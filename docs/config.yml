@@ -42,6 +42,7 @@ categories:
         - toolkit/components/pageextractor
         - accessible
         - media
+        - morph
         - code-quality
         - writing-rust-code
         - rust-components

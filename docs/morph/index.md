@@ -31,13 +31,15 @@ The browser chrome does **not** depend on `@m3e/web` or another web component ru
 - typography;
 - accessibility behaviour.
 
-## Documentation
+```{toctree}
+:maxdepth: 1
 
-- [Design](DESIGN.md)
-- [Motion](MOTION.md)
-- [Shapes](SHAPES.md)
-- [Vertical tabs](VERTICAL_TABS.md)
-- [Architecture](ARCHITECTURE.md)
-- [Upstream strategy](UPSTREAM.md)
+DESIGN
+MOTION
+SHAPES
+VERTICAL_TABS
+ARCHITECTURE
+UPSTREAM
+```
 
 These documents describe intended behaviour, not a claim that every item is already implemented.
