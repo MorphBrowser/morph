@@ -73,6 +73,7 @@
 #include "nsFrameLoaderOwner.h"
 #include "nsFrameManager.h"
 #include "nsIAppWindow.h"
+#include "nsIArray.h"
 #include "nsIBaseWindow.h"
 #include "nsIBrowser.h"
 #include "nsIBrowserController.h"
@@ -811,7 +812,7 @@ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
   // Need to close undeleted ContentPermissionRequestParents before tab is
   // closed.
   // FIXME: Why is PContentPermissionRequest not managed by PBrowser?
-  nsTArray<PContentPermissionRequestParent*> parentArray =
+  nsTArray<RefPtr<ContentPermissionRequestParent>> parentArray =
       nsContentPermissionUtils::GetContentPermissionRequestParentById(mTabId);
   for (auto& permissionRequestParent : parentArray) {
     (void)PContentPermissionRequestParent::Send__delete__(
@@ -1361,11 +1362,21 @@ IPCResult BrowserParent::RecvNewWindowGlobal(
                                                      __func__);
   }
 
-  // Construct our new WindowGlobalParent, bind, and initialize it.
+  // Construct our new WindowGlobalParent from the fields derived here, bind it,
+  // and reconcile the fields the content process sent.
+  WindowGlobalInit derivedInit(aInit);
+  derivedInit.context().mFields =
+      WindowGlobalActor::ComputeInitialFields(browsingContext);
   RefPtr<WindowGlobalParent> wgp =
-      WindowGlobalParent::CreateDisconnected(aInit, Manager());
-  BindPWindowGlobalEndpoint(std::move(aEndpoint), wgp);
-  wgp->Init();
+      WindowGlobalParent::CreateDisconnected(derivedInit, Manager());
+  if (!wgp) {
+    return IPC_FAIL(this, "Failed to create WindowGlobalParent");
+  }
+
+  if (NS_WARN_IF(!BindPWindowGlobalEndpoint(std::move(aEndpoint), wgp))) {
+    return IPC_FAIL(this, "BindPWindowGlobalEndpoint failed");
+  }
+  wgp->InitFromContentProcess(aInit.context().mFields, Manager());
   return IPC_OK();
 }
 

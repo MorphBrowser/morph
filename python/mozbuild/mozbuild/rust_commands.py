@@ -109,8 +109,6 @@ CARGO_CONFIG_KEYS = {
     "MOZ_RUST_COREAUDIO_SDK_PATH": _as_str,
     "MOZ_RUST_DEFAULT_FLAGS": _as_list,
     "MOZ_RUST_LIBRARY_RUSTCFLAGS": _as_list,
-    "MOZ_RUST_PROGRAM_LDFLAGS": _as_list,
-    "MOZ_RUST_PROGRAM_RUSTCFLAGS": _as_list,
     "MOZ_RUST_SANITIZER_OPTION_VARS": _as_list,
     "PKG_CONFIG": _as_str,
     "PKG_CONFIG_LIBDIR": _as_str,
@@ -203,7 +201,6 @@ class CargoInvocation:
             color = "never" if _bool(environ.get("NO_ANSI")) else "always"
         return cls(
             verbose=_bool(environ.get("BUILD_VERBOSE_LOG")),
-            json_output=_bool(environ.get("USE_CARGO_JSON_MESSAGE_FORMAT")),
             color=color,
             extra_rustflags=tuple((environ.get("extra_rustflags") or "").split()),
             cargo_rustcflags=tuple(_as_args(environ.get("CARGO_RUSTCFLAGS"))),
@@ -423,9 +420,6 @@ def _rustc_flags(cmd, substs, invocation):
     if applies_library_lto(cmd.kind, cmd.lto, substs):
         flags.append("-Clto")
 
-    if cmd.kind == "program":
-        flags += substs.get("MOZ_RUST_PROGRAM_RUSTCFLAGS")
-
     flags += invocation.cargo_rustcflags
 
     return flags
@@ -464,7 +458,6 @@ def _cargo_wrap_ldflags(cmd, substs):
         ldflags = _filter_out(
             ldflags, substs.get("MOZ_CARGO_PROGRAM_LDFLAGS_FILTER_OUT")
         )
-        ldflags += substs.get("MOZ_RUST_PROGRAM_LDFLAGS")
 
     return shell_quote(*ldflags)
 
@@ -546,6 +539,7 @@ def compose_env(
     if "PKG_CONFIG_LIBDIR" in substs:
         env["PKG_CONFIG_LIBDIR"] = substs["PKG_CONFIG_LIBDIR"]
     env["RUST_BACKTRACE"] = "full"
+    env["MOZ_TOPSRCDIR"] = topsrcdir
     env["MOZ_TOPOBJDIR"] = topobjdir
     env["MOZ_FOLD_LIBS"] = substs.get("MOZ_FOLD_LIBS")
     env["GLEAN_PYTHON_VENV_DIR"] = substs.get("GLEAN_PARSER_VENV")

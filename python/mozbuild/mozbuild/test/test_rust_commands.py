@@ -102,7 +102,6 @@ class TestCargoInvocation(unittest.TestCase):
     def test_from_environ(self):
         invocation = CargoInvocation.from_environ({
             "BUILD_VERBOSE_LOG": "1",
-            "USE_CARGO_JSON_MESSAGE_FORMAT": "1",
             "MACH_STDOUT_ISATTY": "1",
             "extra_rustflags": "-Wclippy::all -Dwarnings",
             "CARGO_RUSTCFLAGS": "-C 'link-arg=-L/opt/my libs'",
@@ -113,7 +112,6 @@ class TestCargoInvocation(unittest.TestCase):
             invocation,
             CargoInvocation(
                 verbose=True,
-                json_output=True,
                 color="always",
                 extra_rustflags=("-Wclippy::all", "-Dwarnings"),
                 cargo_rustcflags=("-C", "link-arg=-L/opt/my libs"),
@@ -133,12 +131,8 @@ class TestCargoInvocation(unittest.TestCase):
         self.assertEqual(CargoInvocation.from_environ({"NO_ANSI": "1"}).color, "")
 
     def test_zero_valued_signals_are_off(self):
-        invocation = CargoInvocation.from_environ({
-            "BUILD_VERBOSE_LOG": "0",
-            "USE_CARGO_JSON_MESSAGE_FORMAT": "0",
-        })
+        invocation = CargoInvocation.from_environ({"BUILD_VERBOSE_LOG": "0"})
         self.assertFalse(invocation.verbose)
-        self.assertFalse(invocation.json_output)
 
 
 ELIGIBLE = {"RUST_LTO_ELIGIBLE": "1"}
@@ -284,30 +278,21 @@ class TestComposeArgv(unittest.TestCase):
         for arg in ("--no-fail-fast", "-p", "style"):
             self.assertIn(arg, argv)
 
-    def test_program_edge_rustc_flags_precede_the_configured_program_flags(self):
-        substs = _substs(
-            MOZ_RUST_PROGRAM_RUSTCFLAGS=["-C", "default-linker-libraries=yes"]
-        )
+    def test_program_edge_rustc_flags(self):
         cmd = _cmd(
             kind="program",
             names=("nmhproxy",),
             rustc_flags=("-C", "link-arg=/obj/browser/app/nmhproxy/module.res"),
         )
-        argv = _argv(cmd, substs)
+        argv = _argv(cmd, _substs())
         self.assertEqual(argv[argv.index("--bin") + 1], "nmhproxy")
         self.assertEqual(
             argv[argv.index("--") + 1 :],
-            [
-                "-C",
-                "link-arg=/obj/browser/app/nmhproxy/module.res",
-                "-C",
-                "default-linker-libraries=yes",
-            ],
+            ["-C", "link-arg=/obj/browser/app/nmhproxy/module.res"],
         )
 
-    def test_program_flags_do_not_reach_libraries(self):
+    def test_library_flags_do_not_reach_programs(self):
         substs = _substs(
-            MOZ_RUST_PROGRAM_RUSTCFLAGS=["-C", "default-linker-libraries=yes"],
             MOZ_RUST_LIBRARY_RUSTCFLAGS=["-C", "target-feature=-crt-static"],
         )
         argv = _argv(_cmd(), substs)
@@ -315,9 +300,7 @@ class TestComposeArgv(unittest.TestCase):
             argv[argv.index("--") + 1 :], ["-C", "target-feature=-crt-static"]
         )
         argv = _argv(_cmd(kind="program", names=("p",)), substs)
-        self.assertEqual(
-            argv[argv.index("--") + 1 :], ["-C", "default-linker-libraries=yes"]
-        )
+        self.assertNotIn("target-feature=-crt-static", argv)
 
     def test_cargo_rustcflags_follow_the_derived_rustc_flags(self):
         substs = _substs(RUST_LTO_ELIGIBLE="1")
@@ -327,20 +310,6 @@ class TestComposeArgv(unittest.TestCase):
             CargoInvocation(cargo_rustcflags=("-Ctarget-cpu=native",)),
         )
         self.assertEqual(argv[argv.index("--") + 1 :], ["-Clto", "-Ctarget-cpu=native"])
-
-    def test_cargo_rustcflags_follow_the_derived_program_rustc_flags(self):
-        substs = _substs(
-            MOZ_RUST_PROGRAM_RUSTCFLAGS=["-C", "default-linker-libraries=yes"]
-        )
-        argv = _argv(
-            _cmd(kind="program", names=("p",)),
-            substs,
-            CargoInvocation(cargo_rustcflags=("-Ctarget-cpu=native",)),
-        )
-        self.assertEqual(
-            argv[argv.index("--") + 1 :],
-            ["-C", "default-linker-libraries=yes", "-Ctarget-cpu=native"],
-        )
 
     def test_cargo_rustcflags_skip_edges_without_a_rustc_tail(self):
         for kind in ("host-library", "host-program", "test"):
@@ -722,14 +691,6 @@ class TestComposeEnv(unittest.TestCase):
         self.assertEqual(
             _env(cmd, substs)["MOZ_CARGO_WRAP_LDFLAGS"], "-Wl,-z,now -lfoobar"
         )
-
-    def test_program_ldflags_follow_the_filtered_flags(self):
-        substs = {"MOZ_RUST_PROGRAM_LDFLAGS": ["-L/obj/build/win32", "-lunwind"]}
-        env = _env(_cmd(kind="program", link_flags=("-Wl,-z,relro",)), substs)
-        self.assertEqual(
-            env["MOZ_CARGO_WRAP_LDFLAGS"], "-Wl,-z,relro -L/obj/build/win32 -lunwind"
-        )
-        self.assertEqual(_env(_cmd(), substs)["MOZ_CARGO_WRAP_LDFLAGS"], "")
 
     def test_lto_object_path_stages_objects_per_edge(self):
         substs = {"MOZ_LTO_OBJECT_PATH": "1"}

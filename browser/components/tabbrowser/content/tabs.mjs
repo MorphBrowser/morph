@@ -12,6 +12,9 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
 
   #animatingGroups = new Set();
 
+  /** @type {Set<MozTabbrowserTab>} */
+  #openingTabs = new Set();
+
   constructor() {
     super();
 
@@ -135,7 +138,7 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
 
     this.boundObserve = (...args) => this.observe(...args);
     Services.prefs.addObserver("privacy.userContext", this.boundObserve);
-    this.observe(null, "nsPref:changed", "privacy.userContext.enabled");
+    this.observe(null, "nsPref:changed");
 
     document
       .getElementById("vertical-tabs-newtab-button")
@@ -159,13 +162,6 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
 
     CustomizableUI.addListener(this);
     this._updateNewTabVisibility();
-
-    XPCOMUtils.defineLazyPreferenceGetter(
-      this,
-      "_closeTabByDblclick",
-      "browser.tabs.closeTabByDblclick",
-      false
-    );
 
     // The base class set these up before we had the arrowscrollbox.
     this.updateWheelListeners();
@@ -332,7 +328,7 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
   }
 
   cancelTabGroupPreview() {
-    this.previewPanel?.panelOpener.clear();
+    this.previewPanel?.panelOpener.clear(this.previewPanel.tabGroupPanel);
   }
 
   showTabGroupPreview(group) {
@@ -401,7 +397,7 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
     }
 
     if (tab.hasAttribute("fadein")) {
-      if (tab._fullyOpen) {
+      if (this.openAnimationFinished(tab)) {
         this._updateCloseButtons();
       } else {
         this._handleNewTab(tab);
@@ -1297,7 +1293,7 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
           } else {
             DynamicShortcutTooltip.nodeToTooltipMap[button.id] =
               "newTabButton.tooltip";
-            button.removeAttribute("context", "new-tab-button-popup");
+            button.removeAttribute("context");
           }
           // evict from tooltip cache
           DynamicShortcutTooltip.cache.delete(button.id);
@@ -1367,8 +1363,6 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
   _handleTabSelect(aInstant) {
     let selectedTab = this.selectedItem;
     this.#ensureTabIsVisible(selectedTab, aInstant);
-
-    selectedTab._notselectedsinceload = false;
   }
 
   /**
@@ -1597,12 +1591,49 @@ export class MozTabbrowserTabs extends MozElements.TabsBase {
     }
   }
 
+  /**
+   * The number of tabs that are opening or closing, whether or not they
+   * actually animate.
+   *
+   * @type {number}
+   */
+  get tabAnimationsInProgress() {
+    return this.#openingTabs.size + gBrowser._removingTabs.size;
+  }
+
+  /**
+   * Whether the tab has finished its opening animation.
+   *
+   * @param {MozTabbrowserTab} tab
+   * @returns {boolean}
+   */
+  openAnimationFinished(tab) {
+    return !this.#openingTabs.has(tab);
+  }
+
+  /**
+   * Marks a newly added tab as opening until `_handleNewTab` runs for it.
+   *
+   * @param {MozTabbrowserTab} tab
+   */
+  markTabOpening(tab) {
+    this.#openingTabs.add(tab);
+  }
+
+  /**
+   * Stops counting a tab that starts closing as opening.
+   *
+   * @param {MozTabbrowserTab} tab
+   */
+  cancelTabOpening(tab) {
+    this.#openingTabs.delete(tab);
+  }
+
   _handleNewTab(tab) {
     if (tab.container != this) {
       return;
     }
-    tab._fullyOpen = true;
-    gBrowser.tabAnimationsInProgress--;
+    this.#openingTabs.delete(tab);
 
     this._updateCloseButtons();
 

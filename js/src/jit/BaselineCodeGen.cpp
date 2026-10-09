@@ -2492,8 +2492,12 @@ bool BaselineCodeGen<Handler>::emit_Coalesce() {
 
   Label undefinedOrNull;
 
-  masm.branchTestUndefined(Assembler::Equal, R0, &undefinedOrNull);
-  masm.branchTestNull(Assembler::Equal, R0, &undefinedOrNull);
+  {
+    ScratchTagScope tag(masm, R0);
+    masm.splitTagForTest(R0, tag);
+    masm.branchTestUndefined(Assembler::Equal, tag, &undefinedOrNull);
+    masm.branchTestNull(Assembler::Equal, tag, &undefinedOrNull);
+  }
   emitJump();
 
   masm.bind(&undefinedOrNull);
@@ -4504,6 +4508,10 @@ bool BaselineCompilerCodeGen::emitFormalArgAccess(JSOp op) {
     Register temp = R1.scratchReg();
     emitGuardedCallPreBarrierAnyZone(argAddr, MIRType::Value, temp);
     masm.loadValue(frame.addressOfStackValue(-1), R0);
+    Label notMagic;
+    masm.branchTestMagic(Assembler::NotEqual, R0, &notMagic);
+    masm.assumeUnreachable("Unexpected magic value stored to ArgumentsObject");
+    masm.bind(&notMagic);
     masm.storeValue(R0, argAddr);
 
     MOZ_ASSERT(frame.numUnsyncedSlots() == 0);
@@ -4560,6 +4568,11 @@ bool BaselineInterpreterCodeGen::emitFormalArgAccess(JSOp op) {
       emitGuardedCallPreBarrierAnyZone(argAddr, MIRType::Value,
                                        R0.scratchReg());
       masm.loadValue(frame.addressOfStackValue(-1), R0);
+      Label notMagic;
+      masm.branchTestMagic(Assembler::NotEqual, R0, &notMagic);
+      masm.assumeUnreachable(
+          "Unexpected magic value stored to ArgumentsObject");
+      masm.bind(&notMagic);
       masm.storeValue(R0, argAddr);
 
       // Reload the arguments object.
@@ -5539,10 +5552,9 @@ bool BaselineCodeGen<Handler>::emitReturn() {
     }
   }
 
-  // Only emit the jump if this JSOp::RetRval is not the last instruction.
-  // Not needed for last instruction, because last instruction flows
-  // into return label.
-  if (!handler.isDefinitelyLastOp()) {
+  // Only emit the jump if this is not the last reachable instruction, which
+  // flows into the return label.
+  if (!handler.isLastReachableOp()) {
     masm.jump(&return_);
   }
 
@@ -5751,8 +5763,12 @@ bool BaselineCodeGen<Handler>::emit_CheckObjCoercible() {
 
   Label fail, done;
 
-  masm.branchTestUndefined(Assembler::Equal, R0, &fail);
-  masm.branchTestNull(Assembler::NotEqual, R0, &done);
+  {
+    ScratchTagScope tag(masm, R0);
+    masm.splitTagForTest(R0, tag);
+    masm.branchTestUndefined(Assembler::Equal, tag, &fail);
+    masm.branchTestNull(Assembler::NotEqual, tag, &done);
+  }
 
   masm.bind(&fail);
   prepareVMCall();

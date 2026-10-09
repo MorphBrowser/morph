@@ -23,7 +23,7 @@
 #include "mozilla/dom/WheelEventBinding.h"
 #include "mozilla/dom/XULPopupElement.h"
 #include "mozilla/gfx/GPUProcessManager.h"
-#include "mozilla/layers/APZInputBridge.h"
+#include "mozilla/layers/APZBridge.h"
 #include "mozilla/layers/APZThreadUtils.h"
 #include "mozilla/layers/CompositorThread.h"
 #include "mozilla/layers/IAPZCTreeManager.h"
@@ -1454,7 +1454,7 @@ nsEventStatus nsCocoaWindow::DispatchAPZInputEvent(InputData& aEvent) {
   APZEventResult result;
 
   if (mAPZC) {
-    result = mAPZC->InputBridge()->ReceiveInputEvent(aEvent);
+    result = mAPZC->Bridge()->ReceiveInputEvent(aEvent);
   }
 
   if (result.GetStatus() == nsEventStatus_eConsumeNoDefault) {
@@ -1495,7 +1495,7 @@ void nsCocoaWindow::DispatchAPZWheelInputEvent(InputData& aEvent) {
 
     switch (aEvent.mInputType) {
       case PANGESTURE_INPUT: {
-        result = mAPZC->InputBridge()->ReceiveInputEvent(aEvent);
+        result = mAPZC->Bridge()->ReceiveInputEvent(aEvent);
         if (result.GetStatus() == nsEventStatus_eConsumeNoDefault) {
           return;
         }
@@ -1505,12 +1505,12 @@ void nsCocoaWindow::DispatchAPZWheelInputEvent(InputData& aEvent) {
       }
       case SCROLLWHEEL_INPUT: {
         // For wheel events on macOS, send it to APZ using the WidgetInputEvent
-        // variant of ReceiveInputEvent, because the APZInputBridge version of
+        // variant of ReceiveInputEvent, because the APZBridge version of
         // that function has special handling (for delta multipliers etc.) that
         // we need to run. Using the InputData variant would bypass that and
         // go straight to the APZCTreeManager subclass.
         event = aEvent.AsScrollWheelInput().ToWidgetEvent(this);
-        result = mAPZC->InputBridge()->ReceiveInputEvent(event);
+        result = mAPZC->Bridge()->ReceiveInputEvent(event);
         if (result.GetStatus() == nsEventStatus_eConsumeNoDefault) {
           return;
         }
@@ -1520,10 +1520,7 @@ void nsCocoaWindow::DispatchAPZWheelInputEvent(InputData& aEvent) {
         MOZ_CRASH("unsupported event type");
         return;
     }
-    if (event.mMessage == eWheel &&
-        (event.mDeltaX != 0 || event.mDeltaY != 0)) {
-      ProcessUntransformedAPZEvent(&event, result);
-    }
+    ProcessUntransformedAPZEvent(&event, result);
     return;
   }
 
@@ -1540,7 +1537,7 @@ void nsCocoaWindow::DispatchAPZWheelInputEvent(InputData& aEvent) {
       MOZ_CRASH("unexpected event type");
       return;
   }
-  if (event.mMessage == eWheel && (event.mDeltaX != 0 || event.mDeltaY != 0)) {
+  if (event.mMessage == eWheel) {
     DispatchEvent(&event);
   }
 }
@@ -1623,18 +1620,22 @@ already_AddRefed<a11y::LocalAccessible> nsCocoaWindow::GetWindowAccessible() {
   }
 
   // mAccessible might be dead if accessibility was previously disabled and is
-  // now being enabled again.
+  // now being enabled again. It might also still be alive but shut down, which
+  // leaves it without a document, for example after the window's document was
+  // replaced.
   if (mAccessible && mAccessible->IsAlive()) {
     RefPtr<a11y::LocalAccessible> ret;
     CallQueryReferent(mAccessible.get(), static_cast<a11y::LocalAccessible**>(
                                              getter_AddRefs(ret)));
-    return ret.forget();
+    if (ret && ret->Document()) {
+      return ret.forget();
+    }
   }
 
   // need to fetch the accessible anew, because it has gone away.
   // cache the accessible in our weak ptr
   RefPtr<a11y::LocalAccessible> acc = GetRootAccessible();
-  if (GetWindowType() == WindowType::Popup) {
+  if (acc && GetWindowType() == WindowType::Popup) {
     // If we're a popup panel, we want to return the accessible for the
     // content of the panel, not the accessible for the document.
     if (nsIFrame* popupFrame = GetFrame()) {
@@ -2424,10 +2425,10 @@ NSEvent* gLastDragMouseDownEvent = nil;  // [strong]
 
   nsAutoRetainCocoaObject kungFuDeathGrip(self);
 
-  // The system does not send us mouse button presses while it tracks a drag, so
-  // any drag session that is still around at this point is stale. Ending it
-  // runs script, which can tear down this widget.
-  nsDragService::EndStaleDragSession();
+  // The system does not send us mouse button presses while it tracks a drag
+  // that we started, so such a drag session that is still around at this point
+  // is stale. Ending it runs script, which can tear down this widget.
+  nsDragService::EndStaleDragSession("mouseDown:");
   if (!mGeckoChild) {
     return;
   }
@@ -2574,10 +2575,11 @@ NSEvent* gLastDragMouseDownEvent = nil;  // [strong]
 
   nsAutoRetainCocoaObject kungFuDeathGrip(self);
 
-  // A drag needs a pressed mouse button, so any drag session that is still
-  // around while the mouse moves with all buttons released is stale.
+  // A drag that we started needs a pressed mouse button, so such a drag session
+  // that is still around while the mouse moves with all buttons released is
+  // stale.
   if (![NSEvent pressedMouseButtons]) {
-    nsDragService::EndStaleDragSession();
+    nsDragService::EndStaleDragSession("handleMouseMoved:");
   }
   if (!mGeckoChild) {
     return;
@@ -2911,7 +2913,7 @@ static gfx::IntPoint GetIntegerDeltaForEvent(NSEvent* aEvent) {
                                 // DispatchAPZWheelInputEvent, which turns this
                                 // ScrollWheelInput back into a WidgetWheelEvent
                                 // and then it goes through the regular handling
-                                // in APZInputBridge. So passing |eNone| won't
+                                // in APZBridge. So passing |eNone| won't
                                 // pass up the necessary wheel delta adjustment.
                                 WheelDeltaAdjustmentStrategy::eNone);
     wheelEvent.mLineOrPageDeltaX = lineOrPageDelta.x;
@@ -2935,7 +2937,7 @@ static gfx::IntPoint GetIntegerDeltaForEvent(NSEvent* aEvent) {
                                 // DispatchAPZWheelInputEvent, which turns this
                                 // ScrollWheelInput back into a WidgetWheelEvent
                                 // and then it goes through the regular handling
-                                // in APZInputBridge. So passing |eNone| won't
+                                // in APZBridge. So passing |eNone| won't
                                 // pass up the necessary wheel delta adjustment.
                                 WheelDeltaAdjustmentStrategy::eNone);
     wheelEvent.mLineOrPageDeltaX = lineOrPageDelta.x;
@@ -6782,11 +6784,6 @@ void nsCocoaWindow::ProcessTransitions() {
 
       case TransitionType::Zoom:
         if (!mWindow.zoomed) {
-          // Snapshot pre-zoom bounds for GetRestoredBounds() before the
-          // zoom resizes the window to fill the screen.
-          if (mSizeMode == nsSizeMode_Normal) {
-            mRestoredBounds = Some(mBounds);
-          }
           [mWindow zoom:nil];
         }
         break;
@@ -7227,6 +7224,17 @@ void nsCocoaWindow::DispatchSizeModeEvent() {
   }
 }
 
+// MOZ_WINDOW_OCCLUSION set to anything but "1" disables occlusion tracking, as
+// it does on Windows. Test harnesses set it because they run several browser
+// windows on one screen, and an occluded window's documents become hidden.
+static bool IsOcclusionTrackingDisabledByEnv() {
+  static const bool sDisabled = [] {
+    const char* env = getenv("MOZ_WINDOW_OCCLUSION");
+    return env && *env != '1';
+  }();
+  return sDisabled;
+}
+
 void nsCocoaWindow::DispatchOcclusionEvent() {
   if (!mWindow) {
     return;
@@ -7258,7 +7266,7 @@ void nsCocoaWindow::DispatchOcclusionEvent() {
 
   // Our new occlusion state is true if the window is not visible.
   bool newOcclusionState =
-      !keyOrMainNonFullscreen &&
+      !IsOcclusionTrackingDisabledByEnv() && !keyOrMainNonFullscreen &&
       !(mHasStartedNativeFullscreen ||
         ([mWindow occlusionState] & NSWindowOcclusionStateVisible));
 
@@ -7801,6 +7809,15 @@ void nsCocoaWindow::CocoaSendToplevelDeactivateEvents() {
   }
 }
 
+// Called before every zoom, whether we start it or the user does with a title
+// bar double-click or the zoom button, and when a live resize starts. The
+// "Fill" tiling action only reaches us through the latter.
+void nsCocoaWindow::SaveRestoredBounds() {
+  if (mSizeMode == nsSizeMode_Normal) {
+    mRestoredBounds = Some(mBounds);
+  }
+}
+
 void nsCocoaWindow::CocoaWindowDidResize() {
   // It's important to update our bounds before we trigger any listeners. This
   // ensures that our bounds are correct when GetScreenBounds is called.
@@ -8102,6 +8119,12 @@ LayoutDeviceIntPoint nsCocoaWindow::GetNativeLockedPoint() {
   RollUpPopups();
 }
 
+- (void)windowWillStartLiveResize:(NSNotification*)aNotification {
+  if (mGeckoWindow) {
+    mGeckoWindow->SaveRestoredBounds();
+  }
+}
+
 - (void)windowDidMove:(NSNotification*)aNotification {
   if (mGeckoWindow) mGeckoWindow->ReportMoveEvent();
 }
@@ -8149,6 +8172,9 @@ LayoutDeviceIntPoint nsCocoaWindow::GetNativeLockedPoint() {
     return NO;  // See bug 429954.
   }
   mHasEverBeenZoomed = YES;
+  if (mGeckoWindow) {
+    mGeckoWindow->SaveRestoredBounds();
+  }
   return YES;
 }
 

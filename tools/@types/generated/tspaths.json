@@ -82,6 +82,9 @@
       "chrome://browser/content/aiwindow/components/aitab-timeline.mjs": [
         "../../../browser/components/aiwindow/ui/components/aitab-page/aitab-timeline/aitab-timeline.mjs"
       ],
+      "chrome://browser/content/aiwindow/components/aitab-tool-ui.mjs": [
+        "../../../browser/components/aiwindow/ui/components/aitab-tool-ui/aitab-tool-ui.mjs"
+      ],
       "chrome://browser/content/aiwindow/components/applied-memories-button.mjs": [
         "../../../browser/components/aiwindow/ui/components/ai-chat-content/chat-assistant-footer/applied-memories-button.mjs"
       ],
@@ -154,6 +157,9 @@
       "chrome://browser/content/aiwindow/components/smartwindow-topsites.mjs": [
         "../../../browser/components/aiwindow/ui/components/smartwindow-topsites/smartwindow-topsites.mjs"
       ],
+      "chrome://browser/content/aiwindow/components/tab-group-icon.mjs": [
+        "../../../browser/components/aiwindow/ui/components/tab-group-icon/tab-group-icon.mjs"
+      ],
       "chrome://browser/content/aiwindow/components/website-chip-container.mjs": [
         "../../../browser/components/aiwindow/ui/components/website-chip-container/website-chip-container.mjs"
       ],
@@ -171,6 +177,9 @@
       ],
       "chrome://browser/content/aiwindow/modules/SmartFormFillConstants.mjs": [
         "../../../browser/components/aiwindow/ui/modules/SmartFormFillConstants.mjs"
+      ],
+      "chrome://browser/content/aiwindow/modules/TrustedInternalURLs.mjs": [
+        "../../../browser/components/aiwindow/ui/modules/TrustedInternalURLs.mjs"
       ],
       "chrome://browser/content/asrouter/components/menu-message.mjs": [
         "../../../browser/components/asrouter/content/components/menu-message/menu-message.mjs"
@@ -466,6 +475,9 @@
       "chrome://browser/content/urlbar/SmartbarInputUtils.mjs": [
         "../../../browser/components/urlbar/content/SmartbarInputUtils.mjs"
       ],
+      "chrome://browser/content/urlbar/SmartbarMentionUtils.mjs": [
+        "../../../browser/components/urlbar/content/SmartbarMentionUtils.mjs"
+      ],
       "chrome://browser/content/urlbar/UrlbarChildController.mjs": [
         "../../../browser/components/urlbar/content/UrlbarChildController.mjs"
       ],
@@ -581,7 +593,10 @@
         "../../../toolkit/components/certviewer/content/components/utils.mjs"
       ],
       "chrome://global/content/elements/accesskey-check.mjs": [
-        "../../../toolkit/content/widgets/panel-list/accesskey-check.mjs"
+        "../../../toolkit/content/widgets/accesskey-check.mjs"
+      ],
+      "chrome://global/content/elements/auto-accesskey.mjs": [
+        "../../../toolkit/content/widgets/auto-accesskey.mjs"
       ],
       "chrome://global/content/elements/browser-custom-element.mjs": [
         "../../../toolkit/content/widgets/browser-custom-element.mjs"
@@ -1522,9 +1537,6 @@
       "resource:///modules/Dedupe.sys.mjs": [
         "../../../browser/modules/Dedupe.sys.mjs"
       ],
-      "resource:///modules/DevToolsStartup.sys.mjs": [
-        "../../../devtools/startup/DevToolsStartup.sys.mjs"
-      ],
       "resource:///modules/EveryWindow.sys.mjs": [
         "../../../browser/modules/EveryWindow.sys.mjs"
       ],
@@ -1548,6 +1560,9 @@
       ],
       "resource:///modules/FirefoxBridgeExtensionUtils.sys.mjs": [
         "../../../browser/modules/FirefoxBridgeExtensionUtils.sys.mjs"
+      ],
+      "resource:///modules/GenAI.sys.mjs": [
+        "../../../browser/components/genai/GenAI.sys.mjs"
       ],
       "resource:///modules/HistoryController.sys.mjs": [
         "../../../browser/components/firefoxview/HistoryController.sys.mjs"
@@ -1707,6 +1722,9 @@
       ],
       "resource:///modules/asrouter/PanelTestProvider.sys.mjs": [
         "../../../browser/components/asrouter/modules/PanelTestProvider.sys.mjs"
+      ],
+      "resource:///modules/asrouter/PinnableSitesProvider.sys.mjs": [
+        "../../../browser/components/asrouter/modules/PinnableSitesProvider.sys.mjs"
       ],
       "resource:///modules/asrouter/PreonboardingSplash.sys.mjs": [
         "../../../browser/components/asrouter/modules/PreonboardingSplash.sys.mjs"
@@ -6124,9 +6142,6 @@
       "resource://gre/modules/IndexedDB.sys.mjs": [
         "../../../toolkit/modules/IndexedDB.sys.mjs"
       ],
-      "resource://gre/modules/IndexedDBHelper.sys.mjs": [
-        "../../../dom/base/IndexedDBHelper.sys.mjs"
-      ],
       "resource://gre/modules/InlineSpellChecker.sys.mjs": [
         "../../../toolkit/modules/InlineSpellChecker.sys.mjs"
       ],
@@ -6162,9 +6177,6 @@
       ],
       "resource://gre/modules/LoadURIDelegate.sys.mjs": [
         "../../../mobile/shared/modules/geckoview/LoadURIDelegate.sys.mjs"
-      ],
-      "resource://gre/modules/LocationHelper.sys.mjs": [
-        "../../../dom/base/LocationHelper.sys.mjs"
       ],
       "resource://gre/modules/Log.sys.mjs": [
         "../../../toolkit/modules/Log.sys.mjs"
@@ -6640,9 +6652,6 @@
       "resource://gre/modules/handlers/HandlerList.sys.mjs": [
         "../../../uriloader/exthandler/HandlerList.sys.mjs"
       ],
-      "resource://gre/modules/jsdebugger.sys.mjs": [
-        "../../../devtools/platform/jsdebugger.sys.mjs"
-      ],
       "resource://gre/modules/launchonlogin/MacOSLaunchOnLogin.sys.mjs": [
         "../../../toolkit/modules/launchonlogin/MacOSLaunchOnLogin.sys.mjs"
       ],
@@ -7048,9 +7057,6 @@
       "resource://newtab/lib/Widgets/RecentSearchesFeed.sys.mjs": [
         "../../../browser/extensions/newtab/lib/Widgets/RecentSearchesFeed.sys.mjs"
       ],
-      "resource://newtab/lib/Widgets/SportsFeed.sys.mjs": [
-        "../../../browser/extensions/newtab/lib/Widgets/SportsFeed.sys.mjs"
-      ],
       "resource://newtab/lib/Widgets/StocksFeed.sys.mjs": [
         "../../../browser/extensions/newtab/lib/Widgets/StocksFeed.sys.mjs"
       ],
@@ -7117,12 +7123,6 @@
       "resource://normandy/lib/ActionsManager.sys.mjs": [
         "../../../toolkit/components/normandy/lib/ActionsManager.sys.mjs"
       ],
-      "resource://normandy/lib/AddonRollouts.sys.mjs": [
-        "../../../toolkit/components/normandy/lib/AddonRollouts.sys.mjs"
-      ],
-      "resource://normandy/lib/AddonStudies.sys.mjs": [
-        "../../../toolkit/components/normandy/lib/AddonStudies.sys.mjs"
-      ],
       "resource://normandy/lib/CleanupManager.sys.mjs": [
         "../../../toolkit/components/normandy/lib/CleanupManager.sys.mjs"
       ],
@@ -7147,20 +7147,8 @@
       "resource://normandy/lib/NormandyUtils.sys.mjs": [
         "../../../toolkit/components/normandy/lib/NormandyUtils.sys.mjs"
       ],
-      "resource://normandy/lib/PreferenceExperiments.sys.mjs": [
-        "../../../toolkit/components/normandy/lib/PreferenceExperiments.sys.mjs"
-      ],
-      "resource://normandy/lib/PreferenceRollouts.sys.mjs": [
-        "../../../toolkit/components/normandy/lib/PreferenceRollouts.sys.mjs"
-      ],
       "resource://normandy/lib/RecipeRunner.sys.mjs": [
         "../../../toolkit/components/normandy/lib/RecipeRunner.sys.mjs"
-      ],
-      "resource://normandy/lib/Storage.sys.mjs": [
-        "../../../toolkit/components/normandy/lib/Storage.sys.mjs"
-      ],
-      "resource://normandy/lib/TelemetryEvents.sys.mjs": [
-        "../../../toolkit/components/normandy/lib/TelemetryEvents.sys.mjs"
       ],
       "resource://pdf.js/PdfEmbedFallbackStreamConverter.sys.mjs": [
         "../../../toolkit/components/pdfjs/content/PdfEmbedFallbackStreamConverter.sys.mjs"

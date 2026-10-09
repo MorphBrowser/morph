@@ -1817,7 +1817,7 @@ const BASE_MESSAGES = () => [
       lifetime: 12,
     },
     targeting:
-      "'browser.privateWindowRedesign.enabled'|preferenceValue && !isRelayFreeTier && !relayEmailMasksCount",
+      "'browser.privateWindowRedesign.enabled'|preferenceValue && 'signon.firefoxRelay.feature'|preferenceValue != 'enabled' && 'signon.firefoxRelay.feature'|preferenceValue != 'disabled'",
   },
   {
     id: "PRIVATE_WINDOW_BASICS_SPOTLIGHT",
@@ -3638,7 +3638,7 @@ export const OnboardingMessageProvider = {
       "browser.shell.checkDefaultBrowser",
       false
     );
-    let isDefault = await lazy.ShellService.isDefaultBrowser();
+    let isDefault = await lazy.ShellService.isDefaultBrowserAsync();
     return checkDefault && !isDefault;
   },
 

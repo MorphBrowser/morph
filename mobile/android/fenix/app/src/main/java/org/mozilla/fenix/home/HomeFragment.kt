@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -111,6 +112,7 @@ import org.mozilla.fenix.components.appstate.AppState
 import org.mozilla.fenix.components.components
 import org.mozilla.fenix.components.metrics.installSourcePackage
 import org.mozilla.fenix.components.toolbar.ToolbarPosition
+import org.mozilla.fenix.components.toolbar.TopDividerColumn
 import org.mozilla.fenix.compose.snackbar.SnackbarState
 import org.mozilla.fenix.ext.application
 import org.mozilla.fenix.ext.components
@@ -174,6 +176,7 @@ import org.mozilla.fenix.pbmlock.NavigationOrigin
 import org.mozilla.fenix.pbmlock.observePrivateModeLock
 import org.mozilla.fenix.perf.MarkersFragmentLifecycleCallbacks
 import org.mozilla.fenix.perf.StartupTimeline
+import org.mozilla.fenix.reviewprompt.CustomReviewPromptBottomSheetFragment
 import org.mozilla.fenix.reviewprompt.ShowReviewPromptBinding
 import org.mozilla.fenix.search.awesomebar.AwesomeBarComposable
 import org.mozilla.fenix.snackbar.FenixSnackbarDelegate
@@ -740,15 +743,21 @@ class HomeFragment : Fragment(), UserInteractionHandler, OnLongPressedListener {
                                 }
                             },
                             bottomBar = {
-                                val tabGroupsStripColor =
+                                val bottomChromeColors =
                                     homepageToolbarColors(
-                                            isPrivateMode = isPrivateMode,
-                                            shouldUseEdgeToEdgeColors = isEdgeToEdgeBackgroundEnabled(),
-                                        )
-                                        .surface
+                                        isPrivateMode = isPrivateMode,
+                                        shouldUseEdgeToEdgeColors = isEdgeToEdgeBackgroundEnabled(),
+                                    )
+                                val tabGroupsStripColor = bottomChromeColors.surface
                                 if (isToolbarAtTop) {
                                     ToolbarSlot(captureToolbarBounds, { navbarBoundsInRoot = it }) {
-                                        Column {
+                                        TopDividerColumn(
+                                            showDivider =
+                                                settings.shouldShowTabStripAtBottom ||
+                                                    settings.shouldShowTabGroupsStrip,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            dividerColor = bottomChromeColors.outlineVariant,
+                                        ) {
                                             if (settings.shouldShowTabStripAtBottom) {
                                                 TabStrip()
                                             }
@@ -760,7 +769,11 @@ class HomeFragment : Fragment(), UserInteractionHandler, OnLongPressedListener {
                                     }
                                 } else {
                                     ToolbarSlot(captureToolbarBounds, { toolbarBoundsInRoot = it }) {
-                                        Column {
+                                        TopDividerColumn(
+                                            showDivider = settings.shouldShowTabGroupsStrip,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            dividerColor = bottomChromeColors.outlineVariant,
+                                        ) {
                                             if (settings.shouldShowTabGroupsStrip) {
                                                 TabGroupsStrip(containerColor = tabGroupsStripColor)
                                             }
@@ -1423,7 +1436,7 @@ class HomeFragment : Fragment(), UserInteractionHandler, OnLongPressedListener {
                     promptController = requireComponents.playStoreReviewPromptController,
                     activityRef = WeakReference(activity),
                     uiScope = viewLifecycleOwner.lifecycleScope,
-                    navigationDirection = { findNavController().navigate(it) },
+                    showCustomReviewPrompt = { CustomReviewPromptBottomSheetFragment.showPrompt(this) },
                 ),
             owner = viewLifecycleOwner,
             view = view,
@@ -1594,6 +1607,7 @@ class HomeFragment : Fragment(), UserInteractionHandler, OnLongPressedListener {
             appStore = requireComponents.appStore,
             navControllerRef = WeakReference(findNavController()),
             settings = requireComponents.settings,
+            defaultTopSitesProvider = requireComponents.core.defaultTopSitesProvider,
             addTabUseCase = requireComponents.useCases.tabsUseCases.addTab,
             selectTabUseCase = requireComponents.useCases.tabsUseCases.selectTab,
             fenixBrowserUseCases = requireComponents.useCases.fenixBrowserUseCases,

@@ -3,12 +3,13 @@
 * file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
+use crate::ads::{AdImage, AdSpoc, AdTile};
 #[cfg(feature = "stateful")]
 use crate::ads_store::AdsStore;
-use crate::common::bytesize::ByteSize;
+use crate::bytesize::ByteSize;
 use crate::http_cache::{CachePolicy, HttpCache};
 use crate::mars::ad_request::{AdPlacementRequest, AdRequestFlags};
-use crate::mars::ad_response::{AdImage, AdResponse, AdResponseValue, AdSpoc, AdTile};
+use crate::mars::ad_response::{AdResponse, AdResponseValue};
 use crate::mars::error::{RecordClickError, RecordImpressionError, ReportAdError};
 use crate::mars::{MARSClient, ReportReason};
 #[cfg(feature = "stateful")]
@@ -85,25 +86,24 @@ where
         });
 
         #[cfg(feature = "stateful")]
-        let ads_store =
-            client_config
-                .store_config
-                .and_then(|x| match AdsStore::builder(x.db_path).build() {
-                    Ok(store) => Some(store),
-                    Err(e) => {
-                        telemetry.record(&e);
-                        None
-                    }
-                });
+        let ads_store = client_config.store_config.and_then(|x| {
+            match AdsStore::builder(x.db_path).build(telemetry.clone()) {
+                Ok(store) => Some(store),
+                Err(e) => {
+                    telemetry.record(&e);
+                    None
+                }
+            }
+        });
 
         let client = MARSClient::new(environment, http_cache, telemetry.clone());
         telemetry.record(&ClientOperationEvent::New);
         Self {
+            #[cfg(feature = "stateful")]
+            ads_store: Arc::new(Mutex::new(ads_store)),
             client,
             context_id_component,
             telemetry: telemetry.clone(),
-            #[cfg(feature = "stateful")]
-            ads_store: Arc::new(Mutex::new(ads_store)),
         }
     }
 
@@ -119,7 +119,7 @@ where
         // TODO: Re-enable cache invalidation behind a Nimbus experiment.
         // The mobile team has requested this be temporarily disabled.
         // let mut click_url = click_url.clone();
-        // if let Some(request_hash) = pop_request_hash_from_url(&mut click_url) {
+        // if let Some(request_hash) = RequestHash::pop_from_url(&mut click_url) {
         //     let _ = self.client.invalidate_cache_by_hash(&request_hash);
         // }
         self.client
@@ -140,7 +140,7 @@ where
         // TODO: Re-enable cache invalidation behind a Nimbus experiment.
         // The mobile team has requested this be temporarily disabled.
         // let mut impression_url = impression_url.clone();
-        // if let Some(request_hash) = pop_request_hash_from_url(&mut impression_url) {
+        // if let Some(request_hash) = RequestHash::pop_from_url(&mut impression_url) {
         //     let _ = self.client.invalidate_cache_by_hash(&request_hash);
         // }
 
@@ -250,6 +250,14 @@ where
             })
     }
 
+    pub fn shutdown_references(&self) -> ShutdownReferences<T> {
+        ShutdownReferences::new(
+            self.telemetry.clone(),
+            #[cfg(feature = "stateful")]
+            AdsStoreShutdown::new(self.ads_store.clone()),
+        )
+    }
+
     fn request_ads<A>(
         &self,
         placements: Vec<AdPlacementRequest>,
@@ -273,14 +281,6 @@ where
         )?;
         response.enrich_callbacks(&request_hash);
         Ok(response)
-    }
-
-    pub fn shutdown_references(&self) -> ShutdownReferences<T> {
-        ShutdownReferences::new(
-            self.telemetry.clone(),
-            #[cfg(feature = "stateful")]
-            AdsStoreShutdown::new(self.ads_store.clone()),
-        )
     }
 }
 
@@ -314,6 +314,12 @@ mod tests {
     ) -> AdsClient<MozAdsTelemetryWrapper> {
         let telemetry = client.get_telemetry();
         AdsClient {
+            #[cfg(feature = "stateful")]
+            ads_store: Arc::new(Mutex::new(Some(
+                AdsStoreBuilder::new("test_store.db")
+                    .build(MozAdsTelemetryWrapper::noop())
+                    .expect("Simplest AdsStoreBuilder should be constructable"),
+            ))),
             client,
             context_id_component: ContextIDComponent::new(
                 &Uuid::new_v4().to_string(),
@@ -322,12 +328,6 @@ mod tests {
                 Box::new(DefaultContextIdCallback),
             ),
             telemetry,
-            #[cfg(feature = "stateful")]
-            ads_store: Arc::new(Mutex::new(Some(
-                AdsStoreBuilder::new("test_store.db")
-                    .build()
-                    .expect("Simplest AdsStoreBuilder should be constructable"),
-            ))),
         }
     }
 
@@ -336,9 +336,9 @@ mod tests {
         let config = AdsClientConfig {
             cache_config: None,
             environment: Environment::Test,
-            telemetry: MozAdsTelemetryWrapper::noop(),
             #[cfg(feature = "stateful")]
             store_config: None,
+            telemetry: MozAdsTelemetryWrapper::noop(),
         };
         let client = AdsClient::new(config);
         let context_id = client.get_context_id().unwrap();
@@ -427,9 +427,9 @@ mod tests {
         let config = AdsClientConfig {
             cache_config: None,
             environment: Environment::Test,
-            telemetry: MozAdsTelemetryWrapper::noop(),
             #[cfg(feature = "stateful")]
             store_config: None,
+            telemetry: MozAdsTelemetryWrapper::noop(),
         };
         let client = AdsClient::new(config);
 

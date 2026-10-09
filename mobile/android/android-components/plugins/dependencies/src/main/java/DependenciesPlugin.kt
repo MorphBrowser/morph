@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import groovy.lang.GroovyObject
 import org.gradle.api.Plugin
 import org.gradle.api.flow.FlowAction
 import org.gradle.api.flow.FlowParameters
@@ -81,14 +82,21 @@ abstract class DependenciesPlugin : Plugin<Settings> {
     protected abstract val flowProviders: FlowProviders
 
     override fun apply(settings: Settings) {
-        @Suppress("UNCHECKED_CAST")
-        val mozconfig = settings.gradle.extensions.extraProperties["mozconfig"] as Map<String, Any>
-        val substs = mozconfig["substs"] as Map<String, Any>
+        val mozconfig = settings.gradle.extensions.extraProperties["mozconfig"] as Map<*, *>
+        val substs = mozconfig["substs"] as Map<*, *>
         val appservicesInTree = (substs["MOZ_APPSERVICES_IN_TREE"] as? String ?: "0") == "1"
         val onTry = settings.providers.environmentVariable("MOZ_SOURCE_REPO")
             .orNull == "https://hg.mozilla.org/try"
 
-        ComponentsDependencies.initialize(appservicesInTree, onTry)
+        // `mobile/android/shared-settings.gradle` sets `config` in `projectsLoaded`, which is
+        // after this plugin is applied, so resolve the version lazily.
+        @Suppress("GradleProjectIsolation")
+        val componentsVersion = lazy {
+            val config = settings.gradle.rootProject.extensions.extraProperties["config"] as GroovyObject
+            config.getProperty("componentsVersion") as String
+        }
+
+        ComponentsDependencies.initialize(appservicesInTree, onTry, componentsVersion)
 
         flowScope.always(LogGradleErrorForTreeHerder::class) {
             parameters.failure.set(flowProviders.buildWorkResult.map { result -> result.failure })
@@ -101,10 +109,12 @@ abstract class DependenciesPlugin : Plugin<Settings> {
 object ComponentsDependencies {
     private var appservicesInTree: Boolean? = null
     private var onTry: Boolean = false
+    private var componentsVersion: Lazy<String>? = null
 
-    internal fun initialize(inTree: Boolean, onTry: Boolean) {
+    internal fun initialize(inTree: Boolean, onTry: Boolean, componentsVersion: Lazy<String>) {
         appservicesInTree = inTree
         this.onTry = onTry
+        this.componentsVersion = componentsVersion
     }
 
     internal fun getGroupId(): String {
@@ -115,9 +125,14 @@ object ComponentsDependencies {
     }
 
     internal fun getVersionNumber(): String {
-        // On try, relax version pin to allow for --use-existing-task.
-        if (onTry && (appservicesInTree ?: false)) {
-            return "+"
+        if (appservicesInTree ?: false) {
+            // On try, relax version pin to allow for --use-existing-task.
+            if (onTry) {
+                return "+"
+            }
+            // In-tree app-services publishes with the android-components version, like `159.0a1`;
+            // see `configurePublish` in `third_party/application-services/publish.gradle`.
+            return componentsVersion!!.value
         }
         return ApplicationServicesConfig.version
     }

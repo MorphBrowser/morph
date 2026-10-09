@@ -905,6 +905,10 @@ enum class SimdOp {
 
   // Mozilla extensions
   MozPMADDUBSW = 0x201,
+  MozI8x16TestBits = 0x202,
+  MozI16x8TestBits = 0x203,
+  MozI32x4TestBits = 0x204,
+  MozI64x2TestBits = 0x205,
 
   Limit
 };
@@ -1082,6 +1086,10 @@ enum class MozOp {
 #ifdef ENABLE_WASM_JSPI
   // Check that there is a WebAssembly.promising function ready to suspend to.
   GuardSuspending,
+
+  // Reinterpret an externref as (ref null $T) where $T is a cont type. This is
+  // unchecked, and must only be used on values known to be continuations.
+  ExternToCont,
 #endif
 
   Limit

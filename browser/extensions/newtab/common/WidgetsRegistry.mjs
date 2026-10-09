@@ -118,6 +118,9 @@
  * same position when re-enabled. See resolveWidgetOrder() below.
  */
 
+// @experiment(remove) { bug 2078816 }
+import { selectFirstSlotWidget } from "./PageLayoutVariants.mjs";
+
 export const PREF_WIDGETS_LISTS_ENABLED = "widgets.lists.enabled";
 export const PREF_WIDGETS_TIMER_ENABLED = "widgets.focusTimer.enabled";
 export const PREF_WIDGETS_WEATHER_ENABLED = "widgets.weather.enabled";
@@ -130,11 +133,6 @@ export const PREF_WIDGETS_SYSTEM_TIMER_ENABLED =
   "widgets.system.focusTimer.enabled";
 export const PREF_WIDGETS_SYSTEM_WEATHER_ENABLED =
   "widgets.system.weather.enabled";
-export const PREF_WIDGETS_SPORTS_WIDGET_ENABLED =
-  "widgets.sportsWidget.enabled";
-export const PREF_SPORTS_WIDGET_SIZE = "widgets.sportsWidget.size";
-export const PREF_WIDGETS_SYSTEM_SPORTS_WIDGET_ENABLED =
-  "widgets.system.sportsWidget.enabled";
 export const PREF_WIDGETS_CLOCKS_ENABLED = "widgets.clocks.enabled";
 export const PREF_CLOCKS_SIZE = "widgets.clocks.size";
 export const PREF_WIDGETS_SYSTEM_CLOCKS_ENABLED =
@@ -227,30 +225,12 @@ export const WIDGET_REGISTRY = [
     trainhopNamespace: "widgetPictureOfTheDay",
   },
   {
-    id: "sportsWidget",
-    telemetryName: "sports",
-    order: 1,
-    enabledPref: PREF_WIDGETS_SPORTS_WIDGET_ENABLED,
-    sizePref: PREF_SPORTS_WIDGET_SIZE,
-    defaultSize: "medium",
-    validSizes: ["medium", "large"],
-    hasSidebar: false,
-    systemEnabledPref: PREF_WIDGETS_SYSTEM_SPORTS_WIDGET_ENABLED,
-    trainhopEnabledKey: "sportsWidgetEnabled",
-    trainhopSizeKey: "sportsWidgetSize",
-    trainhopSidebarKey: null,
-    widgetsSettingsVisibleKey: "sportsWidgetVisible",
-    widgetsSettingsEnabledKey: "sportsWidgetEnabled",
-    // Bug 2063657: retired; entry deleted in bug 2063656.
-    retired: true,
-  },
-  {
     id: "clocks",
     telemetryName: "clocks",
     prefsL10nId: "home-prefs-clocks-header",
     customizeL10nId: "newtab-custom-widget-clock-toggle",
     customizeEventSource: "WIDGET_CLOCKS",
-    order: 2,
+    order: 1,
     enabledPref: PREF_WIDGETS_CLOCKS_ENABLED,
     sizePref: PREF_CLOCKS_SIZE,
     defaultSize: "medium",
@@ -269,7 +249,7 @@ export const WIDGET_REGISTRY = [
     prefsL10nId: "home-prefs-lists-header",
     customizeL10nId: "newtab-custom-widget-lists-toggle",
     customizeEventSource: "WIDGET_LISTS",
-    order: 3,
+    order: 2,
     enabledPref: PREF_WIDGETS_LISTS_ENABLED,
     sizePref: PREF_LISTS_SIZE,
     defaultSize: "medium",
@@ -288,7 +268,7 @@ export const WIDGET_REGISTRY = [
     prefsL10nId: "home-prefs-timer-header",
     customizeL10nId: "newtab-custom-widget-timer-toggle",
     customizeEventSource: "WIDGET_TIMER",
-    order: 4,
+    order: 3,
     enabledPref: PREF_WIDGETS_TIMER_ENABLED,
     sizePref: PREF_FOCUS_TIMER_SIZE,
     defaultSize: "medium",
@@ -307,7 +287,7 @@ export const WIDGET_REGISTRY = [
     prefsL10nId: "home-prefs-weather-header-srd",
     customizeL10nId: "newtab-custom-widget-weather-toggle",
     customizeEventSource: "WEATHER",
-    order: 5,
+    order: 4,
     enabledPref: PREF_WIDGETS_WEATHER_ENABLED,
     sizePref: PREF_WEATHER_SIZE,
     defaultSize: "small",
@@ -326,7 +306,7 @@ export const WIDGET_REGISTRY = [
     prefsL10nId: "home-prefs-privacy-header",
     customizeL10nId: "newtab-custom-widget-privacy-toggle",
     customizeEventSource: "WIDGET_PRIVACY",
-    order: 6,
+    order: 5,
     enabledPref: PREF_WIDGETS_PRIVACY_ENABLED,
     sizePref: PREF_PRIVACY_SIZE,
     defaultSize: "medium",
@@ -347,7 +327,7 @@ export const WIDGET_REGISTRY = [
     prefsL10nId: "home-prefs-crossword-widget-header",
     customizeL10nId: "newtab-custom-widget-crossword-toggle",
     customizeEventSource: "WIDGET_CROSSWORD",
-    order: 7,
+    order: 6,
     enabledPref: PREF_WIDGETS_CROSSWORD_ENABLED,
     sizePref: PREF_CROSSWORD_SIZE,
     defaultSize: "medium",
@@ -364,10 +344,10 @@ export const WIDGET_REGISTRY = [
   {
     id: "stocks",
     telemetryName: "stocks",
-    prefsL10nId: "home-prefs-stocks-header",
-    customizeL10nId: "newtab-custom-widget-stocks-toggle",
+    prefsL10nId: "home-prefs-stocks-header2",
+    customizeL10nId: "newtab-custom-widget-stocks-toggle2",
     customizeEventSource: "WIDGET_STOCKS",
-    order: 8,
+    order: 7,
     enabledPref: PREF_WIDGETS_STOCKS_ENABLED,
     sizePref: PREF_STOCKS_SIZE,
     defaultSize: "medium",
@@ -386,7 +366,7 @@ export const WIDGET_REGISTRY = [
     prefsL10nId: "home-prefs-search-widget-header",
     customizeL10nId: "newtab-custom-widget-search-toggle",
     customizeEventSource: "WIDGET_RECENT_SEARCHES",
-    order: 9,
+    order: 8,
     enabledPref: PREF_WIDGETS_RECENT_SEARCHES_ENABLED,
     sizePref: PREF_RECENT_SEARCHES_SIZE,
     defaultSize: "medium",
@@ -585,6 +565,11 @@ export function isWidgetEnabled(widget, prefs, widgetsEnabled) {
  * @returns {string}
  */
 export function resolveWidgetSize(widget, prefs) {
+  // @experiment(remove) { bug 2078816 }
+  // A large widget fits a medium card.
+  if (selectFirstSlotWidget(prefs) === widget.id) {
+    return "large";
+  }
   const userPref = prefs[widget.sizePref];
   if (userPref) {
     return userPref;

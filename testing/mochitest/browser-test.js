@@ -57,6 +57,7 @@ const SIMPLETEST_OVERRIDES = [
   "info",
   "expectAssertions",
   "requestCompleteLog",
+  "registerCleanupFunction",
 ];
 
 // An uncaught error with one of these names, from any process, fails the
@@ -518,7 +519,6 @@ Tester.prototype = {
       "top",
       "Application",
       "__SS_tabsToRestore",
-      "__SSi",
       "webConsoleCommandController",
       // Thunderbird
       "MailMigrator",
@@ -1238,6 +1238,21 @@ Tester.prototype = {
           })
         );
         winUtils.restoreNormalRefresh();
+      }
+
+      if (winUtils.isMouseDown) {
+        this.currentTest.addResult(
+          new testResult({
+            name:
+              "test left the mouse button pressed; synthesize a matching" +
+              " mouseup. While the mouse is down, moving or resizing a" +
+              " window suppresses drag and drop for the following tests.",
+            allowFailure: this.currentTest.allowFailure,
+          })
+        );
+        // Outside of the window, so that the mouseup only generates a click
+        // on the root element, if any.
+        window.synthesizeMouseEvent("mouseup", -10, -10);
       }
 
       if (this.SimpleTest.isExpectingUncaughtException()) {

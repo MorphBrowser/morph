@@ -6,8 +6,8 @@
 
 # Toolbar button that opens the panel where the user creates a monitor
 smartwindow-monitor-button =
-    .label = Monitors
-    .tooltiptext = Monitors
+    .label = Tasks
+    .tooltiptext = Tasks
 
 # Title of the panel opened by the toolbar button above
 smartwindow-monitor-panel-title = Tasks
@@ -38,8 +38,14 @@ smartwindow-monitor-panel-manage = Manage and view all tasks
 # a user-created task in Smart Window that watches a web page and alerts the
 # user when a condition they described is met.
 # The user-facing name is not final.
-ai-tasks-monitor-notification-title = { -smart-window-brand-name } monitor agent
-ai-tasks-monitor-notification-body = Found what you’re watching for.
+ai-tasks-monitor-notification-title = Match found
+# Variables:
+#   $pageCount (Number) - How many pages the monitor watches
+ai-tasks-monitor-notification-body =
+    { $pageCount ->
+        [one] { -smart-window-brand-name } found a match on a page you’re watching.
+       *[other] { -smart-window-brand-name } found a match on pages you’re watching.
+    }
 ai-tasks-monitor-notification-snooze = Snooze
 ai-tasks-monitor-notification-dismiss = Dismiss
 
@@ -491,6 +497,9 @@ aitab-page-delete-dialog-cancel =
 aitab-page-delete-dialog-confirm =
     .label = Delete
 
+# Credit at the bottom of a generated page.
+aitab-page-made-with = Made with <span data-l10n-name="brand">{ -smart-window-brand-name }</span>
+
 ## "Pick up where you left off" cards for resuming browsing or chat journeys.
 ## A "journey" is a past browsing or chat session the user was in the middle
 ## of - for example, a set of tabs open toward some task, or an ongoing
@@ -540,3 +549,12 @@ aiwindow-resume-section-empty-no-suggestions-description = When there’s someth
 aiwindow-resume-section-empty-all-dismissed-heading = All caught up
 aiwindow-resume-section-empty-all-dismissed-description = That’s all the suggestions for now. Check back later for more.
 aiwindow-resume-section-hide = Hide for now
+
+smartwindow-aitab-creating = Creating a page…
+# "Open here" opens aitab url in the current tab
+smartwindow-aitab-open-current =
+    .label = Open here
+# "Open in new tab" opens a new browser tab with the AITab url in it
+smartwindow-aitab-open-new =
+    .label = Open in new tab
+smartwindow-aitab-created-an-aitab = Created a Smart Page

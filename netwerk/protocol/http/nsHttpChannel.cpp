@@ -28,6 +28,7 @@
 #include "mozilla/ContentBlockingAllowList.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/FlowMarkers.h"
+#include "mozilla/LoadInfo.h"
 #include "mozilla/NullPrincipal.h"
 #include "mozilla/PerfStats.h"
 #include "mozilla/ProfilerDumpOrCrash.h"
@@ -986,9 +987,10 @@ nsresult nsHttpChannel::OnBeforeConnect() {
       };
 
       bool willCallback = false;
-      rv = NS_ShouldSecureUpgrade(
-          mURI, mLoadInfo, resultPrincipal, LoadAllowSTS(), originAttributes,
-          shouldUpgrade, std::move(resultCallback), willCallback);
+      rv = NS_ShouldSecureUpgrade(mURI, mLoadInfo, this, resultPrincipal,
+                                  LoadAllowSTS(), originAttributes,
+                                  shouldUpgrade, std::move(resultCallback),
+                                  willCallback);
       // If the request gets upgraded because of the HTTPS-Only mode, but no
       // event listener has been registered so far, we want to do that here.
       uint32_t httpOnlyStatus = mLoadInfo->GetHttpsOnlyStatus();
@@ -1187,6 +1189,7 @@ nsresult nsHttpChannel::ContinueOnBeforeConnect(bool aShouldUpgrade,
     // already present in the loadinfo.
     if (aUpgradeWithHTTPSRR) {
       mLoadInfo->SetHttpsUpgradeTelemetry(nsILoadInfo::HTTPS_RR);
+      NS_LogSecureUpgradeToConsole(mURI, mLoadInfo, this, "HTTPS RR"_ns);
     }
     return AsyncCall(&nsHttpChannel::HandleAsyncRedirectChannelToHttps);
   }
@@ -5500,6 +5503,17 @@ nsHttpChannel::OnCacheEntryCheck(nsICacheEntry* entry, uint32_t* aResult) {
         LoadAllowStaleCacheContent(), LoadForceValidateCacheContent(),
         isImmutable, LoadCustomConditionalRequest(), mRequestHead, entry,
         cacheControlRequest, fromPreviousSession, &doBackgroundValidation);
+
+    // A navigation activated from a completed speculation-rules prefetch record
+    // must serve the prefetched response as-is (spec: "create navigation params
+    // from a prefetch record"), so skip freshness/no-store revalidation of the
+    // entry we just found.
+    if (doValidation && mLoadInfo->GetActivatedFromNavigationalPrefetch()) {
+      LOG(
+          ("  serving speculation-rules prefetch from cache without "
+           "validation"));
+      doValidation = false;
+    }
   }
 
   nsAutoCString requestedETag;
@@ -12659,11 +12673,17 @@ void nsHttpChannel::ReEvaluateReferrerAfterTrackingStatusIsKnown() {
 
 namespace {
 
-class BackgroundRevalidatingListener : public nsIStreamListener {
+// Also acts as the only notification callbacks of the revalidating channel, so
+// that none of its notifications reach the consumer of the original channel.
+class BackgroundRevalidatingListener : public nsIStreamListener,
+                                       public nsIInterfaceRequestor,
+                                       public nsIChannelEventSink {
+ public:
   NS_DECL_ISUPPORTS
-
   NS_DECL_NSISTREAMLISTENER
   NS_DECL_NSIREQUESTOBSERVER
+  NS_DECL_NSIINTERFACEREQUESTOR
+  NS_DECL_NSICHANNELEVENTSINK
 
  private:
   virtual ~BackgroundRevalidatingListener() = default;
@@ -12697,8 +12717,29 @@ BackgroundRevalidatingListener::OnStopRequest(nsIRequest* request,
   return NS_OK;
 }
 
+NS_IMETHODIMP
+BackgroundRevalidatingListener::GetInterface(const nsIID& aIID,
+                                             void** aResult) {
+  if (aIID.Equals(NS_GET_IID(nsIChannelEventSink))) {
+    return QueryInterface(aIID, aResult);
+  }
+  return NS_ERROR_NO_INTERFACE;
+}
+
+// The redirect response itself revalidates the cache entry, there is no need
+// to follow it.
+NS_IMETHODIMP
+BackgroundRevalidatingListener::AsyncOnChannelRedirect(
+    nsIChannel* aOldChannel, nsIChannel* aNewChannel, uint32_t aFlags,
+    nsIAsyncVerifyRedirectCallback* aCallback) {
+  LOG(("BackgroundRevalidatingListener::AsyncOnChannelRedirect %p vetoing",
+       aOldChannel));
+  return NS_BINDING_ABORTED;
+}
+
 NS_IMPL_ISUPPORTS(BackgroundRevalidatingListener, nsIStreamListener,
-                  nsIRequestObserver)
+                  nsIRequestObserver, nsIInterfaceRequestor,
+                  nsIChannelEventSink)
 
 }  // namespace
 
@@ -12731,10 +12772,30 @@ void nsHttpChannel::PerformBackgroundCacheRevalidationNow() {
   nsLoadFlags loadFlags = mLoadFlags | LOAD_ONLY_IF_MODIFIED | VALIDATE_ALWAYS |
                           LOAD_BACKGROUND | LOAD_BYPASS_SERVICE_WORKER;
 
+  RefPtr<BackgroundRevalidatingListener> listener =
+      new BackgroundRevalidatingListener();
+
+  nsCOMPtr<nsIPrincipal> principal;
+  nsContentUtils::GetSecurityManager()->GetChannelResultPrincipal(
+      this, getter_AddRefs(principal));
+  nsCOMPtr<nsILoadGroup> loadGroup;
+  rv = NS_NewLoadGroup(getter_AddRefs(loadGroup), principal);
+  if (NS_FAILED(rv)) {
+    LOG(("  failed to create the load group, rv=0x%08x",
+         static_cast<uint32_t>(rv)));
+    return;
+  }
+
+  // XXX(valentin): Preserving the old load info means mInitialSecurityCheckDone
+  // will be true. Using CloneForNewRequest would be closer to the spec, but
+  // it would mean redoing previous checks.
+  nsCOMPtr<nsILoadInfo> loadInfo =
+      static_cast<mozilla::net::LoadInfo*>(mLoadInfo.get())->Clone();
+
   nsCOMPtr<nsIChannel> validatingChannel;
-  rv = NS_NewChannelInternal(getter_AddRefs(validatingChannel), mURI, mLoadInfo,
-                             nullptr /* performance storage */, mLoadGroup,
-                             mCallbacks, loadFlags);
+  rv = NS_NewChannelInternal(getter_AddRefs(validatingChannel), mURI, loadInfo,
+                             nullptr /* performance storage */, loadGroup,
+                             listener, loadFlags);
   if (NS_FAILED(rv)) {
     LOG(("  failed to created the channel, rv=0x%08x",
          static_cast<uint32_t>(rv)));
@@ -12743,6 +12804,7 @@ void nsHttpChannel::PerformBackgroundCacheRevalidationNow() {
 
   nsCOMPtr<nsIHttpChannel> httpChannel(do_QueryInterface(validatingChannel));
   MOZ_ASSERT(httpChannel);
+
   nsCOMPtr<nsIHttpHeaderVisitor> visitor =
       new CopyNonDefaultHeaderVisitor(httpChannel);
   rv = VisitNonDefaultRequestHeaders(visitor);
@@ -12767,8 +12829,6 @@ void nsHttpChannel::PerformBackgroundCacheRevalidationNow() {
     httpChan->mStaleRevalidation = true;
   }
 
-  RefPtr<BackgroundRevalidatingListener> listener =
-      new BackgroundRevalidatingListener();
   rv = validatingChannel->AsyncOpen(listener);
   if (NS_FAILED(rv)) {
     LOG(("  failed to open the channel, rv=0x%08x", static_cast<uint32_t>(rv)));

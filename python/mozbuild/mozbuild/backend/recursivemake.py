@@ -40,6 +40,7 @@ from ..frontend.data import (
     FinalTargetFiles,
     FinalTargetPreprocessedFiles,
     GeneratedFile,
+    Headers,
     HostDefines,
     HostLibrary,
     HostProgram,
@@ -184,9 +185,10 @@ class BackendMakeFile:
             self.fh.write("NONRECURSIVE_TARGETS += export\n")
             self.fh.write("NONRECURSIVE_TARGETS_export += xpidl\n")
             self.fh.write(
-                "NONRECURSIVE_TARGETS_export_xpidl_DIRECTORY = $(DEPTH)/xpcom/xpidl\n"
+                "NONRECURSIVE_TARGETS_export_xpidl_DIRECTORY = "
+                "$(DEPTH)/config/makefiles/xpidl\n"
             )
-            self.fh.write("NONRECURSIVE_TARGETS_export_xpidl_TARGETS += export\n")
+            self.fh.write("NONRECURSIVE_TARGETS_export_xpidl_TARGETS += xpidl\n")
 
         return self.fh.close()
 
@@ -370,6 +372,7 @@ class RecursiveMakeBackend(MakeBackend):
         self._rust_targets = set()
         self._gkrust_target = None
         self._pre_compile = set()
+        self._objdir_local_includes = defaultdict(set)
 
         # For a given file produced by the build, gives the top-level target
         # that will produce it.
@@ -613,6 +616,10 @@ class RecursiveMakeBackend(MakeBackend):
             self._process_linked_libraries(obj, backend_file)
             self._no_skip["syms"].add(backend_file.relobjdir)
 
+        elif isinstance(obj, Headers):
+            # nothing to do
+            ...
+
         elif isinstance(obj, HostProgram):
             self._process_host_program(obj, backend_file)
             self._process_linked_libraries(obj, backend_file)
@@ -632,6 +639,10 @@ class RecursiveMakeBackend(MakeBackend):
 
         elif isinstance(obj, LocalInclude):
             self._process_local_include(obj.path, backend_file)
+            if isinstance(obj.path, ObjDirPath):
+                self._objdir_local_includes[backend_file.relobjdir].add(
+                    mozpath.relpath(obj.path.full_path, self.environment.topobjdir)
+                )
 
         elif isinstance(obj, PerSourceFlag):
             self._process_per_source_flag(obj, backend_file)
@@ -789,6 +800,16 @@ class RecursiveMakeBackend(MakeBackend):
             relobjdir = mozpath.dirname(t)
             rule = root_deps_mk.create_rule([t])
             rule.add_dependencies(["%s/pre-compile" % relobjdir])
+
+        for relobjdir, includes in sorted(self._objdir_local_includes.items()):
+            target = mozpath.join(relobjdir, "target-objects")
+            deps = sorted(
+                f"{d}/pre-compile"
+                for d in includes
+                if d != relobjdir and d in self._pre_compile
+            )
+            if deps and target in self._compile_graph:
+                root_deps_mk.create_rule([target]).add_dependencies(deps)
 
         all_compile_deps = (
             reduce(lambda x, y: x | y, self._compile_graph.values())
@@ -1283,6 +1304,11 @@ class RecursiveMakeBackend(MakeBackend):
         rules = StringIO()
         mk.dump(rules, removal_guard=False)
 
+        xpidl_dir = "config/makefiles/xpidl"
+        self._traversal.add("", dirs=[xpidl_dir])
+        self._traversal.add(xpidl_dir)
+        self._no_skip["export"].add(xpidl_dir)
+
         # Create dependency for output header so we force regeneration if the
         # header was deleted. This ideally should not be necessary. However,
         # some processes (such as PGO at the time this was implemented) wipe
@@ -1290,10 +1316,10 @@ class RecursiveMakeBackend(MakeBackend):
 
         obj = self.Substitution()
         obj.output_path = mozpath.join(
-            self.environment.topobjdir, "config", "makefiles", "xpidl", "Makefile"
+            self.environment.topobjdir, xpidl_dir, "Makefile"
         )
         obj.input_path = mozpath.join(
-            self.environment.topsrcdir, "config", "makefiles", "xpidl", "Makefile.in"
+            self.environment.topsrcdir, xpidl_dir, "Makefile.in"
         )
         obj.topsrcdir = self.environment.topsrcdir
         obj.topobjdir = self.environment.topobjdir
@@ -1325,8 +1351,6 @@ class RecursiveMakeBackend(MakeBackend):
         backend_file.write_once("CARGO_TARGET_DIR := %s\n" % target_dir)
         backend_file.write("%s += $(DEPTH)/%s\n" % (target_variable, obj.location))
         backend_file.write("%s += %s\n" % (target_cargo_variable, obj.name))
-        if obj.features:
-            backend_file.write(f"{obj.FEATURES_VAR} := {','.join(obj.features)}\n")
         if obj.output_category:
             program_target = f"$(DEPTH)/{obj.location}"
             self._process_non_default_target(obj, program_target, backend_file)
@@ -1355,7 +1379,6 @@ class RecursiveMakeBackend(MakeBackend):
         self._process_non_default_target(obj, "force-cargo-test-run", backend_file)
         backend_file.write_once("CARGO_FILE := $(srcdir)/Cargo.toml\n")
         backend_file.write_once("RUST_TESTS := %s\n" % " ".join(obj.names))
-        backend_file.write_once(f"RUST_TEST_FEATURES := {','.join(obj.features)}\n")
 
     def _process_legacy_run_tests(self, obj, backend_file):
         self._no_skip["check"].add(backend_file.relobjdir)
@@ -1562,17 +1585,9 @@ class RecursiveMakeBackend(MakeBackend):
         # up recompiling lots of things.
         target_dir = mozpath.normpath(backend_file.environment.topobjdir)
         backend_file.write("CARGO_TARGET_DIR := %s\n" % target_dir)
-        if libdef.features:
-            backend_file.write(
-                f"{libdef.FEATURES_VAR} := {','.join(libdef.features)}\n"
-            )
         if libdef.cargo_profile_suffix:
             backend_file.write(
                 f"RUST_LIBRARY_CARGO_PROFILE_SUFFIX := {libdef.cargo_profile_suffix}\n"
-            )
-        if libdef.cargo_crate_type:
-            backend_file.write(
-                f"RUST_LIBRARY_CARGO_CRATE_TYPE := {libdef.cargo_crate_type}\n"
             )
         if libdef.output_category:
             self._process_non_default_target(libdef, rust_lib, backend_file)

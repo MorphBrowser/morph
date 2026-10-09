@@ -22,6 +22,7 @@ import java.security.InvalidParameterException
 import java.util.concurrent.TimeUnit.MILLISECONDS
 import mozilla.components.concept.engine.Engine
 import mozilla.components.concept.engine.Engine.HttpsOnlyMode
+import mozilla.components.feature.automotive.isAndroidAutomotiveAvailable
 import mozilla.components.feature.sitepermissions.SitePermissionsRules
 import mozilla.components.feature.sitepermissions.SitePermissionsRules.Action
 import mozilla.components.feature.sitepermissions.SitePermissionsRules.AutoplayAction
@@ -48,6 +49,7 @@ import org.mozilla.fenix.GleanMetrics.TopSites
 import org.mozilla.fenix.R
 import org.mozilla.fenix.autofill.address.RegionAddressFeatureGate
 import org.mozilla.fenix.browser.browsingmode.BrowsingMode
+import org.mozilla.fenix.components.lens.CameraMode
 import org.mozilla.fenix.components.settings.counterPreference
 import org.mozilla.fenix.components.settings.featureFlagBooleanPreference
 import org.mozilla.fenix.components.settings.lazyFeatureFlagBooleanPreference
@@ -1977,16 +1979,23 @@ class Settings(
             default = true,
         )
 
+    /**
+     * Whether this device supports the application's own autofill and password management. Both are disabled on Android
+     * Automotive OS for now until we meet specific Google requirements around protecting passwords and credit card
+     * information in cars.
+     */
+    val isAutofillSupported: Boolean by lazy { !appContext.isAndroidAutomotiveAvailable() }
+
     var shouldPromptToSaveLogins by
         booleanPreference(
             appContext.getPreferenceKey(R.string.pref_key_save_logins),
-            default = true,
+            default = { isAutofillSupported },
         )
 
     var shouldAutofillLogins by
         booleanPreference(
             appContext.getPreferenceKey(R.string.pref_key_autofill_logins),
-            default = true,
+            default = { isAutofillSupported },
         )
 
     /**
@@ -2342,7 +2351,7 @@ class Settings(
     var shouldAutofillCreditCardDetails by
         booleanPreference(
             appContext.getPreferenceKey(R.string.pref_key_credit_cards_save_and_autofill_cards),
-            default = true,
+            default = { isAutofillSupported },
         )
 
     /**
@@ -2353,7 +2362,7 @@ class Settings(
     var shouldAutofillAddressDetails by
         booleanPreference(
             appContext.getPreferenceKey(R.string.pref_key_addresses_save_and_autofill_addresses),
-            default = true,
+            default = { isAutofillSupported },
         )
 
     /** Indicates if the Contile functionality should be visible. */
@@ -2441,6 +2450,16 @@ class Settings(
             default = { FxNimbus.features.continuousOnboarding.value().enabled },
         )
 
+    /**
+     * Whether the Sync sign-in card can be shown during initial onboarding for users whose Firefox install is
+     * attributed to a pairing campaign link.
+     */
+    var isPairingSignInPromptEnabled by
+        booleanPreference(
+            appContext.getPreferenceKey(R.string.pref_key_is_pairing_sign_in_prompt_enabled),
+            default = { FxNimbus.features.pairingSigninPrompt.value().enabled },
+        )
+
     /** The completion timestamp of the second day of continuous onboarding. */
     var secondDayOnboardingCompletedTimestamp by
         longPreference(
@@ -2467,6 +2486,17 @@ class Settings(
         longPreference(
             key = appContext.getPreferenceKey(R.string.pref_key_continuous_onboarding_day_seven_completed_timestamp),
             default = -1L,
+        )
+
+    /** Indicates if continuous onboarding has been completed, meaning its final day-7 stage has finished. */
+    val continuousOnboardingCompleted: Boolean
+        get() = seventhDayOnboardingCompletedTimestamp != -1L
+
+    /** Indicates if the migrate onboarding state feature is enabled. */
+    var migrateOnboardingStateFeatureEnabled by
+        booleanPreference(
+            key = appContext.getPreferenceKey(R.string.pref_key_migrate_onboarding_state_enabled),
+            default = { FxNimbus.features.migrateOnboardingState.value().enabled },
         )
 
     /** Indicates if the marketing onboarding card should be shown to the user. */
@@ -2611,13 +2641,6 @@ class Settings(
         booleanPreference(
             key = appContext.getPreferenceKey(R.string.pref_key_enable_ads_client_for_stories),
             default = { FxNimbus.features.adsClientForStories.value().enabled },
-        )
-
-    /** Indicates if Add Shortcuts improvement is enabled. */
-    var enableAddShortcutsImprovement by
-        booleanPreference(
-            key = appContext.getPreferenceKey(R.string.pref_key_enable_add_shortcuts_improvement),
-            default = { FxNimbus.features.addShortcutsImprovement.value().enabled },
         )
 
     /** Indicates if more shortcuts should be shown. */
@@ -2900,17 +2923,6 @@ class Settings(
         get() = FxNimbus.features.ipProtection.value().enabled || isIPProtectionEnabled
 
     /**
-     * Persists IPProtection locations state set through Secret Settings.
-     *
-     * `true` makes the IPProtection location UI elements interactable.
-     */
-    var isIPProtectionLocationsEnabled by
-        booleanPreference(
-            key = appContext.getPreferenceKey(R.string.pref_key_enable_ip_protection_locations),
-            default = Config.channel.isDebug,
-        )
-
-    /**
      * Tracks how many times the summarize menu item has been shown. Used to control highlight/badge visibility for
      * feature discovery.
      */
@@ -3009,6 +3021,8 @@ class Settings(
         nimbusFeature: DefaultBrowserPrompt = FxNimbus.features.defaultBrowserPrompt.value()
     ): Boolean {
         if (!nimbusFeature.enabled) return false
+
+        if (continuousOnboardingFeatureEnabled && !continuousOnboardingCompleted) return false
 
         val now = currentTimeMillis()
 
@@ -3328,7 +3342,7 @@ class Settings(
     var nativeShareSheetEnabled by
         booleanPreference(
             key = appContext.getPreferenceKey(R.string.pref_key_native_share_sheet),
-            default = { FxNimbus.features.nativeShareSheet.value().enabled },
+            default = true,
         )
 
     var googleLensIntegrationEnabled by
@@ -3357,6 +3371,22 @@ class Settings(
             key = appContext.getPreferenceKey(R.string.pref_key_has_accepted_google_lens_first_run),
             default = false,
         )
+
+    private var lensCameraLastModeName by
+        stringPreference(
+            key = appContext.getPreferenceKey(R.string.pref_key_lens_camera_last_mode),
+            default = CameraMode.LENS.name,
+        )
+
+    /**
+     * The [CameraMode] the user last selected on the Google Lens camera screen. The camera screen opens in this mode
+     * and the address bar shows the matching icon.
+     */
+    var lensCameraLastMode: CameraMode
+        get() = CameraMode.fromNameOrNull(lensCameraLastModeName) ?: CameraMode.LENS
+        set(value) {
+            lensCameraLastModeName = value.name
+        }
 
     /** Whether the voice search entry point is shown in the display-mode browser toolbar. */
     var showVoiceSearchInDisplayToolbar by

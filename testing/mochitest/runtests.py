@@ -85,7 +85,9 @@ from mozprofile.cli import KeyValueParseError, parse_key_value, parse_preference
 from mozprofile.permissions import ServerLocations
 from mozrunner.utils import get_stack_fixer_function, test_environment
 from mozscreenshot import dump_screen
+from moztest.assertions import AssertionFailureParser
 from moztest.tsan import TSANErrorParser
+from moztest.ubsan import UBSanErrorParser
 
 HAVE_PSUTIL = False
 try:
@@ -3051,6 +3053,9 @@ toolbar#nav-bar {
             else:
                 tsanErrors = None
 
+            assertionFailures = AssertionFailureParser(self.log)
+            ubsanErrors = UBSanErrorParser(self.log)
+
             # create an instance to process the output
             outputHandler = self.OutputHandler(
                 harness=self,
@@ -3061,6 +3066,8 @@ toolbar#nav-bar {
                 shutdownLeaks=shutdownLeaks,
                 lsanLeaks=lsanLeaks,
                 tsanErrors=tsanErrors,
+                assertionFailures=assertionFailures,
+                ubsanErrors=ubsanErrors,
                 bisectChunk=bisectChunk,
                 restartAfterFailure=restartAfterFailure,
             )
@@ -3833,6 +3840,7 @@ toolbar#nav-bar {
             "is_emulator": mozinfo.info.get("is_emulator", False),
             "coverage": mozinfo.info.get("coverage", False),
             "nogpu": mozinfo.info.get("nogpu", False),
+            "isolated_process": options.isolated_process,
         })
 
         if not self.mozinfo_variables_shown:
@@ -3973,7 +3981,7 @@ toolbar#nav-bar {
                     f.write(json.dumps(data))
 
         if "MOZ_AUTOMATION" in os.environ:
-            symbolicate_profiles()
+            symbolicate_profiles(symbol_dir=options.symbolsPath)
 
         self.handleShutdownProfile(options)
 
@@ -4444,6 +4452,8 @@ toolbar#nav-bar {
             shutdownLeaks=None,
             lsanLeaks=None,
             tsanErrors=None,
+            assertionFailures=None,
+            ubsanErrors=None,
             bisectChunk=None,
             restartAfterFailure=None,
         ):
@@ -4459,6 +4469,8 @@ toolbar#nav-bar {
             self.shutdownLeaks = shutdownLeaks
             self.lsanLeaks = lsanLeaks
             self.tsanErrors = tsanErrors
+            self.assertionFailures = assertionFailures
+            self.ubsanErrors = ubsanErrors
             self.bisectChunk = bisectChunk
             self.restartAfterFailure = restartAfterFailure
             self.browserProcessId = None
@@ -4495,6 +4507,8 @@ toolbar#nav-bar {
                 self.trackShutdownLeaks,
                 self.trackLSANLeaks,
                 self.trackTSanErrors,
+                self.trackAssertionFailures,
+                self.trackUBSanErrors,
                 self.count_structured,
             ]
             if self.bisectChunk or self.restartAfterFailure:
@@ -4538,6 +4552,12 @@ toolbar#nav-bar {
 
             if self.tsanErrors:
                 self.tsanErrors.flush()
+
+            if self.assertionFailures:
+                self.assertionFailures.flush()
+
+            if self.ubsanErrors:
+                self.ubsanErrors.flush()
 
         # output message handlers:
         # these take a message and return a message
@@ -4662,6 +4682,33 @@ toolbar#nav-bar {
                 else:
                     scope = self.harness.lastTestSeen
                 self.tsanErrors.log(line, pid=pid, scope=scope)
+            return message
+
+        def trackAssertionFailures(self, message):
+            if self.assertionFailures and message["action"] == "process_output":
+                test = self.harness.lastTestSeen
+                if test.endswith(" (finished)"):
+                    test = test[: -len(" (finished)")]
+                self.assertionFailures.log(
+                    message["data"], pid=message.get("process"), test=test
+                )
+            return message
+
+        def trackUBSanErrors(self, message):
+            if self.ubsanErrors and message["action"] == "process_output":
+                if self.harness.lastTestFinished:
+                    scope = self.harness.lastManifest
+                else:
+                    scope = self.harness.lastTestSeen
+                test = self.harness.lastTestSeen
+                if test.endswith(" (finished)"):
+                    test = test[: -len(" (finished)")]
+                self.ubsanErrors.log(
+                    message["data"],
+                    pid=message.get("process"),
+                    scope=scope,
+                    test=test,
+                )
             return message
 
         def trackShutdownLeaks(self, message):

@@ -69,9 +69,7 @@ document.addEventListener(
           TabContextMenu.contextTab.resumeDelayedMedia();
           break;
         case "context_playSelectedTabs":
-          gBrowser.resumeDelayedMediaOnMultiSelectedTabs(
-            TabContextMenu.contextTab
-          );
+          gBrowser.resumeDelayedMediaOnMultiSelectedTabs();
           break;
         case "context_toggleMuteTab":
           TabContextMenu.contextTab.toggleMuteAudio();
@@ -126,7 +124,8 @@ document.addEventListener(
             window,
             TabContextMenu.contextTabs.map(
               tab => tab.linkedBrowser.currentURI.spec
-            )
+            ),
+            "tab_list"
           );
           break;
         case "context_bookmarkTab":

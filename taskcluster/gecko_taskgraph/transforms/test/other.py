@@ -364,6 +364,11 @@ def setup_browsertime(config, tasks):
                     "macosx64-geckodriver",
                     "macosx64-aarch64-node",
                 ],
+                "macosx2700.*": [
+                    "browsertime",
+                    "macosx64-geckodriver",
+                    "macosx64-aarch64-node",
+                ],
                 "windows.*aarch64.*": [
                     "browsertime",
                     "win32-geckodriver",
@@ -385,6 +390,7 @@ def setup_browsertime(config, tasks):
                 "macosx1470.*": ["mac64-ffmpeg-7.1"],
                 "macosx1400.*": ["mac64-ffmpeg-7.1"],
                 "macosx1500.*": ["mac64-ffmpeg-7.1"],
+                "macosx2700.*": ["mac64-ffmpeg-7.1"],
                 "windows.*aarch64.*": ["win64-ffmpeg-7.1"],
                 "windows.*-64.*": ["win64-ffmpeg-7.1"],
             },
@@ -722,7 +728,6 @@ def handle_tier(config, tasks):
                 "android-em-14-x86_64-shippable-lite/opt",
                 "android-em-14-x86_64-lite/opt",
                 "android-em-14-x86_64/debug",
-                "android-em-14-x86_64/debug-isolated-process",
                 "android-em-14-x86-shippable/opt",
                 "android-em-14-x86/opt",
             ]:
@@ -853,7 +858,7 @@ class PlatformSchema(Schema, kw_only=True):
 class BuildSchema(Schema, kw_only=True, forbid_unknown_fields=False):
     """Build configuration schema."""
 
-    type: Literal["opt", "debug", "debug-isolated-process"]
+    type: Literal["opt", "debug"]
     asan: Optional[bool] = None
     ccov: Optional[bool] = None
     clang_trunk: Optional[bool] = None
@@ -1284,4 +1289,16 @@ def resolve_openh264_version(config, tasks):
                 for key in ("artifact", "dest"):
                     if key in fetch:
                         fetch[key] = fetch[key].format(openh264_version=version)
+        yield task
+
+
+@transforms.add
+def set_perfherder_extra_options(config, tasks):
+    for task in tasks:
+        options = [task["attributes"]["unittest_suite"]]
+        variant = task["attributes"].get("unittest_variant")
+        if variant:
+            options.append(variant)
+        env = task.setdefault("worker", {}).setdefault("env", {})
+        env.setdefault("PERFHERDER_EXTRA_OPTIONS", " ".join(options))
         yield task

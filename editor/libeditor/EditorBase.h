@@ -208,6 +208,15 @@ class EditorBase : public nsIEditor,
       nsIClipboard::ClipboardType aClipboardType) const;
 
   /**
+   * Create a DataTransfer object whose data comes from aTransferable rather
+   * than from a clipboard.  Used when pasting a transferable which was handed
+   * to us directly, e.g. by the macOS Services mechanism, so that the paste
+   * event exposes the data being pasted instead of the clipboard contents.
+   */
+  already_AddRefed<DataTransfer> CreateDataTransferForPaste(
+      EventMessage aEventMessage, nsITransferable* aTransferable) const;
+
+  /**
    * Fast non-refcounting editor root element accessor
    */
   Element* GetRoot() const { return mRootElement; }
@@ -788,10 +797,16 @@ class EditorBase : public nsIEditor,
    * @param aPrincipal          Set subject principal if it may be called by
    *                            JS.  If set to nullptr, will be treated as
    *                            called by system.
+   * @param aDataTransfer       If set, used for the "paste" event and for
+   *                            inserting the content.  Otherwise, one is
+   *                            created from aTransferable.  Note that creating
+   *                            it consumes the input streams in aTransferable,
+   *                            so it must only be created once.
    */
   MOZ_CAN_RUN_SCRIPT nsresult PasteTransferableAsAction(
       nsITransferable* aTransferable, DispatchPasteEvent aDispatchPasteEvent,
-      nsIPrincipal* aPrincipal = nullptr);
+      nsIPrincipal* aPrincipal = nullptr,
+      DataTransfer* aDataTransfer = nullptr);
 
   /**
    * PasteAsQuotationAsAction() pastes content in clipboard as quotation.
@@ -1005,6 +1020,22 @@ class EditorBase : public nsIEditor,
 
     void SetSelectionCreatedByDoubleclick(bool aSelectionCreatedByDoubleclick) {
       mSelectionCreatedByDoubleclick = aSelectionCreatedByDoubleclick;
+    }
+
+    /**
+     * Set whether the selection was created by double-click on the innermost
+     * edit action which is dispatching `beforeinput` or `input`, if any.
+     */
+    void SetSelectionCreatedByDoubleclickOfEditActionDispatchingInputEvent(
+        bool aSelectionCreatedByDoubleclick) {
+      for (AutoEditActionDataSetter* editActionData = this; editActionData;
+           editActionData = editActionData->mParentData) {
+        if (editActionData->mDispatchingInputEvent) {
+          editActionData->SetSelectionCreatedByDoubleclick(
+              aSelectionCreatedByDoubleclick);
+          return;
+        }
+      }
     }
 
     [[nodiscard]] bool SelectionCreatedByDoubleclick() const {
@@ -1661,6 +1692,14 @@ class EditorBase : public nsIEditor,
   EditAction GetEditAction() const {
     return mEditActionData ? mEditActionData->GetEditAction()
                            : EditAction::eNone;
+  }
+
+  /**
+   * Return true if the edit action being handled deletes a selection which
+   * was created by double-clicking a word.
+   */
+  [[nodiscard]] bool IsSelectionCreatedByDoubleclick() const {
+    return mEditActionData && mEditActionData->SelectionCreatedByDoubleclick();
   }
 
   /**
@@ -2912,8 +2951,8 @@ class EditorBase : public nsIEditor,
    * it's not canceled.
    */
   [[nodiscard]] MOZ_CAN_RUN_SCRIPT virtual nsresult HandlePasteTransferable(
-      AutoEditActionDataSetter& aEditActionData,
-      nsITransferable& aTransferable) = 0;
+      AutoEditActionDataSetter& aEditActionData, nsITransferable& aTransferable,
+      DataTransfer* aDataTransfer) = 0;
 
  private:
   nsCOMPtr<nsISelectionController> mSelectionController;

@@ -3808,9 +3808,8 @@ const PinnableSitesList = ({
     ...prev,
     [id]: state
   }));
-  const handlePin = async (event, item) => {
+  const handlePin = async (event, item, position) => {
     setItemState(item.id, PENDING);
-    MultiStageUtils.sendActionTelemetry(messageId, item.id, "CLICK_BUTTON");
     const result = await handleAction(event, {
       type: "PIN_TASKBAR_TAB",
       needsAwait: true,
@@ -3829,7 +3828,9 @@ const PinnableSitesList = ({
       pinResultLabel = "failure";
     }
     MultiStageUtils.sendActionTelemetry(messageId, item.id, "PIN_SITE", {
-      result: pinResultLabel
+      result: pinResultLabel,
+      position,
+      personalized: !!item.personalized
     });
 
     // Re-enable the button only on explicit failure so the user can retry.
@@ -3843,7 +3844,7 @@ const PinnableSitesList = ({
   };
   return /*#__PURE__*/external_React_default().createElement("ul", {
     className: `pinnable-sites-list${alwaysShow ? " always-visible" : ""}`
-  }, items.map(item => {
+  }, items.map((item, index) => {
     const nameId = `pinnable-site-name-${item.id}`;
     const state = itemStates[item.id] ?? IDLE;
     const isPendingOrPinned = state === PENDING || state === PINNED;
@@ -3867,8 +3868,9 @@ const PinnableSitesList = ({
       className: "pinnable-sites-description"
     }))), /*#__PURE__*/external_React_default().createElement("button", {
       className: "pinnable-sites-pin-button primary",
+      value: item.id,
       disabled: isPendingOrPinned,
-      onClick: e => handlePin(e, item),
+      onClick: e => handlePin(e, item, index + 1),
       "aria-describedby": nameId
     }, pinButtonLabel && /*#__PURE__*/external_React_default().createElement(Localized, {
       text: pinButtonLabel
@@ -3955,6 +3957,21 @@ function ContentTiles_extends() { return ContentTiles_extends = Object.assign ? 
 const HEADER_STYLES = ["backgroundColor", "border", "padding", "margin", "width", "height"];
 const ContentTiles_TILE_STYLES = ["border", "borderRadius", "marginBlock", "marginInline", "paddingBlock", "paddingInline"];
 const CONTAINER_STYLES = ["padding", "margin", "marginBlock", "marginInline", "paddingBlock", "paddingInline", "flexDirection", "flexWrap", "flexFlow", "flexGrow", "flexShrink", "justifyContent", "alignItems", "gap"];
+
+/**
+ * @param {object|object[]} tiles - The tiles of the screen being shown.
+ * @returns {object} Impression context, if any.
+ */
+function getTileImpressionContext(tiles) {
+  const pinnableSites = (Array.isArray(tiles) ? tiles : [tiles]).find(tile => tile?.type === "pinnable_sites" && Array.isArray(tile.data));
+  if (!pinnableSites) {
+    return {};
+  }
+  return {
+    total_sites: pinnableSites.data.length,
+    personalized_sites: pinnableSites.data.filter(item => item?.personalized).length
+  };
+}
 const ContentTiles = props => {
   const {
     content
@@ -5771,8 +5788,11 @@ function addUtmParams(url, utmTerm) {
 
 
 
+
 // Amount of milliseconds for all transitions to complete (including delays).
 const TRANSITION_OUT_TIME = 1000;
+// Keep in sync with --card-stack-duration in _multistage.scss.
+const CARD_STACK_TRANSITION_OUT_TIME = 400;
 const LANGUAGE_MISMATCH_SCREEN_ID = "AW_LANGUAGE_MISMATCH";
 const MultiStageAboutWelcome = props => {
   const gateInitialPaint = props.gateInitialPaint ?? false;
@@ -5836,7 +5856,8 @@ const MultiStageAboutWelcome = props => {
             screen_family: props.message_id,
             screen_index: order,
             screen_id: screen.id,
-            screen_initials: screenInitials
+            screen_initials: screenInitials,
+            ...getTileImpressionContext(screen.content?.tiles)
           });
 
           // Impression actions should be fired before recording the
@@ -5879,11 +5900,20 @@ const MultiStageAboutWelcome = props => {
       requestAnimationFrame(() => requestAnimationFrame(() => setTransition("")));
     }
   }, [transition]);
+  const isCardStack = defaultScreens?.[0]?.content?.position === "card-stack";
+  const transitionOutTime = isCardStack ? CARD_STACK_TRANSITION_OUT_TIME : TRANSITION_OUT_TIME;
 
   // Transition to next screen, opening about:home on last screen button CTA
   const handleTransition = goBack => {
     // Only handle transitioning out from a screen once.
     if (transition === "out") {
+      return;
+    }
+
+    // The card stack plays a single exit animation on teardown, so finishing
+    // from its last screen would otherwise wait for that twice.
+    if (isCardStack && !goBack && index >= screens.length - 1) {
+      window.AWFinish();
       return;
     }
 
@@ -5901,7 +5931,7 @@ const MultiStageAboutWelcome = props => {
       } else {
         window.AWFinish();
       }
-    }, props.transitions ? TRANSITION_OUT_TIME : 0);
+    }, props.transitions ? transitionOutTime : 0);
   };
   (0,external_React_namespaceObject.useEffect)(() => {
     // When about:welcome loads (on refresh or pressing back button
@@ -5922,7 +5952,7 @@ const MultiStageAboutWelcome = props => {
         setTimeout(() => {
           setTransition(props.transitions ? "in" : "");
           setScreenIndex(Math.min(state, screens.length - 1));
-        }, props.transitions ? TRANSITION_OUT_TIME : 0);
+        }, props.transitions ? transitionOutTime : 0);
       };
 
       // Handle page load, e.g., going back to about:welcome from about:home
@@ -5938,7 +5968,9 @@ const MultiStageAboutWelcome = props => {
       window.addEventListener("popstate", handler);
       return () => window.removeEventListener("popstate", handler);
     }
-    return false;
+    // React calls a non-undefined return value on unmount, so `false` here
+    // throws when the message is torn down.
+    return undefined;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [multiSelects, setMultiSelects] = (0,external_React_namespaceObject.useState)({});
@@ -6669,11 +6701,10 @@ class WelcomeScreen extends (external_React_default()).PureComponent {
     });
   }
 }
-;// ./content-src/asrouter-newtab-multistage.jsx
+;// ./content-src/components/MultistageWithDismiss.jsx
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
-
 
 
 
@@ -6691,8 +6722,37 @@ function MultistageWithDismiss({
   // The card-stack template has its own inline dismiss button, so it doesn't
   // need the corner one.
   const isCardStack = config.screens?.[0]?.content?.position === "card-stack";
+  const transitions = config.transitions ?? false;
+  const animateCardStack = isCardStack && transitions;
+  const [isExiting, setIsExiting] = (0,external_React_namespaceObject.useState)(false);
+  const exitTimeout = (0,external_React_namespaceObject.useRef)(null);
+  (0,external_React_namespaceObject.useEffect)(() => {
+    if (!animateCardStack) {
+      return undefined;
+    }
+    const finish = window.AWFinish;
+    window.AWFinish = () => {
+      if (exitTimeout.current) {
+        return;
+      }
+      setIsExiting(true);
+      exitTimeout.current = setTimeout(finish, CARD_STACK_TRANSITION_OUT_TIME);
+    };
+    return () => {
+      window.AWFinish = finish;
+      clearTimeout(exitTimeout.current);
+      exitTimeout.current = null;
+    };
+  }, [animateCardStack]);
+  const wrapperClasses = ["multistage-newtab-wrapper"];
+  if (animateCardStack) {
+    wrapperClasses.push("card-stack-animated");
+  }
+  if (isExiting) {
+    wrapperClasses.push("card-stack-exiting");
+  }
   return /*#__PURE__*/external_React_default().createElement("div", {
-    className: "multistage-newtab-wrapper",
+    className: wrapperClasses.join(" "),
     style: config.wrapper_content_style ? MultiStageUtils.getValidStyle(config.wrapper_content_style, ["height"]) : {
       height: "500px"
     }
@@ -6705,12 +6765,20 @@ function MultistageWithDismiss({
   }), /*#__PURE__*/external_React_default().createElement(MultiStageAboutWelcome, {
     defaultScreens: config.screens,
     message_id: config.id,
-    transitions: config.transitions ?? false,
+    transitions: transitions,
     backdrop: config.backdrop,
     startScreen: 0,
     updateHistory: false
   }));
 }
+;// ./content-src/asrouter-newtab-multistage.jsx
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+
+
+
 window.mountMultistageMessage = function mountMultistageMessage(container, props) {
   const {
     messageData,

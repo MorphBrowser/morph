@@ -429,8 +429,9 @@ bookmark-panel-remove =
 bookmark-panel-show-editor-checkbox =
     .label = Show editor when saving
     .accesskey = S
-bookmark-panel-save-button =
+bookmark-panel-save-button2 =
     .label = Save
+    .accesskey = a
 
 # Width of the bookmark panel.
 # Should be large enough to fully display the Done and
@@ -941,6 +942,13 @@ urlbar-view-context-menu-open-in-window2 = Open in New Window
 urlbar-view-context-menu-open-in-private-window2 = Open in New Private Window
     .accesskey = P
 
+# A checkable menu item that controls whether pressing the Tab key while
+# navigating the address bar results stops on each result's menu button. When
+# checked, the Tab key moves straight from one result to the next, skipping the
+# menu button that opens this menu.
+urlbar-view-context-menu-skip-menu-with-tab = Skip this menu when using the tab key
+    .accesskey = S
+
 ## Labels shown above groups of urlbar results
 
 # A label shown above the "Firefox Suggest" (bookmarks/history) group in the
@@ -1320,9 +1328,9 @@ tabs-toolbar =
 tabs-toolbar-new-tab =
     .label = New Tab
 
-tabs-toolbar-list-all-tabs =
-    .label = List all tabs
-    .tooltiptext = List all tabs
+tabs-toolbar-list-all-tabs-2 =
+    .label = Search and manage tabs
+    .tooltiptext = Search and manage tabs
 
 ## Drop indicator text for pinned tabs when no tabs are pinned.
 
@@ -1337,6 +1345,17 @@ restore-session-startup-suggestion-button = Show me how
 ## Infobar shown when the user tries to open a file picker and file pickers are blocked by enterprise policy
 
 filepicker-blocked-infobar = Your organization has blocked access to local files on this computer
+
+## Address bar result shown when someone who used the Extensions and Themes
+## keyboard shortcut presses that shortcut after it moved to Search Tabs.
+## Variables:
+##   $searchTabsShortcut (String) - The Search Tabs keyboard shortcut, e.g. "Ctrl+Shift+A".
+##   $addonsShortcut (String) - The Extensions and Themes keyboard shortcut, e.g. "Ctrl+Shift+F".
+
+urlbar-addons-shortcut-moved-title = { $searchTabsShortcut } now searches tabs
+urlbar-addons-shortcut-moved-description = To open extensions and themes, use { $addonsShortcut }.
+urlbar-addons-shortcut-moved-change-shortcuts = Manage shortcuts
+urlbar-addons-shortcut-moved-dismiss = Got it
 
 ## Mozilla data reporting notification (Telemetry, Firefox Health Report, etc)
 
@@ -1367,11 +1386,11 @@ private-browsing-info-panel-description = This helps keep your browsing hidden f
 # Variables:
 #   $agentName (String): The name of the DLP agent that is connected
 content-analysis-indicator-tooltip =
-    .tooltiptext = Data loss prevention (DLP) by { $agentName }. Click for more info.
-content-analysis-panel-title = Data protection
+    .tooltiptext = Data Loss Prevention (DLP) by { $agentName }. Click for more info.
+content-analysis-panel-title2 = Data loss prevention
 # Variables:
 #   $agentName (String): The name of the DLP agent that is connected
-content-analysis-panel-text-styled = Your organization uses <b>{ $agentName }</b> to protect against data loss. <a data-l10n-name="info">Learn more</a>
+content-analysis-panel-text-styled2 = Your organization uses <b>{ $agentName }</b> to control how sensitive data may be shared. <a data-l10n-name="info">Learn more</a>
 
 ## Unified extensions (toolbar) button
 

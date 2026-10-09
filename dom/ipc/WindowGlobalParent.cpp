@@ -212,6 +212,19 @@ already_AddRefed<WindowGlobalParent> WindowGlobalParent::CreateDisconnected(
   return wgp.forget();
 }
 
+void WindowGlobalParent::InitFromContentProcess(const FieldValues& aRequested,
+                                                ContentParent* aSource) {
+  MOZ_ASSERT(GetContentParent() == aSource);
+  MOZ_DIAGNOSTIC_ASSERT(!BrowsingContext()->GetWindowContexts().Contains(this),
+                        "must reconcile before Init registers this context");
+
+  Transaction correction;
+  Transaction::ReconcileInitialFields(this, FieldValues(aRequested), aSource,
+                                      correction);
+  Init();
+  correction.SendCorrection(this, aSource);
+}
+
 void WindowGlobalParent::Init() {
   MOZ_ASSERT(Manager(), "Should have a manager!");
 
@@ -2261,7 +2274,7 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvPDocAccessibleConstructor(
 
   RefPtr<WindowGlobalParent> embedderWgp =
       GetBrowsingContext()->GetEmbedderWindowGlobal();
-  if (NS_WARN_IF(!IsTop() && !embedderWgp)) {
+  if (NS_WARN_IF(!IsTop() && (!embedderWgp || embedderWgp->IsDiscarded()))) {
     // This is an iframe, but it doesn't have a valid embedder WindowGlobal.
     // This can happen if the parent BrowsingContext navigated somewhere else
     // while the embedded document was loading. This isn't an error, but it does

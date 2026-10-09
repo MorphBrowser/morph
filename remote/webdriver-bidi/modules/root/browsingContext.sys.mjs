@@ -19,7 +19,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   EventPromise: "chrome://remote/content/shared/Sync.sys.mjs",
   generateUUID: "chrome://remote/content/shared/UUID.sys.mjs",
   getTimeoutMultiplier: "chrome://remote/content/shared/AppInfo.sys.mjs",
-  getWebDriverSessionById:
+  getWebDriverSessionByInternalSessionId:
     "chrome://remote/content/shared/webdriver/Session.sys.mjs",
   isWebdriverSafeNavigationURL:
     "chrome://remote/content/shared/BrowsingContextUtils.sys.mjs",
@@ -1626,14 +1626,11 @@ class BrowsingContextModule extends RootBiDiModule {
       lazy.pprint`Expected "pageRanges" to be an array, got ${settings.pageRanges}`
     );
 
-    const printSettings = await lazy.print.getPrintSettings(settings);
-    const binaryString = await lazy.print.printToBinaryString(
-      context,
-      printSettings
-    );
+    const printSettings = lazy.print.getPrintSettings(settings);
+    const bytes = await lazy.print.printToBytes(context, printSettings);
 
     return {
-      data: btoa(binaryString),
+      data: bytes.toBase64(),
     };
   }
 
@@ -2762,8 +2759,8 @@ class BrowsingContextModule extends RootBiDiModule {
       const navigableId =
         lazy.NavigableManager.getIdForBrowsingContext(browsingContext);
 
-      const session = lazy.getWebDriverSessionById(
-        this.messageHandler.sessionId
+      const session = lazy.getWebDriverSessionByInternalSessionId(
+        this.messageHandler.internalSessionId
       );
       const handlerConfig = session.userPromptHandler.getPromptHandler(
         type == "beforeunload" ? "beforeUnload" : type

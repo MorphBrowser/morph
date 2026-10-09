@@ -82,6 +82,10 @@
 
     &[uidensity="compact"] {
       --tab-margin-block: 4px;
+
+      @media -moz-pref("sidebar.verticalTabs") {
+        --tab-margin-block: 2px;
+      }
     }
   }
 
@@ -204,7 +208,9 @@
       margin-bottom: -15px;
     }
 
-    --tab-width-transition: min-width 100ms ease-out, max-width 100ms ease-out;
+    @media (prefers-reduced-motion: no-preference) {
+      --tab-width-transition: min-width 100ms ease-out, max-width 100ms ease-out;
+    }
   }
 
   &[noshadowfortests] {
@@ -245,8 +251,10 @@
 .closing-tabs-spacer {
   pointer-events: none;
 
-  #tabbrowser-arrowscrollbox:not(:hover) > #tabbrowser-arrowscrollbox-periphery > & {
-    transition: width 0.15s ease-out;
+  @media (prefers-reduced-motion: no-preference) {
+    #tabbrowser-arrowscrollbox:not(:hover) > #tabbrowser-arrowscrollbox-periphery > & {
+      transition: width 0.15s ease-out;
+    }
   }
 }
 
@@ -1021,8 +1029,7 @@ tab-split-view-wrapper[dragtarget] {
     outline-color: var(--tab-close-button-border-color-active);
   }
 
-  #tabbrowser-tabs[orient="horizontal"] &[pinned],
-  :root:not([sidebar-expand-on-hover]) #tabbrowser-tabs[orient="vertical"] &[pinned],
+  &[pinned],
   #tabbrowser-tabs[closebuttons="activetab"][orient="horizontal"] &:not([selected]) {
     display: none;
   }
@@ -2351,7 +2358,7 @@ tab-group {
 
   @media -moz-pref("browser.nova.enabled") {
     --panel-padding: var(--space-large) var(--space-small) 0;
-    --input-text-background-color: var(--background-color-box);
+    --input-background-color: var(--background-color-box);
     --panel-separator-padding: 0;
     --panel-menuitem-padding-block: var(--space-xsmall);
     --panel-width: 24em;
@@ -2589,6 +2596,8 @@ tab-group {
 
       @media -moz-pref("browser.nova.enabled") {
         background-image: linear-gradient(to top, transparent, var(--toolbox-background-color));
+        /* Clear of the content area's rounded corner, then fade in. */
+        mask-image: linear-gradient(to right, transparent 8px, black calc(2 * 8px), black calc(100% - 2 * 8px), transparent calc(100% - 8px));
       }
     }
 
@@ -2879,6 +2888,13 @@ tab-group {
   --tab-padding-block-start: 3px;
   --tab-padding-block-end: 2px;
 
+  @media -moz-pref("browser.nova.enabled") {
+    :root[uidensity="compact"] & {
+      --tab-padding-block-start: 0px;
+      --tab-padding-block-end: 0px;
+    }
+  }
+
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -3157,7 +3173,7 @@ toolbar:not(#TabsToolbar) #firefox-view-button {
 #alltabs-button {
   list-style-image: url("chrome://browser/skin/search-tabs.svg");
 
-  @media not (-moz-platform: linux) {
+  @media (-moz-platform: windows) {
     #TabsToolbar & {
       list-style-image: url("chrome://global/skin/icons/arrow-down.svg");
     }

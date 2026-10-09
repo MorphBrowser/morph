@@ -5,7 +5,7 @@
 
 pub mod error;
 pub mod telemetry;
-
+use crate::ads::{AdCallbacks, AdImage, AdSpoc, AdTile, SpocFrequencyCaps, SpocRanking};
 #[cfg(feature = "stateful")]
 use crate::client::config::AdsStoreConfig;
 use crate::client::config::{AdsCacheConfig, AdsClientConfig};
@@ -14,9 +14,6 @@ use crate::ffi::telemetry::MozAdsTelemetryWrapper;
 use crate::http_cache::CachePolicy;
 use crate::mars::ad_request::{
     AdContentCategory, AdPlacementRequest, AdRequestFlags, IABContentTaxonomy,
-};
-use crate::mars::ad_response::{
-    AdCallbacks, AdImage, AdSpoc, AdTile, SpocFrequencyCaps, SpocRanking,
 };
 use crate::mars::Environment;
 use crate::mars::ReportReason;
@@ -110,9 +107,9 @@ impl MozAdsClientBuilder {
         let client_config = AdsClientConfig {
             cache_config: inner.cache_config.clone().map(Into::into),
             environment: inner.environment.clone().unwrap_or_default().into(),
-            telemetry: telemetry.clone(),
             #[cfg(feature = "stateful")]
             store_config: inner.store_config.clone().map(Into::into),
+            telemetry: telemetry.clone(),
         };
         let client = AdsClient::new(client_config);
         let shutdown_references = client.shutdown_references();
@@ -127,13 +124,13 @@ impl MozAdsClientBuilder {
         self
     }
 
-    pub fn store_config(self: Arc<Self>, store_config: MozAdsStoreConfig) -> Arc<Self> {
-        self.0.lock().store_config = Some(store_config);
+    pub fn environment(self: Arc<Self>, environment: MozAdsEnvironment) -> Arc<Self> {
+        self.0.lock().environment = Some(environment);
         self
     }
 
-    pub fn environment(self: Arc<Self>, environment: MozAdsEnvironment) -> Arc<Self> {
-        self.0.lock().environment = Some(environment);
+    pub fn store_config(self: Arc<Self>, store_config: MozAdsStoreConfig) -> Arc<Self> {
+        self.0.lock().store_config = Some(store_config);
         self
     }
 
@@ -150,7 +147,9 @@ impl MozAdsClientBuilder {
     }
 }
 
-#[derive(Clone, Debug, Default, uniffi::Enum, Eq, PartialEq)]
+// Deliberately unsorted: uniffi encodes variants by index, and this mirrors
+// `Environment`.
+#[derive(Clone, Debug, Default, uniffi::Enum, PartialEq, Eq)]
 pub enum MozAdsEnvironment {
     #[default]
     Prod,
@@ -226,8 +225,8 @@ pub struct MozAdsImage {
     pub block_key: String,
     pub callbacks: MozAdsCallbacks,
     pub format: String,
-    pub image_url: String,
-    pub url: String,
+    pub image_url: AdsClientUrl,
+    pub url: AdsClientUrl,
 }
 
 #[derive(Debug, PartialEq, uniffi::Record)]
@@ -238,12 +237,12 @@ pub struct MozAdsSpoc {
     pub domain: String,
     pub excerpt: String,
     pub format: String,
-    pub image_url: String,
+    pub image_url: AdsClientUrl,
     pub ranking: MozAdsSpocRanking,
     pub sponsor: String,
     pub sponsored_by_override: Option<String>,
     pub title: String,
-    pub url: String,
+    pub url: AdsClientUrl,
 }
 
 #[derive(Debug, PartialEq, uniffi::Record)]
@@ -264,9 +263,9 @@ pub struct MozAdsTile {
     pub block_key: String,
     pub callbacks: MozAdsCallbacks,
     pub format: String,
-    pub image_url: String,
+    pub image_url: AdsClientUrl,
     pub name: String,
-    pub url: String,
+    pub url: AdsClientUrl,
 }
 
 impl From<AdCallbacks> for MozAdsCallbacks {

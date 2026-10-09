@@ -263,8 +263,6 @@ class CommonBackend(BuildBackend):
             return True
 
         if isinstance(obj, XPIDLModule):
-            # TODO bug 1240134 tracks not processing XPIDL files during
-            # artifact builds.
             self._idl_manager.link_module(obj)
 
         elif isinstance(obj, ConfigFileSubstitution):
@@ -332,12 +330,10 @@ class CommonBackend(BuildBackend):
                 mozpath.join(obj.relobjdir, f"{obj.basename}.h")
             ])
             return False
-
         elif isinstance(obj, (Sources, HostSources)):
             if obj.generated_files:
                 self._handle_generated_sources(obj.generated_files)
             return False
-
         elif isinstance(obj, GeneratedFile):
             for f in obj.outputs:
                 if f == "cbindgen-metadata.json":

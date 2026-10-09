@@ -6,8 +6,10 @@ package org.mozilla.fenix
 
 import android.app.ActivityManager
 import android.app.Application
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Build.VERSION.SDK_INT
 import android.os.StrictMode
@@ -58,6 +60,7 @@ import mozilla.components.concept.storage.FrecencyThresholdOption
 import mozilla.components.feature.addons.migration.DefaultSupportedAddonsChecker
 import mozilla.components.feature.addons.update.GlobalAddonDependencyProvider
 import mozilla.components.feature.autofill.AutofillUseCases
+import mozilla.components.feature.automotive.isAndroidAutomotiveAvailable
 import mozilla.components.feature.fxsuggest.GlobalFxSuggestDependencyProvider
 import mozilla.components.feature.search.ext.buildSearchUrl
 import mozilla.components.feature.search.ext.waitForSelectedOrDefaultSearchEngine
@@ -109,6 +112,7 @@ import org.mozilla.fenix.GleanMetrics.SearchDefaultEngineForPrivate
 import org.mozilla.fenix.GleanMetrics.TabStrip
 import org.mozilla.fenix.GleanMetrics.TermsOfUse
 import org.mozilla.fenix.GleanMetrics.UserAiSummarize
+import org.mozilla.fenix.autofill.AutofillService
 import org.mozilla.fenix.components.Components
 import org.mozilla.fenix.components.Core
 import org.mozilla.fenix.components.appstate.AppAction
@@ -129,6 +133,7 @@ import org.mozilla.fenix.lifecycle.StoreLifecycleObserver
 import org.mozilla.fenix.lifecycle.VisibilityLifecycleObserver
 import org.mozilla.fenix.nimbus.FxNimbus
 import org.mozilla.fenix.onboarding.MARKETING_CHANNEL_ID
+import org.mozilla.fenix.onboarding.reconcileOnboardingCompletionState
 import org.mozilla.fenix.perf.ApplicationExitInfoMetrics
 import org.mozilla.fenix.perf.MarkersActivityLifecycleCallbacks
 import org.mozilla.fenix.perf.ProfilerMarkerFactProcessor
@@ -397,6 +402,8 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
         restoreDownloads()
         restoreMessaging()
 
+        maybeReconcileOnboardingCompletionState()
+
         // [IMPORTANT] Don't progress further until application-services is actually ready to go.
         // This makes it easier to reason about behaviour and avoids issues in the Rust code.
         runBlockingIncrement { megazordDeferred.await() }
@@ -499,6 +506,7 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
         queueIntegrityClientWarmUp(queue)
         queueNimbusFetchInForeground(queue)
         queueDownloadWallpapers(queue)
+        queueUpdateAutofillServiceState(queue)
 
         if (components.settings.enableFxSuggest) {
             queueSuggestIngest(queue)
@@ -619,6 +627,13 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
             }
         }
 
+    private fun queueUpdateAutofillServiceState(queue: RunWhenReadyQueue) =
+        runOnVisualCompleteness(queue) {
+            applicationScope.launch(ioDispatcher) {
+                updateAutofillServiceState()
+            }
+        }
+
     private fun queueStorageMaintenance(queue: RunWhenReadyQueue) =
         runOnVisualCompleteness(queue) {
             // Make sure GlobalPlacesDependencyProvider.initialize(components.core.historyStorage)
@@ -719,6 +734,26 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
         components.ipProtection.storageSynchronizer.initialize()
     }
 
+    /**
+     * Registers or unregisters [AutofillService] so the application is only offered as an Android autofill service on
+     * devices where autofill is supported. The component enabled state is persisted by the system across application
+     * updates, so it has to be restored when autofill becomes supported again. Third party autofill services are
+     * unaffected.
+     */
+    private fun updateAutofillServiceState() {
+        val service = ComponentName(this, AutofillService::class.java)
+        val state =
+            if (components.settings.isAutofillSupported) {
+                PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+            } else {
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+            }
+
+        if (packageManager.getComponentEnabledSetting(service) != state) {
+            packageManager.setComponentEnabledSetting(service, state, PackageManager.DONT_KILL_APP)
+        }
+    }
+
     private fun setupCrashReporting(): CrashReporter {
         return components.analytics.crashReporter.install(this, ::handleCaughtException)
     }
@@ -770,6 +805,26 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
     internal fun restoreMessaging() {
         if (components.settings.isExperimentationEnabled) {
             components.appStore.dispatch(AppAction.MessagingAction.Restore)
+        }
+    }
+
+    /**
+     * Reconciles onboarding completion state for users who have already completed initial onboarding.
+     *
+     * The userHasBeenOnboarded check remains outside [reconcileOnboardingCompletionState] for now. Follow-up work will
+     * consolidate onboarding-completion checks into a single API.
+     *
+     * This must run on the main thread to preserve deterministic ordering. Dispatching it to `ioDispatcher` could race
+     * with timestamp reads and writes performed by `ContinuousOnboardingFeature` and the review prompt's
+     * `continuousOnboardingInProgress` gate. See
+     * [the Phabricator discussion](https://phabricator.services.mozilla.com/D326554#inline-1746839) for details.
+     */
+    fun maybeReconcileOnboardingCompletionState() {
+        if (
+            components.settings.migrateOnboardingStateFeatureEnabled &&
+                components.fenixOnboarding.userHasBeenOnboarded()
+        ) {
+            components.settings.reconcileOnboardingCompletionState()
         }
     }
 
@@ -925,6 +980,7 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
             ),
         mozillaProductDetector: MozillaProductDetector = MozillaProductDetector,
         powerManagerInfoProvider: PowerManagerInfoProvider = DefaultPowerManagerInfoProvider(applicationContext),
+        isAutomotiveDevice: Boolean = applicationContext.isAndroidAutomotiveAvailable(),
     ) {
         setPreferenceMetrics(settings, dohSettingsProvider)
         with(Metrics) {
@@ -1008,6 +1064,7 @@ open class FenixApplication : Application(), Provider, ThemeProvider {
             deviceTotalRam.set(deviceTotalRAM)
 
             isLargeDevice.set(isLargeScreenSize())
+            isAndroidAutomotive.set(isAutomotiveDevice)
         }
 
         PowerSavingMode.activeAtStartup.set(powerManagerInfoProvider.isPowerSaveMode())

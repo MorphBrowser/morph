@@ -866,6 +866,33 @@ class TestRecursiveMakeBackend(BackendTester):
 
         self.assertTrue(os.path.isfile(mozpath.join(p, "Makefile")))
 
+        with open(mozpath.join(env.topobjdir, "root.mk")) as fh:
+            export_dirs = [l for l in fh.readlines() if l.startswith("export_dirs")]
+        self.assertEqual(export_dirs, ["export_dirs := config/makefiles/xpidl\n"])
+
+        with open(mozpath.join(env.topobjdir, "backend.mk")) as fh:
+            lines = fh.readlines()
+        self.assertIn(
+            "NONRECURSIVE_TARGETS_export_xpidl_DIRECTORY = "
+            "$(DEPTH)/config/makefiles/xpidl\n",
+            lines,
+        )
+        self.assertIn("NONRECURSIVE_TARGETS_export_xpidl_TARGETS += xpidl\n", lines)
+
+    def test_xpidl_without_compile_environment(self):
+        env = self._get_environment("xpidl-no-compile", srcdir_name="xpidl")
+        self._consume("xpidl", RecursiveMakeBackend, env=env)
+
+        install_dir = mozpath.join(env.topobjdir, "_build_manifests", "install")
+        self.assertFalse(os.path.exists(mozpath.join(install_dir, "xpidl")))
+        self.assertFalse(
+            os.path.exists(mozpath.join(env.topobjdir, "config/makefiles/xpidl"))
+        )
+
+        with open(mozpath.join(env.topobjdir, "root.mk")) as fh:
+            export_dirs = [l for l in fh.readlines() if l.startswith("export_dirs")]
+        self.assertEqual(export_dirs, ["export_dirs := \n"])
+
     def test_webidl_build_writes_cppsrcs(self):
         """Ensure _handle_webidl_build writes the unified variable into
         webidlsrcs.mk and CPPSRCS lines into dom/bindings/backend.mk, so that
@@ -1099,6 +1126,19 @@ class TestRecursiveMakeBackend(BackendTester):
         found = [str for str in lines if str.startswith("LOCAL_INCLUDES")]
         self.assertEqual(found, expected)
 
+    def test_objdir_local_includes(self):
+        env = self._consume("objdir-local-includes", RecursiveMakeBackend)
+
+        root_deps_path = mozpath.join(env.topobjdir, "root-deps.mk")
+        lines = [l.strip() for l in open(root_deps_path).readlines()]
+        self.assertIn("consumer/target-objects: producer/pre-compile", lines)
+        self.assertEqual(
+            lines.count("producer/target-objects: producer/pre-compile"), 1
+        )
+        self.assertEqual(
+            [l for l in lines if l.startswith("srcdir-only/target-objects:")], []
+        )
+
     def test_generated_includes(self):
         """Test that GENERATED_INCLUDES are written to backend.mk correctly."""
         env = self._consume("generated_includes", RecursiveMakeBackend)
@@ -1189,7 +1229,6 @@ class TestRecursiveMakeBackend(BackendTester):
             "CARGO_FILE := $(srcdir)/Cargo.toml",
             f"CARGO_TARGET_DIR := {env.topobjdir}",
             "RUST_LIBRARY_CARGO_PROFILE_SUFFIX := custom",
-            "RUST_LIBRARY_CARGO_CRATE_TYPE := staticlib",
         ]
 
         self.assertEqual(lines, expected)
@@ -1324,7 +1363,6 @@ class TestRecursiveMakeBackend(BackendTester):
             "HOST_RUST_LIBRARY_FILE := x86_64-unknown-linux-gnu/release/libhostrusttool.a",
             "CARGO_FILE := $(srcdir)/Cargo.toml",
             "CARGO_TARGET_DIR := %s" % env.topobjdir,
-            "HOST_RUST_LIBRARY_FEATURES := musthave,cantlivewithout",
         ]
 
         self.assertEqual(lines, expected)
@@ -1345,7 +1383,6 @@ class TestRecursiveMakeBackend(BackendTester):
             "RUST_LIBRARY_FILE := x86_64-unknown-linux-gnu/release/libfeature_library.a",
             "CARGO_FILE := $(srcdir)/Cargo.toml",
             "CARGO_TARGET_DIR := %s" % env.topobjdir,
-            "RUST_LIBRARY_FEATURES := musthave,cantlivewithout",
             "RUST_LIBRARY_LTO := 1",
         ]
 
@@ -1368,7 +1405,6 @@ class TestRecursiveMakeBackend(BackendTester):
             f"CARGO_TARGET_DIR := {env.topobjdir}",
             "RUST_PROGRAMS += $(DEPTH)/i686-pc-windows-msvc/release/test-program-features.exe",
             "RUST_CARGO_PROGRAMS += test-program-features",
-            "RUST_PROGRAM_FEATURES := musthave,cantlivewithout",
         ]
 
         self.assertEqual(lines, expected)
@@ -1390,7 +1426,6 @@ class TestRecursiveMakeBackend(BackendTester):
             f"CARGO_TARGET_DIR := {env.topobjdir}",
             "HOST_RUST_PROGRAMS += $(DEPTH)/i686-pc-windows-msvc/release/test-host-program-features.exe",
             "HOST_RUST_CARGO_PROGRAMS += test-host-program-features",
-            "HOST_RUST_PROGRAM_FEATURES := musthave,cantlivewithout",
         ]
 
         self.assertEqual(lines, expected)
@@ -1990,6 +2025,8 @@ class TestRecursiveMakeBackend(BackendTester):
         self.assertEqual(mylib["notice"], "Copyright 2026 Somebody.")
         self.assertTrue(mylib["html"])
         self.assertEqual(mylib["paths"], [])
+        self.assertEqual(mylib["acknowledgement"], "Portions are copyright Somebody.")
+        self.assertIsNone(mit["acknowledgement"])
 
 
 if __name__ == "__main__":

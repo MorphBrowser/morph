@@ -280,6 +280,13 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
               "Failed to make GL context current"_ns, __func__);
         }
 
+        bool limitSdrYuvExternalComposites = false;
+#ifdef XP_WIN
+        // Limit SDR YUV external compositing on non-Intel hardware adapters.
+        limitSdrYuvExternalComposites =
+            !swgl && !gfx::gfxVars::AdapterVendorID().EqualsLiteral("0x8086");
+#endif
+
         if (!wr_window_new(
                 aWindowId, aSize.width, aSize.height,
                 aWindowKind == WindowKind::MAIN, supportLowPriorityTransactions,
@@ -303,7 +310,8 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
                 StaticPrefs::gfx_webrender_low_quality_pinch_zoom_AtStartup(),
                 StaticPrefs::gfx_webrender_max_shared_surface_size_AtStartup(),
                 StaticPrefs::gfx_webrender_enable_subpixel_aa_AtStartup(),
-                compositor->ShouldUseLayerCompositor())) {
+                compositor->ShouldUseLayerCompositor(),
+                limitSdrYuvExternalComposites)) {
           // wr_window_new puts a message into gfxCriticalNote if it returns
           // false
           MOZ_ASSERT(errorMessage);
@@ -1338,29 +1346,19 @@ wr::WrClipId DisplayListBuilder::DefineImageMaskClip(
 }
 
 wr::WrClipId DisplayListBuilder::DefineRoundedRectClip(
-    Maybe<wr::WrSpatialId> aSpace, const wr::ComplexClipRegion& aComplex) {
-  WrClipId clipId;
-  if (aSpace) {
-    clipId = wr_dp_define_rounded_rect_clip(mWrState, *aSpace, aComplex);
-  } else {
-    clipId = wr_dp_define_rounded_rect_clip(
-        mWrState, mCurrentSpaceAndClipChain.space, aComplex);
-  }
-
-  return clipId;
+    Maybe<wr::WrSpatialId> aSpace, const wr::ComplexClipRegion& aComplex,
+    bool aAntiAliased) {
+  return wr_dp_define_rounded_rect_clip(
+      mWrState, aSpace.valueOr(mCurrentSpaceAndClipChain.space), aComplex,
+      aAntiAliased);
 }
 
 wr::WrClipId DisplayListBuilder::DefineRectClip(Maybe<wr::WrSpatialId> aSpace,
-                                                wr::LayoutRect aClipRect) {
-  WrClipId clipId;
-  if (aSpace) {
-    clipId = wr_dp_define_rect_clip(mWrState, *aSpace, aClipRect);
-  } else {
-    clipId = wr_dp_define_rect_clip(mWrState, mCurrentSpaceAndClipChain.space,
-                                    aClipRect);
-  }
-
-  return clipId;
+                                                wr::LayoutRect aClipRect,
+                                                bool aAntiAliased) {
+  return wr_dp_define_rect_clip(mWrState,
+                                aSpace.valueOr(mCurrentSpaceAndClipChain.space),
+                                aClipRect, aAntiAliased);
 }
 
 wr::WrSpatialId DisplayListBuilder::DefineStickyFrame(
