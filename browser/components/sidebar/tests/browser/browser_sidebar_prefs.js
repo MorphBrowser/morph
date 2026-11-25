@@ -3,6 +3,12 @@
 
 "use strict";
 
+// Morph defaults to vertical tabs; these checks cover the horizontal default.
+add_setup(async () => {
+  await SpecialPowers.pushPrefEnv({ set: [["sidebar.verticalTabs", false]] });
+  await SidebarTestUtils.waitForTabstripOrientation(window, "horizontal");
+});
+
 add_task(async function test_tools_prefs() {
   const win = await BrowserTestUtils.openNewBrowserWindow();
   const { document } = win;

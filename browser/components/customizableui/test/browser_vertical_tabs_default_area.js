@@ -8,7 +8,11 @@ const kNavBar = "nav-bar";
 
 add_setup(async () => {
   await SpecialPowers.pushPrefEnv({
-    set: [["sidebar.revamp", true]],
+    set: [
+      ["sidebar.revamp", true],
+      // Morph defaults to vertical tabs; these checks start from horizontal.
+      ["sidebar.verticalTabs", false],
+    ],
   });
 });
 

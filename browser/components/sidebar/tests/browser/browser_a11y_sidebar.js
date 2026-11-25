@@ -24,8 +24,11 @@ add_setup(async () => {
     set: [
       ["browser.ml.chat.enabled", true],
       ["sidebar.main.tools", "aichat,syncedtabs,history,bookmarks"],
+      // Morph defaults to vertical tabs; these checks start from horizontal.
+      ["sidebar.verticalTabs", false],
     ],
   });
+  await SidebarTestUtils.waitForTabstripOrientation(window, "horizontal");
 
   const sidebarLauncher = document.querySelector("sidebar-main");
   const sidebarButton = document.getElementById("sidebar-button");

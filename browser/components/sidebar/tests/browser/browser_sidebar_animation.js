@@ -184,6 +184,9 @@ async function ensureLauncherVisibleWithoutAnimating() {
 
 add_setup(async () => {
   await SidebarTestUtils.waitForInitialized(window);
+  // Morph defaults to vertical tabs; these checks start from horizontal.
+  await SpecialPowers.pushPrefEnv({ set: [["sidebar.verticalTabs", false]] });
+  await SidebarTestUtils.waitForTabstripOrientation(window, "horizontal");
   // Windows CI machines have prefers-reduced-motion set, which suppresses the
   // animations under test. Opt back in rather than depend on the host setting.
   gReduceMotionOverride = false;
