@@ -52,7 +52,7 @@ const lazy = {};
 
 ChromeUtils.defineLazyGetter(lazy, "overlayLocalization", () => {
   return new Localization(
-    ["browser/screenshots.ftl", "preview/miniWindow.ftl"],
+    ["browser/screenshots.ftl", "browser/miniWindow.ftl"],
     true
   );
 });
@@ -420,7 +420,15 @@ export class ScreenshotsOverlay {
   handleEvent(event) {
     switch (event.type) {
       case "click":
-        this.handleClick(event);
+        // Touch taps on buttons are handled on touchend.
+        if (event.pointerType !== "touch") {
+          this.handleClick(event);
+        }
+        break;
+      case "touchend":
+        // touchend is the last event of a tap, so an event handler that tears
+        // down the overlay doesn't let the rest of the tap reach the page.
+        this.handleTouchEnd(event);
         break;
       case "pointerdown":
         this.handlePointerDown(event);
@@ -494,6 +502,16 @@ export class ScreenshotsOverlay {
       case "reselect-button":
         this.reselectRegion();
         break;
+    }
+  }
+
+  handleTouchEnd(event) {
+    if (
+      event.originalTarget.id === "screenshots-cancel-button" ||
+      event.originalTarget.closest("#buttons-container") ===
+        this.buttonsContainer
+    ) {
+      this.handleClick(event);
     }
   }
 
@@ -1375,6 +1393,8 @@ export class ScreenshotsOverlay {
       region: this.selectionRegion.dimensions,
       viewportWidth: this.windowDimensions.clientWidth,
       viewportHeight: this.windowDimensions.clientHeight,
+      innerWidth: this.window.innerWidth,
+      innerHeight: this.window.innerHeight,
     });
   }
 
@@ -2001,6 +2021,11 @@ export class ScreenshotsOverlay {
    * @param {number} pageY The y position relative to the page
    */
   scrollIfByEdge(pageX, pageY) {
+    // Mini-window crops must fit in the visible viewport.
+    if (this.mode === SELECTION_MODES.MINI_WINDOW) {
+      return;
+    }
+
     let { scrollX, scrollY, clientWidth, clientHeight } =
       this.windowDimensions.dimensions;
 

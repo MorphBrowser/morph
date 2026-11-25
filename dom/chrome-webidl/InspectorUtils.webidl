@@ -168,9 +168,10 @@ namespace InspectorUtils {
 
   // Given a "CSS expression" (e.g. `var(--x, attr(data-y))`), returns an expression with
   // the substitution function calls actually substituted
-  UTF8String? getSubstitutedValue(UTF8String expression,
-                                 Element element,
-                                 optional [LegacyNullToEmptyString] DOMString pseudo = "");
+  UTF8String? getSubstitutedValue(UTF8String property,
+                                  UTF8String expression,
+                                  Element element,
+                                  optional [LegacyNullToEmptyString] DOMString pseudo = "");
 };
 
 enum InspectorAnchorType {
@@ -204,6 +205,7 @@ dictionary SupportsOptions {
   boolean userAgent = false;
   boolean chrome = false;
   boolean quirks = false;
+  CSSRule? rule = null;
 };
 
 dictionary PropertyNamesOptions {

@@ -35,6 +35,9 @@ function test() {
     cos.clearValidityOverride("self-signed.example.com", -1, {});
     cos.clearValidityOverride("untrusted.example.com", -1, {});
     cos.clearValidityOverride("expired.example.com", -1, {});
+    // Downloads that succeeded thanks to the overrides are cached, and a cache
+    // hit doesn't validate the certificate again.
+    Services.cache2.clear();
 
     if (gPendingInstall) {
       gTests = [];
@@ -83,7 +86,11 @@ function run_install_tests(callback) {
         "Should have seen the right result for an install from " + mainURL;
     }
 
-    let install = await AddonManager.getInstallForURL(url);
+    let install = await AddonManager.getInstallForURL(url, {
+      id: "sslinstall-1@tests.mozilla.org",
+      type: "extension",
+      version: "1.0",
+    });
     gPendingInstall = install;
     install.addListener({
       onDownloadEnded(install) {

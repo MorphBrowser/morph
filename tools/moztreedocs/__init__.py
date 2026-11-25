@@ -40,6 +40,7 @@ def read_build_config(docdir):
     # Only define the parts we need.
     class fakeconfig:
         topsrcdir = build.topsrcdir
+        substs = {}
 
     variables = ("SPHINX_TREES", "SPHINX_PYTHON_PACKAGE_DIRS")
     reader = BuildReader(fakeconfig())
@@ -127,6 +128,12 @@ class _SphinxManager:
             out_dir,
         ]
 
+        with open(os.path.join(MAIN_DOC_PATH, "config.yml")) as fh:
+            api_excludes = [
+                os.path.join(self.topsrcdir, path)
+                for path in yaml.safe_load(fh).get("python_api_exclude", [])
+            ]
+
         for p in sorted(self.python_package_dirs):
             full = os.path.join(self.topsrcdir, p)
 
@@ -144,6 +151,7 @@ class _SphinxManager:
             args = list(base_args)
             args.append(full)
             args.extend(excludes)
+            args.extend(e for e in api_excludes if e.startswith(full + os.sep))
 
             sphinx.ext.apidoc.main(args)
 

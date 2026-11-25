@@ -233,9 +233,11 @@ nsresult CharacterData::SetTextInternal(
   }
 
   Document* document = GetComposedDoc();
-  mozAutoDocUpdate updateBatch(document, aNotify);
-
+  // TextNodeChangedDirection also suppresses state-change notifications when
+  // aNotify is false, so only notifying changes need a script blocker.
+  Maybe<mozAutoDocUpdate> updateBatch;
   if (aNotify) {
+    updateBatch.emplace(document, true);
     CharacterDataChangeInfo info = {
         aOffset == textLength,   aOffset, endOffset, aLength,
         aMutationEffectOnScript, aDetails};
@@ -405,7 +407,8 @@ nsresult CharacterData::BindToTree(BindContext& aContext, nsINode& aParent) {
   if (connected) {
     // Clear the lazy frame construction bits.
     // XXX Why here?
-    UnsetFlags(NODE_NEEDS_FRAME | NODE_DESCENDANTS_NEED_FRAMES);
+    UnsetStyleFlags(NodeStyleFlags::NeedsFrame |
+                    NodeStyleFlags::DescendantsNeedFrames);
     if (mBuffer.IsBidi()) {
       aContext.OwnerDoc().SetBidiEnabled();
     }

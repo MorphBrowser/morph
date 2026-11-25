@@ -168,7 +168,9 @@ bool HTMLButtonElement::IsHTMLFocusable(IsFocusableFlags aFlags,
           aFlags, aIsFocusable, aTabIndex)) {
     return true;
   }
-  *aIsFocusable = IsFormControlDefaultFocusable(aFlags) && !IsDisabled();
+  *aIsFocusable =
+      IsFormControlDefaultFocusable(aFlags) &&
+      ((aFlags & IsFocusableFlags::IgnoreDisabled) || !IsDisabled());
   return false;
 }
 
@@ -224,6 +226,11 @@ void HTMLButtonElement::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
   if (outerActivateEvent) {
     aVisitor.mItemFlags |= NS_OUTER_ACTIVATE_EVENT;
     aVisitor.mWantsActivationBehavior = true;
+    aVisitor.mWantsPostHandleEvent = true;
+  }
+
+  if (aVisitor.mEvent->HasKeyEventMessage() && aVisitor.mEvent->IsTrusted()) {
+    aVisitor.mWantsPostHandleEvent = true;
   }
 
   nsGenericHTMLElement::GetEventTargetParent(aVisitor);

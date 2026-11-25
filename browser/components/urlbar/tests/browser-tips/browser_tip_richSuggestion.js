@@ -28,7 +28,7 @@ add_task(async function ui() {
       type: "test",
       icon: "chrome://global/skin/icons/search-glass.svg",
       titleL10n: { id: "urlbar-search-tips-confirm" },
-      descriptionL10n: { id: "urlbar-dismissal-acknowledgment-weather" },
+      descriptionL10n: { id: "urlbar-feedback-acknowledgment" },
       buttons: [
         {
           url: "https://example.com/tab",
@@ -61,10 +61,7 @@ add_task(async function ui() {
 
   info("Check the container");
   let row = await UrlbarTestUtils.waitForAutocompleteResultAt(window, 0);
-  Assert.equal(
-    row.hasAttribute("rich-suggestion"),
-    !Services.prefs.getBoolPref("browser.nova.enabled")
-  );
+  Assert.ok(!row.hasAttribute("rich-suggestion"));
 
   info("Check the icon");
   let icon = row.querySelector(".urlbarView-favicon");
@@ -78,10 +75,7 @@ add_task(async function ui() {
 
   info("Check the description");
   let description = row.querySelector(".urlbarView-row-body-description");
-  Assert.equal(
-    description.dataset.l10nId,
-    "urlbar-dismissal-acknowledgment-weather"
-  );
+  Assert.equal(description.dataset.l10nId, "urlbar-feedback-acknowledgment");
   Assert.ok(BrowserTestUtils.isVisible(description));
 
   info("Check the first button");
@@ -166,7 +160,8 @@ add_task(async function learn_more() {
 
     if (topic) {
       info("Activate learn more link and check");
-      let expectedURL = `http://127.0.0.1:8888/support-dummy/${topic}`;
+      let expectedURL =
+        Services.urlFormatter.formatURLPref("app.support.baseURL") + topic;
       let newTabOpened = BrowserTestUtils.waitForNewTab(gBrowser, expectedURL);
 
       EventUtils.synthesizeKey("KEY_Tab");

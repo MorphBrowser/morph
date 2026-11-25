@@ -712,8 +712,26 @@ bool InspectorUtils::Supports(GlobalObject&, const nsACString& aDeclaration,
                     ? nsCompatibility::eCompatibility_NavQuirks
                     : nsCompatibility::eCompatibility_FullStandards,
   };
+
+  auto type = [&] {
+    if (!aOptions.mRule) {
+      return StyleCssRuleType::Style;
+    }
+
+    // we need to find the parent suitable rule for the Rust function to
+    // properly handle this (e.g. when we have a CSSNestedDeclarations)
+    auto relativeType =
+        aOptions.mRule->GetContainingRuleStateForParsing().mParseRelativeType;
+    if (relativeType) {
+      return *relativeType;
+    }
+
+    // if we didn't find such suitable rule, pass the rule's own type
+    return aOptions.mRule->Type();
+  }();
+
   return Servo_CSSSupports(&aDeclaration, &params,
-                           /* aUrlData = */ nullptr);
+                           /* aUrlData = */ nullptr, type);
 }
 
 bool InspectorUtils::CssPropertySupportsType(GlobalObject& aGlobalObject,
@@ -1201,11 +1219,10 @@ void InspectorUtils::GetRegisteredCssHighlights(GlobalObject& aGlobalObject,
                                                 Document& aDocument,
                                                 bool aActiveOnly,
                                                 nsTArray<nsString>& aResult) {
-  for (auto const& iter : aDocument.HighlightRegistry().HighlightsOrdered()) {
-    const RefPtr<nsAtom>& highlightName = iter.first();
-    const RefPtr<Highlight>& highlight = iter.second();
+  for (const auto& [name, highlight] :
+       aDocument.HighlightRegistry().Maplike()) {
     if (!aActiveOnly || highlight->Size() > 0) {
-      aResult.AppendElement(highlightName->GetUTF16String());
+      aResult.AppendElement(nsDependentAtomString(name));
     }
   }
 }
@@ -1527,7 +1544,8 @@ static float GetParentFontSizePercentageBasis(
   if (!aPseudo.IsNotPseudo()) {
     parentStyle = GetCleanComputedStyleForElement(
         &aElement, PseudoStyleRequest::NotPseudo());
-  } else if (Element* parent = aElement.GetFlattenedTreeParentElement()) {
+  } else if (RefPtr<Element> parent =
+                 aElement.GetFlattenedTreeParentElement()) {
     // For non pseudo-element, we resolve against the parent element's
     // font-size.
     parentStyle = GetCleanComputedStyleForElement(
@@ -1639,11 +1657,6 @@ void InspectorUtils::GetComputationSteps(GlobalObject& aGlobalObject,
                                          Element& aElement,
                                          const nsAString& aPseudo,
                                          nsTArray<nsCString>& aResult) {
-  Document* doc = aElement.GetComposedDoc();
-  if (!doc) {
-    return;
-  }
-
   auto pseudo = PseudoStyleRequest::Parse(
       aPseudo, aElement.OwnerDoc()->DefaultStyleAttrURLData());
   if (!pseudo) {
@@ -1661,25 +1674,19 @@ void InspectorUtils::GetComputationSteps(GlobalObject& aGlobalObject,
   float percentageBasis =
       GetPercentageBasisFor(aProperty, aElement, *pseudo, *computedStyle);
 
-  Servo_GetComputationSteps(&aExpression, &aElement, pseudo->mType,
-                            computedStyle, doc->EnsureStyleSet().RawData(),
+  Servo_GetComputationSteps(&aProperty, &aExpression, &aElement, pseudo->mType,
+                            computedStyle,
+                            aElement.OwnerDoc()->EnsureStyleSet().RawData(),
                             percentageBasis, &aResult);
 }
 
 /* static */
 void InspectorUtils::GetSubstitutedValue(GlobalObject& aGlobalObject,
+                                         const nsACString& aProperty,
                                          const nsACString& aExpression,
                                          Element& aElement,
                                          const nsAString& aPseudo,
                                          nsACString& aResult) {
-  Document* doc = aElement.GetComposedDoc();
-  if (!doc) {
-    // Return null when the computation couldn't be done so we can differentiate
-    // from valid empty strings.
-    aResult.SetIsVoid(true);
-    return;
-  }
-
   auto pseudo = PseudoStyleRequest::Parse(
       aPseudo, aElement.OwnerDoc()->DefaultStyleAttrURLData());
   if (!pseudo) {
@@ -1700,9 +1707,9 @@ void InspectorUtils::GetSubstitutedValue(GlobalObject& aGlobalObject,
     return;
   }
 
-  Servo_GetSubstitutedValue(&aExpression, &aElement, pseudo->mType,
-                            computedStyle, doc->EnsureStyleSet().RawData(),
-                            &aResult);
+  Servo_GetSubstitutedValue(
+      &aProperty, &aExpression, &aElement, pseudo->mType, computedStyle,
+      aElement.OwnerDoc()->EnsureStyleSet().RawData(), &aResult);
 }
 
 }  // namespace mozilla::dom

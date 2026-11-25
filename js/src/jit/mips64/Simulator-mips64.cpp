@@ -1904,7 +1904,11 @@ bool Simulator::overRecursed(uintptr_t newsp) const {
 }
 
 bool Simulator::overRecursedWithExtra(uint32_t extra) const {
-  uintptr_t newsp = getRegister(sp) - extra;
+  uintptr_t cursp = getRegister(sp);
+  if (extra >= cursp) {
+    return true;
+  }
+  uintptr_t newsp = cursp - extra;
   return newsp <= stackLimit();
 }
 
@@ -2345,6 +2349,7 @@ void Simulator::configureTypeRegister(SimInstruction* instr, int64_t& alu_out,
           alu_out = U64(rs) < U64(rt) ? 1 : 0;
           break;
         case ff_sync:
+          MOZ_ASSERT(sa == 0, "Only SYNC 0 is implemented");
           break;
           // Break and trap instructions.
         case ff_break:
@@ -3168,6 +3173,8 @@ void Simulator::decodeTypeRegister(SimInstruction* instr) {
           setRegister(HI, I64(i128hilo >> 64));
           break;
         case ff_sync:
+          // Only SYNC 0 is implemented. See also configureTypeRegister().
+          AtomicOperations::fenceSeqCst();
           break;
           // Break and trap instructions.
         case ff_break:

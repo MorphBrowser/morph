@@ -81,7 +81,6 @@ add_setup(
 
     Services.prefs.setBoolPref("network.http.happy_eyeballs_enabled", true);
     Services.prefs.setIntPref("network.http.speculative-parallel-limit", 0);
-    Services.prefs.setBoolPref("network.ssl_tokens_cache_enabled", true);
     Services.prefs.setBoolPref("network.http.http3.enable", false);
     // Mirror H1 rationale: the test server listens on IPv4 only, and
     // letting HE try IPv6 first will burn the single-use session ticket.
@@ -90,7 +89,6 @@ add_setup(
     registerCleanupFunction(async () => {
       Services.prefs.clearUserPref("network.http.happy_eyeballs_enabled");
       Services.prefs.clearUserPref("network.http.speculative-parallel-limit");
-      Services.prefs.clearUserPref("network.ssl_tokens_cache_enabled");
       Services.prefs.clearUserPref("network.http.http3.enable");
       Services.prefs.clearUserPref("network.dns.disableIPv6");
       if (callbackServer) {
@@ -334,10 +332,7 @@ async function runHe0RttRace(host, ipv6DelayMs, ipv4DelayMs) {
 add_task(
   {
     skip_if: () =>
-      AppConstants.MOZ_SYSTEM_NSS ||
-      !gServerStarted ||
-      mozinfo.os == "android" ||
-      mozinfo.socketprocess_networking,
+      AppConstants.MOZ_SYSTEM_NSS || !gServerStarted || mozinfo.os == "android",
   },
   async function test_he_h2_0rtt_ipv4_wins_race() {
     // See H1 ipv4_wins_race: fetch#1 falls to IPv4 because IPv6's
@@ -352,10 +347,7 @@ add_task(
 add_task(
   {
     skip_if: () =>
-      AppConstants.MOZ_SYSTEM_NSS ||
-      !gServerStarted ||
-      mozinfo.os == "android" ||
-      mozinfo.socketprocess_networking,
+      AppConstants.MOZ_SYSTEM_NSS || !gServerStarted || mozinfo.os == "android",
   },
   async function test_he_h2_0rtt_ipv6_wins_race() {
     // IPv6 is unimpeded and wins both fetches; fetch#2 resumes via

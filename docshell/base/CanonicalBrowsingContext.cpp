@@ -59,7 +59,9 @@
 #include "nsIContentAnalysis.h"
 #include "nsIWebBrowserChrome.h"
 #include "nsIXULRuntime.h"
+#include "nsAboutProtocolUtils.h"
 #include "nsNetUtil.h"
+#include "nsDocShellLoadState.h"
 #include "nsSHistory.h"
 #include "nsSecureBrowserUI.h"
 #include "nsQueryObject.h"
@@ -304,6 +306,7 @@ void CanonicalBrowsingContext::ReplacedBy(
   Transaction txn;
   txn.SetBrowserId(GetBrowserId());
   txn.SetIsAppTab(GetIsAppTab());
+  txn.SetIsMiniWindow(GetIsMiniWindow());
   txn.SetIsCaptivePortalTab(GetIsCaptivePortalTab());
   txn.SetHasSiblings(GetHasSiblings());
   txn.SetTopLevelCreatedByWebContent(GetTopLevelCreatedByWebContent());
@@ -657,8 +660,8 @@ CanonicalBrowsingContext::CreateLoadingSessionHistoryEntryForLoad(
     }
 
     // If the entry was updated, update also the LoadingSessionHistoryInfo.
-    UniquePtr<LoadingSessionHistoryInfo> lshi =
-        MakeUnique<LoadingSessionHistoryInfo>(entry, existingLoadingInfo);
+    auto lshi =
+        std::make_unique<LoadingSessionHistoryInfo>(entry, existingLoadingInfo);
     aLoadState->SetLoadingSessionHistoryInfo(std::move(lshi));
     existingLoadingInfo = aLoadState->GetLoadingSessionHistoryInfo();
     (void)SetHistoryEntryCount(entry->BCHistoryLength());
@@ -684,9 +687,10 @@ CanonicalBrowsingContext::CreateLoadingSessionHistoryEntryForLoad(
 
   UniquePtr<LoadingSessionHistoryInfo> loadingInfo;
   if (existingLoadingInfo) {
-    loadingInfo = MakeUnique<LoadingSessionHistoryInfo>(*existingLoadingInfo);
+    loadingInfo =
+        std::make_unique<LoadingSessionHistoryInfo>(*existingLoadingInfo);
   } else {
-    loadingInfo = MakeUnique<LoadingSessionHistoryInfo>(entry);
+    loadingInfo = std::make_unique<LoadingSessionHistoryInfo>(entry);
     mLoadingEntries.AppendElement(
         LoadingSessionHistoryEntry{loadingInfo->mLoadId, entry});
   }
@@ -709,12 +713,12 @@ CanonicalBrowsingContext::CreateLoadingSessionHistoryEntryForLoad(
       return loadingInfo;
     }
 
+    WindowGlobalParent* previousWindowGlobal = GetCurrentWindowGlobal();
     loadingInfo->mPreviousEntry =
         PreviousSessionHistoryInfo::CreateValidatedPreviousEntry(
-            entry->Info(), ToMaybeRef(mActiveEntry.get()).map([](auto& aValue) {
-              return aValue.Info();
-            }),
-            navigationType);
+            entry, mActiveEntry, navigationType,
+            previousWindowGlobal ? previousWindowGlobal->DocumentPrincipal()
+                                 : nullptr);
 
     MOZ_LOG_FMT(
         gNavigationAPILog, LogLevel::Verbose, "Previous entry was {}.",
@@ -803,7 +807,8 @@ CanonicalBrowsingContext::ReplaceLoadingSessionHistoryEntryForLoad(
         MaybeReuseNavigationKeyFromActiveEntry(loadingEntry);
       }
 
-      auto result = MakeUnique<LoadingSessionHistoryInfo>(loadingEntry, aInfo);
+      auto result =
+          std::make_unique<LoadingSessionHistoryInfo>(loadingEntry, aInfo);
       if (Navigation::IsAPIEnabled()) {
         MOZ_LOG_FMT(gNavigationAPILog, LogLevel::Debug,
                     "CanonicalBrowsingContext::"
@@ -814,6 +819,14 @@ CanonicalBrowsingContext::ReplaceLoadingSessionHistoryEntryForLoad(
                     ToMaybeRef(result->mInfo.GetURI())
                         .map(std::mem_fn(&nsIURI::GetSpecOrDefault))
                         .valueOr("(null URI)."_ns));
+        WindowGlobalParent* previousWindowGlobal = GetCurrentWindowGlobal();
+        result->mPreviousEntry =
+            PreviousSessionHistoryInfo::CreateValidatedPreviousEntry(
+                loadingEntry, mActiveEntry,
+                NavigationUtils::NavigationTypeFromLoadType(
+                    result->mInfo.LoadType()),
+                previousWindowGlobal ? previousWindowGlobal->DocumentPrincipal()
+                                     : nullptr);
         GetContiguousEntriesForLoad(*result, loadingEntry);
       }
       return result;
@@ -827,8 +840,9 @@ void CanonicalBrowsingContext::GetContiguousEntriesForLoad(
     const RefPtr<SessionHistoryEntry>& aEntry) {
   MOZ_DIAGNOSTIC_ASSERT(Navigation::IsAPIEnabled());
   nsCOMPtr<nsIURI> uri =
-      mActiveEntry ? mActiveEntry->GetURIOrInheritedForAboutBlank() : nullptr;
-  nsCOMPtr<nsIURI> targetURI = aEntry->GetURIOrInheritedForAboutBlank();
+      mActiveEntry ? mActiveEntry->GetURIOrInheritedForAboutBlankOrSrcdoc()
+                   : nullptr;
+  nsCOMPtr<nsIURI> targetURI = aEntry->GetURIOrInheritedForAboutBlankOrSrcdoc();
   bool sameOrigin =
       NS_SUCCEEDED(nsContentUtils::GetSecurityManager()->CheckSameOriginURI(
           targetURI, uri, false, false));
@@ -837,6 +851,7 @@ void CanonicalBrowsingContext::GetContiguousEntriesForLoad(
   NavigationType navigationType =
       aLoadingInfo.mTriggeringNavigationType.valueOr(NavigationType::Push);
   bool found = false;
+  bool replaced = false;
   if (sameOrigin || !aEntry->ForInitialLoad()) {
     RefPtr<SessionHistoryEntry> entry =
         !aEntry->ForInitialLoad() ? aEntry : mActiveEntry;
@@ -845,15 +860,19 @@ void CanonicalBrowsingContext::GetContiguousEntriesForLoad(
       nsSHistory::WalkContiguousEntriesInOrder(
           entry, [activeEntry = entry, targetEntry = aEntry,
                   entries = &aLoadingInfo.mContiguousEntries, navigationType,
-                  &found](auto* aEntry) {
+                  &found, &replaced](auto* aEntry) {
             nsCOMPtr<SessionHistoryEntry> entry = do_QueryObject(aEntry);
             found = found || targetEntry->GetID() == entry->GetID();
             MOZ_ASSERT(entry);
             if (navigationType == NavigationType::Replace &&
                 entry->GetID() == activeEntry->GetID()) {
-              // In the case of a replace navigation, we end up dropping the
-              // active entry and all following entries.
-              return false;
+              // https://html.spec.whatwg.org/#finalize-a-cross-document-navigation
+              // In the case of a replace navigation, the target entry takes
+              // the place of the active entry and all following entries are
+              // kept.
+              entries->AppendElement(targetEntry->Info());
+              replaced = true;
+              return true;
             }
 
             entries->AppendElement(entry->Info());
@@ -873,7 +892,7 @@ void CanonicalBrowsingContext::GetContiguousEntriesForLoad(
     }
   }
 
-  if (aEntry->ForInitialLoad() || !found) {
+  if (!replaced && (aEntry->ForInitialLoad() || !found)) {
     aLoadingInfo.mContiguousEntries.AppendElement(aEntry->Info());
   }
 }
@@ -893,8 +912,8 @@ void CanonicalBrowsingContext::MaybeReuseNavigationKeyFromActiveEntry(
     return;
   }
 
-  nsCOMPtr<nsIURI> uri = mActiveEntry->GetURIOrInheritedForAboutBlank();
-  nsCOMPtr<nsIURI> targetURI = aEntry->GetURIOrInheritedForAboutBlank();
+  nsCOMPtr<nsIURI> uri = mActiveEntry->GetURIOrInheritedForAboutBlankOrSrcdoc();
+  nsCOMPtr<nsIURI> targetURI = aEntry->GetURIOrInheritedForAboutBlankOrSrcdoc();
   bool sameOrigin =
       NS_SUCCEEDED(nsContentUtils::GetSecurityManager()->CheckSameOriginURI(
           targetURI, uri, false, false));
@@ -917,8 +936,9 @@ class PrintListenerAdapter final : public nsIWebProgressListener {
   NS_DECL_ISUPPORTS
 
   // NS_DECL_NSIWEBPROGRESSLISTENER
-  NS_IMETHOD OnStateChange(nsIWebProgress* aWebProgress, nsIRequest* aRequest,
-                           uint32_t aStateFlags, nsresult aStatus) override {
+  NS_IMETHOD OnStateChange(nsIWebProgress* /*aWebProgress*/,
+                           nsIRequest* /*aRequest*/, uint32_t aStateFlags,
+                           nsresult /*aStatus*/) override {
     MOZ_ASSERT(NS_IsMainThread());
     if (aStateFlags & nsIWebProgressListener::STATE_STOP &&
         aStateFlags & nsIWebProgressListener::STATE_IS_DOCUMENT && mPromise) {
@@ -930,34 +950,36 @@ class PrintListenerAdapter final : public nsIWebProgressListener {
     }
     return NS_OK;
   }
-  NS_IMETHOD OnStatusChange(nsIWebProgress* aWebProgress, nsIRequest* aRequest,
-                            nsresult aStatus,
-                            const char16_t* aMessage) override {
+  NS_IMETHOD OnStatusChange(nsIWebProgress* /*aWebProgress*/,
+                            nsIRequest* /*aRequest*/, nsresult aStatus,
+                            const char16_t* /*aMessage*/) override {
     if (aStatus != NS_OK && mPromise) {
       mPromise->Reject(aStatus, __func__);
       mPromise = nullptr;
     }
     return NS_OK;
   }
-  NS_IMETHOD OnProgressChange(nsIWebProgress* aWebProgress,
-                              nsIRequest* aRequest, int32_t aCurSelfProgress,
-                              int32_t aMaxSelfProgress,
-                              int32_t aCurTotalProgress,
-                              int32_t aMaxTotalProgress) override {
+  NS_IMETHOD OnProgressChange(nsIWebProgress* /*aWebProgress*/,
+                              nsIRequest* /*aRequest*/,
+                              int32_t /*aCurSelfProgress*/,
+                              int32_t /*aMaxSelfProgress*/,
+                              int32_t /*aCurTotalProgress*/,
+                              int32_t /*aMaxTotalProgress*/) override {
     return NS_OK;
   }
-  NS_IMETHOD OnLocationChange(nsIWebProgress* aWebProgress,
-                              nsIRequest* aRequest, nsIURI* aLocation,
-                              uint32_t aFlags) override {
+  NS_IMETHOD OnLocationChange(nsIWebProgress* /*aWebProgress*/,
+                              nsIRequest* /*aRequest*/, nsIURI* /*aLocation*/,
+                              uint32_t /*aFlags*/) override {
     return NS_OK;
   }
-  NS_IMETHOD OnSecurityChange(nsIWebProgress* aWebProgress,
-                              nsIRequest* aRequest, uint32_t aState) override {
+  NS_IMETHOD OnSecurityChange(nsIWebProgress* /*aWebProgress*/,
+                              nsIRequest* /*aRequest*/,
+                              uint32_t /*aState*/) override {
     return NS_OK;
   }
-  NS_IMETHOD OnContentBlockingEvent(nsIWebProgress* aWebProgress,
-                                    nsIRequest* aRequest,
-                                    uint32_t aEvent) override {
+  NS_IMETHOD OnContentBlockingEvent(nsIWebProgress* /*aWebProgress*/,
+                                    nsIRequest* /*aRequest*/,
+                                    uint32_t /*aEvent*/) override {
     return NS_OK;
   }
 
@@ -1148,7 +1170,7 @@ RefPtr<PrintPromise> CanonicalBrowsingContext::PrintWithNoContentAnalysis(
           listener->StaticCloneForPrintingCreated(
               std::move(cachedStaticDocument));
         },
-        [promise](ResponseRejectReason reason) {
+        [promise](ResponseRejectReason /*reason*/) {
           NS_WARNING("SendPrint() failed");
           promise->Reject(NS_ERROR_FAILURE, __func__);
         });
@@ -1230,6 +1252,16 @@ void CanonicalBrowsingContext::SessionHistoryCommit(
       }
 
       RefPtr<SessionHistoryEntry> newActiveEntry = mLoadingEntries[i].mEntry;
+
+      uint64_t innerWindowId = 0;
+      if (WindowGlobalParent* wgp = GetCurrentWindowGlobal();
+          wgp && (newActiveEntry->SharedInfo()->InnerWindowId() ==
+                      wgp->InnerWindowId() ||
+                  wgp->DocumentHistoryLoadId() == aLoadId)) {
+        innerWindowId = wgp->InnerWindowId();
+      }
+      newActiveEntry->SharedInfo()->SetInnerWindowId(innerWindowId);
+
       if (aCacheKey != 0) {
         newActiveEntry->SetCacheKey(aCacheKey);
       }
@@ -1411,8 +1443,7 @@ already_AddRefed<nsDocShellLoadState> CanonicalBrowsingContext::CreateLoadInfo(
   const SessionHistoryInfo& info = aEntry->Info();
   RefPtr loadState = MakeRefPtr<nsDocShellLoadState>(info.GetURI());
   info.FillLoadInfo(*loadState);
-  UniquePtr<LoadingSessionHistoryInfo> loadingInfo;
-  loadingInfo = MakeUnique<LoadingSessionHistoryInfo>(aEntry);
+  auto loadingInfo = std::make_unique<LoadingSessionHistoryInfo>(aEntry);
   loadingInfo->mTriggeringNavigationType = Some(aNavigationType);
   mLoadingEntries.AppendElement(
       LoadingSessionHistoryEntry{loadingInfo->mLoadId, aEntry});
@@ -1423,8 +1454,7 @@ already_AddRefed<nsDocShellLoadState> CanonicalBrowsingContext::CreateLoadInfo(
 
 void CanonicalBrowsingContext::NotifyOnHistoryReload(
     uint32_t aReloadFlags, bool& aCanReload,
-    Maybe<NotNull<RefPtr<nsDocShellLoadState>>>& aLoadState,
-    Maybe<bool>& aReloadActiveEntry) {
+    Maybe<NotNull<RefPtr<nsDocShellLoadState>>>& aLoadState) {
   MOZ_DIAGNOSTIC_ASSERT(!aLoadState);
 
   aCanReload = true;
@@ -1436,32 +1466,207 @@ void CanonicalBrowsingContext::NotifyOnHistoryReload(
     return;
   }
 
+  bool reloadActiveEntry = false;
   if (mActiveEntry) {
     shistory->PrepareReloadEntry(mActiveEntry, aReloadFlags);
     aLoadState.emplace(WrapMovingNotNull(
         RefPtr{CreateLoadInfo(mActiveEntry, NavigationType::Reload)}));
-    aReloadActiveEntry.emplace(true);
+    reloadActiveEntry = true;
   } else if (!mLoadingEntries.IsEmpty()) {
     RefPtr<SessionHistoryEntry> loadingEntry =
         mLoadingEntries.LastElement().mEntry;
     shistory->PrepareReloadEntry(loadingEntry, aReloadFlags);
     aLoadState.emplace(WrapMovingNotNull(
         RefPtr{CreateLoadInfo(loadingEntry, NavigationType::Reload)}));
-    aReloadActiveEntry.emplace(false);
+    reloadActiveEntry = false;
   }
 
   if (aLoadState) {
     // Use 0 as the offset, since aLoadState will be be used for reload.
-    aLoadState.ref()->SetLoadIsFromSessionHistory(0,
-                                                  aReloadActiveEntry.value());
+    aLoadState.ref()->SetLoadIsFromSessionHistory(0, reloadActiveEntry);
   }
   // If we don't have an active entry and we don't have a loading entry then
   // the nsDocShell will create a load state based on its document.
 }
 
+// Returns aPrincipal if it is a content principal, its precursor if it is a
+// null principal, and nullptr otherwise.
+static already_AddRefed<nsIPrincipal> GetPrincipalOrPrecursor(
+    nsIPrincipal* aPrincipal) {
+  if (aPrincipal->GetIsContentPrincipal()) {
+    return do_AddRef(aPrincipal);
+  }
+  if (aPrincipal->GetIsNullPrincipal()) {
+    return aPrincipal->GetPrecursorPrincipal();
+  }
+  return nullptr;
+}
+
+// Whether reloading aInfo would reproduce the origin of the document in aWgp.
+// about:blank, about:srcdoc and data: entries get their origin from the entry
+// when reloaded: the first two inherit the stored principal, data: takes it as
+// the precursor of its null principal.
+static bool ReloadWouldInheritDocumentPrincipal(
+    WindowGlobalParent* aWgp, const SessionHistoryInfo* aInfo) {
+  nsIURI* uri = aInfo->GetURI();
+  if (!NS_IsAboutBlankOrSrcdoc(uri) && !uri->SchemeIs("data")) {
+    return true;
+  }
+
+  nsIPrincipal* inherited = aInfo->GetPrincipalToInherit();
+  if (!inherited) {
+    inherited = aInfo->GetTriggeringPrincipal();
+  }
+  if (!inherited) {
+    return false;
+  }
+
+  nsCOMPtr<nsIPrincipal> entryPrincipal = GetPrincipalOrPrecursor(inherited);
+  nsCOMPtr<nsIPrincipal> documentPrincipal =
+      GetPrincipalOrPrecursor(aWgp->DocumentPrincipal());
+  if (!entryPrincipal) {
+    return !documentPrincipal;
+  }
+  return entryPrincipal->Equals(documentPrincipal);
+}
+
+bool CanonicalBrowsingContext::CreateSharedState(
+    SessionHistoryInfo* aInfo, const NewSessionHistorySharedState& aNewState,
+    bool* aWasCreated) {
+  if (aWasCreated) {
+    *aWasCreated = false;
+  }
+  WindowGlobalParent* wgp = GetCurrentWindowGlobal();
+  if (!wgp) {
+    return false;
+  }
+
+  // The request must name the entry's own state.
+  if (SHEntrySharedParentState::Lookup(aNewState.mId)) {
+    return aInfo->SharedId() == aNewState.mId;
+  }
+
+  // The state gets the document's own principals, so it lets content do
+  // nothing the document couldn't. Only the id comes from content, and it must
+  // be one this process minted.
+  if (!nsContentUtils::IsProcessSpecificIdFrom(
+          aNewState.mId, wgp->GetContentParent()->ChildID())) {
+    return false;
+  }
+
+  RefPtr<SHEntrySharedParentState> sharedState = new SHEntrySharedParentState(
+      wgp->DocumentPrincipal(), wgp->DocumentPrincipal(),
+      wgp->DocumentPartitionedPrincipal(), aNewState.mPolicyContainer,
+      aNewState.mContentType);
+  sharedState->ChangeId(aNewState.mId);
+  sharedState->SetInnerWindowId(wgp->InnerWindowId());
+  aInfo->SetSharedState(sharedState);
+  if (aWasCreated) {
+    *aWasCreated = true;
+  }
+  return true;
+}
+
+bool CanonicalBrowsingContext::ValidateSessionHistoryInfo(
+    SessionHistoryInfo* aInfo) const {
+  WindowGlobalParent* wgp = GetCurrentWindowGlobal();
+  if (!wgp || !wgp->DocumentPrincipal()) {
+    return false;
+  }
+
+  // Content can only name shared state bound to its own document. Anything else
+  // belongs to some other document, possibly in another tab, or is the fresh
+  // state the deserializer gave an id the parent didn't know.
+  SHEntrySharedParentState* sharedState =
+      SHEntrySharedParentState::Lookup(aInfo->SharedId());
+  if (!sharedState || sharedState->InnerWindowId() != wgp->InnerWindowId()) {
+    return false;
+  }
+
+  // Content may only store a URI its own process could have loaded, e.g. no
+  // file: URI from a web content process. Entries whose URI inherits a
+  // principal (about:blank, about:srcdoc, data:) are kept from inheriting
+  // another origin's by InheritDocumentPrincipalIfNeeded.
+  ContentParent* contentParent = wgp->GetContentParent();
+  if (!aInfo->GetURI() || !contentParent ||
+      !ContentTriggeredURILoadIsAllowed(aInfo->GetURI(),
+                                        contentParent->GetRemoteType())) {
+    return false;
+  }
+
+  // For a network origin require that its site was loaded in this process.
+  // A sandboxed document's own site could be held only at the precursor level,
+  // so accept down to that level, which also admits the document's own
+  // same-site navigations. Opaque and non-network URIs are covered above.
+  // Use the innermost URI so a nested URI such as view-source: is checked by
+  // the origin it wraps, not the outer scheme.
+  nsCOMPtr<nsIURI> innermostURI = NS_GetInnermostURI(aInfo->GetURI());
+  if (innermostURI && net::SchemeIsHttpOrHttps(innermostURI)) {
+    nsCOMPtr<nsIPrincipal> uriPrincipal = BasePrincipal::CreateContentPrincipal(
+        innermostURI, wgp->DocumentPrincipal()->OriginAttributesRef());
+    if (!uriPrincipal ||
+        !contentParent->LoadedOrigins()->Has(
+            uriPrincipal, LoadedOriginSet::Level::PrecursorOnly,
+            OriginAttributes::STRIP_ALL)) {
+      return false;
+    }
+  }
+
+  // srcdoc content is only ever loaded into a subframe, under an about:srcdoc
+  // URI.
+  if (aInfo->GetSrcdocData().isSome() &&
+      (!NS_IsAboutSrcdoc(aInfo->GetURI()) || IsTopContent())) {
+    return false;
+  }
+
+  return true;
+}
+
+void CanonicalBrowsingContext::InheritDocumentPrincipalIfNeeded() {
+  WindowGlobalParent* wgp = GetCurrentWindowGlobal();
+  if (!wgp || !mActiveEntry) {
+    return;
+  }
+
+  SHEntrySharedParentState* sharedState = mActiveEntry->SharedInfo();
+  if (sharedState->InnerWindowId() != wgp->InnerWindowId() ||
+      ReloadWouldInheritDocumentPrincipal(wgp, &mActiveEntry->Info())) {
+    return;
+  }
+  // We only get here when content gave an entry created by a non-inheriting
+  // load a URI that inherits, which document.open() does when called from a
+  // same-origin about:srcdoc or about:blank frame: the document takes the
+  // caller's URI, but its origin is unchanged. Loading the entry again would
+  // inherit what that load stored, its principal to inherit (a link click
+  // stores the linking document's, possibly another site's) or else its
+  // triggering principal (system for the URL bar), rather than the document's
+  // origin, which is what the spec's document state stores for this. The
+  // principals come from the parent's WindowGlobalParent, and the state is
+  // bound to this document, so this only ever gives the document its own
+  // origin. Its other entries share the state, but either don't inherit or are
+  // this document too.
+  sharedState->mPrincipalToInherit = wgp->DocumentPrincipal();
+  sharedState->mPartitionedPrincipalToInherit =
+      wgp->DocumentPartitionedPrincipal();
+}
+
+void CanonicalBrowsingContext::MaybeRebindActiveEntry(
+    WindowGlobalParent* aPrevious, WindowGlobalParent* aCurrent) {
+  const uint64_t loadId = aCurrent->DocumentHistoryLoadId();
+  if (!mActiveEntry || loadId == 0 ||
+      loadId != aPrevious->DocumentHistoryLoadId() ||
+      mActiveEntry->SharedInfo()->InnerWindowId() !=
+          aPrevious->InnerWindowId() ||
+      !aPrevious->DocumentPrincipal()->Equals(aCurrent->DocumentPrincipal())) {
+    return;
+  }
+  mActiveEntry->SharedInfo()->SetInnerWindowId(aCurrent->InnerWindowId());
+}
+
 void CanonicalBrowsingContext::SetActiveSessionHistoryEntry(
     const Maybe<nsPoint>& aPreviousScrollPos, SessionHistoryInfo* aInfo,
-    uint32_t aLoadType, uint32_t aUpdatedCacheKey, const nsID& aChangeID) {
+    uint32_t aLoadType, uint32_t aUpdatedCacheKey, const nsID& aChangeID,
+    bool aKeepSharedState) {
   nsISHistory* shistory = GetSessionHistory();
   if (!shistory) {
     return;
@@ -1475,7 +1680,12 @@ void CanonicalBrowsingContext::SetActiveSessionHistoryEntry(
   }
   mActiveEntry = MakeRefPtr<SessionHistoryEntry>(aInfo);
   mActiveEntry->SetDocshellID(GetHistoryID());
-  if (oldActiveEntry) {
+  // Entries of the same document share its state. The old entry can belong to
+  // another document, e.g. one a javascript: URL replaced, whose state must not
+  // replace the one aInfo was validated with.
+  if (oldActiveEntry && !aKeepSharedState &&
+      oldActiveEntry->SharedInfo()->InnerWindowId() ==
+          mActiveEntry->SharedInfo()->InnerWindowId()) {
     mActiveEntry->AdoptBFCacheEntry(oldActiveEntry);
   }
   if (aUpdatedCacheKey != 0) {
@@ -1522,7 +1732,7 @@ void CanonicalBrowsingContext::ReplaceActiveSessionHistoryEntry(
   // interaction state does not get updated. So we instead propagate state from
   // the previous canonical entry. See bug 1917369.
   const bool hasUserInteraction = mActiveEntry->GetHasUserInteraction();
-  mActiveEntry->SetInfo(aInfo);
+  mActiveEntry->ReplaceInfo(aInfo);
   mActiveEntry->SetHasUserInteraction(hasUserInteraction);
   // Notify children of the update
   nsSHistory* shistory = static_cast<nsSHistory*>(GetSessionHistory());
@@ -1930,7 +2140,7 @@ void CanonicalBrowsingContext::NotifyStartDelayedAutoplayMedia() {
 }
 
 uint32_t CanonicalBrowsingContext::CountSiteOrigins(
-    GlobalObject& aGlobal,
+    GlobalObject& /*aGlobal*/,
     const Sequence<OwningNonNull<BrowsingContext>>& aRoots) {
   nsTHashSet<nsCString> uniqueSiteOrigins;
 
@@ -1987,7 +2197,7 @@ void CanonicalBrowsingContext::LoadURI(nsIURI* aURI,
                                        ErrorResult& aError) {
   RefPtr<nsDocShellLoadState> loadState;
   nsresult rv = nsDocShellLoadState::CreateFromLoadURIOptions(
-      this, aURI, aOptions, getter_AddRefs(loadState));
+      aURI, aOptions, getter_AddRefs(loadState));
   MOZ_ASSERT(rv != NS_ERROR_MALFORMED_URI);
 
   if (NS_FAILED(rv)) {
@@ -2930,64 +3140,94 @@ void CanonicalBrowsingContext::HistoryCommitIndexAndLength(
   shistory->NotifyOnHistoryCommit();
 }
 
-void CanonicalBrowsingContext::DeactivateDocuments() {
+void CanonicalBrowsingContext::DeactivateDocuments(
+    const SessionHistoryInfo* aPageSwapTargetInfo,
+    NavigationType aNavigationType, bool aForUnload) {
   MOZ_DIAGNOSTIC_ASSERT(IsTop() && mozilla::BFCacheInParent() &&
-                        GetContentParent());
+                        (IsInProcess() || GetContentParent()));
   if (IsInProcess()) {
-    BrowsingContext::DeactivateDocuments();
+    BrowsingContext::DeactivateDocuments(aPageSwapTargetInfo, aNavigationType,
+                                         aForUnload);
   } else {
-    Group()->EachParent([&](ContentParent* aContentParent) {
-      (void)aContentParent->SendDeactivateDocuments(this);
+    Maybe<SessionHistoryInfo> targetInfo =
+        aPageSwapTargetInfo ? Some(*aPageSwapTargetInfo) : Nothing();
+    Group()->EachParent([this, &targetInfo, aNavigationType,
+                         aForUnload](ContentParent* aContentParent) {
+      (void)aContentParent->SendDeactivateDocuments(
+          this, GetContentParent() == aContentParent ? targetInfo : Nothing(),
+          aNavigationType, aForUnload);
     });
 
-    PreOrderWalk([&](BrowsingContext* aContext) {
-      aContext->Canonical()->SetIsInBFCache(/* aIsInBFCache */ true);
-      aContext->Canonical()->SetIsEnteringBFCache(
-          /* aIsEnteringBFCache */ true);
-    });
+    // When the old document unloads (aForUnload) it is destroyed rather than
+    // persisted, so don't mark the subtree as entering/in BFCache.
+    if (!aForUnload) {
+      PreOrderWalk([&](BrowsingContext* aContext) {
+        aContext->Canonical()->SetIsInBFCache(/* aIsInBFCache */ true);
+        aContext->Canonical()->SetIsEnteringBFCache(
+            /* aIsEnteringBFCache */ true);
+      });
+    }
   }
 
-  if (GetCurrentWindowGlobal() && GetCurrentWindowGlobal()->Fullscreen()) {
+  // The unload of the old document exits fullscreen, so only a document that
+  // enters BFCache needs this.
+  if (!aForUnload && GetCurrentWindowGlobal() &&
+      GetCurrentWindowGlobal()->Fullscreen()) {
     GetCurrentWindowGlobal()->ExitTopChromeDocumentFullscreen();
   }
 }
 
 void CanonicalBrowsingContext::ReactivateDocuments(
     SessionHistoryEntry* aEntry,
-    SessionHistoryEntry* aPreviousEntryForActivation) {
-  nsTArray<SessionHistoryInfo> topNewSHIs;
+    SessionHistoryEntry* aPreviousEntryForActivation,
+    nsIPrincipal* aPreviousDocumentPrincipal) {
+  nsTArray<NavigationReactivationData> reactivationData;
 
   if (Navigation::IsAPIEnabled()) {
-    nsSHistory::WalkContiguousEntriesInOrder(
-        aEntry, [&topNewSHIs](auto* aContiguousEntry) {
-          topNewSHIs.AppendElement(aContiguousEntry->Info());
-          return true;
-        });
+    PreOrderWalk([&](BrowsingContext* aContext) {
+      RefPtr<SessionHistoryEntry> activeEntry =
+          aContext == this
+              ? aEntry
+              : aContext->Canonical()->GetActiveSessionHistoryEntry();
+      if (!activeEntry) {
+        return;
+      }
+      nsTArray<SessionHistoryInfo> newSHIs;
+      nsSHistory::WalkContiguousEntriesInOrder(
+          activeEntry, [&newSHIs](auto* aContiguousEntry) {
+            newSHIs.AppendElement(aContiguousEntry->Info());
+            return true;
+          });
+      reactivationData.AppendElement(NavigationReactivationData(
+          aContext,
+          aContext == this ? mActiveEntry->Info() : activeEntry->Info(),
+          std::move(newSHIs)));
+    });
   }
 
   Maybe previousEntryForActivation =
       PreviousSessionHistoryInfo::CreateValidatedPreviousEntry(
-          mActiveEntry->Info(),
-          ToMaybeRef(aPreviousEntryForActivation).map([](auto& aValue) {
-            return aValue.Info();
-          }),
-          Some(NavigationType::Traverse));
+          mActiveEntry, aPreviousEntryForActivation,
+          Some(NavigationType::Traverse), aPreviousDocumentPrincipal);
   if (IsInProcess()) {
-    BrowsingContext::ReactivateDocuments(Some(mActiveEntry->Info()), topNewSHIs,
+    BrowsingContext::ReactivateDocuments(reactivationData,
                                          previousEntryForActivation);
 
   } else {
     Group()->EachParent([&](ContentParent* aContentParent) {
-      nsTArray<SessionHistoryInfo> newSHIs;
-      Maybe<SessionHistoryInfo> reactivatedEntry;
+      nsTArray<NavigationReactivationData> processData;
+      for (const auto& data : reactivationData) {
+        if (data.context().get_canonical()->GetContentParent() ==
+            aContentParent) {
+          processData.AppendElement(data);
+        }
+      }
       Maybe<PreviousSessionHistoryInfo> previousEntry;
       if (GetContentParent() == aContentParent && Navigation::IsAPIEnabled()) {
-        newSHIs.AppendElements(std::move(topNewSHIs));
-        reactivatedEntry.emplace(mActiveEntry->Info());
         previousEntry = previousEntryForActivation;
       }
-      (void)aContentParent->SendReactivateDocuments(this, reactivatedEntry,
-                                                    newSHIs, previousEntry);
+      (void)aContentParent->SendReactivateDocuments(this, processData,
+                                                    previousEntry);
     });
 
     UpdateCurrentTopByBrowserId(this);
@@ -3539,7 +3779,7 @@ struct ClearSiteWalkHistoryData {
 // static
 nsresult CanonicalBrowsingContext::ContainsSameOriginBfcacheEntry(
     SessionHistoryEntry* aEntry, mozilla::dom::BrowsingContext* aBC,
-    int32_t aChildIndex, void* aData) {
+    int32_t /*aChildIndex*/, void* aData) {
   if (!aEntry) {
     return NS_OK;
   }

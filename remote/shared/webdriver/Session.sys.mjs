@@ -46,6 +46,15 @@ XPCOMUtils.defineLazyServiceGetter(
   Ci.amIAddonManagerStartup
 );
 
+// Hidden pref, for tests only. Use the dedicated container for all sessions,
+// including the ones created for browser automation.
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "forceContainer",
+  "remote.experimental.dynamicstart.force-container",
+  false
+);
+
 // Global singleton that holds active WebDriver sessions
 const webDriverSessions = new Map();
 
@@ -272,9 +281,10 @@ export class WebDriverSession {
       throw new lazy.error.SessionNotCreatedError(e);
     }
 
-    this.#userContext = useDedicatedContainer
-      ? getRemoteControlUserContextId()
-      : null;
+    this.#userContext =
+      useDedicatedContainer || lazy.forceContainer
+        ? getRemoteControlUserContextId()
+        : null;
     if (this.#userContext !== null) {
       this.#capabilities.set("moz:userContext", this.#userContext);
       lazy.logger.debug(
@@ -467,8 +477,8 @@ export class WebDriverSession {
 
   /**
    * The user context id of the container created for this session.
-   * Bug 2072964 to start enforcing this restriction in commands and events.
-   * Used only in tests until then.
+   * WebDriver BiDi commands and events are restricted to this user context
+   * when remote.experimental.dynamicstart.container-isolation-enabled is true.
    *
    * @returns {string|null}
    *     The user context id, or null if no user context was created.
@@ -658,9 +668,7 @@ function getRemoteControlUserContextId() {
   return lazy.UserContextManager.createContext({
     // Use a color reminiscent of the color applied to the URL bar.
     color: "red",
-    // Bug 2074485: Add a new container icon matching the robot icon for the
-    // remote control panel. In the meantime, use a circle as a generic icon.
-    icon: "circle",
+    icon: "robot",
     name: REMOTE_CONTROL_CONTAINER_NAME,
   });
 }

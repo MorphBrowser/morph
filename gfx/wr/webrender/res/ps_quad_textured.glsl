@@ -4,6 +4,8 @@
 
 /// This shader renders solid colors or simple images in a color or alpha target.
 
+#define WR_QUAD_ROUNDED_CLIP
+
 #include ps_quad,sample_color0
 
 #define v_flags_mode v_flags.x
@@ -56,8 +58,13 @@ vec4 pattern_fragment(vec4 color) {
 
 #if defined(SWGL_DRAW_SPAN)
 void swgl_drawSpanRGBA8() {
+    if (!rounded_clip_span_is_supported()) {
+        return;
+    }
+    vec4 clip_rect = rounded_clip_span_rect();
+
     if (v_flags_mode == SHADER_MODE_COLOR) {
-        swgl_commitSolidRGBA8(v_color);
+        swgl_commitSolidRGBA8(v_color, clip_rect);
         return;
     }
 
@@ -73,9 +80,9 @@ void swgl_drawSpanRGBA8() {
         // since no swgl commit broadcasts a single channel of an RGBA8 sample.
         if (swgl_isTextureR8(sColor0)) {
             if (v_color != vec4(1.0)) {
-                swgl_commitTextureLinearColorR8ToRGBA8(sColor0, v_uv0, v_uv0_sample_bounds, v_color);
+                swgl_commitTextureLinearColorR8ToRGBA8(sColor0, v_uv0, v_uv0_sample_bounds, v_color, clip_rect);
             } else {
-                swgl_commitTextureLinearR8ToRGBA8(sColor0, v_uv0, v_uv0_sample_bounds);
+                swgl_commitTextureLinearR8ToRGBA8(sColor0, v_uv0, v_uv0_sample_bounds, clip_rect);
             }
         }
 
@@ -86,9 +93,9 @@ void swgl_drawSpanRGBA8() {
         return;
     }
     if (v_color != vec4(1.0)) {
-        swgl_commitTextureColorRGBA8(sColor0, v_uv0, v_uv0_sample_bounds, v_color);
+        swgl_commitTextureColorRGBA8(sColor0, v_uv0, v_uv0_sample_bounds, v_color, clip_rect);
     } else {
-        swgl_commitTextureRGBA8(sColor0, v_uv0, v_uv0_sample_bounds);
+        swgl_commitTextureRGBA8(sColor0, v_uv0, v_uv0_sample_bounds, clip_rect);
     }
 }
 #endif

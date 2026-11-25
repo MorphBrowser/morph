@@ -181,7 +181,7 @@ class CustomTabsToolbarFeature(
             addMenuItems()
         }
 
-        menuDrawableIcon = getDrawable(context, iconsR.drawable.mozac_ic_ellipsis_vertical_24)
+        menuDrawableIcon = getDrawable(context, iconsR.drawable.mozac_ic_more_vertical_round_24)
         menuDrawableIcon?.setTint(readableColor)
 
         if (customTabsToolbarButtonConfig.showMenu && isMenuAvailable()) {
@@ -331,7 +331,7 @@ class CustomTabsToolbarFeature(
                 drawableIcon,
                 context.getString(R.string.mozac_feature_customtabs_share_link),
             ) {
-                val listener =
+                val listener: () -> Unit =
                     customTabsToolbarListeners.shareListener
                         ?: {
                             session?.let {

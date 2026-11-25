@@ -7,7 +7,6 @@ package org.mozilla.fenix.search.awesomebar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -50,14 +49,12 @@ import mozilla.components.lib.state.helpers.StoreProvider.Companion.fragmentStor
 import mozilla.components.support.ktx.android.view.hideKeyboard
 import org.mozilla.fenix.HomeActivity
 import org.mozilla.fenix.R
-import org.mozilla.fenix.browser.browsingmode.BrowsingMode
 import org.mozilla.fenix.components.AppStore
 import org.mozilla.fenix.components.Components
 import org.mozilla.fenix.components.appstate.AppAction.SearchAction.SearchEnded
 import org.mozilla.fenix.components.metrics.MetricsUtils
 import org.mozilla.fenix.ext.components
 import org.mozilla.fenix.ext.getRootView
-import org.mozilla.fenix.home.toolbar.edgeToEdgeClipboardBarBackground
 import org.mozilla.fenix.search.BrowserStoreToFenixSearchMapperMiddleware
 import org.mozilla.fenix.search.BrowserToolbarToFenixSearchMapperMiddleware
 import org.mozilla.fenix.search.FenixSearchMiddleware
@@ -100,7 +97,6 @@ private fun Modifier.awesomeBarContentWidth(useAddressBarFocusMode: Boolean) =
  * @param tabId [String] Id of the current tab for which a new search was started.
  * @param showScrimWhenNoSuggestions Whether to show a scrim when no suggestions are available.
  * @param searchAccessPoint Where search was started from.
- * @param isEdgeToEdgeBackgroundEnabled Whether the Edge2Edge background is enabled.
  */
 class AwesomeBarComposable(
     private val activity: HomeActivity,
@@ -114,7 +110,6 @@ class AwesomeBarComposable(
     private val tabId: String? = null,
     private val showScrimWhenNoSuggestions: Boolean = false,
     private val searchAccessPoint: MetricsUtils.Source = MetricsUtils.Source.NONE,
-    private val isEdgeToEdgeBackgroundEnabled: Boolean = false,
 ) {
     private val searchStore by initializeSearchStore()
 
@@ -122,7 +117,6 @@ class AwesomeBarComposable(
      * [Composable] fully integrated with [BrowserStore] and [BrowserToolbarStore] that will show search suggestions
      * whenever the users edits the current query in the toolbar.
      */
-    @OptIn(ExperimentalLayoutApi::class) // for WindowInsets.isImeVisible
     @Suppress("LongMethod", "CyclomaticComplexMethod", "CognitiveComplexMethod")
     @Composable
     fun SearchSuggestions() {
@@ -153,11 +147,7 @@ class AwesomeBarComposable(
                     state.showClipboardSuggestions && state.query.isEmpty() && state.clipboardHasUrl
                 }
             }
-        val clipboardBarBackground =
-            edgeToEdgeClipboardBarBackground(
-                shouldUseEdgeToEdgeColors = isEdgeToEdgeBackgroundEnabled,
-                isPrivateMode = activity.browsingModeManager.mode == BrowsingMode.Private,
-            )
+        val clipboardBarBackground = MaterialTheme.colorScheme.surface
         val showCurrentTabData = remember { components.settings.showAddressBarInFocusMode }
         val view = LocalView.current
         val focusManager = LocalFocusManager.current
@@ -235,11 +225,9 @@ class AwesomeBarComposable(
                         }
                 ) {
                     val currentTabDetailsToShow =
-                        remember(state.query.isBlank()) {
-                            when (state.query.isBlank() && showCurrentTabData) {
-                                true -> state.currentTabData
-                                else -> null
-                            }
+                        when (state.query.isBlank() && showCurrentTabData) {
+                            true -> state.currentTabData
+                            else -> null
                         }
 
                     Box(modifier = Modifier.awesomeBarContentWidth(showCurrentTabData)) {

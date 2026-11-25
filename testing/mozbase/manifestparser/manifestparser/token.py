@@ -212,14 +212,9 @@ class ManifestTokens:
             Token(t_type=t_variant, value="privateBrowsing")
         )
         _remote_async: Token = self.add(Token(t_type=t_variant, value="remote_async"))
+        _repeat: Token = self.add(Token(t_type=t_variant, value="repeat"))
         _snapshot: Token = self.add(Token(t_type=t_variant, value="snapshot"))
         _standalone: Token = self.add(Token(t_type=t_variant, value="standalone"))
-        _socketprocess_e10s: Token = self.add(
-            Token(t_type=t_variant, value="socketprocess_e10s")
-        )
-        _socketprocess_networking: Token = self.add(
-            Token(t_type=t_variant, value="socketprocess_networking")
-        )  # DOES NOT appear in variants.yml
         _swgl: Token = self.add(Token(t_type=t_variant, value="swgl"))
         _trainhop: Token = self.add(Token(t_type=t_variant, value="trainhop"))
         _vertical_tab: Token = self.add(Token(t_type=t_variant, value="vertical_tab"))
@@ -235,9 +230,6 @@ class ManifestTokens:
             Token(t_type=t_other_flags, value="datareporting")
         )
         _devedition: Token = self.add(Token(t_type=t_other_flags, value="devedition"))
-        _early_beta_or_earlier: Token = self.add(
-            Token(t_type=t_other_flags, value="early_beta_or_earlier")
-        )
         _enterprise: Token = self.add(Token(t_type=t_other_flags, value="enterprise"))
         _false: Token = self.add(Token(t_type=t_other_flags, value="false"))
         _gecko_profiler: Token = self.add(

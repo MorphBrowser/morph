@@ -18,6 +18,7 @@ import mozilla.components.browser.state.state.createCustomTab
 import mozilla.components.browser.state.state.createTab
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.compose.base.text.Text
+import mozilla.components.compose.menu.data.MenuItemTitle
 import mozilla.components.compose.menu.data.MenuItemsGroup
 import mozilla.components.compose.menu.data.StandardMenuItem
 import mozilla.components.compose.menu.store.MenuAction
@@ -66,7 +67,7 @@ class MenuMiddlewareTest {
     private val otherTab = createTab("https://example.com", id = "other")
     private val browserStore = BrowserStore(BrowserState(tabs = listOf(tab, otherTab), selectedTabId = otherTab.id))
     private val shortcut = TopSite.Pinned(1, "Mozilla", tab.content.url, null)
-    private val appStore = AppStore(AppState(screen = Screen.Home, topSites = listOf(shortcut)))
+    private val appStore = AppStore(AppState(screen = Screen.Home(), topSites = listOf(shortcut)))
     private val groups = MutableStateFlow<List<MenuItemsGroup>>(emptyList())
     private val handled = mutableListOf<String>()
     private var dismissCount = 0
@@ -84,7 +85,13 @@ class MenuMiddlewareTest {
         listOf(
             MenuItemsGroup.Row(
                 id = "settings",
-                items = listOf(StandardMenuItem(Text.String("Settings"), MenuItemTapped(ToolbarMenu.Item.Settings))),
+                items =
+                    listOf(
+                        StandardMenuItem(
+                            MenuItemTitle(Text.String("Settings")),
+                            MenuItemTapped(ToolbarMenu.Item.Settings),
+                        )
+                    ),
             )
         )
 

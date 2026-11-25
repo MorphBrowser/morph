@@ -6,6 +6,9 @@
 const { SyncedTabs } = ChromeUtils.importESModule(
   "resource://services-sync/SyncedTabs.sys.mjs"
 );
+const { WeaveService } = ChromeUtils.importESModule(
+  "moz-src:///services/sync/Weave.sys.mjs"
+);
 
 const TEST_ENGINE_BASENAME = "searchSuggestionEngine.xml";
 
@@ -72,10 +75,7 @@ add_task(async function test_tab_switch_result() {
     const details = await UrlbarTestUtils.getDetailsOfResultAt(window, 1);
 
     assertElementsDisplayed(details, {
-      // The separator should *not* be visible, but Proton merely sets its
-      // opacity to zero, which counts as visible. Pass false and remove this
-      // comment when enabling Nova by default.
-      separator: !Services.prefs.getBoolPref("browser.nova.enabled", false),
+      separator: false,
       title: "about:mozilla",
       type: UrlbarShared.RESULT_TYPE.TAB_SWITCH,
     });
@@ -272,12 +272,9 @@ add_task(async function test_remote_tab_result() {
     },
   };
 
-  // Tell the Sync XPCOM service it is initialized.
-  let weaveXPCService = Cc["@mozilla.org/weave/service;1"].getService(
-    Ci.nsISupports
-  ).wrappedJSObject;
-  let oldWeaveServiceReady = weaveXPCService.ready;
-  weaveXPCService.ready = true;
+  // Tell the Sync service it is initialized.
+  let oldWeaveServiceReady = WeaveService.ready;
+  WeaveService.ready = true;
 
   sandbox
     .stub(SyncedTabs._internal, "getTabClients")
@@ -288,7 +285,7 @@ add_task(async function test_remote_tab_result() {
 
   registerCleanupFunction(async function () {
     sandbox.restore();
-    weaveXPCService.ready = oldWeaveServiceReady;
+    WeaveService.ready = oldWeaveServiceReady;
     SyncedTabs._internal = originalSyncedTabsInternal;
     await PlacesUtils.history.clear();
     await PlacesUtils.bookmarks.eraseEverything();
@@ -304,10 +301,7 @@ add_task(async function test_remote_tab_result() {
     const details = await UrlbarTestUtils.getDetailsOfResultAt(window, 1);
 
     assertElementsDisplayed(details, {
-      // The separator should *not* be visible, but Proton merely sets its
-      // opacity to zero, which counts as visible. Pass false and remove this
-      // comment when enabling Nova by default.
-      separator: !Services.prefs.getBoolPref("browser.nova.enabled", false),
+      separator: false,
       title: "Test Remote",
       type: UrlbarShared.RESULT_TYPE.REMOTE_TAB,
     });

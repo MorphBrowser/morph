@@ -14,17 +14,18 @@ import UrlbarPrefs from "chrome://browser/content/urlbar/UrlbarContentPrefs.mjs"
 import { UrlbarContentUtils } from "chrome://browser/content/urlbar/UrlbarContentUtils.mjs";
 import { UrlbarShared } from "chrome://browser/content/urlbar/UrlbarShared.mjs";
 
-const lazy = typeof ChromeUtils != "undefined" ? {} : null;
+const { XPCOMUtils } =
+  typeof ChromeUtils == "undefined"
+    ? { XPCOMUtils: null }
+    : ChromeUtils.importESModule("resource://gre/modules/XPCOMUtils.sys.mjs");
 
-if (lazy) {
-  ChromeUtils.defineESModuleGetters(lazy, {
-    CustomizableUI:
-      "moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs",
-    OpenSearchManager:
-      "moz-src:///browser/components/search/OpenSearchManager.sys.mjs",
-    SearchUIUtils: "moz-src:///browser/components/search/SearchUIUtils.sys.mjs",
-  });
-}
+const lazy = XPCOMUtils?.declareLazy({
+  CustomizableUI:
+    "moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs",
+  OpenSearchManager:
+    "moz-src:///browser/components/search/OpenSearchManager.sys.mjs",
+  SearchUIUtils: "moz-src:///browser/components/search/SearchUIUtils.sys.mjs",
+});
 
 /** @type {Localization} */
 let l10n;
@@ -91,12 +92,14 @@ export class SearchModeSwitcher {
   // The value of the urlbar the last time a search mode was changed.
   #lastInputValue;
 
-  // Keep a cache of the engine list as the keyboard functionality
-  // needs sync access to them.
+  /**
+   * Keep a cache of the engine list as the keyboard functionality
+   * needs sync access to them.
+   *
+   * @type {(PartialSearchEngine|LocalSearchMode)[]}
+   */
   #engines = [];
-  // Keep track of the currently selected engine when the user is cycling
-  // through them with Accel+Up/Down.
-  #selectedIndex = 0;
+
   /**
    * Store the last page each browser had its badge counted for as we
    * don't overcount page visits when badge is updated.
@@ -104,6 +107,15 @@ export class SearchModeSwitcher {
    * @type {WeakMap<MozBrowser, string>}
    */
   #countedBadgeFor = new WeakMap();
+
+  /**
+   * Store the page each browser had its badge suppressed for. The content pref
+   * cache can briefly return the count from before the suppression, so the
+   * badge must not rely on it for the rest of that visit.
+   *
+   * @type {WeakMap<MozBrowser, string>}
+   */
+  #suppressedBadgeFor = new WeakMap();
 
   /**
    * @param {UrlbarInput} input
@@ -172,7 +184,7 @@ export class SearchModeSwitcher {
 
   async #onPopupShowing() {
     // Discard event to avoid recording an abandonment.
-    this.#input.controller.engagementEvent.discard();
+    this.#input.controller.session.discard();
     // Close the view before anything is awaited. Closing it collapses the
     // urlbar, and the panel aligns itself asynchronously and abandons the open
     // if its anchor moves mid-alignment.
@@ -208,8 +220,6 @@ export class SearchModeSwitcher {
   exitSearchMode(event) {
     event.preventDefault();
     this.#input.searchMode = null;
-    this.#selectedIndex = 0;
-    this.#engines = [];
     // Update the result by the default engine.
     this.#input.startQuery();
   }
@@ -394,6 +404,8 @@ export class SearchModeSwitcher {
       return;
     }
 
+    this.#engines = [];
+
     switch (modifiedType) {
       case "changed":
       case "default":
@@ -480,49 +492,57 @@ export class SearchModeSwitcher {
     if (!this.#engines.length) {
       await this.#populateEngines();
     }
-    this.#selectedIndex += event.keyCode == KeyEvent.DOM_VK_UP ? -1 : 1;
-    if (this.#selectedIndex > this.#engines.length - 1) {
-      this.#selectedIndex = 0;
-    }
-    if (this.#selectedIndex < 0) {
-      this.#selectedIndex = this.#engines.length - 1;
-    }
-    let selectedEngine = this.#engines[this.#selectedIndex];
-    this.#input.setSearchMode(
-      {
-        entry: "searchbutton",
-        isPreview: false,
-        source: selectedEngine?.source || UrlbarShared.RESULT_SOURCE.SEARCH,
-        engineName: selectedEngine?.name,
-      },
-      this.#input.browserWindow?.gBrowser.selectedBrowser
-    );
 
-    let searchString = this.#getSearchString();
-    if (searchString) {
-      this.#input.startQuery({ allowAutofill: false });
+    let newIndex =
+      this.#selectedIndex + (event.keyCode == KeyEvent.DOM_VK_UP ? -1 : 1);
+    if (newIndex > this.#engines.length - 1) {
+      newIndex = 0;
     }
+    if (newIndex < 0) {
+      newIndex = this.#engines.length - 1;
+    }
+
+    let selectedEngine = this.#engines[newIndex];
+    if ("name" in selectedEngine) {
+      this.#input.setSearchMode(
+        {
+          entry: "searchbutton",
+          isPreview: false,
+          source: UrlbarShared.RESULT_SOURCE.SEARCH,
+          engineName: selectedEngine.name,
+        },
+        this.#input.browserWindow?.gBrowser.selectedBrowser
+      );
+    } else if ("source" in selectedEngine) {
+      this.#input.setSearchMode(
+        {
+          entry: "searchbutton",
+          isPreview: false,
+          source: selectedEngine.source,
+        },
+        this.#input.browserWindow?.gBrowser.selectedBrowser
+      );
+    }
+
+    this.#input.startQuery({ allowAutofill: false });
   }
 
   async #populateEngines() {
-    let searchEngines = [];
-
     try {
       await this.#input.controller.engineStore.init();
-      searchEngines = this.#input.controller.engineStore
+      this.#engines = this.#input.controller.engineStore
         .getEngines()
         .filter(engine => !engine.hideOneOffButton);
     } catch {
       // Search service failed but we still offer local search modes.
+      this.#engines = [];
     }
 
-    if (this.#input.sapName != "urlbar") {
-      this.#engines = searchEngines;
-    } else {
+    if (this.#input.sapName == "urlbar") {
       // After the settings redesign we no longer use the prefs to hide local
       // search modes. Hence when the settings redesign is enabled we show
       // all local search modes regardless of the prefs.
-      this.#engines = searchEngines.concat(
+      this.#engines = this.#engines.concat(
         UrlbarShared.LOCAL_SEARCH_MODES.filter(
           engine =>
             UrlbarPrefs.get("browser.settings-redesign.enabled") ||
@@ -530,6 +550,20 @@ export class SearchModeSwitcher {
         )
       );
     }
+  }
+
+  get #selectedIndex() {
+    if (!this.#input.searchMode) {
+      return this.#engines.indexOf(this.#input.controller.engineStore.default);
+    }
+    if (this.#input.searchMode.engineName) {
+      return this.#engines.findIndex(
+        e => "name" in e && e.name == this.#input.searchMode.engineName
+      );
+    }
+    return this.#engines.findIndex(
+      e => "source" in e && e.source == this.#input.searchMode.source
+    );
   }
 
   /**
@@ -602,6 +636,10 @@ export class SearchModeSwitcher {
       if (browser != this.#input.browserWindow?.gBrowser?.selectedBrowser) {
         return;
       }
+      if (this.#suppressedBadgeFor.get(browser) == spec) {
+        this.#button.removeAttribute("addengines");
+        return;
+      }
       // Don't hide already shown badges.
       let show =
         this.#countedBadgeFor.get(browser) == spec ||
@@ -634,6 +672,27 @@ export class SearchModeSwitcher {
         handleError() {},
         handleCompletion: () => apply(count),
       }
+    );
+  }
+
+  /**
+   * Hides the addEngines badge and stops it being shown again for this page.
+   */
+  #suppressAddEnginesBadge() {
+    if (this.#input.isSearchbarSAP) {
+      return;
+    }
+    this.#button.removeAttribute("addengines");
+    let browser = this.#input.browserWindow.gBrowser.selectedBrowser;
+    let uri = browser.currentURI;
+    this.#countedBadgeFor.delete(browser);
+    this.#suppressedBadgeFor.set(browser, uri.spec);
+    this.#contentPrefs.set(
+      uri.spec,
+      ADD_ENGINES_BADGE_PREF,
+      /** @type {any} */ (MAX_ADD_ENGINES_BADGE_SHOWN),
+      browser.loadContext,
+      null
     );
   }
 
@@ -851,9 +910,9 @@ export class SearchModeSwitcher {
 
     await this.#populateEngines();
     for (let engine of this.#engines) {
-      if (engine.source) {
+      if ("source" in engine) {
         footerSeparator.before(await this.#buildLocalSearchButton(engine));
-      } else if (engine.name) {
+      } else if ("name" in engine) {
         let menuitem = await this.#buildEngineSearchButton(engine);
         installedEngineSeparator.before(menuitem);
       }
@@ -1165,6 +1224,10 @@ export class SearchModeSwitcher {
    *   The engine to install.
    */
   async #installOpenSearchEngine(engine) {
+    // Hide the badge now in case the install fails or we can't
+    // detect the install properly.
+    this.#suppressAddEnginesBadge();
+
     /** @type {(_: string, newEngine: PartialSearchEngine) => void} */
     let observer = (_, newEngine) => {
       this.#input.search(this.#getSearchString(), {

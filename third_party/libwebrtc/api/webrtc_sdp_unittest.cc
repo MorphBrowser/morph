@@ -8,10 +8,11 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "api/webrtc_sdp.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -51,11 +52,6 @@
 #include "test/gmock.h"
 #include "test/gtest.h"
 
-#ifdef WEBRTC_ANDROID
-#include "pc/test/android_test_initializer.h"
-#endif
-#include "api/webrtc_sdp.h"
-
 namespace webrtc {
 
 namespace {
@@ -63,6 +59,7 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::Field;
 using ::testing::HasSubstr;
+using ::testing::IsEmpty;
 using ::testing::IsNull;
 using ::testing::Not;
 using ::testing::NotNull;
@@ -977,9 +974,6 @@ std::unique_ptr<IceCandidate> NewCandidate(absl::string_view sdp,
 class WebRtcSdpTest : public ::testing::Test {
  public:
   WebRtcSdpTest() {
-#ifdef WEBRTC_ANDROID
-    InitializeAndroidObjects();
-#endif
     // AudioContentDescription
     audio_desc_ = CreateAudioContentDescription();
     StreamParams audio_stream;
@@ -1946,7 +1940,6 @@ class WebRtcSdpTest : public ::testing::Test {
     std::string sdp_video =
         "m=video 3457 RTP/SAVPF 101\r\n"
         "a=rtpmap:101 VP8/90000\r\n"
-        "a=rtcp-fb:101 goog-lntf\r\n"
         "a=rtcp-fb:101 nack\r\n"
         "a=rtcp-fb:101 nack pli\r\n"
         "a=rtcp-fb:101 goog-remb\r\n";
@@ -1982,8 +1975,6 @@ class WebRtcSdpTest : public ::testing::Test {
     Codec vp8 = vcd->codecs()[0];
     EXPECT_EQ(vp8.name, "VP8");
     EXPECT_EQ(101, vp8.id);
-    EXPECT_TRUE(vp8.HasFeedbackParam(
-        FeedbackParam(kRtcpFbParamLntf, kParamValueEmpty)));
     EXPECT_TRUE(vp8.HasFeedbackParam(
         FeedbackParam(kRtcpFbParamNack, kParamValueEmpty)));
     EXPECT_TRUE(vp8.HasFeedbackParam(
@@ -2090,6 +2081,39 @@ TEST_F(WebRtcSdpTest, SerializeSessionDescriptionEmpty) {
 TEST_F(WebRtcSdpTest, SerializeSessionDescriptionWithoutCandidates) {
   // Session description with desc but without candidates.
   EXPECT_EQ(SdpSerialize(MakeDescriptionWithoutCandidates()), kSdpString);
+}
+
+// Tests that each m= section is serialized with its own transport info even
+// when the transport infos are not stored in the same order as the contents.
+TEST_F(WebRtcSdpTest, SerializeSessionDescriptionWithTransportInfosOutOfOrder) {
+  TransportInfo audio_transport_info =
+      *desc_.GetTransportInfoByName(kAudioContentName);
+  ASSERT_TRUE(desc_.RemoveTransportInfoByName(kAudioContentName));
+  desc_.AddTransportInfo(audio_transport_info);
+  ASSERT_EQ(desc_.transport_infos()[0].content_name, kVideoContentName);
+  TestMismatch(std::string(kSdpFullString),
+               SdpSerialize(NewSessionDescriptionWithCandidates()));
+}
+
+// Tests that the a=rtcp line uses the address of an IPv6 RTCP candidate.
+TEST_F(WebRtcSdpTest, SerializeRtcpLineWithIpv6Candidate) {
+  std::unique_ptr<SessionDescriptionInterface> jdesc =
+      NewSessionDescriptionNoCandidates();
+  ASSERT_THAT(jdesc, NotNull());
+  Candidate candidate(ICE_CANDIDATE_COMPONENT_RTCP, "udp",
+                      SocketAddress("::1", 1235), kCandidatePriority, "", "",
+                      IceCandidateType::kHost, kCandidateGeneration,
+                      kCandidateFoundation1);
+  IceCandidate ice_candidate(kAudioContentName, 0, candidate);
+  ASSERT_TRUE(jdesc->AddCandidate(&ice_candidate));
+  EXPECT_THAT(SdpSerialize(jdesc), HasSubstr("a=rtcp:1235 IN IP6 ::1\r\n"));
+}
+
+// Tests that an m= section without codecs is serialized with a fmt of 0.
+TEST_F(WebRtcSdpTest, SerializeMediaSectionWithoutCodecs) {
+  audio_desc_->set_codecs({});
+  EXPECT_THAT(SdpSerialize(MakeDescriptionWithoutCandidates()),
+              HasSubstr("m=audio 9 RTP/SAVPF 0\r\n"));
 }
 
 TEST_F(WebRtcSdpTest, SerializeSessionDescriptionWithBundles) {
@@ -2368,6 +2392,21 @@ TEST_F(WebRtcSdpTest, DeserializeSessionDescription) {
   // Deserialize & Verify
   EXPECT_TRUE(
       CompareSessionDescription(jdesc_, SdpDeserialize(kSdpFullString)));
+}
+
+// Tests that duplicate a=candidate lines within one m= section only add one
+// candidate to the candidate collection of that m= section.
+TEST_F(WebRtcSdpTest, DeserializeSessionDescriptionWithDuplicateCandidate) {
+  std::string sdp = kSdpFullString;
+  const std::string candidate_line =
+      "a=candidate:a0+B/1 1 udp 2130706432 192.168.1.5 1234 typ host "
+      "generation 2\r\n";
+  InjectAfter(candidate_line, candidate_line, &sdp);
+  std::unique_ptr<SessionDescriptionInterface> jdesc = SdpDeserialize(sdp);
+  ASSERT_THAT(jdesc, NotNull());
+  ASSERT_THAT(jdesc->candidates(0), NotNull());
+  EXPECT_EQ(jdesc->candidates(0)->count(), jdesc_->candidates(0)->count());
+  EXPECT_TRUE(CompareSessionDescription(jdesc_, jdesc));
 }
 
 TEST_F(WebRtcSdpTest, DeserializeSessionDescriptionWithoutMline) {
@@ -4348,6 +4387,85 @@ TEST_F(WebRtcSdpTest, DeserializeMsidAttributeWithoutAppDataDuplicate) {
   EXPECT_NE(stream.id, "");
 }
 
+// Tests that with a=msid signaling all SSRCs of an m= section end up in a
+// single StreamParams, and that a track id is generated when a=msid has no
+// appdata.
+TEST_F(WebRtcSdpTest, DeserializeMsidAttributeWithoutAppDataWithSsrcs) {
+  std::string sdp =
+      "v=0\r\n"
+      "o=- 18446744069414584320 18446462598732840960 IN IP4 127.0.0.1\r\n"
+      "s=-\r\n"
+      "t=0 0\r\n"
+      "m=video 9 RTP/SAVPF 96\r\n"
+      "c=IN IP4 0.0.0.0\r\n"
+      "a=rtpmap:96 VP8/90000\r\n"
+      "a=msid:stream_id\r\n"
+      "a=ssrc-group:FID 1 2\r\n"
+      "a=ssrc:1 cname:stream_cname\r\n"
+      "a=ssrc:2 cname:stream_cname\r\n";
+
+  std::unique_ptr<SessionDescriptionInterface> jdesc_output =
+      SdpDeserialize(sdp);
+  ASSERT_THAT(jdesc_output, NotNull());
+  const StreamParamsVec& streams =
+      jdesc_output->description()->contents()[0].media_description()->streams();
+  ASSERT_THAT(streams, SizeIs(1));
+  EXPECT_THAT(streams[0].ssrcs, ElementsAre(1u, 2u));
+  EXPECT_EQ(streams[0].cname, "stream_cname");
+  EXPECT_THAT(streams[0].stream_ids(), ElementsAre("stream_id"));
+  // Track id is randomly generated.
+  EXPECT_NE(streams[0].id, "");
+}
+
+// Tests that an a=ssrc msid line without appdata does not clear a track id
+// signaled by an earlier a=ssrc msid line for the same SSRC.
+TEST_F(WebRtcSdpTest, DeserializeSsrcMsidWithoutAppDataKeepsTrackId) {
+  std::string sdp =
+      "v=0\r\n"
+      "o=- 18446744069414584320 18446462598732840960 IN IP4 127.0.0.1\r\n"
+      "s=-\r\n"
+      "t=0 0\r\n"
+      "m=audio 9 RTP/SAVPF 111\r\n"
+      "c=IN IP4 0.0.0.0\r\n"
+      "a=rtpmap:111 opus/48000/2\r\n"
+      "a=ssrc:1 cname:stream_cname\r\n"
+      "a=ssrc:1 msid:stream_id track_id\r\n"
+      "a=ssrc:1 msid:stream_id2\r\n";
+
+  std::unique_ptr<SessionDescriptionInterface> jdesc_output =
+      SdpDeserialize(sdp);
+  ASSERT_THAT(jdesc_output, NotNull());
+  const StreamParamsVec& streams =
+      jdesc_output->description()->contents()[0].media_description()->streams();
+  ASSERT_THAT(streams, SizeIs(1));
+  EXPECT_EQ(streams[0].id, "track_id");
+  EXPECT_THAT(streams[0].stream_ids(), ElementsAre("stream_id2"));
+}
+
+// Tests that attribute names are matched exactly and not by prefix.
+TEST_F(WebRtcSdpTest, DeserializeIgnoresAttributesWithKnownPrefix) {
+  std::string sdp =
+      "v=0\r\n"
+      "o=- 18446744069414584320 18446462598732840960 IN IP4 127.0.0.1\r\n"
+      "s=-\r\n"
+      "t=0 0\r\n"
+      "m=audio 9 RTP/SAVPF 111\r\n"
+      "c=IN IP4 0.0.0.0\r\n"
+      "a=rtcp-mux-only\r\n"
+      "a=extmapx:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"
+      "a=ssrcx:1 cname:stream_cname\r\n"
+      "a=rtpmap:111 opus/48000/2\r\n";
+
+  std::unique_ptr<SessionDescriptionInterface> jdesc_output =
+      SdpDeserialize(sdp);
+  ASSERT_THAT(jdesc_output, NotNull());
+  const MediaContentDescription* media_desc =
+      jdesc_output->description()->contents()[0].media_description();
+  EXPECT_FALSE(media_desc->rtcp_mux());
+  EXPECT_THAT(media_desc->rtp_header_extensions(), IsEmpty());
+  EXPECT_THAT(media_desc->streams(), IsEmpty());
+}
+
 TEST_F(WebRtcSdpTest, DeserializeMsidAttributeWithoutAppDataMixed) {
   std::string sdp =
       "v=0\r\n"
@@ -5269,6 +5387,8 @@ TEST_F(WebRtcSdpTest, SctpProtocolWithNonApplication) {
   ASSERT_NE(desc, nullptr);
   std::string serialized;
   EXPECT_TRUE(desc->ToString(&serialized));
+  // Unsupported media sections are rejected and serialized with a fmt of 0.
+  EXPECT_THAT(serialized, HasSubstr("m=unsupported 0 UDP/DTLS/SCTP 0\r\n"));
 }
 
 TEST_F(WebRtcSdpTest, RejectsInvalidCharactersInBundleGroup) {
@@ -5374,6 +5494,43 @@ TEST_F(WebRtcSdpTest, DeserializeSdpWithTooLargeExtmapId) {
 
   ASSERT_THAT(output, IsNull());
   EXPECT_EQ(error.line, "a=extmap:256 http://example.com/082005/ext.htm#ttime");
+}
+
+TEST_F(WebRtcSdpTest, RejectsNegativeAudioMaxptime) {
+  std::string sdp =
+      "v=0\r\n"
+      "o=- 2722475918447876005 2 IN IP4 127.0.0.1\r\n"
+      "s=-\r\n"
+      "t=0 0\r\n"
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+      "c=IN IP4 0.0.0.0\r\n"
+      "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+      "a=mid:0\r\n"
+      "a=rtpmap:111 opus/48000/2\r\n"
+      "a=maxptime:-1\r\n";
+  SdpParseError error;
+  EXPECT_THAT(CreateSessionDescription(SdpType::kOffer, sdp, &error), IsNull());
+  EXPECT_THAT(error.description,
+              HasSubstr("maxptime (-1) cannot be less than minptime (0)"));
+}
+
+TEST_F(WebRtcSdpTest, RejectsAudioMaxptimeLessThanMinptime) {
+  std::string sdp =
+      "v=0\r\n"
+      "o=- 2722475918447876005 2 IN IP4 127.0.0.1\r\n"
+      "s=-\r\n"
+      "t=0 0\r\n"
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+      "c=IN IP4 0.0.0.0\r\n"
+      "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+      "a=mid:0\r\n"
+      "a=rtpmap:111 opus/48000/2\r\n"
+      "a=fmtp:111 minptime=20\r\n"
+      "a=maxptime:10\r\n";
+  SdpParseError error;
+  EXPECT_THAT(CreateSessionDescription(SdpType::kOffer, sdp, &error), IsNull());
+  EXPECT_THAT(error.description,
+              HasSubstr("maxptime (10) cannot be less than minptime (20)"));
 }
 
 }  // namespace

@@ -34,6 +34,7 @@ var gExceptionPaths = [
   "chrome://activity-stream/content/data/content/assets/tabs-top-zap-transparent.svg",
   "chrome://activity-stream/content/data/content/assets/euo-tab-orientation.svg",
   "chrome://activity-stream/content/data/content/assets/euo-chatbot.svg",
+  "chrome://browser/content/aiwindow/assets/agent-watch-kit.svg",
   "chrome://browser/content/assets/moz-vpn.svg",
   "chrome://browser/content/assets/vpn-logo.svg",
   "chrome://browser/content/asrouter/assets/fox-with-box-on-cloud.svg",
@@ -61,6 +62,9 @@ var gExceptionPaths = [
   // wasm is not available.
   "resource://pdf.js/web/wasm/openjpeg_nowasm_fallback.js",
   "resource://pdf.js/web/wasm/jbig2_nowasm_fallback.js",
+  "resource://pdf.js/web/wasm/hellbox_nowasm_fallback.js",
+  // Worker chunks loaded on demand using a dynamic import in pdf.worker.mjs.
+  "resource://pdf.js/build/pdf.worker.",
 
   // Exclude the form autofill path that has been moved out of the extensions to
   // toolkit, see bug 1691821.
@@ -69,7 +73,7 @@ var gExceptionPaths = [
   "resource://gre/localization/en-US/toolkit/formautofill",
 
   // Exclude all services-automation because they are used through webdriver
-  "resource://gre/modules/services-automation/",
+  "moz-src:///services/automation/",
 
   // Paths from this folder are constructed in NetErrorParent.sys.mjs based on
   // the type of cert or net error the user is encountering.
@@ -84,9 +88,6 @@ var gExceptionPaths = [
 
   // Nimbus schemas are referenced programmatically.
   "resource://nimbus/schemas/",
-
-  // Normandy schemas are referenced programmatically.
-  "resource://normandy/schemas/",
 
   // ASRouter schemas are referenced programmatically.
   "chrome://browser/content/asrouter/schemas/",
@@ -206,7 +207,7 @@ var allowlist = [
   // extensions/pref/autoconfig/src/nsReadConfig.cpp
   { file: "resource://gre/defaults/autoconfig/prefcalls.js" },
 
-  // browser/components/preferences/moreFromMozilla.js
+  // browser/components/preferences/config/moreFromMozilla.mjs
   // These files URLs are constructed programatically at run time.
   {
     file: "chrome://browser/content/preferences/more-from-mozilla-qr-code-simple.svg",
@@ -266,18 +267,6 @@ var allowlist = [
   // Bug 1494170
   // (The references to these files are dynamically generated, so the test can't
   // find the references)
-  {
-    file: "chrome://devtools/skin/images/aboutdebugging-firefox-aurora.svg",
-    isFromDevTools: true,
-  },
-  {
-    file: "chrome://devtools/skin/images/aboutdebugging-firefox-beta.svg",
-    isFromDevTools: true,
-  },
-  {
-    file: "chrome://devtools/skin/images/aboutdebugging-firefox-release.svg",
-    isFromDevTools: true,
-  },
   { file: "chrome://devtools/skin/images/next.svg", isFromDevTools: true },
 
   // Bug 1526672
@@ -348,6 +337,16 @@ var allowlist = [
   {
     file: "moz-src:///browser/components/backup/resources/CookiesBackupResource.sys.mjs",
   },
+
+  // Bug 2078933: The widget dashboard will generate widgets with this module.
+  {
+    file: "moz-src:///browser/components/widgets/WidgetGenerator.sys.mjs",
+  },
+
+  // Bug 2088187: Smart Window Digests will use this form for setup.
+  {
+    file: "chrome://browser/content/aiwindow/components/smartwindow-digest-form.mjs",
+  },
 ];
 
 if (AppConstants.NIGHTLY_BUILD) {
@@ -375,14 +374,6 @@ if (AppConstants.platform != "win") {
   allowlist.push({
     file: "resource://app/localization/en-US/browser/backgroundtasks/defaultagent.ftl",
   });
-
-  if (AppConstants.NIGHTLY_BUILD) {
-    // This path is refereneced in nsFxrCommandLineHandler.cpp, which is only
-    // compiled in Windows. This path is allowed so that non-Windows builds
-    // can access the FxR UI via --chrome rather than --fxr (which includes VR-
-    // specific functionality)
-    allowlist.push({ file: "chrome://fxr/content/fxrui.html" });
-  }
 }
 
 if (AppConstants.platform == "android") {
@@ -441,12 +432,6 @@ if (!isDevtools) {
   if (!AppConstants.ENABLE_WEBDRIVER) {
     allowlist.add("moz-src:///devtools/platform/jsdebugger.sys.mjs");
   }
-}
-
-if (AppConstants.MOZ_CODE_COVERAGE) {
-  allowlist.add(
-    "chrome://remote/content/marionette/PerTestCoverageUtils.sys.mjs"
-  );
 }
 
 const gInterestingCategories = new Set([
@@ -720,7 +705,7 @@ function parseCodeFile(fileUri) {
         }
 
         // This handles `import` lines which may be multi-line.
-        // We have an ESLint rule, `import/no-unassigned-import` which prevents
+        // We have an ESLint rule, `import-x/no-unassigned-import` which prevents
         // using bare `import "foo.js"`, so we don't need to handle that case
         // here.
         match = line.match(/from\W*['"](.*?)['"]/);

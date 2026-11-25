@@ -18,6 +18,9 @@ const { SpecialMessageActions } = ChromeUtils.importESModule(
 const { RemoteL10n } = ChromeUtils.importESModule(
   "resource:///modules/asrouter/RemoteL10n.sys.mjs"
 );
+const { OnboardingMessageProvider } = ChromeUtils.importESModule(
+  "resource:///modules/asrouter/OnboardingMessageProvider.sys.mjs"
+);
 
 // Helper to record impressions in ASRouter state when dispatching an IMPRESSION
 // action
@@ -84,7 +87,7 @@ add_task(async function show_and_send_telemetry() {
   );
 
   let primaryBtn = infobar.notification.buttonContainer.querySelector(
-    ".notification-button.primary"
+    ".notification-button[type='primary']"
   );
 
   Assert.ok(primaryBtn, "Has a primary button");
@@ -277,7 +280,7 @@ add_task(
     );
 
     let cancelButton = infobar.notification.querySelector(
-      ".footer-button:not(.primary)"
+      ".notification-button:not([type='primary'])"
     );
 
     Assert.ok(cancelButton, "Non-primary footer button exists");
@@ -410,29 +413,32 @@ add_task(async function test_specialMessageAction_onLinkClick() {
   handleStub.restore();
 });
 
-add_task(async function test_showInfoBarMessage_skipsPrivateWindow() {
-  const { PrivateBrowsingUtils } = ChromeUtils.importESModule(
-    "resource://gre/modules/PrivateBrowsingUtils.sys.mjs"
+add_task(async function test_showInfoBarMessage_privateWindow() {
+  let message = (await PanelTestProvider.getMessages()).find(
+    m => m.id === "INFOBAR_ACTION_86"
   );
-  sinon.stub(PrivateBrowsingUtils, "isWindowPrivate").returns(true);
+  Assert.ok(message.id, "Found the message");
 
-  let browser = BrowserWindowTracker.getTopWindow().gBrowser.selectedBrowser;
-  let dispatch = sinon.stub();
+  let privateWin = await BrowserTestUtils.openNewBrowserWindow({
+    private: true,
+  });
+  let dispatchStub = sinon.stub();
 
-  let result = await InfoBar.showInfoBarMessage(
-    browser,
-    {
-      id: "Private Win Test",
-      content: { type: "global", buttons: [], text: "t", dismissable: true },
-    },
-    dispatch
+  let infobar = await InfoBar.showInfoBarMessage(
+    privateWin.gBrowser.selectedBrowser,
+    message,
+    dispatchStub
   );
 
-  Assert.equal(result, null);
-  Assert.equal(dispatch.callCount, 0);
+  Assert.ok(infobar?.notification, "Infobar is shown in a private window");
+  Assert.equal(dispatchStub.firstCall.args[0].type, "IMPRESSION");
+  Assert.equal(dispatchStub.firstCall.args[0].data.id, message.id);
 
-  // Cleanup
-  sinon.restore();
+  await BrowserTestUtils.closeWindow(privateWin);
+  await TestUtils.waitForCondition(
+    () => !InfoBar._activeInfobar,
+    "InfoBar._activeInfobar should be cleared when the window unloads"
+  );
 });
 
 add_task(async function test_non_dismissable_button_action() {
@@ -1952,4 +1958,254 @@ add_task(async function test_remoteText_unresolvable_id() {
   );
 
   el.remove();
+});
+
+async function showWithInlineIcons(inline_icons, html) {
+  const win = BrowserWindowTracker.getTopWindow();
+  const browser = win.gBrowser.selectedBrowser;
+  sinon.stub(RemoteL10n, "formatLocalizableText").resolves(html);
+
+  const infobar = await InfoBar.showInfoBarMessage(
+    browser,
+    {
+      id: "TEST_INLINE_ICONS",
+      content: {
+        type: "global",
+        text: { string_id: "test-id" },
+        inline_icons,
+        buttons: [],
+      },
+    },
+    sinon.stub()
+  );
+  return infobar;
+}
+
+async function cleanUpInfobar(infobar) {
+  RemoteL10n.formatLocalizableText.restore();
+  infobar.notification.closeButton.click();
+  await TestUtils.waitForCondition(() => !InfoBar._activeInfobar);
+}
+
+add_task(async function test_inline_icons_resolves_placeholder() {
+  const infobar = await showWithInlineIcons(
+    { icon: { imageURL: "chrome://browser/skin/menu.svg" } },
+    'before <img data-l10n-name="icon"/> after'
+  );
+
+  const img = getMessageEl(infobar).querySelector("img");
+  Assert.ok(img, "Inline image is rendered");
+  Assert.equal(
+    img.getAttribute("src"),
+    "chrome://browser/skin/menu.svg",
+    "src comes from inline_icons"
+  );
+  Assert.ok(
+    img.classList.contains("inline-icon"),
+    "Image is given the inline-icon class"
+  );
+
+  await cleanUpInfobar(infobar);
+});
+
+add_task(async function test_inline_icons_drops_unmatched_placeholder() {
+  const infobar = await showWithInlineIcons(
+    { somethingElse: { imageURL: "chrome://browser/skin/menu.svg" } },
+    'before <img data-l10n-name="icon"/> after'
+  );
+
+  Assert.ok(
+    !getMessageEl(infobar).querySelector("img"),
+    "A placeholder with no matching entry is dropped"
+  );
+
+  await cleanUpInfobar(infobar);
+});
+
+add_task(async function test_inline_icons_prefers_rtl_url() {
+  const win = BrowserWindowTracker.getTopWindow();
+  win.document.documentElement.setAttribute("dir", "rtl");
+
+  const infobar = await showWithInlineIcons(
+    {
+      icon: {
+        imageURL: "chrome://browser/skin/menu.svg",
+        rtlImageURL: "chrome://browser/skin/back.svg",
+      },
+    },
+    'before <img data-l10n-name="icon"/> after'
+  );
+
+  Assert.equal(
+    getMessageEl(infobar).querySelector("img").getAttribute("src"),
+    "chrome://browser/skin/back.svg",
+    "rtlImageURL is used when the document is RTL"
+  );
+
+  await cleanUpInfobar(infobar);
+  win.document.documentElement.removeAttribute("dir");
+});
+
+add_task(async function test_inline_icons_falls_back_to_ltr_url_in_rtl() {
+  const win = BrowserWindowTracker.getTopWindow();
+  win.document.documentElement.setAttribute("dir", "rtl");
+
+  const infobar = await showWithInlineIcons(
+    { icon: { imageURL: "chrome://browser/skin/menu.svg" } },
+    'before <img data-l10n-name="icon"/> after'
+  );
+
+  Assert.equal(
+    getMessageEl(infobar).querySelector("img").getAttribute("src"),
+    "chrome://browser/skin/menu.svg",
+    "imageURL is used in RTL when no rtlImageURL is given"
+  );
+
+  await cleanUpInfobar(infobar);
+  win.document.documentElement.removeAttribute("dir");
+});
+
+add_task(async function test_restore_session_startup_infobar_renders() {
+  const message = (await OnboardingMessageProvider.getMessages()).find(
+    m => m.id === "RESTORE_SESSION_STARTUP_INFOBAR"
+  );
+  Assert.ok(message, "Found the restore session message");
+
+  // Showing the message runs its impression action, which writes the counter.
+  const PREF = "browser.startup.couldRestoreSession.count";
+  const savedCount = Services.prefs.getIntPref(PREF, 0);
+  registerCleanupFunction(() => Services.prefs.setIntPref(PREF, savedCount));
+
+  const win = BrowserWindowTracker.getTopWindow();
+  const browser = win.gBrowser.selectedBrowser;
+  const infobar = await InfoBar.showInfoBarMessage(
+    browser,
+    message,
+    sinon.stub()
+  );
+
+  const messageEl = getMessageEl(infobar);
+  Assert.ok(messageEl.textContent.trim(), "Fluent string resolved");
+  Assert.ok(
+    messageEl.querySelector("strong"),
+    "Markup in the string is rendered as elements"
+  );
+
+  const icon = messageEl.querySelector("img.inline-icon");
+  Assert.ok(icon, "Inline menu icon is rendered");
+  Assert.equal(
+    icon.getAttribute("src"),
+    "chrome://browser/skin/menu.svg",
+    "Inline icon resolves to the application menu icon"
+  );
+
+  infobar.notification.closeButton.click();
+  await TestUtils.waitForCondition(() => !InfoBar._activeInfobar);
+});
+
+add_task(async function test_PN_infobar_keeps_first_accepted_date() {
+  const message = {
+    id: "updated-privacy-notice-notification-infobar",
+    groups: ["cfr"],
+    template: "infobar",
+    content: {
+      impression_action: {
+        type: "MULTI_ACTION",
+        orderedExecution: true,
+        data: {
+          actions: [
+            {
+              type: "SET_PREF",
+              data: {
+                pref: {
+                  name: "termsofuse.firstAcceptedDate",
+                  value: {
+                    copyFromPref: "termsofuse.acceptedDate",
+                  },
+                },
+              },
+            },
+            {
+              type: "SET_PREF",
+              data: {
+                pref: {
+                  name: "termsofuse.acceptedDate",
+                  value: {
+                    timestamp: true,
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+      text: {
+        string_id: "existing-user-privacy-notice-update-message",
+        args: { where: "tabshifted" },
+      },
+      linkUrls: {
+        "privacy-notice-link": "https://www.mozilla.org/privacy/firefox/next/",
+      },
+      type: "tab",
+      buttons: [
+        {
+          label: {
+            string_id: "existing-user-tou-learn-more",
+          },
+          action: {
+            type: "OPEN_URL",
+            data: {
+              where: "tabshifted",
+              args: "https://www.mozilla.org/privacy/firefox/update/",
+            },
+            dismiss: false,
+          },
+          accessKey: "L",
+        },
+      ],
+    },
+    trigger: {
+      id: "defaultBrowserCheck",
+    },
+    frequency: {
+      lifetime: 1,
+    },
+    priority: 2,
+    targeting:
+      "('termsofuse.acceptedDate'|preferenceValue != '0') && (('termsofuse.acceptedDate'|preferenceValue * 1) < 1765972800000)",
+  };
+
+  const FIRST_ACCEPTED_PREF = "termsofuse.firstAcceptedDate";
+  const firstAcceptedDate = "1748736000000";
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      [FIRST_ACCEPTED_PREF, firstAcceptedDate],
+      ["termsofuse.acceptedDate", "1756684800000"],
+    ],
+  });
+
+  const browser = BrowserWindowTracker.getTopWindow().gBrowser.selectedBrowser;
+  let infobar = await InfoBar.showInfoBarMessage(
+    browser,
+    message,
+    sinon.stub()
+  );
+  Assert.equal(
+    Services.prefs.getStringPref(FIRST_ACCEPTED_PREF),
+    firstAcceptedDate,
+    "Existing firstAcceptedDate was not overwritten"
+  );
+  infobar.notification.closeButton.click();
+  await TestUtils.waitForCondition(() => !InfoBar._activeInfobar);
+
+  Services.prefs.clearUserPref(FIRST_ACCEPTED_PREF);
+  const acceptedDate = Services.prefs.getStringPref("termsofuse.acceptedDate");
+  infobar = await InfoBar.showInfoBarMessage(browser, message, sinon.stub());
+  Assert.equal(
+    Services.prefs.getStringPref(FIRST_ACCEPTED_PREF),
+    acceptedDate,
+    "Default firstAcceptedDate was copied from acceptedDate"
+  );
+  infobar.notification.closeButton.click();
+  await TestUtils.waitForCondition(() => !InfoBar._activeInfobar);
 });

@@ -97,7 +97,6 @@ add_task(async function test_process_ping() {
   Assert.ok(m.isPingAllowed("gpu"));
   Assert.ok(m.isPingAllowed("main"));
   Assert.ok(m.isPingAllowed("rdd"));
-  Assert.ok(m.isPingAllowed("socket"));
   Assert.ok(m.isPingAllowed("utility"));
   Assert.ok(m.isPingAllowed("vr"));
 });
@@ -502,6 +501,30 @@ add_task(async function test_sendUnsubmittedPings() {
   Assert.equal(store.crashesWithoutPingSubmissions().length, 0);
 });
 
+add_task(async function test_ping_submit_persistence() {
+  let m = await getManager();
+  m._disableGleanPing = false;
+
+  let id = await m.createDummyDump();
+
+  await m.addCrash(
+    m.processTypes[Ci.nsIXULRuntime.PROCESS_TYPE_CONTENT],
+    m.CRASH_TYPE_CRASH,
+    id,
+    DUMMY_DATE,
+    {}
+  );
+  Assert.ok(m._gleanPingPromise);
+  await m._gleanPingPromise;
+
+  // After the Glean ping promise resolves, we load the store from disk and
+  // ensure it was persisted in such a way that the submitted ping is marked as
+  // such.
+  let store = await m._getStore();
+  await store.load();
+  Assert.equal(store.crashesWithoutPingSubmissions().length, 0);
+});
+
 add_task(async function test_addCrash() {
   let m = await getManager();
 
@@ -556,12 +579,6 @@ add_task(async function test_addCrash() {
     "rdd-crash",
     DUMMY_DATE
   );
-  await m.addCrash(
-    m.processTypes[Ci.nsIXULRuntime.PROCESS_TYPE_SOCKET],
-    m.CRASH_TYPE_CRASH,
-    "socket-crash",
-    DUMMY_DATE
-  );
 
   await m.addCrash(
     m.processTypes[Ci.nsIXULRuntime.PROCESS_TYPE_DEFAULT],
@@ -577,7 +594,7 @@ add_task(async function test_addCrash() {
   );
 
   crashes = await m.getCrashes();
-  Assert.equal(crashes.length, 10);
+  Assert.equal(crashes.length, 9);
 
   let map = new Map(crashes.map(crash => [crash.id, crash]));
 
@@ -699,22 +716,6 @@ add_task(async function test_addCrash() {
   Assert.ok(
     crash.isOfType(
       m.processTypes[Ci.nsIXULRuntime.PROCESS_TYPE_RDD],
-      m.CRASH_TYPE_CRASH
-    )
-  );
-
-  crash = map.get("socket-crash");
-  Assert.ok(!!crash);
-  Assert.equal(crash.crashDate, DUMMY_DATE);
-  Assert.equal(
-    crash.type,
-    m.processTypes[Ci.nsIXULRuntime.PROCESS_TYPE_SOCKET] +
-      "-" +
-      m.CRASH_TYPE_CRASH
-  );
-  Assert.ok(
-    crash.isOfType(
-      m.processTypes[Ci.nsIXULRuntime.PROCESS_TYPE_SOCKET],
       m.CRASH_TYPE_CRASH
     )
   );
@@ -910,10 +911,6 @@ add_task(async function test_addCrashWrong() {
 });
 
 add_task(async function test_telemetryHistogram() {
-  let Telemetry = Services.telemetry;
-  let h = Telemetry.getKeyedHistogramById("PROCESS_CRASH_SUBMIT_ATTEMPT");
-  h.clear();
-  Telemetry.clearScalars();
   Services.fog.testResetFOG();
 
   let m = await getManager();
@@ -952,11 +949,11 @@ add_task(async function test_telemetryHistogram() {
   Assert.greater(keysCount, 2);
 
   // Check that we have the expected keys.
-  let snap = h.snapshot();
+  let snap = Glean.crash.submitAttempt.testGetValue();
   Assert.equal(
     Object.keys(snap).length,
     keysCount,
-    "Some crash types have not been recorded, see the list in Histograms.json"
+    "Some crash types have not been recorded"
   );
   Assert.deepEqual(
     Object.keys(snap).sort(),

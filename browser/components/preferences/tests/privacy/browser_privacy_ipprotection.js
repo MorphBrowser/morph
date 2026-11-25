@@ -543,31 +543,12 @@ add_task(async function test_autostart_checkboxes() {
   );
 });
 
-// Test that additional links exist
-add_task(async function test_additional_links() {
-  await setupVpnPrefs({
-    feature: true,
-    entitlementCache: '{"subscribed": false}',
-  });
-
-  await BrowserTestUtils.withNewTab(
-    { gBrowser, url: "about:preferences#privacy" },
-    async function (browser) {
-      let settingGroup = testSettingsGroupVisible(browser);
-      let ipProtectionLinks = settingGroup?.querySelector("#ipProtectionLinks");
-      is_element_visible(
-        ipProtectionLinks,
-        "VPN upgrade link section is shown"
-      );
-    }
-  );
-});
-
 // Test that the "not opted in" section is shown when entitlementCache is empty
 add_task(async function test_not_opted_in_section_visible_when_empty() {
   await setupVpnPrefs({
     feature: true,
     entitlementCache: "",
+    siteInclusions: false,
   });
 
   await BrowserTestUtils.withNewTab(
@@ -590,6 +571,39 @@ add_task(async function test_not_opted_in_section_visible_when_empty() {
     }
   );
 });
+
+// Tests that the not opted in section shows with the correct copy once site inclusions is enabled
+add_task(
+  async function test_not_opted_in_section_visible_with_site_inclusions_enabled() {
+    await setupVpnPrefs({
+      feature: true,
+      entitlementCache: "",
+      siteInclusions: true,
+    });
+
+    await BrowserTestUtils.withNewTab(
+      { gBrowser, url: "about:preferences#privacy" },
+      async function (browser) {
+        let settingGroup = testSettingsGroupVisible(browser);
+        let notOptedInSection = settingGroup?.querySelector(
+          "#ipProtectionNotOptedInV2"
+        );
+        is_element_visible(
+          notOptedInSection,
+          "Not opted in section version two is shown"
+        );
+
+        let getStartedButton = settingGroup?.querySelector(
+          "#getStartedButtonV2"
+        );
+        is_element_visible(
+          getStartedButton,
+          "Get started button version two is shown"
+        );
+      }
+    );
+  }
+);
 
 // Test that clicking the "Get started" button start the optin flow.
 add_task(async function test_get_started_button() {
@@ -775,6 +789,7 @@ add_task(async function test_not_opted_in_section_hidden_when_opted_in() {
   await setupVpnPrefs({
     feature: true,
     entitlementCache: '{"some":"data"}',
+    siteInclusions: false,
   });
 
   await BrowserTestUtils.withNewTab(
@@ -827,13 +842,6 @@ add_task(async function test_vpn_sections_hidden_when_not_opted_in() {
         autoStartSettings,
         "Autostart settings group is hidden when entitlementCache is empty"
       );
-
-      let ipProtectionLinks = settingGroup?.querySelector("#ipProtectionLinks");
-      is_element_hidden(
-        ipProtectionLinks,
-        "VPN links section is hidden when entitlementCache is empty"
-      );
-
       let bandwidthSettings = settingGroup?.querySelector(
         "#ipProtectionBandwidth"
       );
@@ -873,12 +881,6 @@ add_task(async function test_vpn_sections_shown_when_opted_in() {
       is_element_visible(
         autoStartSettings,
         "Autostart settings group is shown when entitlementCache has a value"
-      );
-
-      let ipProtectionLinks = settingGroup?.querySelector("#ipProtectionLinks");
-      is_element_visible(
-        ipProtectionLinks,
-        "VPN links section is shown when entitlementCache has a value"
       );
 
       let bandwidthSettings = settingGroup?.querySelector(
@@ -994,80 +996,6 @@ add_task(async function test_bandwidth_usage_sub_gb_precision_in_preferences() {
   );
   await SpecialPowers.popPrefEnv();
 });
-
-// Test that the upsell link is not visible if a user is considered subscribed
-add_task(async function test_vpn_ipProtectionLinks_hidden_if_subscribed() {
-  await setupVpnPrefs({
-    feature: true,
-    siteExceptions: true,
-    entitlementCache: '{"subscribed": true}',
-  });
-
-  await BrowserTestUtils.withNewTab(
-    { gBrowser, url: "about:preferences#privacy" },
-    async function (browser) {
-      let settingGroup = testSettingsGroupVisible(browser);
-
-      let ipProtectionLinks = settingGroup?.querySelector("#ipProtectionLinks");
-      is_element_hidden(
-        ipProtectionLinks,
-        "VPN links section is hidden when entitlementCache.subscribed is true"
-      );
-    }
-  );
-});
-
-// Test that the upsell link is not visible when upgradeNotAvailable is true.
-add_task(
-  async function test_vpn_ipProtectionLinks_hidden_if_upgrade_not_available() {
-    await setupVpnPrefs({
-      feature: true,
-      siteExceptions: true,
-      entitlementCache: '{"subscribed": false}',
-      upgradeNotAvailable: true,
-    });
-
-    await BrowserTestUtils.withNewTab(
-      { gBrowser, url: "about:preferences#privacy" },
-      async function (browser) {
-        let settingGroup = testSettingsGroupVisible(browser);
-        let ipProtectionLinks =
-          settingGroup?.querySelector("#ipProtectionLinks");
-        is_element_hidden(
-          ipProtectionLinks,
-          "VPN upgrade link section is hidden when upgradeNotAvailable is true"
-        );
-      }
-    );
-
-    await SpecialPowers.popPrefEnv();
-  }
-);
-
-// Test that we default to showing the upsell link if entitlement cache pref fails to be parsed.
-add_task(
-  async function test_vpn_ipProtectionLinks_malformed_entitlement_cache() {
-    await setupVpnPrefs({
-      feature: true,
-      siteExceptions: true,
-      entitlementCache: "invalid-json",
-    });
-
-    await BrowserTestUtils.withNewTab(
-      { gBrowser, url: "about:preferences#privacy" },
-      async function (browser) {
-        let settingGroup = testSettingsGroupVisible(browser);
-
-        let ipProtectionLinks =
-          settingGroup?.querySelector("#ipProtectionLinks");
-        is_element_visible(
-          ipProtectionLinks,
-          "VPN links section is shown as a fallback when entitlementCache cannot be parsed"
-        );
-      }
-    );
-  }
-);
 
 // Test the site exclusions section shows when site inclusions is false
 add_task(async function test_site_rules_hidden_without_inclusions_feature() {

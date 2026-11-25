@@ -19,6 +19,9 @@ user_pref("browser.sessionstore.resume_from_crash", false);
 // Don't show the Bookmarks Toolbar on any tab (the above pref that
 // disables the New Tab Page ends up showing the toolbar on about:blank).
 user_pref("browser.toolbars.bookmarks.visibility", "never");
+// Accept the form resubmission confirmation instead of prompting, so tests can
+// reload the result of a POST navigation.
+user_pref("dom.confirm_repost.testing.always_accept", true);
 // Expose TestUtils interface
 user_pref("dom.testing.testutils.enabled", true);
 // Only install add-ons from the profile and the application scope
@@ -77,6 +80,16 @@ user_pref("widget.gtk.theme-scrollbar-colors.enabled", false);
 // (only Android right now), might get a snapshot at different times during the
 // animation.
 user_pref("ui.scrollbarFadeDuration", 0);
+// Disable the fullscreen warning ("<host> is now full screen"). It animates in
+// and out when a page enters fullscreen, so reftests that take their screenshot
+// via drawWindow can otherwise capture it at different points in its animation.
+user_pref("full-screen-api.warning.timeout", 0);
+user_pref("full-screen-api.keyboardlock-warning.timeout", 0);
+// Keep the link-target status panel ("overlink", shown at the bottom of the
+// window on link hover) from appearing: a reftest that synthetically hovers a
+// link would otherwise have drawWindow capture it. There is no disable pref, so
+// use a one-hour delay, far longer than any test, so it never shows.
+user_pref("browser.overlink-delay", 3600000);
 user_pref("media.block-autoplay-until-in-foreground", false);
 // Force a light color scheme unless explicitly overridden by pref.
 user_pref("layout.css.prefers-color-scheme.content-override", 1);

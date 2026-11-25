@@ -6,7 +6,6 @@ package org.mozilla.fenix.ui.robots
 
 import android.util.Log
 import androidx.compose.ui.test.ComposeTimeoutException
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
@@ -45,7 +44,6 @@ class SettingsTranslationsRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "clickLanguageToDownload: Clicked the $languageToDownload language download button")
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyDownloadedLanguage(downloadedLanguage: String) {
         Log.i(TAG, "verifyDownloadedLanguage: Waiting until $downloadedLanguage is downloaded")
         composeTestRule.waitUntil(timeoutMillis = 30_000) {
@@ -121,17 +119,20 @@ class SettingsTranslationsRobot(private val composeTestRule: ComposeTestRule) {
 
     fun clickCancelDeleteNeverTranslateThisSiteDialog() {
         Log.i(TAG, "clickCancelDeleteNeverTranslateThisSiteDialog: Trying to click the \"Cancel\" dialog button")
-        composeTestRule.onNodeWithText(getStringResource(R.string.dialog_delete_negative)).performClick()
+        composeTestRule
+            .onNodeWithText(getStringResource(R.string.never_translate_site_dialog_cancel_preference))
+            .performClick()
         Log.i(TAG, "clickCancelDeleteNeverTranslateThisSiteDialog: Clicked the \"Cancel\" dialog button")
     }
 
     fun clickConfirmDeleteNeverTranslateThisSiteDialog() {
         Log.i(TAG, "clickConfirmDeleteNeverTranslateThisSiteDialog: Trying to click the \"Delete\" dialog button")
-        composeTestRule.onNodeWithText(getStringResource(R.string.dialog_delete_positive)).performClick()
+        composeTestRule
+            .onNodeWithText(getStringResource(R.string.never_translate_site_dialog_confirm_delete_preference))
+            .performClick()
         Log.i(TAG, "clickConfirmDeleteNeverTranslateThisSiteDialog: Clicked the \"Delete\" dialog button")
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyAlwaysAutomaticallyTranslateForLanguage(languageToTranslate: String) {
         for (i in 1..RETRY_COUNT) {
             Log.i(TAG, "verifyAlwaysAutomaticallyTranslateForLanguage: Started try #$i")
@@ -182,7 +183,6 @@ class SettingsTranslationsRobot(private val composeTestRule: ComposeTestRule) {
         )
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyNeverAutomaticallyTranslateForLanguage(languageToTranslate: String) {
         for (i in 1..RETRY_COUNT) {
             Log.i(TAG, "verifyNeverAutomaticallyTranslateForLanguage: Started try #$i")

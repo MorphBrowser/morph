@@ -9,7 +9,7 @@ use super::token;
 use crate::bso::{IncomingBso, IncomingEncryptedBso, OutgoingBso, OutgoingEncryptedBso};
 use crate::engine::{CollectionPost, CollectionRequest};
 use crate::error::{self, Error, ErrorResponse, debug, info, trace, warn};
-use crate::record_types::MetaGlobalRecord;
+use crate::record_types::{MetaGlobalRecord, SyncIdsRecord};
 use crate::{CollectionName, Guid, ServerTimestamp};
 use serde_json::Value;
 use std::str::FromStr;
@@ -133,11 +133,20 @@ pub trait SetupStorageClient {
     fn fetch_info_collections(&self) -> error::Result<Sync15ClientResponse<InfoCollections>>;
     fn fetch_meta_global(&self) -> error::Result<Sync15ClientResponse<MetaGlobalRecord>>;
     fn fetch_crypto_keys(&self) -> error::Result<Sync15ClientResponse<IncomingEncryptedBso>>;
+    /// Fetches `meta/syncids`. A successful response with `None` means the
+    /// payload couldn't be parsed.
+    fn fetch_sync_ids(&self) -> error::Result<Sync15ClientResponse<Option<SyncIdsRecord>>>;
 
     fn put_meta_global(
         &self,
         xius: ServerTimestamp,
         global: &MetaGlobalRecord,
+    ) -> error::Result<ServerTimestamp>;
+    /// Only used with EngineChoicesModel::Device
+    fn put_sync_ids(
+        &self,
+        xius: ServerTimestamp,
+        sync_ids: &SyncIdsRecord,
     ) -> error::Result<ServerTimestamp>;
     fn put_crypto_keys(
         &self,
@@ -243,6 +252,30 @@ impl SetupStorageClient for Sync15StorageClient {
         self.relative_storage_request(Method::Get, "storage/crypto/keys")
     }
 
+    fn fetch_sync_ids(&self) -> error::Result<Sync15ClientResponse<Option<SyncIdsRecord>>> {
+        let got: Sync15ClientResponse<IncomingBso> =
+            self.relative_storage_request(Method::Get, "storage/meta/syncids")?;
+        Ok(match got {
+            Sync15ClientResponse::Success {
+                record,
+                last_modified,
+                route,
+                status,
+            } => {
+                // Unlike meta/global, a record we can't parse is not fatal - it
+                // just means we've nothing to adopt.
+                let record = SyncIdsRecord::from_payload(&record.payload);
+                Sync15ClientResponse::Success {
+                    record,
+                    last_modified,
+                    route,
+                    status,
+                }
+            }
+            Sync15ClientResponse::Error(e) => Sync15ClientResponse::Error(e),
+        })
+    }
+
     fn put_meta_global(
         &self,
         xius: ServerTimestamp,
@@ -250,6 +283,15 @@ impl SetupStorageClient for Sync15StorageClient {
     ) -> error::Result<ServerTimestamp> {
         let bso = OutMetaGlobalBso::new(Guid::new("global").into(), global)?;
         self.put("storage/meta/global", xius, &bso)
+    }
+
+    fn put_sync_ids(
+        &self,
+        xius: ServerTimestamp,
+        sync_ids: &SyncIdsRecord,
+    ) -> error::Result<ServerTimestamp> {
+        let bso = OutgoingBso::new(Guid::new("syncids").into(), sync_ids)?;
+        self.put("storage/meta/syncids", xius, &bso)
     }
 
     fn put_crypto_keys(

@@ -4,10 +4,16 @@
 
 #include "WebTransportParent.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "Http3WebTransportSession.h"
+#include "mozilla/AutoRestore.h"
+#include "mozilla/ErrorResult.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/dom/ClientInfo.h"
+#include "mozilla/dom/InternalHeaders.h"
 #include "mozilla/dom/WebTransportBinding.h"
 #include "mozilla/dom/WebTransportLog.h"
 #include "mozilla/ipc/BackgroundParent.h"
@@ -37,10 +43,15 @@ void WebTransportParent::Create(
     const uint64_t& aBrowsingContextID, const IPCClientInfo& aClientInfo,
     const bool& aDedicated, const bool& aRequireUnreliable,
     const uint32_t& aCongestionControl, nsTArray<nsString>&& aProtocols,
+    nsTArray<WebTransportHeader>&& aHeaders,
     nsTArray<WebTransportHash>&& aServerCertHashes,
+    const mozilla::Maybe<uint16_t>&
+        aAnticipatedConcurrentIncomingUnidirectionalStreams,
+    const mozilla::Maybe<uint16_t>&
+        aAnticipatedConcurrentIncomingBidirectionalStreams,
     Endpoint<PWebTransportParent>&& aParentEndpoint,
-    std::function<void(std::tuple<const nsresult&, const uint8_t&>)>&&
-        aResolver) {
+    std::function<void(std::tuple<const nsresult&, const uint8_t&,
+                                  const uint64_t&>)>&& aResolver) {
   LOG(("Created WebTransportParent %p %s %s %s congestion=%s", this,
        NS_ConvertUTF16toUTF8(aURL).get(),
        aDedicated ? "Dedicated" : "AllowPooling",
@@ -54,9 +65,8 @@ void WebTransportParent::Create(
                   : "Default")));
 
   if (!aParentEndpoint.IsValid()) {
-    aResolver(ResolveType(
-        NS_ERROR_INVALID_ARG,
-        static_cast<uint8_t>(WebTransportReliabilityMode::Pending)));
+    CallResolver(aResolver, NS_ERROR_INVALID_ARG,
+                 static_cast<uint8_t>(WebTransportReliabilityMode::Pending), 0);
     return;
   }
 
@@ -64,8 +74,8 @@ void WebTransportParent::Create(
   nsresult rv =
       mozilla::net::gIOService->NewWebTransport(getter_AddRefs(mWebTransport));
   if (NS_FAILED(rv)) {
-    aResolver(ResolveType(
-        rv, static_cast<uint8_t>(WebTransportReliabilityMode::Pending)));
+    CallResolver(aResolver, rv,
+                 static_cast<uint8_t>(WebTransportReliabilityMode::Pending), 0);
     return;
   }
 
@@ -74,9 +84,8 @@ void WebTransportParent::Create(
   nsCOMPtr<nsIURI> uri;
   rv = NS_NewURI(getter_AddRefs(uri), aURL);
   if (NS_FAILED(rv)) {
-    aResolver(ResolveType(
-        NS_ERROR_INVALID_ARG,
-        static_cast<uint8_t>(WebTransportReliabilityMode::Pending)));
+    CallResolver(aResolver, rv,
+                 static_cast<uint8_t>(WebTransportReliabilityMode::Pending), 0);
     return;
   }
 
@@ -87,6 +96,33 @@ void WebTransportParent::Create(
         new net::WebTransportHash(alg, hash.value()));
   }
 
+  // The content process has already applied these restrictions, but it is
+  // not trusted.
+  nsTArray<nsCString> headerNames;
+  nsTArray<nsCString> headerValues;
+  RefPtr<InternalHeaders> requestHeaders =
+      new InternalHeaders(HeadersGuardEnum::Request);
+  for (const auto& header : aHeaders) {
+    IgnoredErrorResult erv;
+    if (header.name().LowerCaseEqualsLiteral("wt-available-protocols")) {
+      erv.ThrowTypeError("wt-available-protocols is reserved");
+    } else {
+      requestHeaders->Append(header.name(), header.value(), erv);
+    }
+    if (erv.Failed()) {
+      CallResolver(aResolver, NS_ERROR_INVALID_ARG,
+                   static_cast<uint8_t>(WebTransportReliabilityMode::Pending),
+                   0);
+      return;
+    }
+  }
+  nsTArray<InternalHeaders::Entry> headerEntries;
+  requestHeaders->GetEntries(headerEntries);
+  for (const auto& entry : headerEntries) {
+    headerNames.AppendElement(entry.mName);
+    headerValues.AppendElement(entry.mValue);
+  }
+
   nsCOMPtr<nsIRunnable> r = NS_NewRunnableFunction(
       "WebTransport AsyncConnect",
       [self = RefPtr{this}, uri = std::move(uri),
@@ -94,13 +130,21 @@ void WebTransportParent::Create(
        nsServerCertHashes = std::move(nsServerCertHashes),
        principal = RefPtr{aPrincipal}, browsingContextID = aBrowsingContextID,
        flags = nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
-       clientInfo = ClientInfo{aClientInfo},
-       protocols = std::move(aProtocols)] {
+       clientInfo = ClientInfo{aClientInfo}, protocols = std::move(aProtocols),
+       headerNames = std::move(headerNames),
+       headerValues = std::move(headerValues),
+       anticipatedUni = aAnticipatedConcurrentIncomingUnidirectionalStreams,
+       anticipatedBidi = aAnticipatedConcurrentIncomingBidirectionalStreams] {
         LOG(("WebTransport %p AsyncConnect", self.get()));
-        if (NS_FAILED(self->mWebTransport->AsyncConnectWithClient(
-                uri, dedicated, std::move(nsServerCertHashes), principal,
-                browsingContextID, flags, self, Some(clientInfo), protocols,
-                nsIWebTransport::HTTPVersion::h3))) {
+        // 0 and "unset" are equivalent downstream: the limit is raise-only.
+        uint16_t uniStreams = anticipatedUni.valueOr(0);
+        uint16_t bidiStreams = anticipatedBidi.valueOr(0);
+        nsresult rv = self->mWebTransport->AsyncConnectWithClient(
+            uri, dedicated, std::move(nsServerCertHashes), principal,
+            browsingContextID, flags, self, Some(clientInfo), protocols,
+            headerNames, headerValues, nsIWebTransport::HTTPVersion::h3,
+            uniStreams, bidiStreams);
+        if (NS_FAILED(rv)) {
           LOG(("AsyncConnect failure; we should get OnSessionClosed"));
         }
       });
@@ -142,10 +186,10 @@ void WebTransportParent::Create(
                 resolver = std::move(p->mResolver);
               }
               if (resolver) {
-                resolver(
-                    ResolveType(aValue.RejectValue(),
-                                static_cast<uint8_t>(
-                                    WebTransportReliabilityMode::Pending)));
+                CallResolver(
+                    resolver, aValue.RejectValue(),
+                    static_cast<uint8_t>(WebTransportReliabilityMode::Pending),
+                    0);
               }
             }
           });
@@ -153,6 +197,33 @@ void WebTransportParent::Create(
 
 void WebTransportParent::ActorDestroy(ActorDestroyReason aWhy) {
   LOG(("ActorDestroy WebTransportParent %d", aWhy));
+  // Settling any still-pending promises (createXStream, atomicWrite,
+  // ready/closed) on unexpected teardown happens on the child side, in
+  // WebTransportChild::ActorDestroy() calling CloseAll() directly:
+  // IProtocol::ActorDisconnected() marks the actor destroyed before calling
+  // ActorDestroy(), so CanSend() is already false here and a SendCloseAll()
+  // call from this side would always be a no-op.
+
+  // Before mWebTransport is retargeted to the socket thread, the
+  // QueryNegotiatedProtocol runnable from OnSessionReady() closes it instead.
+  if (mRetargeted) {
+    CloseSessionForDestroyedActor();
+  }
+}
+
+void WebTransportParent::CloseSessionForDestroyedActor() {
+  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+  MOZ_ASSERT(mRetargeted);
+  {
+    MutexAutoLock lock(mMutex);
+    if (mClosed) {
+      return;
+    }
+    mClosed.Flip();
+    mExecuteAfterResolverCallback = nullptr;
+  }
+  LOG(("Closing session %p for destroyed actor", this));
+  mWebTransport->CloseSession(0, ""_ns);
 }
 
 // We may not receive this response if the child side is destroyed without
@@ -175,6 +246,7 @@ IPCResult WebTransportParent::RecvClose(const uint32_t& aCode,
 
     WebTransportStatsData statsData;
     if (proxy->CloseSessionAndGetStats(aCode, aReason, statsData)) {
+      AddParentExpiredOutgoing(statsData);
       stats = Some(statsData);
       LOG(("Retrieved stats from close: bytesSent=%llu",
            (unsigned long long)statsData.bytesSent()));
@@ -206,19 +278,58 @@ IPCResult WebTransportParent::RecvClose(const uint32_t& aCode,
   return IPC_OK();
 }
 
+namespace {
+// Each NS_AsyncCopy() of one stream holds a reference; the stream is removed
+// from the callback maps when the last of them completes (on the socket
+// thread).
+class StreamCopies final {
+ public:
+  NS_INLINE_DECL_REFCOUNTING(StreamCopies)
+
+  StreamCopies(WebTransportParent* aParent, uint64_t aStreamId)
+      : mParent(aParent), mStreamId(aStreamId) {}
+
+  nsresult AsyncCopy(nsIInputStream* aSource, nsIOutputStream* aSink,
+                     nsIEventTarget* aTarget, nsAsyncCopyMode aMode,
+                     nsISupports** aCopierCtx = nullptr) {
+    RefPtr<StreamCopies> self(this);
+    nsresult rv = NS_AsyncCopy(aSource, aSink, aTarget, aMode,
+                               mozilla::ipc::kDefaultDataPipeCapacity, CopyDone,
+                               this, true, true, aCopierCtx);
+    if (NS_SUCCEEDED(rv)) {
+      self.forget().leak();
+    }
+    return rv;
+  }
+
+ private:
+  ~StreamCopies() { mParent->RemoveFinishedStream(mStreamId); }
+
+  static void CopyDone(void* aClosure, nsresult) {
+    RefPtr<StreamCopies> copies =
+        dont_AddRef(static_cast<StreamCopies*>(aClosure));
+  }
+
+  const RefPtr<WebTransportParent> mParent;
+  const uint64_t mStreamId;
+};
+}  // namespace
+
 class BidiReceiveStream : public nsIWebTransportStreamCallback {
  public:
   NS_DECL_THREADSAFE_ISUPPORTS
   NS_DECL_NSIWEBTRANSPORTSTREAMCALLBACK
 
   BidiReceiveStream(
+      WebTransportParent* aParent,
       WebTransportParent::CreateBidirectionalStreamResolver&& aResolver,
       std::function<
           void(uint64_t, WebTransportParent::OnResetOrStopSendingCallback&&,
                nsIWebTransportBidirectionalStream* aStream)>&& aStreamCallback,
       int64_t aSendOrder, Maybe<uint64_t> aSendGroupId,
       nsCOMPtr<nsISerialEventTarget>& aSocketThread)
-      : mResolver(std::move(aResolver)),
+      : mParent(aParent),
+        mResolver(std::move(aResolver)),
         mStreamCallback(std::move(aStreamCallback)),
         mSendOrder(aSendOrder),
         mSendGroupId(aSendGroupId),
@@ -226,6 +337,7 @@ class BidiReceiveStream : public nsIWebTransportStreamCallback {
 
  private:
   virtual ~BidiReceiveStream() = default;
+  RefPtr<WebTransportParent> mParent;
   WebTransportParent::CreateBidirectionalStreamResolver mResolver;
   std::function<void(uint64_t,
                      WebTransportParent::OnResetOrStopSendingCallback&&,
@@ -242,13 +354,15 @@ class UniReceiveStream : public nsIWebTransportStreamCallback {
   NS_DECL_NSIWEBTRANSPORTSTREAMCALLBACK
 
   UniReceiveStream(
+      WebTransportParent* aParent,
       WebTransportParent::CreateUnidirectionalStreamResolver&& aResolver,
       std::function<void(uint64_t,
                          WebTransportParent::OnResetOrStopSendingCallback&&,
                          nsIWebTransportSendStream* aStream)>&& aStreamCallback,
       int64_t aSendOrder, Maybe<uint64_t> aSendGroupId,
       nsCOMPtr<nsISerialEventTarget>& aSocketThread)
-      : mResolver(std::move(aResolver)),
+      : mParent(aParent),
+        mResolver(std::move(aResolver)),
         mStreamCallback(std::move(aStreamCallback)),
         mSendOrder(aSendOrder),
         mSendGroupId(aSendGroupId),
@@ -256,6 +370,7 @@ class UniReceiveStream : public nsIWebTransportStreamCallback {
 
  private:
   virtual ~UniReceiveStream() = default;
+  RefPtr<WebTransportParent> mParent;
   WebTransportParent::CreateUnidirectionalStreamResolver mResolver;
   std::function<void(uint64_t,
                      WebTransportParent::OnResetOrStopSendingCallback&&,
@@ -292,14 +407,15 @@ NS_IMETHODIMP BidiReceiveStream::OnBidirectionalStreamReady(
 
   uint64_t id;
   (void)aStream->GetStreamId(&id);
+  auto copies = MakeRefPtr<StreamCopies>(mParent, id);
   nsCOMPtr<nsIAsyncInputStream> inputStream;
   aStream->GetInputStream(getter_AddRefs(inputStream));
   MOZ_ASSERT(inputStream);
   nsCOMPtr<nsISupports> inputCopyContext;
-  rv = NS_AsyncCopy(inputStream, inputsender, mSocketThread,
-                    NS_ASYNCCOPY_VIA_WRITESEGMENTS,  // can we use READSEGMENTS?
-                    mozilla::ipc::kDefaultDataPipeCapacity, nullptr, nullptr,
-                    true, true, getter_AddRefs(inputCopyContext));
+  rv = copies->AsyncCopy(
+      inputStream, inputsender, mSocketThread,
+      NS_ASYNCCOPY_VIA_WRITESEGMENTS,  // can we use READSEGMENTS?
+      getter_AddRefs(inputCopyContext));
   if (NS_WARN_IF(NS_FAILED(rv))) {
     mResolver(rv);
     return rv;
@@ -319,10 +435,9 @@ NS_IMETHODIMP BidiReceiveStream::OnBidirectionalStreamReady(
   aStream->GetOutputStream(getter_AddRefs(outputStream));
   MOZ_ASSERT(outputStream);
   nsCOMPtr<nsISupports> outputCopyContext;
-  rv = NS_AsyncCopy(outputreceiver, outputStream, mSocketThread,
-                    NS_ASYNCCOPY_VIA_READSEGMENTS,
-                    mozilla::ipc::kDefaultDataPipeCapacity, nullptr, nullptr,
-                    true, true, getter_AddRefs(outputCopyContext));
+  rv = copies->AsyncCopy(outputreceiver, outputStream, mSocketThread,
+                         NS_ASYNCCOPY_VIA_READSEGMENTS,
+                         getter_AddRefs(outputCopyContext));
   if (NS_WARN_IF(NS_FAILED(rv))) {
     mResolver(rv);
     return rv;
@@ -331,24 +446,28 @@ NS_IMETHODIMP BidiReceiveStream::OnBidirectionalStreamReady(
   LOG(("Returning BidirectionalStream pipe to content"));
   mResolver(BidirectionalStream(id, inputreceiver, outputsender));
 
-  auto onResetOrStopSending =
-      [inputCopyContext(inputCopyContext), outputCopyContext(outputCopyContext),
-       inputsender(inputsender),
-       outputreceiver(outputreceiver)](nsresult aError) {
-        LOG(("onResetOrStopSending err=%x", static_cast<uint32_t>(aError)));
-        NS_CancelAsyncCopy(inputCopyContext, aError);
-        inputsender->CloseWithStatus(aError);
-        NS_CancelAsyncCopy(outputCopyContext, aError);
-        outputreceiver->CloseWithStatus(aError);
-      };
+  auto onResetOrStopSending = [inputCopyContext(inputCopyContext),
+                               inputsender(inputsender)](nsresult aError) {
+    LOG(("onReset err=%x", static_cast<uint32_t>(aError)));
+    NS_CancelAsyncCopy(inputCopyContext, aError);
+    inputsender->CloseWithStatus(aError);
+  };
+
+  auto onStopSending = [outputCopyContext(outputCopyContext),
+                        outputreceiver(outputreceiver)](nsresult aError) {
+    LOG(("onStopSending err=%x", static_cast<uint32_t>(aError)));
+    NS_CancelAsyncCopy(outputCopyContext, aError);
+    outputreceiver->CloseWithStatus(aError);
+  };
 
   // Store onResetOrStopSending in WebTransportParent::mBidiStreamCallbackMap
   // and onResetOrStopSending will be called when a stream receives STOP_SENDING
   // or RESET.
-  mStreamCallback(id,
-                  WebTransportParent::OnResetOrStopSendingCallback(
-                      std::move(onResetOrStopSending)),
-                  aStream);
+  mStreamCallback(
+      id,
+      WebTransportParent::OnResetOrStopSendingCallback(
+          std::move(onResetOrStopSending), std::move(onStopSending)),
+      aStream);
   return NS_OK;
 }
 
@@ -384,10 +503,10 @@ UniReceiveStream::OnUnidirectionalStreamReady(
   aStream->GetOutputStream(getter_AddRefs(outputStream));
   MOZ_ASSERT(outputStream);
   nsCOMPtr<nsISupports> copyContext;
-  rv = NS_AsyncCopy(receiver, outputStream, mSocketThread,
-                    NS_ASYNCCOPY_VIA_READSEGMENTS,
-                    mozilla::ipc::kDefaultDataPipeCapacity, nullptr, nullptr,
-                    true, true, getter_AddRefs(copyContext));
+  auto copies = MakeRefPtr<StreamCopies>(mParent, id);
+  rv = copies->AsyncCopy(receiver, outputStream, mSocketThread,
+                         NS_ASYNCCOPY_VIA_READSEGMENTS,
+                         getter_AddRefs(copyContext));
   if (NS_WARN_IF(NS_FAILED(rv))) {
     mResolver(rv);
     return rv;
@@ -461,36 +580,67 @@ IPCResult WebTransportParent::RecvSetSendGroup(uint64_t aStreamId,
   return IPC_OK();
 }
 
-IPCResult WebTransportParent::RecvExportKeyingMaterial(
-    nsTArray<uint8_t>&& aLabel, Maybe<nsTArray<uint8_t>>&& aContext,
-    ExportKeyingMaterialResolver&& aResolver) {
-  LOG(("ExportKeyingMaterial for %p, label length=%zu, has context=%d", this,
-       aLabel.Length(), aContext.isSome()));
+IPCResult
+WebTransportParent::RecvSetAnticipatedConcurrentIncomingUnidirectionalStreams(
+    const Maybe<uint16_t>& aValue) {
+  LOG(("Set anticipatedConcurrentIncomingUnidirectionalStreams=%s",
+       aValue.isSome() ? nsPrintfCString("%u", aValue.value()).get() : "null"));
+  if (mWebTransport) {
+    mWebTransport->SetAnticipatedConcurrentIncomingUnidirectionalStreams(
+        aValue.valueOr(0));
+  }
+  return IPC_OK();
+}
 
-  if (!mWebTransport) {
-    aResolver(nsTArray<uint8_t>());
+IPCResult
+WebTransportParent::RecvSetAnticipatedConcurrentIncomingBidirectionalStreams(
+    const Maybe<uint16_t>& aValue) {
+  LOG(("Set anticipatedConcurrentIncomingBidirectionalStreams=%s",
+       aValue.isSome() ? nsPrintfCString("%u", aValue.value()).get() : "null"));
+  if (mWebTransport) {
+    mWebTransport->SetAnticipatedConcurrentIncomingBidirectionalStreams(
+        aValue.valueOr(0));
+  }
+  return IPC_OK();
+}
+
+IPCResult WebTransportParent::RecvExportKeyingMaterial(
+    nsTArray<uint8_t>&& aLabel, nsTArray<uint8_t>&& aContext,
+    uint32_t aOutputLength, ExportKeyingMaterialResolver&& aResolver) {
+  LOG(
+      ("ExportKeyingMaterial for %p, label length=%zu, context length=%zu, "
+       "outputLength=%u",
+       this, aLabel.Length(), aContext.Length(), aOutputLength));
+
+  // aOutputLength is content-process-controlled. The 1..4096 bound is also
+  // enforced in the DOM binding (WebTransport::ExportKeyingMaterial), but
+  // that check cannot be trusted here: an IPC argument must be re-validated
+  // at the trust boundary before being used to size an allocation.
+  if (aOutputLength == 0 ||
+      aOutputLength > nsIWebTransport::MAX_KEYING_MATERIAL_LENGTH) {
+    aResolver(Nothing());
     return IPC_OK();
   }
 
-  nsTArray<uint8_t> context;
-  if (aContext.isSome()) {
-    context = std::move(aContext.ref());
+  if (!mWebTransport) {
+    aResolver(Nothing());
+    return IPC_OK();
   }
 
   nsTArray<uint8_t> keyingMaterial;
-  nsresult rv =
-      mWebTransport->ExportKeyingMaterial(aLabel, context, keyingMaterial);
+  nsresult rv = mWebTransport->ExportKeyingMaterial(
+      aLabel, aContext, aOutputLength, keyingMaterial);
 
   if (NS_FAILED(rv)) {
     LOG(("ExportKeyingMaterial failed with rv=0x%08x",
          static_cast<uint32_t>(rv)));
-    aResolver(nsTArray<uint8_t>());
+    aResolver(Nothing());
     return IPC_OK();
   }
 
   LOG(("ExportKeyingMaterial succeeded, returning %zu bytes",
        keyingMaterial.Length()));
-  aResolver(std::move(keyingMaterial));
+  aResolver(Some(std::move(keyingMaterial)));
   return IPC_OK();
 }
 
@@ -554,7 +704,7 @@ IPCResult WebTransportParent::RecvCreateUnidirectionalStream(
                            std::move(aCallback), aStream});
       };
   RefPtr<UniReceiveStream> callback =
-      new UniReceiveStream(std::move(aResolver), std::move(streamCb),
+      new UniReceiveStream(this, std::move(aResolver), std::move(streamCb),
                            aSendOrder, aSendGroupId, mSocketThread);
   nsresult rv;
   rv = mWebTransport->CreateOutgoingUnidirectionalStream(callback);
@@ -581,7 +731,7 @@ IPCResult WebTransportParent::RecvCreateBidirectionalStream(
                            std::move(aCallback), aStream});
       };
   RefPtr<BidiReceiveStream> callback =
-      new BidiReceiveStream(std::move(aResolver), std::move(streamCb),
+      new BidiReceiveStream(this, std::move(aResolver), std::move(streamCb),
                             aSendOrder, aSendGroupId, mSocketThread);
   nsresult rv;
   rv = mWebTransport->CreateOutgoingBidirectionalStream(callback);
@@ -604,6 +754,8 @@ WebTransportParent::OnSessionReady(uint64_t aSessionId) {
 
   mSessionReady = true;
   mSessionId = aSessionId;
+  mDatagramCreditGranter.SetDatagramPrefixBytes(
+      DatagramPrefixBytes(aSessionId));
 
   // Retarget to socket thread. After this, WebTransportParent and
   // |mWebTransport| should be only accessed on the socket thread.
@@ -614,9 +766,10 @@ WebTransportParent::OnSessionReady(uint64_t aSessionId) {
         [self = RefPtr{this}, result = rv] {
           MutexAutoLock lock(self->mMutex);
           if (!self->mClosed && self->mResolver) {
-            self->mResolver(ResolveType(
-                result, static_cast<uint8_t>(
-                            WebTransportReliabilityMode::Supports_unreliable)));
+            CallResolver(self->mResolver, result,
+                         static_cast<uint8_t>(
+                             WebTransportReliabilityMode::Supports_unreliable),
+                         0);
             self->mResolver = nullptr;
           }
         }));
@@ -625,25 +778,51 @@ WebTransportParent::OnSessionReady(uint64_t aSessionId) {
 
   mSocketThread->Dispatch(NS_NewRunnableFunction(
       "WebTransportParent::QueryNegotiatedProtocol", [self = RefPtr{this}] {
+        self->mRetargeted = true;
+        if (!self->CanSend()) {
+          self->CloseSessionForDestroyedActor();
+          return;
+        }
+
         nsAutoCString subprotocol;
         if (self->mWebTransport) {
           self->mWebTransport->GetNegotiatedProtocol(subprotocol);
           LOG(("Negotiated protocol: %s", subprotocol.get()));
           if (self->CanSend()) {
-            (void)self->SendNegotiatedProtocol(subprotocol);
+            nsTArray<nsCString> names;
+            nsTArray<nsCString> values;
+            self->mWebTransport->GetResponseHeaders(names, values);
+            nsTArray<WebTransportHeader> headers(names.Length());
+            for (size_t i = 0; i < names.Length() && i < values.Length(); ++i) {
+              headers.AppendElement(WebTransportHeader(names[i], values[i]));
+            }
+            (void)self->SendNegotiatedProtocolAndHeaders(subprotocol, headers);
           }
+
+          // Fetch max datagram size synchronously on socket thread
+          // This will call OnMaxDatagramSize which stores it in
+          // mMaxDatagramSizeValue
+          self->mWebTransport->GetMaxDatagramSize();
+          self->mDatagramCreditGranter.SetMaxDatagramSize(
+              self->mMaxDatagramSizeValue);
+          // Grant before any datagram arrives, so the first write()s can
+          // resolve immediately.
+          self->MaybeSendDatagramCapacity();
         }
 
-        // Resolve ready promise AFTER sending the negotiated protocol
-        // to ensure protocol is available when ready resolves
+        // Resolve ready promise AFTER sending the negotiated protocol and
+        // fetching max datagram size to ensure both are available when ready
+        // resolves
+        uint64_t maxDatagramSize = self->mMaxDatagramSizeValue;
         self->mOwningEventTarget->Dispatch(NS_NewRunnableFunction(
-            "WebTransportParent::OnSessionReady", [self]() {
+            "WebTransportParent::OnSessionReady", [self, maxDatagramSize]() {
               MutexAutoLock lock(self->mMutex);
               if (!self->mClosed && self->mResolver) {
-                self->mResolver(ResolveType(
-                    NS_OK,
+                CallResolver(
+                    self->mResolver, NS_OK,
                     static_cast<uint8_t>(
-                        WebTransportReliabilityMode::Supports_unreliable)));
+                        WebTransportReliabilityMode::Supports_unreliable),
+                    maxDatagramSize);
                 self->mResolver = nullptr;
                 if (self->mExecuteAfterResolverCallback) {
                   self->mExecuteAfterResolverCallback();
@@ -705,16 +884,22 @@ WebTransportParent::OnSessionClosed(const bool aCleanly,
         [self = RefPtr{this}, result = rv] {
           MutexAutoLock lock(self->mMutex);
           if (!self->mClosed && self->mResolver) {
-            self->mResolver(ResolveType(
-                result, static_cast<uint8_t>(
-                            WebTransportReliabilityMode::Supports_unreliable)));
+            CallResolver(self->mResolver, result,
+                         static_cast<uint8_t>(
+                             WebTransportReliabilityMode::Supports_unreliable),
+                         0);
             self->mResolver = nullptr;
           }
         }));
   } else {
+    // Datagrams that arrived in the same turn as the close would otherwise
+    // be dropped: the backend's end-of-turn flush finds the listener gone.
+    if (mSocketThread->IsOnCurrentThread()) {
+      FlushIncomingDatagrams();
+    }
     {
       MutexAutoLock lock(mMutex);
-      if (mResolver) {
+      if (mResolver && !mClosed) {
         LOG(("[%p] NotifyRemoteClosed to be called later", this));
         // NotifyRemoteClosed needs to wait until mResolver is invoked.
         mExecuteAfterResolverCallback = [self = RefPtr{this}, aCleanly,
@@ -737,44 +922,78 @@ WebTransportParent::OnSessionClosed(const bool aCleanly,
 }
 
 NS_IMETHODIMP WebTransportParent::OnDraining() {
-  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
-
   LOG(("WebTransportParent::OnDraining %p", this));
 
-  (void)SendDraining();
+  // A server that drains immediately upon connection can deliver this before
+  // WebTransportSessionProxy::RetargetTo(mSocketThread) (called from
+  // OnSessionReady) has taken effect, in which case we're still on the main
+  // thread here. SendDraining() requires the actor's worker thread
+  // (mSocketThread, the thread the parent endpoint was Bind()'d on), so hop
+  // there explicitly instead of assuming our caller already did.
+  mSocketThread->Dispatch(NS_NewRunnableFunction(
+      "WebTransportParent::OnDraining",
+      [self = RefPtr{this}] { (void)self->SendDraining(); }));
 
   return NS_OK;
 }
 
+// The WebIDL streamErrorCode is an unsigned long; anything wider is a peer
+// that sent no application error code.
+static Maybe<uint32_t> ToApplicationErrorCode(uint64_t aErrorCode) {
+  if (aErrorCode > std::numeric_limits<uint32_t>::max()) {
+    return Nothing();
+  }
+  return Some(static_cast<uint32_t>(aErrorCode));
+}
+
 NS_IMETHODIMP WebTransportParent::OnStopSending(uint64_t aStreamId,
-                                                nsresult aError) {
+                                                uint64_t aErrorCode) {
   MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
-  LOG(("WebTransportParent::OnStopSending %p stream id=%" PRIx64, this,
-       aStreamId));
+  LOG(("WebTransportParent::OnStopSending %p stream id=%" PRIx64
+       " errorCode=%" PRIu64,
+       this, aStreamId, aErrorCode));
+  StopSendingError error;
+  error.errorCode() = ToApplicationErrorCode(aErrorCode);
+  if (CanSend()) {
+    (void)SendOnStreamResetOrStopSending(aStreamId, error);
+  }
   if (auto entry = mUniStreamCallbackMap.Lookup(aStreamId)) {
-    entry->mCallback.OnResetOrStopSending(aError);
+    entry->mCallback.OnStopSending(NS_ERROR_ABORT);
     mUniStreamCallbackMap.Remove(aStreamId);
   } else if (auto entry = mBidiStreamCallbackMap.Lookup(aStreamId)) {
-    entry->mCallback.OnResetOrStopSending(aError);
-    mBidiStreamCallbackMap.Remove(aStreamId);
+    entry->mCallback.OnStopSending(NS_ERROR_ABORT);
+    entry->mStopSendingReceived = true;
+    if (entry->mResetReceived) {
+      mBidiStreamCallbackMap.Remove(aStreamId);
+    }
   }
-  (void)SendOnStreamResetOrStopSending(aStreamId, StopSendingError(aError));
   return NS_OK;
 }
 
 NS_IMETHODIMP WebTransportParent::OnResetReceived(uint64_t aStreamId,
-                                                  nsresult aError) {
+                                                  uint64_t aErrorCode) {
   MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
-  LOG(("WebTransportParent::OnResetReceived %p stream id=%" PRIx64, this,
-       aStreamId));
+  LOG(("WebTransportParent::OnResetReceived %p stream id=%" PRIx64
+       " errorCode=%" PRIu64,
+       this, aStreamId, aErrorCode));
+  ResetError error;
+  error.errorCode() = ToApplicationErrorCode(aErrorCode);
+  if (CanSend()) {
+    (void)SendOnStreamResetOrStopSending(aStreamId, error);
+  }
   if (auto entry = mUniStreamCallbackMap.Lookup(aStreamId)) {
-    entry->mCallback.OnResetOrStopSending(aError);
+    entry->mCallback.OnResetOrStopSending(NS_ERROR_ABORT);
     mUniStreamCallbackMap.Remove(aStreamId);
   } else if (auto entry = mBidiStreamCallbackMap.Lookup(aStreamId)) {
-    entry->mCallback.OnResetOrStopSending(aError);
-    mBidiStreamCallbackMap.Remove(aStreamId);
+    entry->mCallback.OnResetOrStopSending(NS_ERROR_ABORT);
+    entry->mResetReceived = true;
+    if (entry->mStopSendingReceived) {
+      mBidiStreamCallbackMap.Remove(aStreamId);
+    }
+  } else if (auto entry = mIncomingUniStreamCallbackMap.Lookup(aStreamId)) {
+    entry->mCallback.OnResetOrStopSending(NS_ERROR_ABORT);
+    mIncomingUniStreamCallbackMap.Remove(aStreamId);
   }
-  (void)SendOnStreamResetOrStopSending(aStreamId, ResetError(aError));
   return NS_OK;
 }
 
@@ -789,7 +1008,8 @@ void WebTransportParent::NotifyRemoteClosed(
 
   mSocketThread->Dispatch(NS_NewRunnableFunction(
       __func__, [self = RefPtr{this}, aErrorCode, reason = nsCString{aReason},
-                 aCleanly, stats = std::move(stats)]() {
+                 aCleanly, stats = std::move(stats)]() mutable {
+        self->AddParentExpiredOutgoing(*stats);
         // The session is gone, so an in-flight gather will never call back;
         // settle it with the close-time stats.
         self->ResolvePendingGetStats(stats);
@@ -797,6 +1017,13 @@ void WebTransportParent::NotifyRemoteClosed(
         (void)self->SendRemoteClosed(aCleanly, aErrorCode, reason, stats);
         // Let the other end shut down the IPC channel after RecvClose()
       }));
+}
+
+void WebTransportParent::RemoveFinishedStream(uint64_t aStreamId) {
+  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+  mIncomingUniStreamCallbackMap.Remove(aStreamId);
+  mUniStreamCallbackMap.Remove(aStreamId);
+  mBidiStreamCallbackMap.Remove(aStreamId);
 }
 
 NS_IMETHODIMP
@@ -817,20 +1044,35 @@ WebTransportParent::OnIncomingUnidirectionalStreamAvailable(
     return rv;
   }
 
+  uint64_t id;
+  (void)aStream->GetStreamId(&id);
+
   nsCOMPtr<nsIAsyncInputStream> inputStream;
   aStream->GetInputStream(getter_AddRefs(inputStream));
   MOZ_ASSERT(inputStream);
-  rv = NS_AsyncCopy(inputStream, sender, mSocketThread,
-                    NS_ASYNCCOPY_VIA_WRITESEGMENTS,
-                    mozilla::ipc::kDefaultDataPipeCapacity);
+  auto copies = MakeRefPtr<StreamCopies>(this, id);
+  rv = copies->AsyncCopy(inputStream, sender, mSocketThread,
+                         NS_ASYNCCOPY_VIA_WRITESEGMENTS);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
   }
 
   LOG(("%p Sending UnidirectionalStream pipe to content", this));
   // pass the DataPipeReceiver to the content process
-  uint64_t id;
-  (void)aStream->GetStreamId(&id);
+
+  // Register the stream so RecvStopSendingStream() can find it when content
+  // calls cancel() on the corresponding WebTransportReceiveStream, and so a
+  // RESET_STREAM from the peer closes our local pipe.
+  // Capture our end of the pipe: serializing receiver to content below closes
+  // the parent's copy of it.
+  auto onResetOrStopSending = [sender = RefPtr{sender}](nsresult aError) {
+    sender->CloseWithStatus(aError);
+  };
+  mIncomingUniStreamCallbackMap.InsertOrUpdate(
+      id, StreamHash<nsIWebTransportReceiveStream>{
+              OnResetOrStopSendingCallback(std::move(onResetOrStopSending)),
+              aStream});
+
   (void)SendIncomingUnidirectionalStream(id, receiver);
 
   return NS_OK;
@@ -855,16 +1097,6 @@ WebTransportParent::OnIncomingBidirectionalStreamAvailable(
     return rv;
   }
 
-  nsCOMPtr<nsIAsyncInputStream> inputStream;
-  aStream->GetInputStream(getter_AddRefs(inputStream));
-  MOZ_ASSERT(inputStream);
-  rv = NS_AsyncCopy(inputStream, inputSender, mSocketThread,
-                    NS_ASYNCCOPY_VIA_WRITESEGMENTS,
-                    mozilla::ipc::kDefaultDataPipeCapacity);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    return rv;
-  }
-
   RefPtr<DataPipeSender> outputSender;
   RefPtr<DataPipeReceiver> outputReceiver;
   rv =
@@ -874,20 +1106,31 @@ WebTransportParent::OnIncomingBidirectionalStreamAvailable(
     return rv;
   }
 
+  uint64_t id;
+  (void)aStream->GetStreamId(&id);
+
+  nsCOMPtr<nsIAsyncInputStream> inputStream;
+  aStream->GetInputStream(getter_AddRefs(inputStream));
+  MOZ_ASSERT(inputStream);
   nsCOMPtr<nsIAsyncOutputStream> outputStream;
   aStream->GetOutputStream(getter_AddRefs(outputStream));
   MOZ_ASSERT(outputStream);
-  rv = NS_AsyncCopy(outputReceiver, outputStream, mSocketThread,
-                    NS_ASYNCCOPY_VIA_READSEGMENTS,
-                    mozilla::ipc::kDefaultDataPipeCapacity);
+
+  auto copies = MakeRefPtr<StreamCopies>(this, id);
+  rv = copies->AsyncCopy(inputStream, inputSender, mSocketThread,
+                         NS_ASYNCCOPY_VIA_WRITESEGMENTS);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    return rv;
+  }
+
+  rv = copies->AsyncCopy(outputReceiver, outputStream, mSocketThread,
+                         NS_ASYNCCOPY_VIA_READSEGMENTS);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
   }
 
   LOG(("%p Sending BidirectionalStream pipe to content", this));
   // pass the DataPipeSender to the content process
-  uint64_t id;
-  (void)aStream->GetStreamId(&id);
   (void)SendIncomingBidirectionalStream(id, inputReceiver, outputSender);
   return NS_OK;
 }
@@ -917,83 +1160,239 @@ WebTransportParent::OnIncomingBidirectionalStreamAvailable(
   return IPC_OK();
 }
 
-// The promise sent in this request will be resolved
-// in OnOutgoingDatagramOutCome which is called synchronously from
-// WebTransportSessionProxy::SendDatagram
-::mozilla::ipc::IPCResult WebTransportParent::RecvOutgoingDatagram(
-    nsTArray<uint8_t>&& aData, const TimeStamp& aExpirationTime,
-    const uint64_t& aSendGroupId, const int64_t& aSendOrder,
-    OutgoingDatagramResolver&& aResolver) {
-  LOG(("WebTransportParent sending datagram, sendGroup=%" PRIu64
-       ", sendOrder=%" PRId64,
-       aSendGroupId, aSendOrder));
+::mozilla::ipc::IPCResult WebTransportParent::RecvOutgoingDatagrams(
+    nsTArray<OutgoingDatagram>&& aDatagrams) {
+  LOG(("WebTransportParent received %zu batched outgoing datagrams",
+       aDatagrams.Length()));
   MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
   MOZ_ASSERT(mWebTransport);
 
-  (void)aExpirationTime;
+  // Content splits its messages at about 64 KiB or 1024 datagrams, so a batch
+  // this large can only come from a compromised child holding up the socket
+  // thread.
+  static constexpr size_t kMaxBatchDatagrams = 256 * 1024;
+  static constexpr size_t kMaxBatchBytes = 1024 * 1024;
+  size_t batchBytes = 0;
+  for (const auto& datagram : aDatagrams) {
+    batchBytes += datagram.data().Length();
+  }
+  if (aDatagrams.Length() > kMaxBatchDatagrams || batchBytes > kMaxBatchBytes) {
+    return IPC_FAIL(this, "Outgoing datagram batch is too large");
+  }
 
-  MOZ_ASSERT(!mOutgoingDatagramResolver);
-  mOutgoingDatagramResolver = std::move(aResolver);
-  // XXX we need to forward the timestamps to the necko stack
-  // timestamp should be checked in the necko for expiry
-  // See Bug 1818300
-  // currently this calls OnOutgoingDatagramOutCome synchronously
-  // Neqo won't call us back if the id == 0!
-  // We don't use the ID for anything currently; rework of the stack
-  // to implement proper HighWatermark buffering will require
-  // changes here anyways.
-  static uint64_t sDatagramId = 1;
-  LOG_VERBOSE(("Sending datagram %" PRIu64 ", length %zu", sDatagramId,
-               aData.Length()));
-  (void)mWebTransport->SendDatagram(aData, sDatagramId++, aSendGroupId,
-                                    aSendOrder);
+  AutoRestore<bool> inBatch(mInOutgoingDatagramsBatch);
+  mInOutgoingDatagramsBatch = true;
+  TimeStamp now = TimeStamp::Now();
+  for (auto& datagram : aDatagrams) {
+    double ageMs = (now - datagram.timestamp()).ToMilliseconds();
+    LOG(("Forwarding datagram to neqo queue (age=%f ms), sendGroup=%" PRIu64
+         ", sendOrder=%" PRId64,
+         ageMs, datagram.sendGroupId(), datagram.sendOrder()));
+
+    // neqo measures outgoingMaxAge from the write timestamp too, but a
+    // datagram already past it need not be queued at all.
+    if (ageMs > mDatagramMaxAge) {
+      LOG(
+          ("Dropping datagram: age %f ms exceeds outgoingMaxAge %f ms "
+           "before reaching neqo",
+           ageMs, mDatagramMaxAge));
+      mDatagramCreditGranter.OnExpiredBeforeForwarding(
+          datagram.data().Length());
+      continue;
+    }
+
+    // neqo's implementation-defined default max age (a small multiple of
+    // the RTT, with a floor) bounds how long a datagram waits in its
+    // queue.  The write timestamp also counts the connection setup for a
+    // datagram written before the session was ready, and the IPC transit
+    // from the content process, which on a loaded machine can alone exceed
+    // that bound.  Neither is time spent queued behind the network, so
+    // unless the page set an explicit outgoingMaxAge, age the datagram from
+    // its arrival here.
+    TimeStamp timestamp =
+        std::isfinite(mDatagramMaxAge) ? datagram.timestamp() : now;
+
+    // neqo's queue requires a session's timestamps to be non-decreasing.
+    // Writes from several writables, flushed one writable at a time at
+    // connect, need not be, so never go backwards.
+    if (mLastOutgoingDatagramTimestamp.IsNull() ||
+        timestamp > mLastOutgoingDatagramTimestamp) {
+      mLastOutgoingDatagramTimestamp = timestamp;
+    }
+
+    // Send to neqo's datagram queue, untracked. The sent/expired/dropped
+    // outcome is read back in aggregate via MaybeSendDatagramCapacity()
+    // rather than reported per datagram.
+    (void)mWebTransport->SendDatagramAt(datagram.data(), datagram.sendGroupId(),
+                                        datagram.sendOrder(),
+                                        mLastOutgoingDatagramTimestamp);
+    mDatagramCreditGranter.OnForwarded(datagram.data().Length());
+  }
+
+  // Called even if every datagram in this batch was dropped for age above
+  // without ever reaching neqo: that still needs reporting (it advances
+  // the parent expiry count), and content's RetireInFlight() -- which
+  // unblocks any write() promise deferred past outgoingMaxBufferedDatagrams
+  // -- has no other trigger. Cheap to call unconditionally; it only
+  // actually sends a message when there's something to report.
+  MaybeSendDatagramCapacity();
 
   return IPC_OK();
 }
 
+void WebTransportParent::MaybeSendDatagramCapacity() {
+  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+  MOZ_ASSERT(mWebTransport);
+
+  RefPtr<net::WebTransportSessionProxy> proxy =
+      static_cast<net::WebTransportSessionProxy*>(mWebTransport.get());
+  size_t remainingBytes = 0;
+  size_t queuedDatagrams = 0;
+  size_t maxQueuedBytes = 0;
+  if (!proxy->GetDatagramQueueCapacity(&remainingBytes, &queuedDatagrams,
+                                       &maxQueuedBytes)) {
+    return;
+  }
+  DatagramQueueSample sample;
+  sample.mRemainingBytes = remainingBytes;
+  sample.mQueuedDatagrams = queuedDatagrams;
+  sample.mMaxQueuedBytes = maxQueuedBytes;
+  if (!proxy->GetDatagramSessionStats(&sample.mSent, &sample.mExpired,
+                                      &sample.mDropped)) {
+    return;
+  }
+
+  Maybe<DatagramCapacityUpdate> update = mDatagramCreditGranter.Compute(sample);
+  if (update && CanSend()) {
+    mDatagramCreditGranter.Commit(*update);
+    LOG(("WebTransportParent sending DatagramCapacity datagrams=%" PRIu64
+         " bytes=%" PRIu64 " sentDelta=%" PRIu64 " expiredDelta=%" PRIu64
+         " droppedDelta=%" PRIu64,
+         update->mCumulativeDatagrams, update->mCumulativeBytes,
+         update->mSentDelta, update->mExpiredDelta, update->mDroppedDelta));
+    (void)SendDatagramCapacity(update->mCumulativeDatagrams,
+                               update->mCumulativeBytes, update->mSentDelta,
+                               update->mExpiredDelta, update->mDroppedDelta,
+                               mDatagramCreditGranter.DatagramPrefixBytes());
+  }
+
+  // Nothing else samples the queue again once the child has used up its
+  // credit without neqo rejecting anything, so have the next output pass do
+  // it while datagrams are still queued.
+  if (queuedDatagrams > 0 && mDatagramCreditGranter.CreditExhausted()) {
+    proxy->RequestOutgoingDatagramProgress();
+  }
+}
+
+::mozilla::ipc::IPCResult WebTransportParent::RecvUpdateDatagramQueueParams(
+    const uint32_t& aOutgoingMaxBufferedDatagrams,
+    const double& aOutgoingMaxAge) {
+  LOG(
+      ("WebTransportParent::RecvUpdateDatagramQueueParams: "
+       "outgoingMaxBufferedDatagrams=%" PRIu32 ", maxAge=%f",
+       aOutgoingMaxBufferedDatagrams, aOutgoingMaxAge));
+  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+  MOZ_ASSERT(mWebTransport);
+  mWebTransport->SetDatagramMaxBufferedDatagrams(aOutgoingMaxBufferedDatagrams);
+  mWebTransport->SetDatagramMaxAge(aOutgoingMaxAge);
+  mDatagramMaxAge = aOutgoingMaxAge;
+  mDatagramCreditGranter.SetMaxBufferedDatagrams(aOutgoingMaxBufferedDatagrams);
+
+  return IPC_OK();
+}
+
+// Bounds one IncomingDatagrams message. Chosen for message size, not latency:
+// the per-datagram cost of holding one back is a fraction of a microsecond, so
+// even a batch of hundreds would delay the first by tens of microseconds, but a
+// batch of hundreds of full-size datagrams would be a multi-hundred-KB message.
+static constexpr size_t kMaxPendingIncomingBytes = 64 * 1024;
+// Charged per datagram on top of its payload, so the bound also limits the
+// entry count (and counts zero-length datagrams).
+static constexpr size_t kPendingIncomingDatagramOverhead = 16;
+
 NS_IMETHODIMP WebTransportParent::OnDatagramReceived(
     const nsTArray<uint8_t>& aData) {
-  // We must be on the Socket Thread
-  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+  // A datagram that arrives between OnStopRequest and the RetargetTo() in
+  // OnSessionReady is delivered on the main thread (see OnDraining), but the
+  // pending batch belongs to the socket thread.
+  if (!mSocketThread->IsOnCurrentThread()) {
+    mSocketThread->Dispatch(
+        NS_NewRunnableFunction("WebTransportParent::OnDatagramReceived",
+                               [self = RefPtr{this}, data = aData.Clone()] {
+                                 self->OnDatagramReceived(data);
+                               }));
+    return NS_OK;
+  }
 
   LOG(("WebTransportParent received datagram length = %zu", aData.Length()));
 
-  TimeStamp ts = TimeStamp::Now();
-  (void)SendIncomingDatagram(aData, ts);
+  mPendingIncomingBytes += aData.Length() + kPendingIncomingDatagramOverhead;
+  mPendingIncoming.AppendElement(
+      IncomingDatagram(aData.Clone(), TimeStamp::Now()));
+
+  // The backend calls OnDatagramsFlush() once it has handed over everything
+  // this turn produced; flush ahead of it only to bound the message size.
+  if (mPendingIncomingBytes >= kMaxPendingIncomingBytes) {
+    FlushIncomingDatagrams();
+  }
 
   return NS_OK;
 }
 
-NS_IMETHODIMP
-WebTransportParent::OnOutgoingDatagramOutCome(
-    uint64_t aId, WebTransportSessionEventListener::DatagramOutcome aOutCome) {
-  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
-  // XXX - do we need better error mappings for failures?
-  nsresult result = NS_ERROR_FAILURE;
-  (void)result;
-  (void)aId;
-
-  if (aOutCome == WebTransportSessionEventListener::DatagramOutcome::SENT) {
-    result = NS_OK;
-    LOG(("Sent datagram id= %" PRIu64, aId));
-  } else {
-    LOG(("Didn't send datagram id= %" PRIu64, aId));
+NS_IMETHODIMP WebTransportParent::OnDatagramsFlush() {
+  // Can arrive on the main thread like OnDatagramReceived, and must stay
+  // behind the datagrams it follows.
+  if (!mSocketThread->IsOnCurrentThread()) {
+    mSocketThread->Dispatch(NS_NewRunnableFunction(
+        "WebTransportParent::OnDatagramsFlush",
+        [self = RefPtr{this}] { self->OnDatagramsFlush(); }));
+    return NS_OK;
   }
 
-  // This assumes the stack is calling us back synchronously!
-  MOZ_ASSERT(mOutgoingDatagramResolver);
-  mOutgoingDatagramResolver(result);
-  mOutgoingDatagramResolver = nullptr;
-
+  FlushIncomingDatagrams();
   return NS_OK;
+}
+
+NS_IMETHODIMP WebTransportParent::OnOutgoingDatagramSpaceAvailable() {
+  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+
+  // The only capacity sample not taken while handling a child batch, so the
+  // only thing that releases a fully back-pressured writer.  Inside
+  // RecvOutgoingDatagrams() the batch's own closing sample covers it.
+  if (mInOutgoingDatagramsBatch) {
+    return NS_OK;
+  }
+  MaybeSendDatagramCapacity();
+  return NS_OK;
+}
+
+void WebTransportParent::FlushIncomingDatagrams() {
+  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+
+  mPendingIncomingBytes = 0;
+  if (mPendingIncoming.IsEmpty()) {
+    return;
+  }
+
+  LOG(("WebTransportParent sending %zu batched datagrams",
+       mPendingIncoming.Length()));
+  if (CanSend()) {
+    (void)SendIncomingDatagrams(mPendingIncoming);
+  }
+  mPendingIncoming.Clear();
 }
 
 NS_IMETHODIMP WebTransportParent::OnMaxDatagramSize(uint64_t aSize) {
   LOG(("Max datagram size is %" PRIu64, aSize));
   MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
-  MOZ_ASSERT(mMaxDatagramSizeResolver);
-  mMaxDatagramSizeResolver(aSize);
-  mMaxDatagramSizeResolver = nullptr;
+  if (mMaxDatagramSizeResolver) {
+    // Called from RecvGetMaxDatagramSize IPC path
+    mMaxDatagramSizeResolver(aSize);
+    mMaxDatagramSizeResolver = nullptr;
+  } else {
+    // Called from OnSessionReady path - store for resolver
+    mMaxDatagramSizeValue = aSize;
+  }
   return NS_OK;
 }
 
@@ -1026,8 +1425,22 @@ NS_IMETHODIMP WebTransportParent::OnStatsAvailable(
     return NS_OK;
   }
 
-  ResolvePendingGetStats(rawStats ? Some(*rawStats) : Nothing());
+  if (!rawStats) {
+    ResolvePendingGetStats(Nothing());
+    return NS_OK;
+  }
+
+  WebTransportStatsData stats = *rawStats;
+  AddParentExpiredOutgoing(stats);
+  ResolvePendingGetStats(Some(stats));
   return NS_OK;
+}
+
+void WebTransportParent::AddParentExpiredOutgoing(
+    WebTransportStatsData& aStats) const {
+  MOZ_ASSERT(mSocketThread->IsOnCurrentThread());
+  aStats.datagrams().expiredOutgoing() +=
+      mDatagramCreditGranter.ParentExpired();
 }
 
 void WebTransportParent::ResolvePendingGetStats(

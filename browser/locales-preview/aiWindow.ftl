@@ -132,7 +132,17 @@ ai-tasks-alert-delete-button =
 ai-tasks-alert-edit-button = Edit
 ai-tasks-alert-pause-button = Pause
 ai-tasks-alert-resume-button = Resume
-ai-tasks-alert-check-now-button = Check now
+ai-tasks-alert-check-now-button =
+  .label = Check now
+# Button in the create form. Pressing it fills in the task name and the
+# "Notify me when" field with a suggestion, replacing what is there.
+ai-tasks-alert-suggest-button = Write it for me
+# Label of the "Write it for me" button while the suggestion is being written.
+# Screen readers also announce it when the writing starts.
+ai-tasks-alert-suggest-generating-button = Generating…
+# Label of the "Write it for me" button once it has filled in the form.
+# Pressing it again writes a new suggestion.
+ai-tasks-alert-suggest-retry-button = Retry
 
 ## Dialog Headers - Titles for alert dialogs
 
@@ -148,15 +158,28 @@ ai-tasks-page-title = Tasks
 ai-tasks-add-alert-button = Create task
 ai-task-page-description = { -smart-window-brand-name } can watch prices and content on pages you choose. You’ll get a desktop notification when it finds a match.
 ai-tasks-no-monitors-title = { -smart-window-brand-name } tasks aren’t available in your region
-ai-tasks-no-monitors-message = Learn more <a data-l10n-name="smart-window-link">about Smart Window</a>.
+ai-tasks-no-monitors-message = Learn more <a data-l10n-name="smart-window-link">about { -smart-window-brand-name }</a>.
+ai-tasks-blocked-title = { -smart-window-brand-name } tasks are blocked in AI controls
 ai-task-page-no-alerts = Create a task to track prices or content on pages you choose. You’ll get notified when { -smart-window-brand-name } finds a match.
 ai-task-page-no-alerts-title = Watch what matters
+# Headings for the groups of tasks on the Tasks page.
+ai-tasks-group-monitors-active = Monitors · Active
+ai-tasks-group-monitors-paused = Monitors · Paused
+# Shown next to a group heading.
 # Variables:
-#   $count (number) - The number of tasks currently active
-ai-tasks-alerts-count = { $count ->
-    [one] { $count } task
-   *[other] { $count } tasks
-}
+#   $count (number) - The number of tasks in the group
+#   $limit (number) - The maximum number of tasks the group can hold
+ai-tasks-group-count-of-limit = { $count } of { $limit }
+# Shown next to a group heading.
+# Variables:
+#   $count (number) - The number of tasks in the group
+ai-tasks-group-count = { $count }
+# Button below a group of tasks that shows the rest of the group.
+# Variables:
+#   $count (number) - The number of tasks currently hidden
+ai-tasks-group-show-more = Show { $count } more
+# Button below an expanded group of tasks that hides all but the first few again.
+ai-tasks-group-show-less = Show less
 # Variables:
 #   $count (number) - The number of webpages being watched
 ai-tasks-alert-watching-pages = { $count ->
@@ -184,6 +207,8 @@ ai-tasks-alert-error-max-urls = { $maxUrls ->
 # Shown when creating or resuming a task is refused because the limit of
 # active tasks has been reached. Paused tasks don’t count toward the limit.
 ai-tasks-alert-error-active-limit = You’ve reached the limit of active tasks. Pause or delete one to add or resume another.
+# Shown next to the "Write it for me" button when no suggestion could be written
+ai-tasks-alert-error-suggestion-failed = Couldn’t write a suggestion. Try again.
 
 ## Accessibility - ARIA labels and accessibility text
 
@@ -308,7 +333,23 @@ ai-tasks-alert-history-error-network = { -smart-window-brand-name } couldn’t c
 
 ai-tasks-alert-history-error-timeout = The page took too long to respond. This task will try again at its next scheduled time.
 
-ai-tasks-alert-history-error-rate-limit = { -smart-window-brand-name } has reached its check limit for today. This task will try again at its next scheduled time.
+ai-tasks-alert-history-error-budget = { -smart-window-brand-name } has reached its weekly check limit. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-rate-limit = { -smart-window-brand-name } has reached its request limit for now. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-too-large = There was too much page content to compare in one check. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-capacity = { -smart-window-brand-name } is at capacity. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-upstream-rate-limit = { -smart-window-brand-name } is temporarily handling too many requests. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-connection-blocked = { -smart-window-brand-name } temporarily blocked requests from your connection. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-request-blocked = { -smart-window-brand-name } blocked this request for security reasons. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-request = { -smart-window-brand-name } couldn’t process this request. This task will try again at its next scheduled time.
+
+ai-tasks-alert-history-error-service-budget = { -smart-window-brand-name } has reached its usage limit. This task will try again at its next scheduled time.
 
 ai-tasks-alert-history-error-auth = This page asked us to sign in, so there was nothing to compare. Open the page, sign in, and the next check should work.
 
@@ -324,11 +365,15 @@ ai-tasks-alert-history-error-prompt-load = { -smart-window-brand-name } couldn�
 
 ai-tasks-alert-history-error-unknown = Something went wrong on our side and this check didn’t run. Nothing was compared.
 
-## AI Tab - A page generated from the content of the user's tabs
+## Smart Page - A page generated from the content of the user's tabs
 
-# The feature name. It stays here rather than in brandings.ftl until the AI Tab
-# strings are exposed to localization.
--ai-tab-brand-name = AI Tab
+# The feature name. It stays here rather than in brandings.ftl until the Smart
+# Page strings are exposed to localization.
+-smart-page-brand-name =
+    { $plural-form ->
+        [true] Smart Pages
+       *[false] Smart Page
+    }
 
 # Title given to a generated page when the model returns no title of its own and
 # the user did not say what the page should focus on.
@@ -337,33 +382,36 @@ ai-tab-default-page-title = Generated page
 # Shown in place of a generated page when it can't be displayed, for
 # example because the user deleted it, the address is wrong, or it
 # failed to load.
-aitab-page-error-heading = This page isn’t available anymore.
-# TODO - Bug 2075639: update this string based on UX feedback
-aitab-page-error-description = Some other supplementary string.
+aitab-page-error-heading = This { -smart-page-brand-name } isn’t available
+# Introduces the list of possible reasons the page can’t be displayed.
+aitab-page-error-intro = Here’s what may have happened:
+aitab-page-error-reason-deleted = <strong>The page was deleted.</strong> To create a new one, go to another tab in { -smart-window-brand-name } and ask in the sidebar.
+aitab-page-error-reason-incorrect-link = <strong>The link is incorrect.</strong> Search for the page by name in the address bar.
+aitab-page-error-reason-shared-link = <strong>The link was shared with you.</strong> { -smart-page-brand-name(plural-form: "true") } can’t be shared by link. Ask the sender for a PDF instead.
 
 # Page context menu entry that builds a generated page from the current page.
 main-context-menu-create-aitab =
-    .label = Create { -ai-tab-brand-name }
-    .accesskey = A
+    .label = Create { -smart-page-brand-name }
+    .accesskey = C
 
 # Tab context menu entry that builds a generated page from the tabs the menu
 # was opened on.
 tab-context-create-aitab =
-    .label = Create { -ai-tab-brand-name }
+    .label = Create { -smart-page-brand-name }
 
 # Tab group menu entry that builds a generated page from the group's tabs.
 tab-group-editor-action-create-aitab =
-    .label = Create { -ai-tab-brand-name }
+    .label = Create { -smart-page-brand-name }
 
-# Chat message that starts the conversation created by a "Create AI Tab" menu
+# Chat message that starts the conversation created by a "Create Smart Page" menu
 # entry, written in the user's voice. The URLs of the chosen tabs are appended
 # on the lines below it.
 # Variables:
 #   $tabCount (Number) - How many tabs the page is built from.
 ai-tab-create-page-prompt =
     { $tabCount ->
-        [one] Create an { -ai-tab-brand-name } from this tab:
-       *[other] Create an { -ai-tab-brand-name } from these tabs:
+        [one] Create a { -smart-page-brand-name } from this tab:
+       *[other] Create a { -smart-page-brand-name } from these tabs:
     }
 
 # A rating cell in a generated table, for example "4.5 / 5". Both numbers
@@ -385,87 +433,7 @@ smartbar-command-watch-description = Get notified when pages change
 # task command types will be added later.
 smartbar-command-coming-soon = More types of tasks are coming soon
 
-## Smart Form Fill
-
-ai-smart-form-fill-autocomplete-label = Smart Form Fill
-ai-smart-form-fill-autocomplete-loading = Loading
-ai-smart-form-fill-autocomplete-sources-label = Fill from sources
-ai-smart-form-fill-autocomplete-choose-tabs = Open or choose pages related to this form to get autofill suggestions
-ai-smart-form-fill-autocomplete-open-tabs = Open pages related to this form to get autofill suggestions
-ai-smart-form-fill-close-review =
-    .label = Close
-
-# Variables:
-#   $tabs (number) - The number of tabs used as a source for autofill
-ai-smart-form-fill-autocomplete-tabs-count =
-    { $tabs ->
-        [one] { $tabs } tab
-       *[other] { $tabs } tabs
-    }
-
-# Sources are what tabs the Smart Form Fill should use to generate field values
-ai-smart-form-fill-edit-sources = Edit sources
-ai-smart-form-fill-suggested-tabs = Suggested tabs
-ai-smart-form-fill-other-tabs = Other tabs
-
-# Variables:
-#   $tabTitle (string) - Title of the tab controlled by the toggle
-ai-smart-form-fill-tab-select-toggle =
-    .aria-label = Toggle tab selection for “{ $tabTitle }”
-
-ai-smart-form-fill-cancel-tab-select =
-    .label = Cancel
-
-ai-smart-form-fill-accept-tab-select =
-    .label = Done
-
-ai-smart-form-fill-fill-form =
-    .label = Fill form
-
-ai-smart-form-fill-review-heading = Review suggestions
-
-# Variables:
-#   $count (number) - The number of generated form field suggestions
-ai-smart-form-fill-review-description =
-    { $count ->
-        [one] We found suggestions for { $count } field. Edit or delete anything that’s not correct.
-       *[other] We found suggestions for { $count } fields. Edit or delete anything that’s not correct.
-    }
-
-ai-smart-form-fill-field =
-    .label = Field
-
-ai-smart-form-fill-jump-to-bottom =
-    .tooltiptext = Jump to bottom
-    .aria-label = Jump to bottom of suggestions
-
-ai-smart-form-fill-cancel-review =
-    .label = Cancel
-
-ai-smart-form-fill-finding-suggestions = Finding suggestions
-
-ai-smart-form-fill-stop-finding-suggestions =
-    .aria-label = Stop finding suggestions
-
-ai-smart-form-fill-success-heading = Suggestions added to form
-ai-smart-form-fill-success-description = Review the form and fill any remaining fields before you submit.
-
-ai-smart-form-fill-no-changes-heading = No changes applied
-ai-smart-form-fill-no-changes-description = Smart Form Fill didn’t fill any fields. Check the form and try again.
-
-ai-smart-form-fill-no-suggestions-heading = No suggestions found
-ai-smart-form-fill-no-suggestions-description = Smart Form Fill wasn’t able to generate any suggestions for this form.
-
-ai-smart-form-fill-error-try-again-heading = Suggestions weren’t added to the form
-ai-smart-form-fill-error-try-again-description = Something went wrong. Try adding suggestions again.
-
-ai-smart-form-fill-error-heading = Suggestions weren’t added
-ai-smart-form-fill-error-description = Something went wrong. To try again, select a form field and choose Fill from sources.
-
-ai-smart-form-fill-try-again =
-    .label = Try again
-
-## AI Tab generated pages
+## Smart Page generated pages
 
 # Shown above the title of a generated page that was created today.
 aitab-created-today = Created today
@@ -488,8 +456,8 @@ aitab-page-delete =
     .aria-label = Delete page
     .title = Delete page
 
-aitab-page-delete-dialog-title = Delete this { -ai-tab-brand-name }?
-aitab-page-delete-dialog-message = This generated page will be removed. The sources it was built from aren’t affected.
+aitab-page-delete-dialog-title = Delete this { -smart-page-brand-name }?
+aitab-page-delete-dialog-message = This page will be permanently deleted. The sources used to create it won’t be affected.
 
 aitab-page-delete-dialog-cancel =
     .label = Cancel
@@ -498,7 +466,31 @@ aitab-page-delete-dialog-confirm =
     .label = Delete
 
 # Credit at the bottom of a generated page.
-aitab-page-made-with = Made with <span data-l10n-name="brand">{ -smart-window-brand-name }</span>
+aitab-page-footer-brand = { -smart-window-brand-name }
+
+smartwindow-aitab-creating = Creating your { -smart-page-brand-name }
+smartwindow-aitab-updating = Updating your { -smart-page-brand-name }
+smartwindow-aitab-creating-an-aitab-failed = Tried to create { -smart-page-brand-name }, but couldn’t
+smartwindow-aitab-updating-an-aitab-failed =  Tried to update { -smart-page-brand-name }, but couldn’t
+
+# "Open here" opens aitab url in the current tab
+smartwindow-aitab-open-current =
+    .label = Open here
+# "Open in new tab" opens a new browser tab with the AITab url in it
+smartwindow-aitab-open-new =
+    .label = Open in new tab
+
+smartwindow-aitab-response-card-title = Your { -smart-page-brand-name } is ready
+smartwindow-aitab-created-an-aitab = Created { -smart-page-brand-name }
+smartwindow-aitab-updated-an-aitab = Updated { -smart-page-brand-name }
+smartwindow-aitab-empty-chat-message = Want to make changes to your { -smart-page-brand-name }? Ask in the chat to add or remove content.
+
+# Variables:
+#   $tags (Number) - Number of sources used to create the AITab
+smart-window-aitab-sources-count = { $tags ->
+    [one] { $tags } source
+   *[other] { $tags } sources
+}
 
 ## "Pick up where you left off" cards for resuming browsing or chat journeys.
 ## A "journey" is a past browsing or chat session the user was in the middle
@@ -517,7 +509,7 @@ aiwindow-resume-card-tab-count =
 aiwindow-resume-card-more = More
     .aria-label = More options for { $text }
 aiwindow-resume-card-open-tabs = Open tabs
-aiwindow-resume-card-snooze = Snooze for now
+aiwindow-resume-card-snooze = Snooze until tomorrow
 # Variables:
 #   $text (String) - The journey title
 aiwindow-resume-card-resume = Resume
@@ -550,11 +542,95 @@ aiwindow-resume-section-empty-all-dismissed-heading = All caught up
 aiwindow-resume-section-empty-all-dismissed-description = That’s all the suggestions for now. Check back later for more.
 aiwindow-resume-section-hide = Hide for now
 
-smartwindow-aitab-creating = Creating a page…
-# "Open here" opens aitab url in the current tab
-smartwindow-aitab-open-current =
-    .label = Open here
-# "Open in new tab" opens a new browser tab with the AITab url in it
-smartwindow-aitab-open-new =
-    .label = Open in new tab
-smartwindow-aitab-created-an-aitab = Created a Smart Page
+## Clarifying question card
+## A card the assistant shows to ask the user a question before it continues
+## (for example, before starting a research report). The user picks one of the
+## listed answers, types their own, or skips.
+
+# Variables:
+#   $current (Number) - The number of the question being shown, starting at 1
+#   $total (Number) - How many questions there are in total
+ai-clarifying-question-progress = Question { $current } of { $total }
+# Badge on the answer the assistant suggests.
+ai-clarifying-question-recommended = Recommended
+# Text box where the user types their own answer instead of picking one.
+ai-clarifying-question-custom-answer =
+    .placeholder = Something else
+    .aria-label = Something else
+ai-clarifying-question-skip =
+    .label = Skip
+ai-clarifying-question-send =
+    .label = Send
+ai-clarifying-question-close =
+    .title = Close questions
+
+## Smart actions toolbar
+## Suggestions for the current page, shown under the navigation toolbar.
+
+smart-actions-toolbar =
+    .aria-label = Smart actions
+smart-actions-loading = Looking at this page…
+
+## Smart Window digest starter dismiss button
+## Shown on hover over a digest starter pill. Turns off the digest and
+## removes its pill from the starter row.
+## Variables:
+##   $text (String) - The label of the pill, which is the digest's title, for example "Morning News"
+
+aiwindow-starter-digest-dismiss =
+    .aria-label = Dismiss { $text }
+
+## Smart Window digest form
+## Used to create a digest, or edit an existing one. A digest is a summary
+## about a topic that is refreshed on a schedule the user sets.
+
+smartwindow-digest-form-create-heading = Create a digest
+smartwindow-digest-form-edit-heading = Edit digest
+smartwindow-digest-form-create-subheading = You’ll get a summary about this topic on a schedule you set.
+smartwindow-digest-form-edit-subheading = Change how this digest is set up.
+# Label above the digest's topic, which is generated and can't be edited
+smartwindow-digest-form-topic-label = Topic
+smartwindow-digest-form-description =
+    .label = What to cover
+    .placeholder = Describe what you want to follow and what kind of updates matter to you.
+# Info button beside the digest's topic. Opens a popup explaining where the
+# digest's topic came from.
+smartwindow-digest-form-memory-tooltip-trigger =
+    .aria-label = Where this topic came from
+# Shown in the popup opened by the info button beside the digest's topic. The
+# link opens Smart Window's memory settings.
+smartwindow-digest-form-memory-tooltip = This topic is based on <a data-l10n-name="memories-link">your memories</a>
+smartwindow-digest-form-sources =
+    .label = Preferred sources
+    .placeholder = Add a website
+smartwindow-digest-form-frequency =
+    .label = How often to update
+smartwindow-digest-form-frequency-daily =
+    .label = Daily
+smartwindow-digest-form-frequency-weekly =
+    .label = Weekly
+# The digest only updates when the user asks for it
+smartwindow-digest-form-frequency-on-demand =
+    .label = On demand
+# Shown beside the frequency dropdown when Weekly is selected
+smartwindow-digest-form-day =
+    .label = Day
+smartwindow-digest-form-time =
+    .label = Time
+smartwindow-digest-form-length =
+    .label = Digest length
+smartwindow-digest-form-length-standard =
+    .label = Standard
+smartwindow-digest-form-length-short =
+    .label = Short
+smartwindow-digest-form-required-note = * Required
+# Note shown at the bottom of the create form indicating required fields
+# The asterisk (*) marks form fields that must be filled in.
+smartwindow-digest-form-cancel =
+    .label = Cancel
+smartwindow-digest-form-create =
+    .label = Create
+smartwindow-digest-form-save =
+    .label = Save changes
+smartwindow-digest-form-error-description = Enter what you want this digest to cover.
+smartwindow-digest-form-error-url = Enter a valid website address.

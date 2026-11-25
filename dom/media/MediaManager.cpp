@@ -2385,6 +2385,10 @@ MediaManager::EnumerateRawDevices(EnumerationParams aParams) {
   Maybe<MediaDeviceSet> speakers;
   RefPtr devices = new MediaDeviceSetRefCnt();
 
+  if (aParams.mVideo) {
+    videoBackend = aParams.HasFakeCams() ? fakeBackend : realBackend;
+  }
+
   // Enumerate microphones first, then cameras, then speakers, since
   // the enumerateDevices() algorithm expects them listed in that order.
   if (const auto& audio = aParams.mAudio; audio.isSome()) {
@@ -2395,6 +2399,7 @@ MediaManager::EnumerateRawDevices(EnumerationParams aParams) {
     GetMediaDevices(audioBackend, audio->mInputType, audios,
                     audio->mForcedDeviceName.get());
     if (audio->mInputType == MediaSourceEnum::Microphone &&
+        aParams.VideoInputType() == MediaSourceEnum::Camera &&
         audioBackend == videoBackend) {
       micsOfVideoBackend.emplace();
       micsOfVideoBackend->AppendElements(audios);
@@ -2402,7 +2407,6 @@ MediaManager::EnumerateRawDevices(EnumerationParams aParams) {
     devices->AppendElements(std::move(audios));
   }
   if (const auto& video = aParams.mVideo; video.isSome()) {
-    videoBackend = aParams.HasFakeCams() ? fakeBackend : realBackend;
     MediaDeviceSet videos;
     LOG("EnumerateRawDevices: Getting video sources with {} backend",
         videoBackend == fakeBackend ? "fake" : "real");
@@ -3738,8 +3742,8 @@ RefPtr<GetUserMediaWindowListener> MediaManager::GetOrMakeWindowListener(
     MOZ_ASSERT(PrincipalHandleMatches(windowListener->GetPrincipalHandle(),
                                       principal));
   } else {
-    windowListener = new GetUserMediaWindowListener(
-        windowId, MakePrincipalHandle(principal));
+    windowListener =
+        new GetUserMediaWindowListener(windowId, PrincipalHandle(principal));
     AddWindowID(windowId, windowListener);
   }
   return windowListener;
@@ -4403,7 +4407,7 @@ void DeviceListener::Activate(RefPtr<LocalMediaDevice> aDevice,
                                            &DeviceListener::Stop);
   }
 
-  mDeviceState = MakeUnique<DeviceState>(
+  mDeviceState = std::make_unique<DeviceState>(
       std::move(aDevice), std::move(aTrackSource), offWhileDisabled);
   mDeviceState->mDeviceMuted = aStartMuted;
   mDeviceState->mAllocated = aIsAllocated;

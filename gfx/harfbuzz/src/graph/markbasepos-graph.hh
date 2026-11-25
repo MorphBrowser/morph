@@ -34,7 +34,7 @@
 
 namespace graph {
 
-struct AnchorMatrix : public OT::Layout::GPOS_impl::AnchorMatrix
+struct AnchorMatrix : public OT::Layout::GPOS_impl::AnchorMatrix<SmallTypes>
 {
   graph_result_t<void> sanitize (const graph_t::vertex_t& vertex, unsigned class_count) const
   {
@@ -42,8 +42,8 @@ struct AnchorMatrix : public OT::Layout::GPOS_impl::AnchorMatrix
     if (unlikely (vertex_len < AnchorMatrix::min_size)) return Err(SANITIZE_FAILURE);
     hb_barrier ();
 
-    if (unlikely (vertex_len < AnchorMatrix::min_size +
-                  OT::Offset16::static_size * class_count * this->rows))
+    if (unlikely (vertex_len - AnchorMatrix::min_size <
+                  hb_unsigned_mul_saturate (OT::Offset16::static_size, class_count, this->rows)))
       return Err(SANITIZE_FAILURE);
     return Ok();
   }
@@ -130,7 +130,7 @@ struct AnchorMatrix : public OT::Layout::GPOS_impl::AnchorMatrix
   }
 };
 
-struct MarkArray : public OT::Layout::GPOS_impl::MarkArray
+struct MarkArray : public OT::Layout::GPOS_impl::MarkArray<SmallTypes>
 {
   graph_result_t<void> sanitize (const graph_t::vertex_t& vertex) const
   {
@@ -175,7 +175,7 @@ struct MarkArray : public OT::Layout::GPOS_impl::MarkArray
 
     this->len = new_index;
     v.set_buffer (o.head, o.head + MarkArray::min_size +
-                  OT::Layout::GPOS_impl::MarkRecord::static_size * new_index);
+                  OT::Layout::GPOS_impl::MarkRecord<SmallTypes>::static_size * new_index);
 
     return Ok();
   }
@@ -187,7 +187,7 @@ struct MarkArray : public OT::Layout::GPOS_impl::MarkArray
                                   unsigned start_class)
   {
     unsigned size = MarkArray::min_size +
-                    OT::Layout::GPOS_impl::MarkRecord::static_size *
+                    OT::Layout::GPOS_impl::MarkRecord<SmallTypes>::static_size *
                     marks.get_population ();
     TRY_ASSIGN (unsigned prime_id, c.create_node (size));
     MarkArray* prime = (MarkArray*) c.graph.object (prime_id).head;
@@ -201,16 +201,34 @@ struct MarkArray : public OT::Layout::GPOS_impl::MarkArray
       unsigned offset_pos = (char*) &((*this)[mark].markAnchor) - (char*) this;
       unsigned* anchor_index;
       if (pos_to_index.has (offset_pos, &anchor_index))
-        TRY (c.graph.move_child (this_index,
-                                 &((*this)[mark].markAnchor),
-                                 prime_id,
-                                 &((*prime)[i].markAnchor)));
+        TRY (c.graph.add_link (&((*prime)[i].markAnchor),
+                               prime_id,
+                               *anchor_index));
 
       i++;
     }
 
-    // Restore correct ordering of the vertex links which are disturbed by move_child.
-    c.graph.vertices_[this_index].sort_real_links ();
+    // Finding the link for a single mark is O(n) so to avoid O(n^2), remove
+    // the old links of all of the moved marks in one pass.
+    auto& v = c.graph.vertices_[this_index];
+    const auto& o = v.obj ();
+    int num_links = o.real_links.length;
+    for (int j = 0; j < num_links; j++)
+    {
+      const auto& link = o.real_links[j];
+      unsigned mark = (link.position - MarkArray::min_size) /
+                      OT::Layout::GPOS_impl::MarkRecord<SmallTypes>::static_size;
+      if (!marks.has (mark)) continue;
+
+      c.graph.vertices_[link.objidx].remove_parent (this_index);
+
+      v.remove_real_link_unordered (j);
+      num_links--;
+      j--;
+    }
+
+    // Restore correct ordering after the above removes, which mess up link ordering.
+    v.sort_real_links ();
 
     return Ok(prime_id);
   }
@@ -256,7 +274,7 @@ struct MarkBasePosFormat1 : public OT::Layout::GPOS_impl::MarkBasePosFormat1_2<S
       class_info_t& info = class_to_info[klass];
       partial_coverage_size += OT::HBUINT16::static_size * info.marks.get_population ();
       unsigned accumulated_delta =
-          OT::Layout::GPOS_impl::MarkRecord::static_size * info.marks.get_population () +
+          OT::Layout::GPOS_impl::MarkRecord<SmallTypes>::static_size * info.marks.get_population () +
           OT::Offset16::static_size * base_count;
 
       for (unsigned objidx : info.child_indices)
@@ -356,7 +374,7 @@ struct MarkBasePosFormat1 : public OT::Layout::GPOS_impl::MarkBasePosFormat1_2<S
     for (const auto& link : mark_array.vertex->obj ().real_links)
     {
       unsigned mark = (link.position - 2) /
-                     OT::Layout::GPOS_impl::MarkRecord::static_size;
+                     OT::Layout::GPOS_impl::MarkRecord<SmallTypes>::static_size;
       unsigned klass = (*mark_array.table)[mark].get_class ();
       if (klass >= class_count) continue;
       class_to_info[klass].child_indices.push (link.objidx);
@@ -501,7 +519,7 @@ struct MarkBasePos : public OT::Layout::GPOS_impl::MarkBasePos
       return ((MarkBasePosFormat1*)(&u.format1))->split_subtables (c, this_index);
 #ifndef HB_NO_BEYOND_64K
     case 2: HB_FALLTHROUGH;
-      // Don't split 24bit MarkBasePos's.
+      // 24-bit MarkBasePos already has widened offsets; leave it unsplit.
 #endif
     default:
       return Ok(hb_vector_t<unsigned> ());

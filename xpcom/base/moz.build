@@ -84,6 +84,7 @@ EXPORTS += [
     "nsDebugImpl.h",
     "nsDumpUtils.h",
     "nsError.h",
+    "nsFunctionInterfaceUtils.h",
     "nsGZFileWriter.h",
     "nsIClassInfoImpl.h",
     "nsID.h",
@@ -108,10 +109,6 @@ if CONFIG["OS_ARCH"] == "WINNT":
     EXPORTS += [
         "nsWindowsHelpers.h",
     ]
-    if CONFIG["CC_TYPE"] not in ("gcc", "clang"):
-        OS_LIBS += [
-            "wscapi",
-        ]
 
 EXPORTS.mozilla += [
     "AppShutdown.h",
@@ -275,12 +272,6 @@ GeneratedFile(
     "error_list.rs",
     script="ErrorList.py",
     entry_point="error_list_rs",
-    inputs=extra_errors,
-)
-GeneratedFile(
-    "error_list.json",
-    script="ErrorList.py",
-    entry_point="error_list_json",
     inputs=extra_errors,
 )
 GeneratedFile(

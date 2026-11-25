@@ -64,11 +64,10 @@ void AfterEGLCall(const char* funcName);
 
 class EglDisplay;
 /**
- * Known GL extensions that can be queried by
- * IsExtensionSupported.  The results of this are cached, and as
- * such it's safe to use this even in performance critical code.
- * If you add to this array, remember to add to the string names
- * in GLLibraryEGL.cpp.
+ * Known EGL library extensions that can be queried by
+ * GLLibraryEGL::IsExtensionSupported. The results of this are cached, and as
+ * such it's safe to use this even in performance critical code. If you add to
+ * this array, remember to add to the string names in GLLibraryEGL.cpp.
  */
 enum class EGLLibExtension {
   ANDROID_get_native_client_buffer,
@@ -78,6 +77,8 @@ enum class EGLLibExtension {
   ANGLE_platform_angle,
   ANGLE_platform_angle_d3d,
   ANGLE_platform_angle_metal,
+  ANGLE_platform_angle_opengl,
+  ANGLE_platform_angle_display_key,
   ANGLE_platform_angle_device_id,
   EXT_device_enumeration,
   EXT_device_query,
@@ -87,11 +88,10 @@ enum class EGLLibExtension {
 };
 
 /**
- * Known GL extensions that can be queried by
- * IsExtensionSupported.  The results of this are cached, and as
- * such it's safe to use this even in performance critical code.
- * If you add to this array, remember to add to the string names
- * in GLLibraryEGL.cpp.
+ * Known EGL display extensions that can be queried by
+ * EglDisplay::IsExtensionSupported. The results of this are cached, and as
+ * such it's safe to use this even in performance critical code. If you add to
+ * this array, remember to add to the string names in GLLibraryEGL.cpp.
  */
 enum class EGLExtension {
   KHR_image_base,
@@ -128,6 +128,14 @@ enum class EGLExtension {
   Max
 };
 
+/**
+ * Known EGL device extensions that can be queried by
+ * EglDisplay::IsExtensionSupported. The results of this are cached, and as such
+ * it's safe to use this even in performance critical code. If you add to this
+ * array, remember to add to the string names in GLLibraryEGL.cpp.
+ */
+enum class EGLDeviceExtension { ANGLE_device_d3d, ANGLE_device_metal, Max };
+
 struct EGLCreateDisplayFlags {
   // Force creation of a hardware accelerated Display. Must be false if
   // mForceSoftware is true.
@@ -153,14 +161,23 @@ class GLLibraryEGL final {
   PRLibrary* mEGLLibrary = nullptr;
   PRLibrary* mGLLibrary = nullptr;
   bool mIsANGLE = false;
-  bool mIsD3DANGLE = false;
-  bool mIsMetalANGLE = false;
   std::bitset<UnderlyingValue(EGLLibExtension::Max)> mAvailableExtensions;
   std::weak_ptr<EglDisplay> mDefaultDisplay;
   std::unordered_map<EGLDisplay, std::weak_ptr<EglDisplay>> mActiveDisplays;
 
  public:
+  // Return the default implementation, which may be bundled ANGLE.
+  // On Android, fall back to system EGL/GLES if ANGLE initialization fails.
   static RefPtr<GLLibraryEGL> Get(nsACString* const out_failureId);
+#ifdef MOZ_WIDGET_ANDROID
+  // Return system EGL/GLES regardless of the default
+  // implementation.
+  static RefPtr<GLLibraryEGL> GetNative(nsACString* const out_failureId);
+  // Initialize the default library if necessary and report whether it is
+  // recognized as ANGLE. Does not create a display or a GLContext, and does
+  // not guarantee that their creation will succeed.
+  static bool IsANGLEAvailable();
+#endif
   static void Shutdown();
 
  private:
@@ -168,9 +185,13 @@ class GLLibraryEGL final {
 
   static StaticMutex sMutex;
   static StaticRefPtr<GLLibraryEGL> sInstance MOZ_GUARDED_BY(sMutex);
+  static StaticRefPtr<GLLibraryEGL> sNativeInstance MOZ_GUARDED_BY(sMutex);
 
-  bool Init(nsACString* const out_failureId);
-  void InitLibExtensions();
+  enum class LibraryType { Default, Native, ANGLE };
+  static RefPtr<GLLibraryEGL> GetImpl(LibraryType,
+                                      nsACString* const out_failureId);
+  bool Init(LibraryType, nsACString* const out_failureId);
+  void InitLibExtensions(LibraryType);
 
   std::shared_ptr<EglDisplay> CreateDisplayLocked(
       const EGLCreateDisplayFlags& aFlags, nsACString* const out_failureId,
@@ -184,6 +205,10 @@ class GLLibraryEGL final {
   std::shared_ptr<EglDisplay> CreateDisplay(ID3D11Device*);
   std::shared_ptr<EglDisplay> CreateDisplayForMetalDevice(
       uint64_t aMetalDeviceRegistryID);
+#ifdef MOZ_WIDGET_ANDROID
+  std::shared_ptr<EglDisplay> CreateDisplayForWebRenderAndroidGLES(
+      nsACString* const out_failureId);
+#endif
   std::shared_ptr<EglDisplay> DefaultDisplay(nsACString* const out_failureId);
 
   bool IsExtensionSupported(EGLLibExtension aKnownExtension) const {
@@ -195,8 +220,6 @@ class GLLibraryEGL final {
   }
 
   bool IsANGLE() const { return mIsANGLE; }
-  bool IsD3DANGLE() const { return mIsD3DANGLE; }
-  bool IsMetalANGLE() const { return mIsMetalANGLE; }
 
   // -
   // PFN wrappers
@@ -766,6 +789,8 @@ class EglDisplay final {
 
  private:
   std::bitset<UnderlyingValue(EGLExtension::Max)> mAvailableExtensions;
+  std::bitset<UnderlyingValue(EGLDeviceExtension::Max)>
+      mAvailableDeviceExtensions;
 
   bool mShouldLeakEGLDisplay = false;
 
@@ -788,6 +813,10 @@ class EglDisplay final {
 
   void MarkExtensionUnsupported(EGLExtension aKnownExtension) {
     mAvailableExtensions[UnderlyingValue(aKnownExtension)] = false;
+  }
+
+  bool IsExtensionSupported(EGLDeviceExtension aKnownExtension) const {
+    return mAvailableDeviceExtensions[UnderlyingValue(aKnownExtension)];
   }
 
   void DumpEGLConfig(EGLConfig) const;

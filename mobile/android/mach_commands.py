@@ -297,20 +297,11 @@ def android_build_geckoview_example(command_context, args):
 @CommandArgument("args", nargs=argparse.REMAINDER)
 def android_compile_all(command_context, args):
     tasks = command_context.substs["GRADLE_ANDROID_COMPILE_ALL_TASKS"]
-
-    # Serialize the indexing build: the semanticdb-javac plugin races when concurrent
-    # compile tasks write its shared output. --no-parallel is insufficient (it only
-    # disables cross-project parallelism), so cap the worker pool to one. See bug 2036411.
-    if command_context.substs.get("ENABLE_MOZSEARCH_PLUGIN"):
-        tasks = tasks + ["--max-workers=1"]
-
-    ret = gradle(
+    return gradle(
         command_context,
         tasks + args,
         verbose=True,
     )
-
-    return ret
 
 
 def install_app_bundle(command_context, bundle):
@@ -744,28 +735,75 @@ https://experimenter.info/nimbus-cli for the full documentation.""",
 @CommandArgument(
     "--update",
     action="store_true",
-    help="Check for a newer nimbus-cli before running, ignoring the cached version.",
+    help="Check for a newer nimbus-cli and download if it exists.",
+)
+@CommandArgument(
+    "--force-update",
+    action="store_true",
+    help=(
+        "Download the latest version of nimbus-cli, whether it has been updated or not"
+    ),
 )
 @CommandArgument("args", nargs=argparse.REMAINDER)
-def android_nimbus_cli(command_context, update=False, args=()):
-    if not conditions.is_android(command_context):
-        command_context.log(
-            logging.ERROR,
-            "nimbus-cli",
-            {},
-            "nimbus-cli drives Firefox for Android builds, but no Android build "
-            "was detected.\n"
-            "Switch to a Firefox for Android build context or use 'mach bootstrap'\n"
-            "to setup an Android build environment.",
-        )
-        return 1
-
+def android_nimbus_cli(command_context, update=False, force_update=False, args=()):
     # mobile/android isn't a package, so load the implementation by path rather
     # than putting this directory on sys.path.
     nimbus_cli = load_source(
         "nimbus_cli", os.path.join(os.path.dirname(__file__), "nimbus_cli.py")
     )
-    return nimbus_cli.run(command_context, args, force_update=update)
+
+    update_mode = None
+    if force_update:
+        update_mode = "force"
+    elif update:
+        update_mode = "check"
+
+    if update_mode is not None:
+        return nimbus_cli.update(command_context, update_mode)
+    else:
+        return nimbus_cli.run(command_context, args)
+
+
+@SubCommand(
+    "android",
+    "cli",
+    """Run the Android CLI (android) from the Android SDK that the build system would use.
+
+Arguments are passed through, e.g. `sdk list`. Use `-- --help` for the Android
+CLI's own help.""",
+)
+@CommandArgument("args", nargs=argparse.REMAINDER)
+def android_cli(command_context, args):
+    from pathlib import Path
+
+    from mozboot import android
+    from mozbuild.base import BuildEnvironmentNotFoundException
+
+    try:
+        sdk_root = command_context.substs.get("ANDROID_SDK_ROOT")
+    except BuildEnvironmentNotFoundException:
+        sdk_root = None
+    sdk_path = (
+        Path(sdk_root)
+        if sdk_root
+        else android.get_sdk_path(android.get_os_name_for_android())
+    )
+    android_cli_path = android.get_android_cli_path(sdk_path)
+    if not android_cli_path.is_file():
+        command_context.log(
+            logging.ERROR,
+            "android",
+            {"path": str(android_cli_path)},
+            "'android' not found at {path}. "
+            "Did you run `mach bootstrap` with Android selected yet?",
+        )
+        return 1
+
+    return command_context.run_process(
+        [str(android_cli_path), "--no-metrics", f"--sdk={sdk_path}"] + args,
+        pass_thru=True,
+        ensure_exit_code=False,
+    )
 
 
 @Command(
@@ -822,6 +860,17 @@ def gradle(command_context, args, verbose=False, gradle_path=None, topsrcdir=Non
 
     if command_context.substs.get("MOZ_AUTOMATION"):
         gradle_flags += ["--console=plain"]
+
+    android_gradle = load_source(
+        "android_gradle", os.path.join(os.path.dirname(__file__), "gradle.py")
+    )
+
+    if max_heap := os.environ.get("MOZ_GRADLE_MAX_HEAP"):
+        jvmargs = android_gradle.jvmargs_with_max_heap(topsrcdir, max_heap)
+        gradle_flags += [f"-Dorg.gradle.jvmargs={jvmargs}"]
+
+    if seed := os.environ.get("MOZ_GRADLE_USER_HOME_SEED"):
+        android_gradle.seed_gradle_user_home(seed, os.environ.get("GRADLE_USER_HOME"))
 
     env = os.environ.copy()
 
@@ -1040,15 +1089,13 @@ def emulator_reset(command_context):
                 f"Failed to remove the AVD directory: '{avd_home_path}': {e}",
             )
 
-    sdk_manager_tool_path = android.get_sdkmanager_tool_path(
-        android.get_sdk_path(os_name)
-    )
-    if not sdk_manager_tool_path.exists():
+    android_cli_path = android.get_android_cli_path(android.get_sdk_path(os_name))
+    if not android_cli_path.exists():
         command_context.log(
             logging.ERROR,
             "emulator",
             {},
-            f"Unable to proceed - 'sdkmanager' not found at {sdk_manager_tool_path}. "
+            f"Unable to proceed - 'android' not found at {android_cli_path}. "
             f"Please run './mach bootstrap' to reinstall your Android SDK.",
         )
         return 1
@@ -1072,9 +1119,7 @@ def emulator_reset(command_context):
 
     android.ensure_android_packages(
         os_name,
-        os_arch,
         packages,
-        no_interactive=True,
         avd_manifest=avd_manifest,
     )
 

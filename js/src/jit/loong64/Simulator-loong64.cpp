@@ -2243,7 +2243,11 @@ bool Simulator::overRecursed(uintptr_t newsp) const {
 }
 
 bool Simulator::overRecursedWithExtra(uint32_t extra) const {
-  uintptr_t newsp = getRegister(sp) - extra;
+  uintptr_t cursp = getRegister(sp);
+  if (extra >= cursp) {
+    return true;
+  }
+  uintptr_t newsp = cursp - extra;
   return newsp <= stackLimit();
 }
 
@@ -4086,9 +4090,11 @@ void Simulator::decodeTypeOp17(SimInstruction* instr) {
     case op_ammin_db_du:
       UNIMPLEMENTED();
       break;
-    case op_dbar:
-      // TODO(loong64): dbar simulation
+    case op_dbar: {
+      MOZ_ASSERT(instr->bits(14, 0) == 0, "Only DBAR 0 is implemented");
+      AtomicOperations::fenceSeqCst();
       break;
+    }
     case op_ibar:
       UNIMPLEMENTED();
       break;

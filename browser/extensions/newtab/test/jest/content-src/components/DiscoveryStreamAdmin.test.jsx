@@ -501,6 +501,95 @@ describe("<DiscoveryStreamAdminUI>", () => {
       );
     });
 
+    const STAGE_ENDPOINT_PREF = {
+      "widgets.framed.endpoint.stage":
+        "https://merino.services.allizom.org/api/v1/widgets/framed",
+    };
+    const STAGE_ALLOWLISTED = {
+      ...STAGE_ENDPOINT_PREF,
+      "discoverystream.endpoints": "https://merino.services.allizom.org/",
+    };
+    const STAGE_NOT_ALLOWLISTED = {
+      ...STAGE_ENDPOINT_PREF,
+      "discoverystream.endpoints": "https://merino.services.mozilla.com/",
+    };
+    const framedSourceToggle = container =>
+      container.querySelector("#widgets-framed-environment");
+
+    it("should switch widgets.framed.environment between prod and stage", () => {
+      const { container, dispatch } = renderWidgets(STAGE_ALLOWLISTED);
+      const toggle = framedSourceToggle(container);
+      expect(toggle.hasAttribute("disabled")).toBe(false);
+      expect(toggle.getAttribute("label")).toBe(
+        "Framed widgets source: Prod (Default)"
+      );
+      fireToggle(toggle, true);
+      expect(dispatch).toHaveBeenCalledWith(
+        ac.SetPref("widgets.framed.environment", "stage")
+      );
+      fireToggle(toggle, false);
+      expect(dispatch).toHaveBeenCalledWith(
+        ac.SetPref("widgets.framed.environment", "prod")
+      );
+    });
+
+    it("should disable the framed widgets source toggle when stage Merino isn't allowlisted", () => {
+      const { container } = renderWidgets(STAGE_NOT_ALLOWLISTED);
+      const toggle = framedSourceToggle(container);
+      expect(toggle.hasAttribute("disabled")).toBe(true);
+      expect(toggle.parentElement.getAttribute("title")).toBe(
+        "Add https://merino.services.allizom.org/ to discoverystream.endpoints to use stage"
+      );
+    });
+
+    it("should enable the framed widgets source toggle on Nightly and show stage", () => {
+      const { container } = renderWidgets({
+        ...STAGE_NOT_ALLOWLISTED,
+        "widgets.framed.environment": "stage",
+        isNightlyBuild: true,
+      });
+      const toggle = framedSourceToggle(container);
+      expect(toggle.hasAttribute("disabled")).toBe(false);
+      expect(toggle.hasAttribute("pressed")).toBe(true);
+      expect(toggle.getAttribute("label")).toBe("Framed widgets source: Stage");
+      expect(toggle.parentElement.hasAttribute("title")).toBe(false);
+    });
+
+    it("should disable the toggle on Nightly when the stage endpoint isn't stage Merino", () => {
+      const { container } = renderWidgets({
+        ...STAGE_NOT_ALLOWLISTED,
+        "widgets.framed.endpoint.stage": "https://example.com/framed",
+        "widgets.framed.environment": "stage",
+        isNightlyBuild: true,
+      });
+      const toggle = framedSourceToggle(container);
+      expect(toggle.hasAttribute("disabled")).toBe(true);
+      expect(toggle.hasAttribute("pressed")).toBe(false);
+    });
+
+    it("should show prod when stage is set but not allowed", () => {
+      const { container } = renderWidgets({
+        ...STAGE_NOT_ALLOWLISTED,
+        "widgets.framed.environment": "stage",
+      });
+      const toggle = framedSourceToggle(container);
+      expect(toggle.hasAttribute("disabled")).toBe(true);
+      expect(toggle.hasAttribute("pressed")).toBe(false);
+      expect(toggle.getAttribute("label")).toBe(
+        "Framed widgets source: Prod (Default)"
+      );
+    });
+
+    it("should label the framed widgets source toggle Stage when on", () => {
+      const { container } = renderWidgets({
+        ...STAGE_ALLOWLISTED,
+        "widgets.framed.environment": "stage",
+      });
+      const toggle = framedSourceToggle(container);
+      expect(toggle.hasAttribute("pressed")).toBe(true);
+      expect(toggle.getAttribute("label")).toBe("Framed widgets source: Stage");
+    });
+
     it("should flip a widget's system pref from its toggle", () => {
       const { container, dispatch } = renderWidgets({
         "widgets.system.enabled": true,
@@ -519,13 +608,16 @@ describe("<DiscoveryStreamAdminUI>", () => {
       const labels = {
         "newtab-custom-widget-clock-toggle": "Clock",
         "newtab-custom-widget-crossword-toggle": "Crossword",
+        "newtab-custom-widget-horoscopes-toggle": "Horoscopes",
         "newtab-custom-widget-lists-toggle": "Lists",
         "newtab-custom-widget-picture-toggle": "Picture of the day",
         "newtab-custom-widget-privacy-toggle": "Privacy",
         "newtab-custom-widget-search-toggle": "Search",
-        "newtab-custom-widget-stocks-toggle2": "Finance",
+        "newtab-custom-widget-solitaire-toggle": "Solitaire",
         "newtab-custom-widget-timer-toggle": "Timer",
+        "newtab-custom-widget-travel-toggle": "Travel",
         "newtab-custom-widget-weather-toggle": "Weather",
+        "newtab-custom-widget-wrexhamafc": "Wrexham AFC",
       };
       document.l10n = {
         formatMessages: async keys =>
@@ -539,19 +631,22 @@ describe("<DiscoveryStreamAdminUI>", () => {
         [...container.querySelectorAll('[id^="widgets.system."]')].map(toggle =>
           toggle.getAttribute("data-l10n-id")
         );
-      await waitFor(() => expect(order()).toHaveLength(9));
+      await waitFor(() => expect(order()).toHaveLength(12));
 
       // Written by hand so the test does not mirror the sort.
       expect(order()).toEqual([
         "newtab-custom-widget-clock-toggle",
         "newtab-custom-widget-crossword-toggle",
-        "newtab-custom-widget-stocks-toggle2",
+        "newtab-custom-widget-horoscopes-toggle",
         "newtab-custom-widget-lists-toggle",
         "newtab-custom-widget-picture-toggle",
         "newtab-custom-widget-privacy-toggle",
         "newtab-custom-widget-search-toggle",
+        "newtab-custom-widget-solitaire-toggle",
         "newtab-custom-widget-timer-toggle",
+        "newtab-custom-widget-travel-toggle",
         "newtab-custom-widget-weather-toggle",
+        "newtab-custom-widget-wrexhamafc",
       ]);
     });
 
@@ -625,22 +720,6 @@ describe("<DiscoveryStreamAdminUI>", () => {
       expect(cleared).not.toContain("discoverystream.foo");
     });
 
-    it("should flip a bespoke widget feature pref from its toggle", () => {
-      const { container, dispatch } = renderWidgets({
-        "widgets.system.enabled": true,
-        "widgets.pictureOfTheDay.setAsWallpaper.enabled": false,
-      });
-      fireToggle(
-        container.querySelector(
-          '[id="widgets.pictureOfTheDay.setAsWallpaper.enabled"]'
-        ),
-        true
-      );
-      expect(dispatch).toHaveBeenCalledWith(
-        ac.SetPref("widgets.pictureOfTheDay.setAsWallpaper.enabled", true)
-      );
-    });
-
     it("should flip the privacy VPN messages pref from its toggle", () => {
       const { container, dispatch } = renderWidgets({
         "widgets.system.enabled": true,
@@ -705,6 +784,10 @@ describe("<DiscoveryStreamAdminUI> Layouts", () => {
     "spaces-buttons-bottom",
     "spaces-buttons-top",
     "spaces-floating-arrows",
+    "spaces-peek",
+    "spaces-preview-cards",
+    "spaces-preview-illustrated",
+    "spaces-preview-kit",
     "spaces-thematic-v1",
     // @experiment(remove) { bug 2078816 }
     "widget-first-content-slot",

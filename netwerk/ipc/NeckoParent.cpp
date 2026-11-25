@@ -26,10 +26,8 @@
 #include "mozilla/net/DNSRequestParent.h"
 #include "mozilla/net/DocumentChannelParent.h"
 #include "mozilla/net/IPCTransportProvider.h"
-#include "mozilla/net/PSocketProcessBridgeParent.h"
 #include "mozilla/net/RemoteStreamGetter.h"
 #include "mozilla/net/RequestContextService.h"
-#include "mozilla/net/SocketProcessParent.h"
 #ifdef MOZ_WEBRTC
 #  include "mozilla/net/StunAddrsRequestParent.h"
 #  include "mozilla/net/WebrtcTCPSocketParent.h"
@@ -65,7 +63,6 @@ using mozilla::dom::TCPServerSocketParent;
 using mozilla::dom::TCPSocketParent;
 using mozilla::dom::UDPSocketParent;
 using mozilla::ipc::LoadInfoArgsToLoadInfo;
-using mozilla::ipc::PrincipalInfo;
 #ifdef MOZ_PLACES
 using mozilla::places::PageIconProtocolHandler;
 #endif
@@ -106,7 +103,7 @@ SpeculativeConnectCallbackWrapper::GetInterface(const nsIID& aIID,
 }
 }  // anonymous namespace
 
-NeckoParent::NeckoParent() : mSocketProcessBridgeInited(false) {
+NeckoParent::NeckoParent() {
   // Init HTTP protocol handler now since we need atomTable up and running very
   // early (IPDL argument handling for PHttpChannel constructor needs it) so
   // normal init (during 1st Http channel request) isn't early enough.
@@ -125,28 +122,13 @@ static PBOverrideStatus PBOverrideStatusFromLoadContext(
 }
 
 static already_AddRefed<nsIPrincipal> GetRequestingPrincipal(
-    const LoadInfoArgs& aLoadInfoArgs) {
-  const Maybe<PrincipalInfo>& optionalPrincipalInfo =
-      aLoadInfoArgs.requestingPrincipalInfo();
-
-  if (optionalPrincipalInfo.isNothing()) {
-    return nullptr;
-  }
-
-  const PrincipalInfo& principalInfo = optionalPrincipalInfo.ref();
-
-  auto principalOrErr = PrincipalInfoToPrincipal(principalInfo);
-  return principalOrErr.isOk() ? principalOrErr.unwrap().forget() : nullptr;
-}
-
-static already_AddRefed<nsIPrincipal> GetRequestingPrincipal(
     const HttpChannelCreationArgs& aArgs) {
   if (aArgs.type() != HttpChannelCreationArgs::THttpChannelOpenArgs) {
     return nullptr;
   }
 
   const HttpChannelOpenArgs& args = aArgs.get_HttpChannelOpenArgs();
-  return GetRequestingPrincipal(args.loadInfo());
+  return do_AddRef(args.loadInfo().requestingPrincipal());
 }
 
 void NeckoParent::GetValidatedOriginAttributes(
@@ -394,7 +376,7 @@ static already_AddRefed<nsIPrincipal> GetRequestingPrincipal(
 
   const GeckoViewContentChannelOpenArgs& args =
       aArgs.get_GeckoViewContentChannelOpenArgs();
-  return GetRequestingPrincipal(args.loadInfo());
+  return do_AddRef(args.loadInfo().requestingPrincipal());
 }
 
 already_AddRefed<PGeckoViewContentChannelParent>
@@ -502,8 +484,7 @@ mozilla::ipc::IPCResult NeckoParent::RecvPDNSRequestConstructor(
 
   RefPtr<DNSRequestParent> actor =
       mozilla::ipc::ActorCast<DNSRequestParent>(aActor);
-  RefPtr<DNSRequestHandler> handler =
-      actor->GetDNSRequest()->AsDNSRequestHandler();
+  RefPtr<DNSRequestHandler> handler = actor->GetDNSRequest();
   handler->DoAsyncResolve(aHost, aTrrServer, aPort, aType, aOriginAttributes,
                           aFlags);
   return IPC_OK();
@@ -684,63 +665,6 @@ mozilla::ipc::IPCResult NeckoParent::RecvGetExtensionFD(
     aResolve(invalidFD);
   }
 
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult NeckoParent::RecvInitSocketProcessBridge(
-    InitSocketProcessBridgeResolver&& aResolver) {
-  MOZ_ASSERT(NS_IsMainThread());
-
-  // Initing the socket process bridge must be async here in order to
-  // wait for the socket process launch before executing.
-  auto task = [self = RefPtr{this}, resolver = std::move(aResolver)]() {
-    // The content process might be already destroyed.
-    if (!self->CanSend()) {
-      return;
-    }
-
-    Endpoint<PSocketProcessBridgeChild> invalidEndpoint;
-    if (NS_WARN_IF(self->mSocketProcessBridgeInited)) {
-      resolver(std::move(invalidEndpoint));
-      return;
-    }
-
-    RefPtr<SocketProcessParent> parent = SocketProcessParent::GetSingleton();
-    if (NS_WARN_IF(!parent)) {
-      resolver(std::move(invalidEndpoint));
-      return;
-    }
-
-    Endpoint<PSocketProcessBridgeParent> parentEndpoint;
-    Endpoint<PSocketProcessBridgeChild> childEndpoint;
-    if (NS_WARN_IF(NS_FAILED(PSocketProcessBridge::CreateEndpoints(
-            parent->OtherEndpointProcInfo(),
-            self->Manager()->OtherEndpointProcInfo(), &parentEndpoint,
-            &childEndpoint)))) {
-      resolver(std::move(invalidEndpoint));
-      return;
-    }
-
-    if (NS_WARN_IF(!parent->SendInitSocketProcessBridgeParent(
-            self->Manager()->OtherPid(), std::move(parentEndpoint)))) {
-      resolver(std::move(invalidEndpoint));
-      return;
-    }
-
-    resolver(std::move(childEndpoint));
-    self->mSocketProcessBridgeInited = true;
-  };
-  gIOService->CallOrWaitForSocketProcess(std::move(task));
-
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult NeckoParent::RecvResetSocketProcessBridge() {
-  // SendResetSocketProcessBridge is called from
-  // SocketProcessBridgeChild::ActorDestroy if the socket process
-  // crashes.  This is necessary in order to properly initialize the
-  // restarted socket process.
-  mSocketProcessBridgeInited = false;
   return IPC_OK();
 }
 
@@ -971,7 +895,8 @@ RefPtr<RemoteStreamPromise> NeckoParent::CreateRemoteStreamForResolvedURI(
     return RemoteStreamPromise::CreateAndReject(rv, __func__);
   }
 
-  auto promiseHolder = MakeUnique<MozPromiseHolder<RemoteStreamPromise>>();
+  auto promiseHolder =
+      std::make_unique<MozPromiseHolder<RemoteStreamPromise>>();
   RefPtr<RemoteStreamPromise> promise = promiseHolder->Ensure(__func__);
 
   nsCOMPtr<nsIMIMEService> mime = do_GetService("@mozilla.org/mime;1", &rv);

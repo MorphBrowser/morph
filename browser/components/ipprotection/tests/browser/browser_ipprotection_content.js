@@ -236,26 +236,46 @@ add_task(async function test_enrolling_skeleton() {
   let content = await openPanel({
     unauthenticated: false,
     isEnrolling: true,
+    bandwidthUsage: null,
   });
 
-  let container = content.shadowRoot.querySelector("#enrolling-container");
+  let outerContainer = content.shadowRoot.querySelector(
+    "#outer-enrolling-container"
+  );
+  Assert.ok(outerContainer, "Outer enrolling container should be present");
+  let container = outerContainer.querySelector("#enrolling-container");
   Assert.ok(container, "Enrolling container should be present");
   Assert.ok(
     container.querySelector(".skeleton-title"),
     "Skeleton title element should be present"
   );
   Assert.ok(
-    container.querySelector(".skeleton-line"),
-    "Skeleton line element should be present"
+    container.querySelector(".skeleton-image"),
+    "Skeleton image element should be present"
   );
   Assert.equal(
     container.querySelectorAll(".skeleton-line-thick").length,
-    2,
-    "Two skeleton line thick elements should be present"
+    1,
+    "One skeleton line thick element should be inside the enrolling container"
   );
   Assert.ok(
-    container.querySelector(".skeleton-image"),
-    "Skeleton image element should be present"
+    outerContainer.querySelector(":scope > .skeleton-line-outer"),
+    "Outer skeleton line thick element should be present"
+  );
+  Assert.ok(
+    !outerContainer.querySelector(".skeleton-line"),
+    "Skeleton line should be hidden without bandwidth usage"
+  );
+
+  await setPanelState({
+    bandwidthUsage: { remaining: 1, max: 1 },
+  });
+
+  Assert.ok(
+    content.shadowRoot.querySelector(
+      "#outer-enrolling-container > .skeleton-line"
+    ),
+    "Skeleton line should be present with bandwidth usage"
   );
 
   Assert.ok(
@@ -338,4 +358,120 @@ add_task(async function test_enrolling_transitions_to_ready() {
 
   await closePanel();
   cleanupService();
+});
+
+/**
+ * Tests that the site inclusion prompt is shown once when the user turns on
+ * the VPN, follows navigation to the current website, and is removed when
+ * dismissed.
+ */
+add_task(async function test_site_inclusion_prompt() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["browser.ipProtection.features.siteInclusions", true],
+      ["browser.ipProtection.siteInclusionPromptShown", false],
+      ["browser.ipProtection.userEnabled", false],
+      ["browser.ipProtection.userEnableCount", 0],
+    ],
+  });
+  const EXCLUDED_SITE = "https://example.net";
+  let sandbox = sinon.createSandbox();
+  sandbox.stub(IPPProxyManager, "start").resolves({ started: true });
+  sandbox
+    .stub(IPPSiteRuleManager, "getRule")
+    .callsFake(principal =>
+      principal?.origin === EXCLUDED_SITE
+        ? IPPPrincipalRules.EXCLUDED
+        : IPPPrincipalRules.DEFAULT
+    );
+
+  let tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    "https://www.example.com"
+  );
+  let content = await openPanel({ isProtectionEnabled: false, error: "" });
+
+  content.dispatchEvent(
+    new CustomEvent("IPProtection:UserEnable", { bubbles: true })
+  );
+  await setPanelState({ isProtectionEnabled: true });
+
+  let prompt = content.siteInclusionPromptEl;
+  Assert.ok(prompt, "Prompt should be shown after the VPN is turned on");
+  Assert.equal(prompt.localName, "moz-promo", "Prompt should be a moz-promo");
+  Assert.ok(prompt.dismissable, "Prompt should be dismissable");
+  Assert.deepEqual(
+    JSON.parse(prompt.getAttribute("data-l10n-args")),
+    { website: "example.com" },
+    "Prompt should be passed the current website without www."
+  );
+
+  let loaded = BrowserTestUtils.browserLoaded(tab.linkedBrowser);
+  BrowserTestUtils.startLoadingURIString(
+    tab.linkedBrowser,
+    "https://example.org"
+  );
+  await loaded;
+  await content.updateComplete;
+
+  prompt = content.siteInclusionPromptEl;
+  Assert.deepEqual(
+    JSON.parse(prompt.getAttribute("data-l10n-args")),
+    { website: "example.org" },
+    "Prompt should follow navigation to a new website"
+  );
+  Assert.ok(
+    Services.prefs.getBoolPref("browser.ipProtection.siteInclusionPromptShown"),
+    "Prompt should be recorded as shown"
+  );
+
+  loaded = BrowserTestUtils.browserLoaded(tab.linkedBrowser);
+  BrowserTestUtils.startLoadingURIString(tab.linkedBrowser, EXCLUDED_SITE);
+  await loaded;
+  await content.updateComplete;
+
+  Assert.ok(
+    !content.siteInclusionPromptEl,
+    "Prompt should not be shown on an excluded website"
+  );
+
+  loaded = BrowserTestUtils.browserLoaded(tab.linkedBrowser);
+  BrowserTestUtils.startLoadingURIString(
+    tab.linkedBrowser,
+    "https://example.org"
+  );
+  await loaded;
+  await content.updateComplete;
+
+  prompt = content.siteInclusionPromptEl;
+  Assert.ok(prompt, "Prompt should return after leaving the excluded website");
+
+  await prompt.updateComplete;
+  let dismissed = BrowserTestUtils.waitForEvent(
+    document,
+    "IPProtection:DismissSiteInclusionPrompt"
+  );
+  prompt.closeButton.click();
+  await dismissed;
+  await content.updateComplete;
+
+  Assert.ok(
+    !content.siteInclusionPromptEl,
+    "Prompt should be removed after it is dismissed"
+  );
+
+  content.dispatchEvent(
+    new CustomEvent("IPProtection:UserEnable", { bubbles: true })
+  );
+  await content.updateComplete;
+
+  Assert.ok(
+    !content.siteInclusionPromptEl,
+    "Prompt should not be shown a second time"
+  );
+
+  await closePanel();
+  BrowserTestUtils.removeTab(tab);
+  sandbox.restore();
+  await SpecialPowers.popPrefEnv();
 });

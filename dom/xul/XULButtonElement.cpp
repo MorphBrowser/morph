@@ -67,7 +67,8 @@ void XULButtonElement::PopupOpened() {
     return;
   }
   gMenuJustOpenedOrClosedTime = TimeStamp::Now();
-  SetAttr(kNameSpaceID_None, nsGkAtoms::open, u"true"_ns, true);
+  SetAttr(kNameSpaceID_None, nsGkAtoms::open, u"true"_ns, true,
+          IsKnownNewAttr::No);
 }
 
 void XULButtonElement::PopupClosed(bool aDeselectMenu) {
@@ -300,7 +301,7 @@ void XULButtonElement::StartBlinking() {
           if (parent->GetActiveMenuChild() == self) {
             // Restore the highlighting if we're still the active item.
             self->SetAttr(kNameSpaceID_None, nsGkAtoms::menuactive, u"true"_ns,
-                          true);
+                          true, IsKnownNewAttr::No);
           }
         }
         // Reuse our timer to actually execute.
@@ -532,14 +533,19 @@ void XULButtonElement::PostHandleEventForMenus(
   }
 }
 
+void XULButtonElement::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
+  aVisitor.mWantsPostHandleEvent = true;
+  nsXULElement::GetEventTargetParent(aVisitor);
+}
+
 nsresult XULButtonElement::PostHandleEvent(EventChainPostVisitor& aVisitor) {
   if (aVisitor.mEventStatus == nsEventStatus_eConsumeNoDefault) {
-    return nsXULElement::PostHandleEvent(aVisitor);
+    return NS_OK;
   }
 
   if (IsMenu()) {
     PostHandleEventForMenus(aVisitor);
-    return nsXULElement::PostHandleEvent(aVisitor);
+    return NS_OK;
   }
 
   auto* event = aVisitor.mEvent;
@@ -621,7 +627,7 @@ nsresult XULButtonElement::PostHandleEvent(EventChainPostVisitor& aVisitor) {
       break;
   }
 
-  return nsXULElement::PostHandleEvent(aVisitor);
+  return NS_OK;
 }
 
 void XULButtonElement::Blurred() {

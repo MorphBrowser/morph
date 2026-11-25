@@ -6,6 +6,8 @@
 
 #include "mozilla/MathAlgorithms.h"
 
+#include <bit>
+
 #include "jit/arm/Assembler-arm.h"
 #include "jit/Lowering.h"
 #include "jit/MIR-wasm.h"
@@ -15,8 +17,6 @@
 
 using namespace js;
 using namespace js::jit;
-
-using mozilla::FloorLog2;
 
 LBoxAllocation LIRGeneratorARM::useBoxFixed(MDefinition* mir, Register reg1,
                                             Register reg2, bool useAtStart) {
@@ -192,12 +192,11 @@ void LIRGeneratorARM::lowerForMulInt64(LMulI64* ins, MMul* mir,
 
   if (rhs->isConstant()) {
     int64_t constant = rhs->toConstant()->toInt64();
-    int32_t shift = mozilla::FloorLog2(uint64_t(constant));
     // See special cases in CodeGeneratorARM::visitMulI64
     if (constant >= -1 && constant <= 2) {
       needsTemp = false;
     }
-    if (constant > 0 && int64_t(1) << shift == constant) {
+    if (constant > 0 && std::has_single_bit(uint64_t(constant))) {
       needsTemp = false;
     }
   }
@@ -302,21 +301,29 @@ void LIRGeneratorARM::lowerDivI(MDiv* div) {
   // rewritten to use other instructions.
   if (div->rhs()->isConstant()) {
     int32_t rhs = div->rhs()->toConstant()->toInt32();
-    // Check for division by a positive power of two, which is an easy and
-    // important case to optimize. Note that other optimizations are also
-    // possible; division by negative powers of two can be optimized in a
-    // similar manner as positive powers of two, and division by other
-    // constants can be optimized by a reciprocal multiplication technique.
-    int32_t shift = FloorLog2(uint32_t(rhs));
-    if (rhs > 0 && 1 << shift == rhs) {
-      LDivPowTwoI* lir =
-          new (alloc()) LDivPowTwoI(useRegisterAtStart(div->lhs()), shift);
+
+    // Check for division by a power of two, which is an easy and important
+    // case to optimize.
+    if (std::has_single_bit(mozilla::Abs(rhs))) {
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
+      LDivPowTwoI* lir = new (alloc())
+          LDivPowTwoI(useRegisterAtStart(div->lhs()), shift, rhs < 0);
       if (div->fallible()) {
         assignSnapshot(lir, div->bailoutKind());
       }
       define(lir, div);
       return;
     }
+
+    // Division by other constants can be optimized by a reciprocal
+    // multiplication technique.
+    auto lhs = useRegister(div->lhs());
+    auto* lir = new (alloc()) LDivConstantI(lhs, rhs);
+    if (div->fallible()) {
+      assignSnapshot(lir, div->bailoutKind());
+    }
+    define(lir, div);
+    return;
   }
 
   if (ARMFlags::HasIDIV()) {
@@ -360,26 +367,27 @@ void LIRGeneratorARM::lowerMulI(MMul* mul, MDefinition* lhs, MDefinition* rhs) {
 void LIRGeneratorARM::lowerModI(MMod* mod) {
   if (mod->rhs()->isConstant()) {
     int32_t rhs = mod->rhs()->toConstant()->toInt32();
-    int32_t shift = FloorLog2(uint32_t(rhs));
-    if (rhs > 0 && 1 << shift == rhs) {
+
+    if (std::has_single_bit(mozilla::Abs(rhs))) {
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
       LModPowTwoI* lir =
-          new (alloc()) LModPowTwoI(useRegister(mod->lhs()), shift);
+          new (alloc()) LModPowTwoI(useRegisterAtStart(mod->lhs()), shift);
       if (mod->fallible()) {
         assignSnapshot(lir, mod->bailoutKind());
       }
       define(lir, mod);
       return;
     }
-    if (shift < 31 && (1 << (shift + 1)) - 1 == rhs) {
-      MOZ_ASSERT(rhs);
-      LModMaskI* lir = new (alloc())
-          LModMaskI(useRegister(mod->lhs()), temp(), temp(), shift + 1);
-      if (mod->fallible()) {
-        assignSnapshot(lir, mod->bailoutKind());
-      }
-      define(lir, mod);
-      return;
+
+    // Modulus by other constants can be optimized by a reciprocal
+    // multiplication technique.
+    auto lhs = useRegister(mod->lhs());
+    auto* lir = new (alloc()) LModConstantI(lhs, rhs);
+    if (mod->fallible()) {
+      assignSnapshot(lir, mod->bailoutKind());
     }
+    define(lir, mod);
+    return;
   }
 
   if (ARMFlags::HasIDIV()) {
@@ -551,6 +559,29 @@ void LIRGeneratorARM::lowerBigIntPtrMod(MBigIntPtrMod* ins) {
 }
 
 void LIRGeneratorARM::lowerUDiv(MDiv* div) {
+  if (div->rhs()->isConstant()) {
+    // NOTE: the result of toInt32 is coerced to uint32_t.
+    uint32_t rhs = div->rhs()->toConstant()->toInt32();
+
+    if (std::has_single_bit(rhs)) {
+      int32_t shift = std::countr_zero(rhs);
+      auto* lir = new (alloc())
+          LDivPowTwoI(useRegisterAtStart(div->lhs()), shift, false);
+      if (div->fallible()) {
+        assignSnapshot(lir, div->bailoutKind());
+      }
+      define(lir, div);
+      return;
+    }
+
+    auto* lir = new (alloc()) LUDivConstant(useRegister(div->lhs()), rhs);
+    if (div->fallible()) {
+      assignSnapshot(lir, div->bailoutKind());
+    }
+    define(lir, div);
+    return;
+  }
+
   MDefinition* lhs = div->getOperand(0);
   MDefinition* rhs = div->getOperand(1);
 
@@ -574,6 +605,29 @@ void LIRGeneratorARM::lowerUDiv(MDiv* div) {
 }
 
 void LIRGeneratorARM::lowerUMod(MMod* mod) {
+  if (mod->rhs()->isConstant()) {
+    // NOTE: the result of toInt32 is coerced to uint32_t.
+    uint32_t rhs = mod->rhs()->toConstant()->toInt32();
+
+    if (std::has_single_bit(rhs)) {
+      int32_t shift = std::countr_zero(rhs);
+      auto* lir =
+          new (alloc()) LModPowTwoI(useRegisterAtStart(mod->lhs()), shift);
+      if (mod->fallible()) {
+        assignSnapshot(lir, mod->bailoutKind());
+      }
+      define(lir, mod);
+      return;
+    }
+
+    auto* lir = new (alloc()) LUModConstant(useRegister(mod->lhs()), rhs);
+    if (mod->fallible()) {
+      assignSnapshot(lir, mod->bailoutKind());
+    }
+    define(lir, mod);
+    return;
+  }
+
   MDefinition* lhs = mod->getOperand(0);
   MDefinition* rhs = mod->getOperand(1);
 
@@ -1044,6 +1098,8 @@ bool MWasmTernarySimd128::canRelaxBitselect() { return false; }
 bool MWasmBinarySimd128::canPmaddubsw() { return false; }
 
 bool MWasmBinarySimd128::canTestBits() { return false; }
+
+bool MWasmReplaceLaneSimd128::canMoveLane() { return false; }
 #endif
 
 bool MWasmBinarySimd128::specializeForConstantRhs() {
@@ -1066,6 +1122,10 @@ void LIRGenerator::visitWasmShuffleSimd128(MWasmShuffleSimd128* ins) {
 
 void LIRGenerator::visitWasmReplaceLaneSimd128(MWasmReplaceLaneSimd128* ins) {
   MOZ_CRASH("replace-lane SIMD NYI");
+}
+
+void LIRGenerator::visitWasmMoveLaneSimd128(MWasmMoveLaneSimd128* ins) {
+  MOZ_CRASH("move-lane SIMD NYI");
 }
 
 void LIRGenerator::visitWasmScalarToSimd128(MWasmScalarToSimd128* ins) {

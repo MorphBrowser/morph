@@ -30,7 +30,6 @@ XPIDL_SOURCES += [
     "nsISelectionController.idl",
     "nsISelectionDisplay.idl",
     "nsISelectionListener.idl",
-    "nsISlowScriptDebug.idl",
 ]
 
 XPIDL_MODULE = "dom"
@@ -166,6 +165,7 @@ EXPORTS.mozilla.dom += [
     "ContentProcessMessageManager.h",
     "CrossShadowBoundaryRange.h",
     "CustomElementRegistry.h",
+    "CycleCollectorUnlinkTester.h",
     "DirectionalityUtils.h",
     "DocGroup.h",
     "Document.h",
@@ -226,6 +226,7 @@ EXPORTS.mozilla.dom += [
     "NodeInfoInlines.h",
     "NodeIterator.h",
     "NodeList.h",
+    "NodeOwnedObjectList.h",
     "ParentProcessMessageManager.h",
     "PlacesBookmark.h",
     "PlacesBookmarkAddition.h",
@@ -256,6 +257,7 @@ EXPORTS.mozilla.dom += [
     "PrefetchCandidates.h",
     "ProcessMessageManager.h",
     "ProfilerCounter.h",
+    "QuotaExceededError.h",
     "RadioGroupContainer.h",
     "Range.h",
     "RequestCallbackManager.h",
@@ -367,6 +369,7 @@ UNIFIED_SOURCES += [
     "CrossShadowBoundaryRange.cpp",
     "Crypto.cpp",
     "CustomElementRegistry.cpp",
+    "CycleCollectorUnlinkTester.cpp",
     "DirectionalityUtils.cpp",
     "DocGroup.cpp",
     "Document.cpp",
@@ -472,6 +475,7 @@ UNIFIED_SOURCES += [
     "PrefetchCandidates.cpp",
     "ProcessMessageManager.cpp",
     "ProfilerCounter.cpp",
+    "QuotaExceededError.cpp",
     "RadioGroupContainer.cpp",
     "Range.cpp",
     "RangeUtils.cpp",
@@ -578,7 +582,6 @@ MOZ_SRC_FILES += [
     "ContentAreaDropListener.sys.mjs",
     "IndexedDBHelper.sys.mjs",
     "LocationHelper.sys.mjs",
-    "SlowScriptDebug.sys.mjs",
 ]
 
 XPCOM_MANIFESTS += [

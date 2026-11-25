@@ -63,9 +63,6 @@ skip-if = [
 ["test_ext_background_early_shutdown.js"]
 requesttimeoutfactor = 3  # Slow on Linux TSan/ASan (replaces manifest 2x)
 run-sequentially = ["os == 'mac'"] # frequent fail in parallel on Mac
-skip-if = [
-  "isolated_process", # Bug 1709961
-]
 
 ["test_ext_background_empty.js"]
 
@@ -123,6 +120,14 @@ run-if = [
 ["test_ext_browsingData_cookies_cache.js"]
 
 ["test_ext_browsingData_cookies_cookieStoreId.js"]
+
+["test_ext_builtin_widget.js"]
+run-if = [
+  "appname != 'thunderbird'",
+]
+skip-if = [
+  "os == 'android'", # Widgets are not exposed to android.
+]
 
 ["test_ext_cache_api.js"]
 
@@ -197,6 +202,8 @@ skip-if = [
 ["test_ext_contentscript_slow_frame.js"]
 
 ["test_ext_contentscript_structured_clone.js"]
+
+["test_ext_contentscript_sync_xhr.js"]
 
 ["test_ext_contentscript_teardown.js"]
 
@@ -396,9 +403,6 @@ skip-if = [
 ["test_ext_eventpage_warning.js"]
 
 ["test_ext_experiments.js"]
-skip-if = [
-  "isolated_process", # Bug 1709961
-]
 
 ["test_ext_experiments_console.js"]
 
@@ -436,9 +440,6 @@ run-if = [
 ]
 
 ["test_ext_l10n.js"]
-skip-if = [
-  "isolated_process", # Bug 1709961
-]
 
 ["test_ext_localStorage.js"]
 
@@ -557,9 +558,6 @@ skip-if = [
 ]
 
 ["test_ext_proxy_socks.js"]
-skip-if = [
-  "socketprocess_networking",
-]
 run-sequentially = ["true"] # TCPServerSocket fails otherwise
 
 ["test_ext_proxy_speculative.js"]
@@ -608,6 +606,8 @@ skip-if = [
 ["test_ext_runtime_sendMessage_multiple.js"]
 
 ["test_ext_runtime_sendMessage_no_receiver.js"]
+
+["test_ext_runtime_sendMessage_response_warning.js"]
 
 ["test_ext_same_site_cookies.js"]
 
@@ -721,9 +721,6 @@ skip-if = [
 ["test_ext_storage_session.js"]
 
 ["test_ext_storage_session_on_crash.js"]
-skip-if = [
-  "isolated_process", # Bug 1709961
-]
 
 ["test_ext_storage_sync.js"]
 skip-if = [
@@ -856,6 +853,8 @@ skip-if = [
 ]
 
 ["test_ext_webRequest_redirect_mozextension.js"]
+
+["test_ext_webRequest_redirect_resource_timing.js"]
 
 ["test_ext_webRequest_requestSize.js"]
 

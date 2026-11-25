@@ -3,11 +3,13 @@
 # file, you can obtain one at http://mozilla.org/MPL/2.0/.
 
 UNIFIED_SOURCES += [
+    "TestCharacterData.cpp",
     "TestCharacterDataBuffer.cpp",
     "TestContentUtils.cpp",
     "TestMimeType.cpp",
     "TestParser.cpp",
     "TestScheduler.cpp",
+    "TestScriptCompression.cpp",
     "TestTextDirective.cpp",
     "TestXMLSerializerNoBreakLink.cpp",
     "TestXPathGenerator.cpp",

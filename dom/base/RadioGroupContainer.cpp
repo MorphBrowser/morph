@@ -29,24 +29,13 @@ struct nsRadioGroupStruct {
 
 RadioGroupContainer::RadioGroupContainer() = default;
 
-RadioGroupContainer::~RadioGroupContainer() {
-  for (const auto& group : mRadioGroups) {
-    for (const auto& button : group.GetData()->mRadioButtons.AsSpan()) {
-      // When the radio group container is being cycle-collected, any remaining
-      // connected buttons will also be in the process of being cycle-collected.
-      // Here, we unset the button's reference to the container so that when it
-      // is collected it does not attempt to remove itself from a potentially
-      // already deleted radio group.
-      button->DisconnectRadioGroupContainer();
-    }
-  }
-}
+RadioGroupContainer::~RadioGroupContainer() = default;
 
-/* static */
-void RadioGroupContainer::Traverse(RadioGroupContainer* tmp,
-                                   nsCycleCollectionTraversalCallback& cb) {
+NS_IMPL_CYCLE_COLLECTION_CLASS(RadioGroupContainer)
+
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(RadioGroupContainer)
   for (const auto& entry : tmp->mRadioGroups) {
-    nsRadioGroupStruct* radioGroup = entry.GetWeak();
+    nsRadioGroupStruct* radioGroup = entry.GetRawPtr();
     NS_CYCLE_COLLECTION_NOTE_EDGE_NAME(
         cb, "mRadioGroups entry->mSelectedRadioButton");
     cb.NoteXPCOMChild(ToSupports(radioGroup->mSelectedRadioButton));
@@ -57,7 +46,20 @@ void RadioGroupContainer::Traverse(RadioGroupContainer* tmp,
       cb.NoteXPCOMChild(ToSupports(button));
     }
   }
-}
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
+
+NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(RadioGroupContainer)
+  for (const auto& group : tmp->mRadioGroups) {
+    for (const auto& button : group.GetData()->mRadioButtons.AsSpan()) {
+      // Any remaining connected buttons are also being cycle-collected. Unset
+      // the button's reference to the container so that when it is collected
+      // it does not attempt to remove itself from an already cleared radio
+      // group.
+      button->DisconnectRadioGroupContainer(tmp);
+    }
+  }
+  tmp->mRadioGroups.Clear();
+NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 size_t RadioGroupContainer::SizeOfIncludingThis(
     MallocSizeOf aMallocSizeOf) const {

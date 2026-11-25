@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use neqo_common::{qdebug, qtrace};
+use tracing::{debug, trace};
 
 use crate::{
     cc::{
@@ -99,13 +99,26 @@ impl Display for State {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Cubic {
     /// Current CUBIC parameters.
     current: State,
     /// CUBIC parameters that have been stored on a congestion event to restore later in case it
     /// turns out to have been spurious.
     stored: Option<State>,
+    /// Whether to apply the alternative backoff factor [`Self::BETA_USIZE_DIVIDEND_ECN`] on ECN-CE
+    /// congestion events (RFC 8511).
+    abe: bool,
+}
+
+impl Default for Cubic {
+    fn default() -> Self {
+        Self {
+            current: State::default(),
+            stored: None,
+            abe: true,
+        }
+    }
 }
 
 impl Display for Cubic {
@@ -186,6 +199,13 @@ impl Cubic {
     /// construct the beta value from `85/100`.
     pub const BETA_USIZE_DIVIDEND_ECN: usize = 85;
 
+    /// Enable or disable Alternative Backoff with ECN (RFC 8511). Enabled by default.
+    #[must_use]
+    pub const fn abe(mut self, abe: bool) -> Self {
+        self.abe = abe;
+        self
+    }
+
     /// This is the factor that is used by fast convergence to further reduce the next `W_max` when
     /// a congestion event occurs while `cwnd < W_max`. This speeds up the bandwidth release for
     /// when a new flow joins the network.
@@ -259,7 +279,7 @@ impl Cubic {
                 0.0
             }
         };
-        qtrace!("[{self}] New epoch");
+        trace!("[{self}] New epoch");
     }
 
     #[cfg(test)]
@@ -270,6 +290,11 @@ impl Cubic {
     #[cfg(test)]
     pub const fn set_w_max(&mut self, w_max: f64) {
         self.current.w_max = Some(w_max);
+    }
+
+    #[cfg(test)]
+    pub const fn t_epoch(&self) -> Option<Instant> {
+        self.current.t_epoch
     }
 }
 
@@ -319,6 +344,11 @@ impl WindowAdjustment for Cubic {
         // > slow start.
         //
         // <https://datatracker.ietf.org/doc/html/rfc9438#section-4.2-10>
+        //
+        // We are using `min_rtt` rather than `smoothed_rtt` to avoid growth being more aggressive
+        // when already under queueing delay. This is in line with what the Linux Kernel does:
+        //
+        // (https://github.com/torvalds/linux/blob/7e1392a42ea288d70a266f6553fe06f57f8647ea/net/ipv4/tcp_cubic.c#L265)
         //
         // In neqo the target congestion window is in bytes.
         let t = now.saturating_duration_since(t_epoch);
@@ -458,7 +488,7 @@ impl WindowAdjustment for Cubic {
 
         // Reducing the congestion window and resetting time
         self.current.t_epoch = None;
-        let beta_dividend = if congestion_trigger == Ecn {
+        let beta_dividend = if self.abe && congestion_trigger == Ecn {
             Self::BETA_USIZE_DIVIDEND_ECN
         } else {
             Self::BETA_USIZE_DIVIDEND
@@ -485,7 +515,7 @@ impl WindowAdjustment for Cubic {
             return;
         };
 
-        qdebug!(
+        debug!(
             "Spurious cong event: recovering cubic state from {} to {stored}",
             self.current
         );

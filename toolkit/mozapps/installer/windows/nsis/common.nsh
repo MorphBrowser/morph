@@ -2,6 +2,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+SetDateSave off
 
 ################################################################################
 # Helper defines and macros for toolkit applications
@@ -7509,7 +7510,7 @@
       ${If} $4 == $2 ; Check if the entry matches our installation directory
         StrCpy $4 $1 "" $3
         ${If} ${FileExists} "$4\*.*" ; Check if the directory exists
-          ExecShell "open" "$INSTDIR\notification-helper.exe" '--profile "$4"' SW_HIDE
+          Exec '"$INSTDIR\notification-helper.exe" --profile "$4"'
         ${EndIf}
       ${EndIf}
     ${Loop}

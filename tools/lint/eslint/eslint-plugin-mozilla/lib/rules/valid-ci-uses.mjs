@@ -33,6 +33,7 @@ const platformSpecificInterfaces = new Map([
   ["nsIASWebAuthSessionRequest", "darwin"],
   ["nsIAccessibleMacEvent", "darwin"],
   ["nsIAccessibleMacInterface", "darwin"],
+  ["nsICocoaAppShellTestUtils", "darwin"],
   ["nsILocalFileMac", "darwin"],
   ["nsIAccessibleMacEvent", "darwin"],
   ["nsIKeychainMigrationUtils", "darwin"],
@@ -70,6 +71,8 @@ const platformSpecificInterfaces = new Map([
   // Sandbox test is only enabled for certain configurations (MOZ_SANDBOX,
   // MOZ_DEBUG, ENABLE_TESTS).
   ["mozISandboxTest", "any"],
+  // These are for MOZ_ENTERPRISE
+  ["nsIImeiProvider", "any"],
 ]);
 
 function interfaceHasProperty(interfaceName, propertyName) {

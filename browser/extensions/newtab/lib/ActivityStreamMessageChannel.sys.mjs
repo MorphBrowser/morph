@@ -7,6 +7,7 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   AboutHomeStartupCache: "resource:///modules/AboutHomeStartupCache.sys.mjs",
   AboutNewTabParent: "resource:///actors/AboutNewTabParent.sys.mjs",
+  CONTENT_PREF_RULES: "resource://newtab/lib/ActivityStream.sys.mjs",
 });
 
 import {
@@ -16,6 +17,54 @@ import {
 } from "resource://newtab/common/Actions.mjs";
 
 const ABOUT_NEW_TAB_URL = "about:newtab";
+
+/**
+ * Whether content may write `value` to the pref `name`, per that pref's
+ * `allowSetFromContent` rule in PREFS_CONFIG. Prefs without a rule are only
+ * writable from the parent process.
+ *
+ * @param {string} name Pref name, relative to the activity-stream branch
+ * @param {any} value The value to write, or undefined when clearing the pref
+ * @param {boolean} [clearing]
+ * @returns {boolean}
+ */
+function isPrefChangeAllowedFromContent(name, value, clearing = false) {
+  const rule = typeof name === "string" && lazy.CONTENT_PREF_RULES?.get(name);
+  if (!rule) {
+    return false;
+  }
+  if (clearing) {
+    return true;
+  }
+  if (rule.oneOf) {
+    return rule.oneOf.includes(value);
+  }
+  return typeof value === rule.type;
+}
+
+function isPrefActionAllowedFromContent(action) {
+  switch (action.type) {
+    case at.SET_PREF:
+      return isPrefChangeAllowedFromContent(
+        action.data?.name,
+        action.data?.value
+      );
+    case at.CLEAR_PREF:
+      return isPrefChangeAllowedFromContent(action.data?.name, undefined, true);
+    case at.SET_MULTIPLE_PREFS: {
+      const values = action.data?.values;
+      return (
+        !!values &&
+        typeof values === "object" &&
+        Object.entries(values).every(([name, value]) =>
+          isPrefChangeAllowedFromContent(name, value)
+        )
+      );
+    }
+    default:
+      return true;
+  }
+}
 
 export const DEFAULT_OPTIONS = {
   dispatch(action) {
@@ -29,17 +78,29 @@ export const DEFAULT_OPTIONS = {
 };
 
 export class ActivityStreamMessageChannel {
+  /** @type {Function} */
+  dispatch;
+
+  /** @type {string} */
+  pageURL;
+
+  /** @type {string} */
+  outgoingMessageName;
+
+  /** @type {string} */
+  incomingMessageName;
+
   /**
    * ActivityStreamMessageChannel - This module connects a Redux store to the new tab page actor.
    *                  You should use the BroadcastToContent, AlsoToOneContent, and AlsoToMain action creators
    *                  in common/Actions.sys.mjs to help you create actions that will be automatically routed
    *                  to the correct location.
    *
-   * @param  {object} options
-   * @param  {function} options.dispatch The dispatch method from a Redux store
-   * @param  {string} options.pageURL The URL to which the channel is attached, such as about:newtab.
-   * @param  {string} options.outgoingMessageName The name of the message sent to child processes
-   * @param  {string} options.incomingMessageName The name of the message received from child processes
+   * @param  {object} [options] Overrides for DEFAULT_OPTIONS
+   * @param  {function} [options.dispatch] The dispatch method from a Redux store
+   * @param  {string} [options.pageURL] The URL to which the channel is attached, such as about:newtab.
+   * @param  {string} [options.outgoingMessageName] The name of the message sent to child processes
+   * @param  {string} [options.incomingMessageName] The name of the message received from child processes
    */
   constructor(options = {}) {
     Object.assign(this, DEFAULT_OPTIONS, options);
@@ -92,6 +153,13 @@ export class ActivityStreamMessageChannel {
    * @param  {string} targetId The portID of the port that sent the message
    */
   onActionFromContent(action, targetId) {
+    if (!isPrefActionAllowedFromContent(action)) {
+      console.error(
+        `Dropped ${action.type} from content for a pref it may not change`,
+        action.data
+      );
+      return;
+    }
     this.dispatch(ac.AlsoToMain(action, this.validatePortID(targetId)));
   }
 
@@ -378,7 +446,7 @@ export class ActivityStreamMessageChannel {
    *             be formatted as Redux actions, and dispatches them to this.store
    *
    * @param  {object} msg A custom message from content
-   * @param  {object} msg.action A Redux action (e.g. {type: "HELLO_WORLD"})
+   * @param  {object} msg.data A Redux action (e.g. {type: "HELLO_WORLD"})
    * @param  {object} msg.target A message target
    * @param  {object} tabDetails details about a loaded tab, similar to onNewTabInit
    */

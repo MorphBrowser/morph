@@ -298,6 +298,8 @@ skip-if = [
 
 ["test_ext_executeScript_mozextension.html"]
 
+["test_ext_experiments_child.html"]
+
 ["test_ext_extension_getViews.html"]
 
 ["test_ext_extension_iframe_messaging.html"]
@@ -382,6 +384,8 @@ skip-if = [
 ]
 
 ["test_ext_runtime_getContexts.html"]
+
+["test_ext_runtime_sendMessage_response_warning.html"]
 
 ["test_ext_script_filenames.html"]
 

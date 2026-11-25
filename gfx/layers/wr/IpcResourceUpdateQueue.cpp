@@ -330,17 +330,23 @@ void IpcResourceUpdateQueue::AddSnapshotImage(SnapshotImageKey aKey) {
   mUpdates.AppendElement(layers::OpAddSnapshotImage(aKey));
 }
 
+void IpcResourceUpdateQueue::AdoptSnapshotImage(SnapshotImageKey aFrom,
+                                                SnapshotImageKey aKey) {
+  mUpdates.AppendElement(layers::OpAdoptSnapshotImage(aFrom, aKey));
+}
+
 bool IpcResourceUpdateQueue::AddBlobImage(BlobImageKey key,
                                           const ImageDescriptor& aDescriptor,
                                           Range<uint8_t> aBytes,
-                                          ImageIntRect aVisibleRect) {
+                                          ImageIntRect aVisibleRect,
+                                          uint16_t aTileSize) {
   MOZ_RELEASE_ASSERT(aDescriptor.width > 0 && aDescriptor.height > 0);
   auto bytes = mWriter.Write(aBytes);
   if (!bytes.length()) {
     return false;
   }
   mUpdates.AppendElement(
-      layers::OpAddBlobImage(aDescriptor, bytes, aVisibleRect, 0, key));
+      layers::OpAddBlobImage(aDescriptor, bytes, aVisibleRect, aTileSize, key));
   return true;
 }
 

@@ -147,6 +147,11 @@ class Repository(abc.ABC):
 
     @property
     @abc.abstractmethod
+    def is_shallow(self) -> bool:
+        """Whether this repo is a shallow clone."""
+
+    @property
+    @abc.abstractmethod
     def is_cinnabar_repo(self) -> bool:
         """True if the repo is a git cinnabar repo"""
 
@@ -249,6 +254,27 @@ class Repository(abc.ABC):
         example, commits to the repo during the Finder's lifetime.
         """
 
+    def get_tracked_files(self, patterns: list[str]) -> list[str]:
+        """Return the sorted paths, relative to the repository root, of the
+        managed files in the working directory that match any of the
+        ``patterns``. Each pattern selects files by name with the ``*`` and
+        ``**`` wildcards, such as ``**/*.idl`` or ``dom/webidl/*.webidl``. A
+        pattern that only matches directories, such as ``dom/*``, is not
+        supported."""
+        if unsupported := [p for p in patterns if any(c in p for c in '?[]\\"')]:
+            raise ValueError(
+                f"Unsupported character in tracked file patterns: {', '.join(unsupported)}"
+            )
+        if not patterns:
+            return []
+        return self._get_tracked_files(patterns)
+
+    def _get_tracked_files(self, patterns: list[str]) -> list[str]:
+        finder = self.get_tracked_files_finder(self.path)
+        return sorted({
+            path for pattern in patterns for path, _ in finder.find(pattern)
+        })
+
     @abc.abstractmethod
     def get_ignored_files_finder(self):
         """Obtain a mozpack.files.BaseFinder of ignored files in the working
@@ -330,12 +356,18 @@ class Repository(abc.ABC):
             dest_branch = f"{global_prefix}{dest_branch}"
 
         with self.try_commit(message, changed_files) as head:
+            rev = self._try_head_to_commit(head)
             self.push(
                 remote,
-                ref=head,
+                ref=rev,
                 dest_branch=dest_branch,
                 force=True,
             )
+        return rev
+
+    def _try_head_to_commit(self, head: str) -> str:
+        """Return the commit SHA for the `head` yielded by `try_commit`."""
+        return head
 
     @abc.abstractmethod
     def _push_to_hg_try(self, message, changed_files, remote, allow_log_capture):
@@ -360,11 +392,13 @@ class Repository(abc.ABC):
 
         If `allow_log_capture` is set to `True`, then the push-to-try will be run using
         Popen instead of check_call so that the logs can be captured elsewhere.
+
+        Returns the pushed commit SHA when pushing to a git remote, otherwise None.
         """
         if HG_TRY_URL in remote:
             self._push_to_hg_try(message, changed_files, remote, allow_log_capture)
-        else:
-            self._push_to_git_try(message, changed_files, remote)
+            return None
+        return self._push_to_git_try(message, changed_files, remote)
 
     @abc.abstractmethod
     def update(self, ref):

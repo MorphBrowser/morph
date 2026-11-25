@@ -22,6 +22,7 @@
 #include "mozilla/a11y/AccessibleWrap.h"
 #include "mozilla/a11y/Compatibility.h"
 #include "mozilla/a11y/DocAccessibleParent.h"
+#include "mozilla/dom/Element.h"
 #include "nsEventMap.h"
 #include "nsWinUtils.h"
 #include "sdnAccessible.h"
@@ -392,6 +393,10 @@ already_AddRefed<IAccessible> MsaaAccessible::GetIAccessibleFor(
         return nullptr;
       }
       for (DocAccessibleParent* remoteDoc : *remoteDocs) {
+        if (remoteDoc->IsPrintDoc()) {
+          // Print documents aren't exposed to platform accessibility APIs.
+          continue;
+        }
         LocalAccessible* outerDoc = remoteDoc->OuterDocOfRemoteBrowser();
         if (!outerDoc ||
             !IsInclusiveDescendantOf(localDoc, outerDoc->Document())) {
@@ -485,6 +490,24 @@ Accessible* MsaaAccessible::GetAccessibleFrom(IUnknown* aUnknown) {
     return nullptr;
   }
   return msaa->Acc();
+}
+
+void MsaaAccessible::GetInnerHTML(nsAString& aInnerHTML) {
+  if (!mAcc) {
+    return;
+  }
+  if (RemoteAccessible* remoteAcc = mAcc->AsRemote()) {
+    if (remoteAcc->Document()->RequestDomainsIfInactive(
+            CacheDomain::InnerHTML)) {
+      return;
+    }
+    if (!remoteAcc->mCachedFields) {
+      return;
+    }
+    remoteAcc->mCachedFields->GetAttribute(CacheKey::InnerHTML, aInnerHTML);
+  } else if (dom::Element* el = mAcc->AsLocal()->Elm()) {
+    el->GetInnerHTML(aInnerHTML, IgnoreErrors());
+  }
 }
 
 // IUnknown methods

@@ -500,9 +500,13 @@ class nsContainerFrame : public nsSplittableFrame {
   // have arbitrary nsContainerFrames.
   NS_DECLARE_FRAME_PROPERTY_WITHOUT_DTOR(FirstLetterProperty, nsIFrame)
 
-  void SetHasFirstLetterChild() { mHasFirstLetterChild = true; }
+  void SetHasFirstLetterChild() {
+    AddStateBits(NS_FRAME_HAS_FIRST_LETTER_CHILD);
+  }
 
-  void ClearHasFirstLetterChild() { mHasFirstLetterChild = false; }
+  void ClearHasFirstLetterChild() {
+    RemoveStateBits(NS_FRAME_HAS_FIRST_LETTER_CHILD);
+  }
 
 #ifdef DEBUG
   // Use this to suppress the ABSURD_SIZE assertions.
@@ -632,7 +636,7 @@ class nsContainerFrame : public nsSplittableFrame {
    */
   nsFrameList* SetOverflowFrames(nsFrameList&& aOverflowFrames) {
     MOZ_ASSERT(aOverflowFrames.NotEmpty(), "Shouldn't be called");
-    auto* list = new (PresShell()) nsFrameList(std::move(aOverflowFrames));
+    auto* list = new nsFrameList(std::move(aOverflowFrames));
     SetProperty(OverflowProperty(), list);
     return list;
   }
@@ -642,7 +646,7 @@ class nsContainerFrame : public nsSplittableFrame {
                "Shouldn't override existing list!");
     MOZ_ASSERT(CanContainOverflowContainers(),
                "This type of frame can't have overflow containers!");
-    auto* list = new (PresShell()) nsFrameList(std::move(aOverflowContainers));
+    auto* list = new nsFrameList(std::move(aOverflowContainers));
     SetProperty(OverflowContainersProperty(), list);
     return list;
   }
@@ -654,8 +658,7 @@ class nsContainerFrame : public nsSplittableFrame {
                "Shouldn't override existing list!");
     MOZ_ASSERT(CanContainOverflowContainers(),
                "This type of frame can't have overflow containers!");
-    auto* list =
-        new (PresShell()) nsFrameList(std::move(aExcessOverflowContainers));
+    auto* list = new nsFrameList(std::move(aExcessOverflowContainers));
     SetProperty(ExcessOverflowContainersProperty(), list);
     return list;
   }
@@ -671,17 +674,17 @@ class nsContainerFrame : public nsSplittableFrame {
   void DestroyOverflowList() {
     nsFrameList* list = TakeProperty(OverflowProperty());
     MOZ_ASSERT(list && list->IsEmpty());
-    list->Delete(PresShell());
+    list->Delete();
   }
   void DestroyOverflowContainers() {
     nsFrameList* list = TakeProperty(OverflowContainersProperty());
     MOZ_ASSERT(list && list->IsEmpty());
-    list->Delete(PresShell());
+    list->Delete();
   }
   void DestroyExcessOverflowContainers() {
     nsFrameList* list = TakeProperty(ExcessOverflowContainersProperty());
     MOZ_ASSERT(list && list->IsEmpty());
-    list->Delete(PresShell());
+    list->Delete();
   }
 
   /**

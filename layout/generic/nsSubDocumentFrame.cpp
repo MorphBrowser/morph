@@ -20,6 +20,7 @@
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/ImageDocument.h"
 #include "mozilla/dom/RemoteBrowser.h"
+#include "mozilla/dom/ViewTransition.h"
 #include "mozilla/layers/RenderRootStateManager.h"
 #include "mozilla/layers/StackingContextHelper.h"  // for StackingContextHelper
 #include "mozilla/layers/WebRenderScrollData.h"
@@ -162,6 +163,7 @@ void nsSubDocumentFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
 }
 
 void nsSubDocumentFrame::UpdateEmbeddedBrowsingContextDependentData() {
+  MOZ_ASSERT(!nsContentUtils::IsSafeToRunScript());
   if (!mFrameLoader) {
     return;
   }
@@ -201,24 +203,25 @@ void nsSubDocumentFrame::ShowViewer() {
   if (!frameloader->IsRemoteFrame() && !PresContext()->IsDynamic()) {
     // We let the printing code take care of loading the document and
     // initializing the shell.
-  } else {
-    AutoWeakFrame weakThis(this);
-    mCallingShow = true;
-    bool didCreateDoc = frameloader->Show(this);
-    if (!weakThis.IsAlive()) {
-      return;
-    }
-    mCallingShow = false;
-    mDidCreateDoc = didCreateDoc;
-    if (!HasAnyStateBits(NS_FRAME_FIRST_REFLOW)) {
-      frameloader->UpdatePositionAndSize(this);
-    }
-    if (!weakThis.IsAlive()) {
-      return;
-    }
-    UpdateEmbeddedBrowsingContextDependentData();
-    InvalidateFrame();
+    return;
   }
+  AutoWeakFrame weakThis(this);
+  mCallingShow = true;
+  bool didCreateDoc = frameloader->Show(this);
+  if (!weakThis.IsAlive()) {
+    return;
+  }
+  mCallingShow = false;
+  mDidCreateDoc = didCreateDoc;
+  if (!HasAnyStateBits(NS_FRAME_FIRST_REFLOW)) {
+    frameloader->UpdatePositionAndSize(this);
+  }
+  if (!weakThis.IsAlive()) {
+    return;
+  }
+  nsAutoScriptBlocker sb;
+  UpdateEmbeddedBrowsingContextDependentData();
+  InvalidateFrame();
 }
 
 Document* nsSubDocumentFrame::GetExtantSubdocument() {
@@ -305,7 +308,7 @@ static void WrapBackgroundColorInOwnLayer(nsDisplayListBuilder* aBuilder,
                                           nsDisplayList* aList) {
   for (nsDisplayItem* item : aList->TakeItems()) {
     if (item->GetType() == DisplayItemType::TYPE_BACKGROUND_COLOR) {
-      nsDisplayList tmpList(aBuilder);
+      nsDisplayList tmpList;
       tmpList.AppendToTop(item);
       item = MakeDisplayItemWithIndex<nsDisplayOwnLayer>(
           aBuilder, aFrame, /* aIndex = */ nsDisplayOwnLayer::OwnLayerForSubdoc,
@@ -391,6 +394,19 @@ void nsSubDocumentFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
     }
   }
 
+  Document* subdoc = presShell->GetDocument();
+  ViewTransition* vt = subdoc->GetActiveViewTransition();
+  if (vt && aBuilder->IsPaintingToWindow() &&
+      subdoc->RenderingSuppressedForViewTransitions() &&
+      vt->IsHoldingSubdocument()) {
+    DisplayListClipState::AutoSaveRestore clipState(aBuilder);
+    clipState.ClipContainingBlockDescendantsToContentBox(aBuilder, this);
+    aLists.Content()
+        ->AppendNewToTop<nsDisplayViewTransitionSubdocumentSnapshot>(
+            aBuilder, this, vt->SubdocumentSnapshotRect());
+    return;
+  }
+
   nsIFrame* subdocRootFrame = presShell->GetRootFrame();
 
   nsPresContext* presContext = presShell->GetPresContext();
@@ -436,7 +452,7 @@ void nsSubDocumentFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
                        presContext->IsRootContentDocumentCrossProcess() ||
                        (sf && sf->IsScrollingActive());
 
-  nsDisplayList childItems(aBuilder);
+  nsDisplayList childItems;
 
   if (subdocRootFrame) {
     DisplayListClipState::AutoSaveRestore nestedClipState(aBuilder);
@@ -515,6 +531,17 @@ void nsSubDocumentFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
   if (layerItem) {
     childItems.AppendToTop(layerItem);
     layerItem->SetShouldFlattenAway(!needsOwnLayer);
+  }
+
+  if (vt && vt->IsCapturingSubdocumentSnapshot() &&
+      aBuilder->IsPaintingToWindow()) {
+    // The iframe element can also be captured by a transition in its own
+    // document, which wraps this frame in another
+    // nsDisplayViewTransitionCapture, so this one needs a different index.
+    childItems.AppendNewToTopWithIndex<nsDisplayViewTransitionCapture>(
+        aBuilder, this, /* aIndex = */ 1, &childItems,
+        aBuilder->CurrentActiveScrolledRoot(),
+        nsDisplayViewTransitionCapture::Kind::Subdocument);
   }
 
   if (aBuilder->IsForFrameVisibility()) {
@@ -899,8 +926,7 @@ void nsSubDocumentFrame::DidSetComputedStyle(ComputedStyle* aOldComputedStyle) {
 }
 
 nsIFrame* NS_NewSubDocumentFrame(PresShell* aPresShell, ComputedStyle* aStyle) {
-  return new (aPresShell)
-      nsSubDocumentFrame(aStyle, aPresShell->GetPresContext());
+  return new nsSubDocumentFrame(aStyle, aPresShell->GetPresContext());
 }
 
 NS_IMPL_FRAMEARENA_HELPERS(nsSubDocumentFrame)
@@ -965,13 +991,13 @@ void nsSubDocumentFrame::Destroy(DestroyContext& aContext) {
     mPostedReflowCallback = false;
   }
 
-  // Detach the subdocument's views and stash them in the frame loader.
-  // We can then reattach them if we're being reframed (for example if
-  // the frame has been made position:fixed).
-  if (RefPtr<nsFrameLoader> frameloader = FrameLoader()) {
-    ClearDisplayItems();
+  ClearDisplayItems();
+  PrepareInProcessPresShellsForDetach();
 
-    PrepareInProcessPresShellsForDetach();
+  // Stash the detached subdocuments in the frame loader. We can then reattach
+  // them if we're being reframed (for example if the frame has been made
+  // position:fixed).
+  if (RefPtr<nsFrameLoader> frameloader = FrameLoader()) {
     frameloader->SetDetachedSubdocs(std::move(mInProcessPresShells));
 
     // We call nsFrameLoader::HideViewer() in a script runner so that we can

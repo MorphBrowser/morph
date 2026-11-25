@@ -45,6 +45,10 @@ class Sidebar extends PureComponent {
       navItems.push(PAGE_TYPES.SESSION_HISTORY);
     }
 
+    if (Services.prefs.getBoolPref("dom.speculation_rules.enabled", false)) {
+      navItems.push(PAGE_TYPES.SPECULATIVE_LOADS);
+    }
+
     const isSelected = page => {
       return page === this.props.selectedPage;
     };

@@ -78,13 +78,14 @@ def apply_patches(angle_src_dir: Path, patch_dir: Path) -> None:
                 str(patch),
                 "--no-backup-if-mismatch",
                 "--batch",
+                "--forward",
             ]
             result = subprocess.run(command, check=False)
             reject_content = reject_path.read_text()
         if result.returncode != 0:
             print(f"""Could not apply {patch}.
 
-    Please follow the instructions in {SCRIPT_DIR / "README.md"} to resolve.
+    Please follow the instructions at https://firefox-source-docs.mozilla.org/gfx/VendoringANGLE.html to resolve.
 
     Patch rejection details:\n{reject_content}""")
             sys.exit(1)
@@ -93,8 +94,36 @@ def apply_patches(angle_src_dir: Path, patch_dir: Path) -> None:
 def prune_unused_files(angle_src_dir: Path, gn_configs) -> None:
     print("Pruning unused files")
 
-    # Ensure we retain the LICENSE file.
-    required_files = {Path("LICENSE")}
+    # Ensure we retain the LICENSE file, and some headers that are incorrectly
+    # missing as dependencies in the GN build scripts.
+    required_files = {
+        Path(path)
+        for path in [
+            "LICENSE",
+            "src/third_party/khronos/GL/wglext.h",
+            "third_party/spirv-headers/src/include/spirv/unified1/ArmExperimentalMLOperations.h",
+            "third_party/spirv-headers/src/include/spirv/unified1/NonSemanticGraphDebugInfo.h",
+            "third_party/spirv-headers/src/include/spirv/unified1/NonSemanticShaderDebugInfo.h",
+            "third_party/spirv-headers/src/include/spirv/unified1/spirv.hpp11",
+            "third_party/spirv-tools/src/source/val/instruction.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_av1std.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_av1std_decode.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_av1std_encode.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_h264std.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_h264std_decode.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_h264std_encode.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_h265std.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_h265std_decode.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_h265std_encode.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_vp9std.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codec_vp9std_decode.h",
+            "third_party/vulkan-headers/src/include/vk_video/vulkan_video_codecs_common.h",
+            "third_party/vulkan-headers/src/include/vulkan/vk_platform.h",
+            "third_party/vulkan-headers/src/include/vulkan/vulkan.h",
+            "third_party/vulkan-headers/src/include/vulkan/vulkan_android.h",
+            "third_party/vulkan-headers/src/include/vulkan/vulkan_core.h",
+        ]
+    }
 
     # Resolve a GN-style path to a angle_src_dir-relative path.
     def resolve_path(path: str) -> Path:

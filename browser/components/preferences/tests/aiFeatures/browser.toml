@@ -1,11 +1,11 @@
 [DEFAULT]
-dupe-manifest=true
 prefs = [
-  "browser.settings-redesign.enabled=false",
+  "extensions.getAddons.langpacks.url=https://mochi.test:8000/langpacks",
 ]
 support-files = [
   "head.js",
   "../head-common.js",
+  "head_generated_widgets.js",
   "head_smart_window.js",
 ]
 tags = "os_integration"
@@ -15,6 +15,14 @@ tags = "os_integration"
 ["browser_aiFeatures_block_dialog.js"]
 
 ["browser_aiFeatures_chatbot.js"]
+
+["browser_aiFeatures_generated_widgets.js"]
+
+["browser_aiFeatures_generated_widgets_global_toggle.js"]
+
+["browser_aiFeatures_generated_widgets_row.js"]
+
+["browser_aiFeatures_generated_widgets_row_blocked.js"]
 
 ["browser_aiFeatures_smart_window.js"]
 

@@ -240,10 +240,14 @@ class nsCocoaUtils {
   static BOOL IsMomentumScrollEvent(NSEvent* aEvent);
   static BOOL EventHasPhaseInformation(NSEvent* aEvent);
 
-  // Hides the Menu bar and the Dock. Multiple hide/show requests can be nested.
-  static void HideOSChromeOnScreen(bool aShouldHide);
+  // Hides the Menu bar and the Dock. With aShouldPreventAppSwitching it also
+  // blocks the shortcuts for switching to another application, which would
+  // otherwise restore them. Requests nest, so every hide has to be matched by
+  // an unhide passing the same aShouldPreventAppSwitching.
+  static void HideOSChromeOnScreen(bool aShouldHide,
+                                   bool aShouldPreventAppSwitching);
 
-  static nsIWidget* GetHiddenWindowWidget();
+  static already_AddRefed<nsIWidget> GetHiddenWindowWidget();
 
   /**
    * Should the application restore its state because it was launched by the OS
@@ -416,6 +420,15 @@ class nsCocoaUtils {
    * Unicode character.
    */
   static uint32_t ConvertGeckoKeyCodeToMacCharCode(uint32_t aKeyCode);
+
+  /**
+   * Converts a Cocoa key equivalent character without a printable form (a
+   * function key, Delete, Return, ...) to the Gecko key name (like "VK_F13")
+   * that a XUL key element takes in its keycode attribute. Returns false if
+   * there is no such name.
+   */
+  static bool GetGeckoKeyCodeNameForMacCharCode(uint32_t aCharCode,
+                                                nsAString& aKeyCodeName);
 
   /**
    * Converts Gecko native modifier flags for `nsIWidget::SynthesizeNative*()`

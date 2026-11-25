@@ -11,6 +11,7 @@
 #include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/glean/GleanPings.h"
 #include "mozilla/glean/NetwerkMetrics.h"
+#include "mozilla/net/ChannelEventQueue.h"
 #include "mozilla/net/Dictionary.h"
 #include "nsCOMPtr.h"
 #include "nsCRT.h"
@@ -35,7 +36,7 @@
 #undef assert
 #include "assert.h"
 #include "brotli/decode.h"
-#include "state.h"
+#include "dec/state.h"
 
 #define ZSTD_STATIC_LINKING_ONLY 1
 #include "zstd/zstd.h"
@@ -203,6 +204,9 @@ nsHTTPCompressConv::nsHTTPCompressConv() {
 
 nsHTTPCompressConv::~nsHTTPCompressConv() {
   LOG(("nsHttpCompresssConv %p dtor\n", this));
+  if (mMainThreadEventQueue) {
+    mMainThreadEventQueue->NotifyReleasingOwner();
+  }
   if (mInpBuffer) {
     free(mInpBuffer);
   }
@@ -286,7 +290,7 @@ nsHTTPCompressConv::AsyncConvertData(const char* aFromType, const char* aToType,
     mMode = HTTP_COMPRESS_ZSTD_DICTIONARY;
   }
   LOG(("nsHttpCompresssConv %p AsyncConvertData %s %s mode %d\n", this,
-       aFromType, aToType, (CompressMode)mMode));
+       aFromType, aToType, mMode.load()));
 
   MutexAutoLock lock(mMutex);
   // hook ourself up with the receiving listener.
@@ -300,6 +304,16 @@ nsHTTPCompressConv::GetConvertedType(const nsACString& aFromType,
                                      nsIChannel* aChannel,
                                      nsACString& aToType) {
   return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+void nsHTTPCompressConv::SetDispatchToMainThread() {
+  MOZ_ASSERT(NS_IsMainThread());
+  if (mDispatchToMainThread) {
+    return;
+  }
+  mMainThreadEventQueue =
+      new ChannelEventQueue(static_cast<nsIStreamConverter*>(this));
+  mDispatchToMainThread = true;
 }
 
 NS_IMETHODIMP
@@ -338,7 +352,7 @@ nsHTTPCompressConv::MaybeRetarget(nsIRequest* request) {
       rv = req->RetargetDeliveryTo(backgroundThread);
       NS_ENSURE_SUCCESS(rv, rv);
       if (NS_SUCCEEDED(rv)) {
-        mDispatchToMainThread = true;
+        SetDispatchToMainThread();
       }
     } else {
       LOG(("MaybeRetarget: Not retargeting: Length %" PRId64, length));
@@ -391,7 +405,7 @@ nsHTTPCompressConv::OnStartRequest(nsIRequest* request) {
       // |do_OnDataAvailable| and |OnStopRequest|.
       if (!retargetlistener ||
           NS_FAILED(retargetlistener->CheckListenerChain())) {
-        mDispatchToMainThread = true;
+        SetDispatchToMainThread();
       }
     }
   }
@@ -400,11 +414,26 @@ nsHTTPCompressConv::OnStartRequest(nsIRequest* request) {
 
 NS_IMETHODIMP
 nsHTTPCompressConv::OnStopRequest(nsIRequest* request, nsresult aStatus) {
+  if (mDispatchToMainThread) {
+    mMainThreadEventQueue->RunOrEnqueue(std::make_unique<ChannelFunctionEvent>(
+        []() { return do_AddRef(GetMainThreadSerialEventTarget()); },
+        [self = RefPtr{this}, request = nsCOMPtr<nsIRequest>(request),
+         aStatus]() {
+          AutoEventEnqueuer ensureSerialDispatch(self->mMainThreadEventQueue);
+          (void)self->DoOnStopRequest(request, aStatus);
+        }));
+    return NS_OK;
+  }
+  return DoOnStopRequest(request, aStatus);
+}
+
+nsresult nsHTTPCompressConv::DoOnStopRequest(nsIRequest* request,
+                                             nsresult aStatus) {
   nsresult status = aStatus;
   // Bug 1886237 : TRRServiceChannel calls OnStopRequest OMT
   // MOZ_ASSERT(NS_IsMainThread());
   LOG(("nsHttpCompresssConv %p onstop %" PRIx32 " mDispatchToMainThread %d\n",
-       this, static_cast<uint32_t>(aStatus), bool(mDispatchToMainThread)));
+       this, static_cast<uint32_t>(aStatus), mDispatchToMainThread.load()));
 
   // Framing integrity is enforced for content-encoding: gzip, but not for
   // content-encoding: deflate. Note that gzip vs deflate is NOT determined
@@ -904,7 +933,7 @@ nsHTTPCompressConv::OnDataAvailable(nsIRequest* request, nsIInputStream* iStr,
     case HTTP_COMPRESS_BROTLI:
     case HTTP_COMPRESS_BROTLI_DICTIONARY: {
       if (!mBrotli) {
-        mBrotli = MakeUnique<BrotliWrapper>();
+        mBrotli = std::make_unique<BrotliWrapper>();
         if (!mBrotli->Init(request, mMode)) {
           return NS_ERROR_FAILURE;
         }
@@ -927,7 +956,7 @@ nsHTTPCompressConv::OnDataAvailable(nsIRequest* request, nsIInputStream* iStr,
     case HTTP_COMPRESS_ZSTD:
     case HTTP_COMPRESS_ZSTD_DICTIONARY: {
       if (!mZstd) {
-        mZstd = MakeUnique<ZstdWrapper>(request, mMode);
+        mZstd = std::make_unique<ZstdWrapper>(request, mMode);
         if (!mZstd->mDStream) {
           return NS_ERROR_OUT_OF_MEMORY;
         }
@@ -990,7 +1019,7 @@ nsresult nsHTTPCompressConv::do_OnDataAvailable(nsIRequest* request,
   LOG(
       ("nsHttpCompressConv %p do_OnDataAvailable mDispatchToMainThread %d "
        "count %u",
-       this, bool(mDispatchToMainThread), count));
+       this, mDispatchToMainThread.load(), count));
   if (count == 0) {
     // Never send 0-byte OnDataAvailables; imglib at least barfs on them and
     // they're not useful
@@ -1007,20 +1036,19 @@ nsresult nsHTTPCompressConv::do_OnDataAvailable(nsIRequest* request,
       listener = mListener;
     }
 
-    // This is safe and will always run before OnStopRequest, because
-    // ChanneleventQueue means that we can't enqueue OnStopRequest until after
-    // the OMT OnDataAvailable call has completed.  So Dispatching here will
-    // ensure it's in the MainThread event queue before OnStopRequest
-    nsCOMPtr<nsIRunnable> handler = NS_NewRunnableFunction(
-        "nsHTTPCompressConv::do_OnDataAvailable",
-        [request{RefPtr<nsIRequest>(request)}, stream{std::move(stream)},
-         listener{std::move(listener)}, offset, count]() {
+    mDecodedDataLength += count;
+    // Serialize bounced data and stop notifications across nested event loops.
+    mMainThreadEventQueue->RunOrEnqueue(std::make_unique<ChannelFunctionEvent>(
+        []() { return do_AddRef(GetMainThreadSerialEventTarget()); },
+        [self = RefPtr{this}, request{RefPtr<nsIRequest>(request)},
+         stream{std::move(stream)}, listener{std::move(listener)}, offset,
+         count]() {
+          AutoEventEnqueuer ensureSerialDispatch(self->mMainThreadEventQueue);
           LOG(("nsHttpCompressConv Calling OnDataAvailable on Mainthread"));
           (void)listener->OnDataAvailable(request, stream, offset, count);
-        });
+        }));
 
-    mDecodedDataLength += count;
-    return NS_DispatchToMainThread(handler);
+    return NS_OK;
   }
 
   if (!mStream) {
@@ -1214,7 +1242,7 @@ nsHTTPCompressConv::CheckListenerChain() {
                    StaticPrefs::network_decompression_off_mainthread2();
 
   if (NS_FAILED(rv) && alwaysOMT) {
-    mDispatchToMainThread = true;
+    SetDispatchToMainThread();
     return NS_OK;
   }
 

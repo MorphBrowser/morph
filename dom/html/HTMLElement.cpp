@@ -314,11 +314,9 @@ void HTMLElement::UpdateFormOwner() {
 }
 
 bool HTMLElement::IsDisabledForEvents(WidgetEvent* aEvent) {
-  if (IsFormAssociatedElement()) {
-    return IsElementDisabledForEvents(aEvent, GetPrimaryFrame());
-  }
-
-  return false;
+  // IsFormAssociatedElement is the more expensive check.
+  return IsElementDisabledForEvents(aEvent, GetPrimaryFrame()) &&
+         IsFormAssociatedElement();
 }
 
 void HTMLElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
@@ -462,16 +460,6 @@ void HTMLElement::UpdateBarredFromConstraintValidation() {
 // Here, we expand 'NS_IMPL_NS_NEW_HTML_ELEMENT()' by hand.
 // (Calling the macro directly (with no args) produces compiler warnings.)
 nsGenericHTMLElement* NS_NewHTMLElement(
-    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
-    mozilla::dom::FromParser aFromParser) {
-  RefPtr<mozilla::dom::NodeInfo> nodeInfo(aNodeInfo);
-  auto* nim = nodeInfo->NodeInfoManager();
-  return new (nim) mozilla::dom::HTMLElement(nodeInfo.forget(), aFromParser);
-}
-
-// Distinct from the above in order to have function pointer that compared
-// unequal to a function pointer to the above.
-nsGenericHTMLElement* NS_NewCustomElement(
     already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
     mozilla::dom::FromParser aFromParser) {
   RefPtr<mozilla::dom::NodeInfo> nodeInfo(aNodeInfo);

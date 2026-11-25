@@ -28,7 +28,6 @@ using namespace js;
 using namespace js::jit;
 
 using JS::GenericNaN;
-using mozilla::FloorLog2;
 using mozilla::NegativeInfinity;
 
 // shared
@@ -48,8 +47,17 @@ bool CodeGeneratorARM64::generateOutOfLineCode() {
     // All non-table-based bailouts will go here.
     masm.bind(&deoptLabel_);
 
-    // Store the frame size, so the handler can recover the IonScript.
-    masm.push(Imm32(frameSize()));
+    // Push the snapshot offset from emitBailoutOOL, and the frame size so the
+    // handler can recover the IonScript.
+    {
+      vixl::UseScratchRegisterScope temps(&masm);
+      const ARMRegister snapshotOffset64(BailoutSnapshotOffsetReg, 64);
+      MOZ_ASSERT(temps.IsAvailable(snapshotOffset64));
+      temps.Exclude(snapshotOffset64);
+      const Register scratch = temps.AcquireX().asUnsized();
+      masm.move32(Imm32(frameSize()), scratch);
+      masm.push(BailoutSnapshotOffsetReg, scratch);
+    }
 
     TrampolinePtr handler = gen->jitRuntime()->getGenericBailoutHandler();
     masm.jump(handler);
@@ -67,24 +75,6 @@ void CodeGeneratorARM64::emitBranch(Assembler::Condition cond,
     jumpToBlock(mirFalse, Assembler::InvertCondition(cond));
     jumpToBlock(mirTrue);
   }
-}
-
-void CodeGeneratorARM64::emitBailoutOOL(LSnapshot* snapshot) {
-  masm.push(Imm32(snapshot->snapshotOffset()));
-  jumpToDeoptLabel();
-}
-
-void CodeGeneratorARM64::bailoutIf(Assembler::Condition condition,
-                                   LSnapshot* snapshot) {
-  encode(snapshot);
-
-  InlineScriptTree* tree = snapshot->mir()->block()->trackedTree();
-  auto* ool = new (alloc()) LambdaOutOfLineCode(
-      [=, this](OutOfLineCode& ool) { emitBailoutOOL(snapshot); });
-  addOutOfLineCode(ool,
-                   new (alloc()) BytecodeSite(tree, tree->script()->code()));
-
-  masm.B(ool->entry(), condition);
 }
 
 void CodeGeneratorARM64::bailoutIfTest(Assembler::Condition condition,
@@ -246,11 +236,24 @@ void CodeGenerator::visitMulI(LMulI* ins) {
         masm.Adds(destreg32, lhsreg32, Operand(lhsreg32));
         break;  // Go to overflow check.
       default:
-        // Use shift if cannot overflow and constant is a power of 2
+        // Use shift if cannot overflow and constant is a power of 2, or
+        // add-with-shift if constant is (1 << C1) | (1 << C2).
         if (!mul->canOverflow() && constant > 0) {
-          int32_t shift = FloorLog2(uint32_t(constant));
-          if ((1 << shift) == constant) {
+          if (std::has_single_bit(uint32_t(constant))) {
+            int32_t shift = std::countr_zero(uint32_t(constant));
             masm.Lsl(destreg32, lhsreg32, shift);
+            return;
+          }
+
+          uint32_t shift = mozilla::FloorLog2(uint32_t(constant));
+          uint32_t rest = uint32_t(constant) - (uint32_t(1) << shift);
+          if (std::has_single_bit(rest)) {
+            uint32_t restShift = std::countr_zero(rest);
+            masm.Add(destreg32, lhsreg32,
+                     Operand(lhsreg32, vixl::LSL, shift - restShift));
+            if (restShift != 0) {
+              masm.Lsl(destreg32, destreg32, restShift);
+            }
             return;
           }
         }
@@ -2217,8 +2220,8 @@ void CodeGenerator::visitMulI64(LMulI64* lir) {
       default:
         // Use shift if constant is nonnegative power of 2.
         if (constant > 0) {
-          int32_t shift = mozilla::FloorLog2(uint64_t(constant));
-          if (int64_t(1) << shift == constant) {
+          if (std::has_single_bit(uint64_t(constant))) {
+            int32_t shift = std::countr_zero(uint64_t(constant));
             masm.Lsl(ARMRegister(output.reg, 64),
                      ARMRegister(ToRegister64(lhs).reg, 64), shift);
             break;
@@ -2345,7 +2348,7 @@ void CodeGenerator::visitMulIntPtr(LMulIntPtr* ins) {
 
     // Use shift if constant is a power of 2.
     if (constant > 0 && std::has_single_bit(uintptr_t(constant))) {
-      uint32_t shift = mozilla::FloorLog2(uintptr_t(constant));
+      uint32_t shift = std::countr_zero(uintptr_t(constant));
       masm.Lsl(dest, lhs, shift);
       return;
     }
@@ -3888,6 +3891,35 @@ void CodeGenerator::visitWasmReplaceLaneSimd128(LWasmReplaceLaneSimd128* ins) {
       break;
     default:
       MOZ_CRASH("ReplaceLane SimdOp not implemented");
+  }
+#else
+  MOZ_CRASH("No SIMD");
+#endif
+}
+
+void CodeGenerator::visitWasmMoveLaneSimd128(LWasmMoveLaneSimd128* ins) {
+#ifdef ENABLE_JIT_SIMD
+  MOZ_ASSERT(ToFloatRegister(ins->lhs()) == ToFloatRegister(ins->output()));
+  ARMFPRegister dest(ToFloatRegister(ins->lhs()), 128);
+  ARMFPRegister src(ToFloatRegister(ins->rhs()), 128);
+  uint32_t laneIndex = ins->mir()->laneIndex();
+  uint32_t srcLaneIndex = ins->mir()->srcLaneIndex();
+
+  switch (ins->mir()->simdOp()) {
+    case wasm::SimdOp::I8x16ReplaceLane:
+      masm.Mov(dest.V16B(), laneIndex, src.V16B(), srcLaneIndex);
+      break;
+    case wasm::SimdOp::I16x8ReplaceLane:
+      masm.Mov(dest.V8H(), laneIndex, src.V8H(), srcLaneIndex);
+      break;
+    case wasm::SimdOp::I32x4ReplaceLane:
+      masm.Mov(dest.V4S(), laneIndex, src.V4S(), srcLaneIndex);
+      break;
+    case wasm::SimdOp::I64x2ReplaceLane:
+      masm.Mov(dest.V2D(), laneIndex, src.V2D(), srcLaneIndex);
+      break;
+    default:
+      MOZ_CRASH("MoveLane SimdOp not implemented");
   }
 #else
   MOZ_CRASH("No SIMD");

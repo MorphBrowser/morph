@@ -16,8 +16,11 @@
 
 #include "wasm/WasmModuleTypes.h"
 
+#include "mozilla/DebugOnly.h"
+
 #include <bit>
 
+#include "js/CharacterEncoding.h"
 #include "vm/JSAtomUtils.h"  // AtomizeUTF8Chars
 #include "vm/MallocProvider.h"
 #include "wasm/WasmUtility.h"
@@ -94,14 +97,6 @@ class TagLayout {
 //=========================================================================
 
 /* static */
-CacheableName CacheableName::fromUTF8Chars(UniqueChars&& utf8Chars) {
-  size_t length = strlen(utf8Chars.get());
-  UTF8Bytes bytes;
-  bytes.replaceRawBuffer(utf8Chars.release(), length, length + 1);
-  return CacheableName(std::move(bytes));
-}
-
-/* static */
 bool CacheableName::fromUTF8Chars(const char* utf8Chars, CacheableName* name) {
   size_t utf8CharsLen = strlen(utf8Chars);
   UTF8Bytes bytes;
@@ -120,6 +115,20 @@ bool CacheableName::fromUTF8Bytes(mozilla::Span<const char> utf8Bytes,
   if (!bytes.append(utf8Bytes.data(), utf8Bytes.Length())) {
     return false;
   }
+  *name = CacheableName(std::move(bytes));
+  return true;
+}
+
+/* static */
+bool CacheableName::fromLinearString(JSLinearString* str, CacheableName* name) {
+  size_t length = JS::GetDeflatedUTF8StringLength(str);
+  UTF8Bytes bytes;
+  if (!bytes.resizeUninitialized(length)) {
+    return false;
+  }
+  mozilla::DebugOnly<size_t> written =
+      JS::DeflateStringToUTF8Buffer(str, mozilla::Span(bytes.begin(), length));
+  MOZ_ASSERT(written == length);
   *name = CacheableName(std::move(bytes));
   return true;
 }
@@ -197,7 +206,8 @@ size_t Export::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {
 }
 
 bool Limits::matches(Limits src, Limits dst) {
-  if (src.addressType != dst.addressType) {
+  if (src.addressType != dst.addressType || src.shared != dst.shared ||
+      src.pageSize != dst.pageSize) {
     return false;
   }
   if (src.initial < dst.initial) {
@@ -219,23 +229,59 @@ bool TableType::matches(TableType src, TableType dst) {
          Limits::matches(src.limits, dst.limits);
 }
 
-bool MemoryDesc::matches(const MemoryDesc& src, const MemoryDesc& dst) {
-  return src.addressType() == dst.addressType() &&
-         src.isShared() == dst.isShared() && src.pageSize() == dst.pageSize() &&
-         Limits::matches(src.limits, dst.limits);
+bool GlobalType::matches(GlobalType src, GlobalType dst) {
+  if (src.isMutable != dst.isMutable) {
+    return false;
+  }
+  if (src.isMutable) {
+    return src.type == dst.type;
+  }
+  return ValType::isSubTypeOf(src.type, dst.type);
 }
 
-bool GlobalDesc::matches(const GlobalDesc& src, const GlobalDesc& dst) {
-  if (src.isMutable() != dst.isMutable()) {
+DefinitionKind CoreExternType::kind() const {
+  return payload_.match(
+      [](const SharedTypeDef&) { return DefinitionKind::Function; },
+      [](const TableType&) { return DefinitionKind::Table; },
+      [](const Limits&) { return DefinitionKind::Memory; },
+      [](const GlobalType&) { return DefinitionKind::Global; },
+      [](const SharedTagType&) { return DefinitionKind::Tag; });
+}
+
+bool CoreExternType::matches(const CoreExternType& src,
+                             const CoreExternType& dst) {
+  if (src.kind() != dst.kind()) {
     return false;
   }
-  if (src.isMutable() && src.type() != dst.type()) {
-    return false;
+  switch (src.kind()) {
+    case DefinitionKind::Function:
+      return TypeDef::isSubTypeOf(&src.asFunc(), &dst.asFunc());
+    case DefinitionKind::Table:
+      return TableType::matches(src.asTable(), dst.asTable());
+    case DefinitionKind::Memory:
+      return Limits::matches(src.asMemory(), dst.asMemory());
+    case DefinitionKind::Global:
+      return GlobalType::matches(src.asGlobal(), dst.asGlobal());
+    case DefinitionKind::Tag:
+      return TagType::matches(src.asTag(), dst.asTag());
+    default:
+      MOZ_CRASH();
   }
-  if (!src.isMutable() && !ValType::isSubTypeOf(src.type(), dst.type())) {
-    return false;
+}
+
+bool CoreInstanceType::addExport(CacheableName&& name, CoreExternType&& type) {
+  auto p = exports_.lookupForAdd(name.utf8Bytes());
+  MOZ_RELEASE_ASSERT(!p, "export names must be unique");
+  return exports_.add(p, std::move(name), std::move(type));
+}
+
+mozilla::Maybe<const CoreExternType&> CoreInstanceType::getExport(
+    const CacheableName& name) const {
+  auto p = exports_.lookup(name.utf8Bytes());
+  if (!p) {
+    return mozilla::Nothing();
   }
-  return true;
+  return mozilla::SomeRef<const CoreExternType>(p->value());
 }
 
 size_t GlobalDesc::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {

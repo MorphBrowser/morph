@@ -4,26 +4,18 @@
 
 "use strict";
 
-let h2Port;
 let h3Port;
 let trrServer;
 
 const certOverrideService = Cc[
   "@mozilla.org/security/certoverride;1"
 ].getService(Ci.nsICertOverrideService);
-const { TestUtils } = ChromeUtils.importESModule(
-  "resource://testing-common/TestUtils.sys.mjs"
-);
 
 const { NodeHTTPServer } = ChromeUtils.importESModule(
   "resource://testing-common/NodeServer.sys.mjs"
 );
 
 add_setup(async function setup() {
-  h2Port = Services.env.get("MOZHTTP2_PORT");
-  Assert.notEqual(h2Port, null);
-  Assert.notEqual(h2Port, "");
-
   h3Port = Services.env.get("MOZHTTP3_PORT_PROXY");
   Assert.notEqual(h3Port, null);
   Assert.notEqual(h3Port, "");
@@ -40,11 +32,6 @@ add_setup(async function setup() {
     Services.prefs.clearUserPref("network.dns.disablePrefetch");
     await trrServer.stop();
   });
-
-  if (mozinfo.socketprocess_networking) {
-    Services.dns;
-    await TestUtils.waitForCondition(() => Services.io.socketProcessLaunched);
-  }
 });
 
 function makeChan(url) {

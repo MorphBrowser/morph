@@ -10,47 +10,25 @@ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 import { UrlbarProvider } from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
 
-const lazy = {};
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   SyncedTabs: "resource://services-sync/SyncedTabs.sys.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
   UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
+  UrlbarTokenizer:
+    "moz-src:///browser/components/urlbar/UrlbarTokenizer.sys.mjs",
+  WeaveService: "moz-src:///services/sync/Weave.sys.mjs",
+  showRemoteIconsPref: {
+    pref: "services.sync.syncedTabs.showRemoteIcons",
+    default: true,
+  },
+  syncUsernamePref: { pref: "services.sync.username" },
 });
 
 // By default, we add remote tabs that have been used more recently than this
 // time ago. Any remaining remote tabs are added in queue if no other results
 // are found.
 const RECENT_REMOTE_TAB_THRESHOLD_MS = 72 * 60 * 60 * 1000; // 72 hours.
-
-ChromeUtils.defineLazyGetter(lazy, "weaveXPCService", function () {
-  try {
-    return Cc["@mozilla.org/weave/service;1"].getService(Ci.nsISupports)
-      .wrappedJSObject;
-  } catch (ex) {
-    // The app didn't build Sync.
-  }
-  return null;
-});
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "showRemoteIconsPref",
-  "services.sync.syncedTabs.showRemoteIcons",
-  true
-);
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "syncUsernamePref",
-  "services.sync.username"
-);
-
-// from MDN...
-function escapeRegExp(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 /**
  * Singleton class to cache the latest remote tab data.
@@ -80,7 +58,7 @@ class _cache {
     // being signed in), don't reach in to Weave.Service as that may initialize
     // Sync unnecessarily - we'll get an observer notification later when it
     // becomes ready and has synced a list of tabs.
-    if (lazy.weaveXPCService.ready) {
+    if (lazy.WeaveService.ready) {
       let clients = await lazy.SyncedTabs.getTabClients();
       lazy.SyncedTabs.sortTabClientsByLastUsed(clients);
       for (let client of clients) {
@@ -155,9 +133,8 @@ export class UrlbarProviderRemoteTabs extends UrlbarProvider {
       lazy.syncUsernamePref &&
       lazy.UrlbarPrefs.get("suggest.remotetab") &&
       queryContext.sources.includes(lazy.UrlbarShared.RESULT_SOURCE.TABS) &&
-      lazy.weaveXPCService &&
-      lazy.weaveXPCService.ready &&
-      lazy.weaveXPCService.enabled
+      lazy.WeaveService.ready &&
+      lazy.WeaveService.enabled
     );
   }
 
@@ -171,9 +148,12 @@ export class UrlbarProviderRemoteTabs extends UrlbarProvider {
   async startQuery(queryContext, addCallback) {
     let instance = this.queryInstance;
 
-    let searchString = queryContext.tokens.map(t => t.value).join(" ");
+    let tokens = queryContext.restrictToken
+      ? queryContext.tokens.filter(
+          t => !lazy.UrlbarTokenizer.isRestrictionToken(t)
+        )
+      : queryContext.tokens;
 
-    let re = new RegExp(escapeRegExp(searchString), "i");
     let tabsData = await _cache.get();
     if (instance != this.queryInstance) {
       return;
@@ -182,11 +162,13 @@ export class UrlbarProviderRemoteTabs extends UrlbarProvider {
     let resultsAdded = 0;
     let staleTabs = [];
     for (let { tab, client } of tabsData) {
+      let url = tab.url.toLocaleLowerCase();
+      let title = tab.title.toLocaleLowerCase();
       if (
-        !searchString ||
-        searchString == lazy.UrlbarShared.RESTRICT_TOKENS.OPENPAGE ||
-        re.test(tab.url) ||
-        (tab.title && re.test(tab.title))
+        tokens.every(
+          t =>
+            url.includes(t.lowerCaseValue) || title.includes(t.lowerCaseValue)
+        )
       ) {
         // Bug 2017798 - we need to determine how to safely show remote favicons here,
         // but until then, we show a generic favicon for the site if possible.

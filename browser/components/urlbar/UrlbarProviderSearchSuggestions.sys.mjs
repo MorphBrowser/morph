@@ -11,10 +11,9 @@ import {
   UrlbarProvider,
   UrlbarUtils,
 } from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-const lazy = {};
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   DEFAULT_FORM_HISTORY_PARAM:
     "moz-src:///toolkit/components/search/SearchSuggestionController.sys.mjs",
   FormHistory: "resource://gre/modules/FormHistory.sys.mjs",
@@ -346,7 +345,7 @@ export class UrlbarProviderSearchSuggestions extends UrlbarProvider {
       return /** @type {UrlbarResultCommand[]} */ ([
         {
           name: RESULT_MENU_COMMANDS.TRENDING_BLOCK,
-          l10n: { id: "urlbar-result-menu-trending-dont-show2" },
+          l10n: { id: "urlbar-result-menu-trending-dont-show3" },
         },
         {
           name: "separator",
@@ -682,16 +681,9 @@ export class UrlbarProviderSearchSuggestions extends UrlbarProvider {
     // Remove results in reverse order so the acknowledgment tip isn't removed.
     resultsToRemove.reverse();
     resultsToRemove.forEach(result =>
-      controller.removeResult(
-        result,
-        result == acknowledgedResult
-          ? {
-              acknowledgeDismissalL10n: {
-                id: "urlbar-trending-dismissal-acknowledgment",
-              },
-            }
-          : undefined
-      )
+      controller.removeResult(result, {
+        acknowledgeDismissal: result == acknowledgedResult,
+      })
     );
   }
 }

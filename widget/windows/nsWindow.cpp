@@ -89,6 +89,7 @@
 #include "imgIContainer.h"
 #include "mozilla/AppShutdown.h"
 #include "mozilla/AutoRestore.h"
+#include "mozilla/ClearOnShutdown.h"
 #include "mozilla/Components.h"
 #include "mozilla/DynamicallyLinkedFunctionPtr.h"
 #include "mozilla/Likely.h"
@@ -144,6 +145,7 @@
 #include "nsIScreenManager.h"
 #include "nsISupportsPrimitives.h"
 #include "nsITheme.h"
+#include "nsIThreadShutdown.h"
 #include "nsIWidgetListener.h"
 #include "nsLayoutUtils.h"
 #include "nsLookAndFeel.h"
@@ -245,6 +247,7 @@ nsWindow* nsWindow::sCurrentWindow = nullptr;
 bool nsWindow::sJustGotDeactivate = false;
 bool nsWindow::sJustGotActivate = false;
 bool nsWindow::sIsInMouseCapture = false;
+TimeStamp nsWindow::sLastAppDeactivationTime;
 
 // Urgent-message reentrancy depth for the static `WindowProc` callback.
 //
@@ -325,6 +328,9 @@ InjectTouchInputPtr nsWindow::sInjectTouchFuncPtr;
 bool nsWindow::sIsNativePointLocked = false;
 bool nsWindow::sIsUsingRawInputForMouseMove = false;
 nsWindow* nsWindow::sNativePointLockedWindow = nullptr;
+
+uint32_t nsWindow::sDesktopIdRequestsInFlight = 0;
+bool nsWindow::sDesktopIdHangForTesting = false;
 
 static SystemTimeConverter<DWORD>& TimeConverter() {
   static SystemTimeConverter<DWORD> timeConverterSingleton;
@@ -884,8 +890,8 @@ void nsWindow::SendAnAPZEvent(InputData& aEvent) {
     // Give the swipe tracker a first pass at the event. If a new pan gesture
     // has been started since the beginning of the swipe, the swipe tracker
     // will know to ignore the event.
-    nsEventStatus status =
-        mSwipeTracker->ProcessEvent(aEvent.AsPanGestureInput());
+    nsEventStatus status = mSwipeTracker->ProcessEvent(
+        aEvent.AsPanGestureInput(), SwipeInputSource::Touchpad);
     if (status == nsEventStatus_eConsumeNoDefault) {
       return;
     }
@@ -907,6 +913,9 @@ void nsWindow::SendAnAPZEvent(InputData& aEvent) {
     WidgetWheelEvent event = panInput.ToWidgetEvent(this);
     if (mAPZC) {
       event = MayStartSwipe(panInput, result);
+      if (!panInput.ShouldDispatchToContentAfterAPZ()) {
+        return;
+      }
     }
 
     ProcessUntransformedAPZEvent(&event, result);
@@ -931,7 +940,7 @@ void nsWindow::RecreateDirectManipulationIfNeeded() {
     return;
   }
 
-  mDmOwner = MakeUnique<DirectManipulationOwner>(this);
+  mDmOwner = std::make_unique<DirectManipulationOwner>(this);
 
   LayoutDeviceIntRect bounds = mBounds;
   mDmOwner->Init(bounds);
@@ -1294,6 +1303,16 @@ void nsWindow::Destroy() {
    * cleanup. It also would like to have the HWND intact, so we nullptr it here.
    */
   DestroyLayerManager();
+
+  // Destroying the window doesn't release the GDI objects the Windows App SDK
+  // allocates for a title bar extended into the client area, so undo that
+  // first. Skipped for windows still open once shutdown is confirmed: the
+  // process exit frees them, and resetting it then makes the process exit with
+  // STATUS_INVALID_PARAMETER.
+  if (mCustomNonClient &&
+      !AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
+    WindowsUIUtils::SetIsTitlebarCollapsed(mWnd, false);
+  }
 
   // The DestroyWindow function destroys the specified window. The function
   // sends WM_DESTROY and WM_NCDESTROY messages to the window to deactivate it
@@ -2263,28 +2282,72 @@ void nsWindow::GetWorkspaceID(nsAString& workspaceID) {
 }
 
 void nsWindow::AsyncUpdateWorkspaceID() {
+  AssertIsOnMainThread();
+  static StaticRefPtr<nsIThread> sThread;
+
+  if (mDesktopIdUpdatePending ||
+      AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
+    return;
+  }
+
+  if (!sThread) {
+    nsCOMPtr<nsIThread> newThread;
+    if (NS_FAILED(
+            NS_NewNamedThread("WinWorkspaceID", getter_AddRefs(newThread)))) {
+      return;
+    }
+    sThread = newThread.forget();
+    RunOnShutdown(
+        [] {
+          nsCOMPtr<nsIThread> thread = sThread.forget();
+          if (!sDesktopIdRequestsInFlight) {
+            thread->Shutdown();
+            return;
+          }
+
+          // GetWindowDesktopId can block forever (bug 2080829), so don't wait
+          // for it.
+          nsCOMPtr<nsIThreadShutdown> shutdown;
+          if (NS_SUCCEEDED(thread->BeginShutdown(getter_AddRefs(shutdown)))) {
+            (void)shutdown->StopWaitingAndLeakThread();
+          }
+        },
+        ShutdownPhase::XPCOMShutdownThreads);
+  }
+
   nsWeakPtr weakSelf = do_GetWeakReference(this);
   // Wrap weak reference in nsMainThreadPtrHandle to resist attempts to
   // Release() the weak reference off-main-thread (it's not thread safe)
   // in case of failed task dispatch.
   nsMainThreadPtrHandle<nsIWeakReference> weakSelfHandle(
       new nsMainThreadPtrHolder("AsyncUpdateWorkspaceID", weakSelf.forget()));
-  NS_DispatchBackgroundTask(NS_NewRunnableFunction(
+  nsresult rv = sThread->Dispatch(NS_NewRunnableFunction(
       "BackgroundUpdateWorkspaceID",
-      [hwnd = mWnd, weakSelfHandle = std::move(weakSelfHandle)]() mutable {
+      [hwnd = mWnd, hangForTesting = sDesktopIdHangForTesting,
+       weakSelfHandle = std::move(weakSelfHandle)]() mutable {
+        if (hangForTesting) {
+          ::Sleep(INFINITE);
+        }
         auto id = DoGetWorkspaceID(hwnd);
         NS_DispatchToMainThread(NS_NewRunnableFunction(
             "MainUpdateWorkspaceID",
             [id = std::move(id),
              weakSelfHandle = std::move(weakSelfHandle)]() mutable {
               AssertIsOnMainThread();
+              --sDesktopIdRequestsInFlight;
               nsCOMPtr<nsIWidget> widgetSelf = do_QueryReferent(weakSelfHandle);
               auto* self = static_cast<nsWindow*>(widgetSelf.get());
               if (self) {
                 self->mDesktopId = id;
+                self->mDesktopIdUpdatePending = false;
               }
             }));
       }));
+  if (NS_FAILED(rv)) {
+    return;
+  }
+  ++sDesktopIdRequestsInFlight;
+  mDesktopIdUpdatePending = true;
 }
 
 void nsWindow::MoveToWorkspace(const nsAString& workspaceID) {
@@ -3358,6 +3421,12 @@ void nsWindow::TryDwmResizeHack() {
 
   // ---------------------------------------------------------------------------
 
+  // No renderer yet (e.g. sizemode=fullscreen before first paint): skip without
+  // using up the one-shot flag.
+  if (!mWindowRenderer) {
+    return;
+  }
+
   // Regardless of preferences or heuristics, only apply the hack if this is the
   // first time we've entered fullscreen across the entire Firefox session.
   // (Subsequent transitions to fullscreen, even with different windows, don't
@@ -4146,7 +4215,13 @@ bool nsWindow::DispatchMouseEvent(EventMessage aEventMessage, WPARAM wParam,
                                   int16_t aButton, uint16_t aInputSource,
                                   WinPointerInfo* aPointerInfo,
                                   IsNonclient aIsNonclient,
-                                  Maybe<LayoutDeviceIntPoint> aMovement) {
+                                  Maybe<LayoutDeviceIntPoint> aMovement,
+                                  const WidgetMouseEventCommand& aCommand) {
+  // Dispatch pending X1/X2 event if any before dealing with this one.
+  DispatchPendingMouseUpEvent({});
+  if (mInDtor || mOnDestroyCalled) {
+    return false;
+  }
   ContextMenuPreventer contextMenuPreventer(this);
   bool result = false;
 
@@ -4228,6 +4303,7 @@ bool nsWindow::DispatchMouseEvent(EventMessage aEventMessage, WPARAM wParam,
     mouseEvent.emplace(true, aEventMessage, this, WidgetMouseEvent::eReal,
                        aIsContextMenuKey ? WidgetMouseEvent::eContextMenuKey
                                          : WidgetMouseEvent::eNormal);
+    mouseEvent->mCommand = aCommand;
   }
   WidgetMouseEvent& mouseOrPointerEvent =
       pointerEvent.isSome() ? pointerEvent.ref() : mouseEvent.ref();
@@ -4299,6 +4375,12 @@ bool nsWindow::DispatchMouseEvent(EventMessage aEventMessage, WPARAM wParam,
       break;
     case MouseButton::eSecondary:
       eventButton = VK_RBUTTON;
+      break;
+    case MouseButton::eX1:
+      eventButton = VK_XBUTTON1;
+      break;
+    case MouseButton::eX2:
+      eventButton = VK_XBUTTON2;
       break;
     default:
       eventButton = 0;
@@ -4523,6 +4605,21 @@ bool nsWindow::IsAsyncResponseEvent(UINT aMsg, LRESULT& aResult) {
 #endif
 
   return false;
+}
+
+bool nsWindow::DispatchPendingMouseUpEvent(
+    const WidgetMouseEventCommand& aCommand) {
+  Maybe<PendingMouseUpEventData> data = mPendingMouseUpEvent.take();
+  if (!data) {
+    return false;
+  }
+  DispatchMouseEvent(
+      eMouseUp, data->mWParam, data->mLParam, false, data->mButton,
+      data->mInputSource,
+      mPointerEvents.GetCachedPointerInfo(WM_XBUTTONUP, data->mWParam),
+      IsNonclient::No, mozilla::Nothing(), aCommand);
+  DispatchPendingEvents();
+  return true;
 }
 
 void nsWindow::IPCWindowProcHandler(UINT& msg, WPARAM& wParam, LPARAM& lParam) {
@@ -5479,19 +5576,60 @@ bool nsWindow::ProcessMessageInternal(UINT msg, WPARAM& wParam, LPARAM& lParam,
     case WM_XBUTTONDOWN:
     case WM_XBUTTONUP:
     case WM_NCXBUTTONDOWN:
-    case WM_NCXBUTTONUP:
+    case WM_NCXBUTTONUP: {
       *aRetValue = TRUE;
+      int16_t button = 0;
+      bool prefValue = false;
       switch (GET_XBUTTON_WPARAM(wParam)) {
         case XBUTTON1:
-          result = !Preferences::GetBool("mousebutton.4th.enabled", true);
+          prefValue = Preferences::GetBool("mousebutton.4th.enabled", true);
+          button = MouseButton::eX1;
           break;
         case XBUTTON2:
-          result = !Preferences::GetBool("mousebutton.5th.enabled", true);
+          prefValue = Preferences::GetBool("mousebutton.5th.enabled", true);
+          button = MouseButton::eX2;
           break;
         default:
           break;
       }
+      if (!prefValue) {
+        result = true;
+        break;
+      }
+      if (StaticPrefs::dom_event_mouse_xbuttons_enabled()) {
+        if (msg == WM_XBUTTONUP) {
+          DispatchPendingMouseUpEvent({});
+          if (mInDtor || mOnDestroyCalled) {
+            break;
+          }
+          // We need to determine the default action of the X1/X2 button
+          // press without actually doing it, since the content may call
+          // preventDefault(). So we store the information about the button
+          // press, then on receiving WM_APPCOMMAND, we set the default
+          // action and fire the event.
+          mPendingMouseUpEvent = Some(PendingMouseUpEventData{
+              button, MOUSE_INPUT_SOURCE(), wParam, lParam});
+          // However, we may never receive WM_APPCOMMAND if there is no action
+          // for the button. So we also post MOZ_WM_AFTER_XBUTTONUP to flush
+          // the pending event if it's still there.
+          ::PostMessage(mWnd, MOZ_WM_AFTER_XBUTTONUP, 0, 0);
+        } else if (msg == WM_XBUTTONDOWN) {
+          DispatchMouseEvent(eMouseDown, wParam, lParam, false, button,
+                             MOUSE_INPUT_SOURCE(),
+                             mPointerEvents.GetCachedPointerInfo(msg, wParam),
+                             IsNonclient::No, mozilla::Nothing(), nullptr);
+          DispatchPendingEvents();
+        }
+      }
       break;
+    }
+
+    case MOZ_WM_AFTER_XBUTTONUP: {
+      // If the button press didn't have a default action,
+      // we fire the event now.
+      DispatchPendingMouseUpEvent({});
+      break;
+    }
 
     case WM_SIZING: {
       if (mAspectRatio > 0) {
@@ -5714,6 +5852,9 @@ bool nsWindow::ProcessMessageInternal(UINT msg, WPARAM& wParam, LPARAM& lParam,
     } break;
 
     case WM_ACTIVATEAPP: {
+      if (!wParam) {
+        sLastAppDeactivationTime = TimeStamp::Now();
+      }
       // Bug 1851991: Sometimes this can be called before gfxPlatform::Init
       // when a window is created very early. In that case we just forego
       // setting this and accept the GPU process might briefly run at a lower
@@ -6393,12 +6534,23 @@ nsresult nsWindow::SynthesizeNativeMouseScrollEvent(
     double aDeltaY, double aDeltaZ, nsIWidget::NativeModifiers aModifierFlags,
     uint32_t aAdditionalFlags, nsISynthesizedEventCallback* aCallback) {
   AutoSynthesizedEventCallbackNotifier notifier(aCallback);
+  int32_t delta;
+  switch (aNativeMessage) {
+    case WM_MOUSEWHEEL:
+    case WM_VSCROLL:
+      delta = static_cast<int32_t>(aDeltaY);
+      break;
+    case WM_MOUSEHWHEEL:
+      // WM_MOUSEHWHEEL deltas are positive when scrolling to the right, the
+      // opposite of the convention used by this function.
+      delta = -static_cast<int32_t>(aDeltaX);
+      break;
+    default:
+      delta = static_cast<int32_t>(aDeltaX);
+      break;
+  }
   return MouseScrollHandler::SynthesizeNativeMouseScrollEvent(
-      this, aPoint, aNativeMessage,
-      (aNativeMessage == WM_MOUSEWHEEL || aNativeMessage == WM_VSCROLL)
-          ? static_cast<int32_t>(aDeltaY)
-          : static_cast<int32_t>(aDeltaX),
-      aModifierFlags, aAdditionalFlags);
+      this, aPoint, aNativeMessage, delta, aModifierFlags, aAdditionalFlags);
 }
 
 nsresult nsWindow::SynthesizeNativeTouchpadPan(
@@ -8576,7 +8728,7 @@ nsresult nsWindow::SynthesizeNativeTouchPoint(
     }
 
     if (!mSynthesizedTouchInput) {
-      mSynthesizedTouchInput = MakeUnique<MultiTouchInput>();
+      mSynthesizedTouchInput = std::make_unique<MultiTouchInput>();
     }
 
     WidgetEventTime time = CurrentMessageWidgetEventTime();
@@ -8604,8 +8756,8 @@ nsresult nsWindow::SynthesizeNativeTouchPoint(
     }
 
     if (!entry) {
-      entry.Insert(MakeUnique<PointerInfo>(aPointerId, aPoint,
-                                           PointerInfo::PointerType::TOUCH));
+      entry.Insert(std::make_unique<PointerInfo>(
+          aPointerId, aPoint, PointerInfo::PointerType::TOUCH));
     } else {
       if (entry.Data()->mType != PointerInfo::PointerType::TOUCH) {
         return NS_ERROR_UNEXPECTED;
@@ -8692,8 +8844,8 @@ nsresult nsWindow::SynthesizeNativePenInput(
     }
 
     if (!entry) {
-      entry.Insert(MakeUnique<PointerInfo>(aPointerId, aPoint,
-                                           PointerInfo::PointerType::PEN));
+      entry.Insert(std::make_unique<PointerInfo>(
+          aPointerId, aPoint, PointerInfo::PointerType::PEN));
     } else {
       if (entry.Data()->mType != PointerInfo::PointerType::PEN) {
         return NS_ERROR_UNEXPECTED;

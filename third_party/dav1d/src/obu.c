@@ -352,6 +352,11 @@ static int read_frame_size(Dav1dContext *const c, GetBits *const gb,
                 if (!ref->p.frame_hdr) return -1;
                 hdr->width[1] = ref->p.frame_hdr->width[1];
                 hdr->height = ref->p.frame_hdr->height;
+                if (hdr->width[1] > seqhdr->max_width ||
+                    hdr->height > seqhdr->max_height)
+                {
+                    return -1;
+                }
                 hdr->render_width = ref->p.frame_hdr->render_width;
                 hdr->render_height = ref->p.frame_hdr->render_height;
                 hdr->super_res.enabled = seqhdr->super_res && dav1d_get_bit(gb);
@@ -372,6 +377,11 @@ static int read_frame_size(Dav1dContext *const c, GetBits *const gb,
     if (hdr->frame_size_override) {
         hdr->width[1] = dav1d_get_bits(gb, seqhdr->width_n_bits) + 1;
         hdr->height = dav1d_get_bits(gb, seqhdr->height_n_bits) + 1;
+        if (hdr->width[1] > seqhdr->max_width ||
+            hdr->height > seqhdr->max_height)
+        {
+            return -1;
+        }
     } else {
         hdr->width[1] = seqhdr->max_width;
         hdr->height = seqhdr->max_height;
@@ -1463,17 +1473,30 @@ ptrdiff_t dav1d_parse_obus(Dav1dContext *const c, Dav1dData *const in) {
             }
 
             if ((c->n_itut_t35 + 1) > INT_MAX / (int)sizeof(*c->itut_t35)) goto error;
-            struct Dav1dITUTT35 *itut_t35 = dav1d_realloc(ALLOC_OBU_META, c->itut_t35,
-                                                          (c->n_itut_t35 + 1) * sizeof(*c->itut_t35));
-            if (!itut_t35) goto error;
-            c->itut_t35 = itut_t35;
-            memset(c->itut_t35 + c->n_itut_t35, 0, sizeof(*c->itut_t35));
+            uint8_t *const payload = dav1d_malloc(ALLOC_OBU_META, payload_size);
+            if (!payload) goto error;
 
-            struct itut_t35_ctx_context *itut_t35_ctx;
+            struct itut_t35_ctx_context *itut_t35_ctx = NULL;
             if (!c->n_itut_t35) {
                 assert(!c->itut_t35_ref);
                 itut_t35_ctx = dav1d_malloc(ALLOC_OBU_META, sizeof(struct itut_t35_ctx_context));
-                if (!itut_t35_ctx) goto error;
+                if (!itut_t35_ctx) {
+                    dav1d_free(payload);
+                    goto error;
+                }
+            }
+
+            struct Dav1dITUTT35 *itut_t35 = dav1d_realloc(ALLOC_OBU_META, c->itut_t35,
+                                                          (c->n_itut_t35 + 1) * sizeof(*c->itut_t35));
+            if (!itut_t35) {
+                dav1d_free(itut_t35_ctx);
+                dav1d_free(payload);
+                goto error;
+            }
+            c->itut_t35 = itut_t35;
+            memset(c->itut_t35 + c->n_itut_t35, 0, sizeof(*c->itut_t35));
+
+            if (!c->n_itut_t35) {
                 c->itut_t35_ref = dav1d_ref_init(&itut_t35_ctx->ref, c->itut_t35,
                                                  dav1d_picture_free_itut_t35, itut_t35_ctx, 0);
             } else {
@@ -1485,8 +1508,7 @@ ptrdiff_t dav1d_parse_obus(Dav1dContext *const c, Dav1dData *const in) {
             itut_t35_ctx->n_itut_t35 = c->n_itut_t35 + 1;
 
             Dav1dITUTT35 *const itut_t35_metadata = &c->itut_t35[c->n_itut_t35];
-            itut_t35_metadata->payload = dav1d_malloc(ALLOC_OBU_META, payload_size);
-            if (!itut_t35_metadata->payload) goto error;
+            itut_t35_metadata->payload = payload;
 
             itut_t35_metadata->country_code = country_code;
             itut_t35_metadata->country_code_extension_byte = country_code_extension_byte;

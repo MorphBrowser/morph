@@ -7,6 +7,7 @@
 
 #include "Assertions.h"
 #include "ClientUsageArray.h"
+#include "mozilla/StaticString.h"
 #include "mozilla/ThreadSafeWeakPtr.h"
 #include "mozilla/dom/quota/QuotaManager.h"
 
@@ -30,9 +31,9 @@ class OriginInfo final : public SupportsThreadSafeWeakPtr<OriginInfo> {
 
   OriginInfo(GroupInfo* aGroupInfo, const nsACString& aOrigin,
              const nsACString& aStorageOrigin, bool aIsPrivate,
-             const ClientUsageArray& aClientUsages, int64_t aUsage,
-             int64_t aAccessTime, int32_t aMaintenanceDate, bool aPersisted,
-             bool aDirectoryExists);
+             bool aIsEncrypted, const ClientUsageArray& aClientUsages,
+             int64_t aUsage, int64_t aAccessTime, int32_t aMaintenanceDate,
+             bool aPersisted, bool aDirectoryExists);
 
   GroupInfo* GetGroupInfo() const { return mGroupInfo; }
 
@@ -72,6 +73,8 @@ class OriginInfo final : public SupportsThreadSafeWeakPtr<OriginInfo> {
 
   bool IsPrivate() const { return mIsPrivate; }
 
+  bool IsEncrypted() const { return mIsEncrypted; }
+
   bool IsExtensionOrigin() const { return mIsExtension; }
 
   bool LockedDirectoryExists() const {
@@ -83,6 +86,23 @@ class OriginInfo final : public SupportsThreadSafeWeakPtr<OriginInfo> {
   void LockedSetClean() {
     AssertCurrentThreadOwnsQuotaMutex();
     mMetadataDirty = false;
+    mCacheRowStale = false;
+  }
+
+  bool LockedCacheRowStale() const {
+    AssertCurrentThreadOwnsQuotaMutex();
+
+    return mCacheRowStale;
+  }
+
+  void LockedClearCacheRowStale() {
+    AssertCurrentThreadOwnsQuotaMutex();
+    mCacheRowStale = false;
+  }
+
+  void LockedSetCacheRowStale() {
+    AssertCurrentThreadOwnsQuotaMutex();
+    mCacheRowStale = true;
   }
 
   OriginMetadata FlattenToOriginMetadata() const;
@@ -154,9 +174,7 @@ class OriginInfo final : public SupportsThreadSafeWeakPtr<OriginInfo> {
 
   constexpr TimeStamp GetLastModifiedTime() const { return mLastModifiedTime; }
 
-#if defined(NIGHTLY_BUILD) || defined(DEBUG)
   bool CheckIfUsageIsConsistent(const nsACString& context) const;
-#endif  // defined(NIGHTLY_BUILD) || defined(DEBUG)
 
   nsTHashMap<nsStringHashKey, NotNull<CanonicalQuotaObject*>>
       mCanonicalQuotaObjects;
@@ -166,6 +184,7 @@ class OriginInfo final : public SupportsThreadSafeWeakPtr<OriginInfo> {
   int64_t mAccessTime;
   int32_t mMaintenanceDate;
   bool mIsPrivate;
+  bool mIsEncrypted;
   bool mAccessed;
   bool mPersisted;
   const bool mIsExtension;
@@ -188,7 +207,14 @@ class OriginInfo final : public SupportsThreadSafeWeakPtr<OriginInfo> {
 
   void MakeDirty(DirtyTrackingAutoLock& aProofOfLock);
 
+  // Records the quotamanager.usage_underflow event if aUsage is negative.
+  void LockedMaybeRecordUsageUnderflow(Client::Type aClientType, int64_t aUsage,
+                                       StaticString aCallSite);
+
   ClientUsageArray mClientUsages;
+  // Per client, how many times a negative usage was seen for this OriginInfo.
+  // Used to throttle usage_underflow telemetry events.
+  Array<uint32_t, Client::TYPE_MAX> mUsageUnderflowCount{};
 
   // Signed for the same reason as QuotaManager::mTemporaryStorageUsage: though
   // it shouldn't go negative, in case that happens (transient state or bug
@@ -198,6 +224,9 @@ class OriginInfo final : public SupportsThreadSafeWeakPtr<OriginInfo> {
   int64_t mUsage;
   TimeStamp mLastModifiedTime;
   bool mMetadataDirty = false;
+  // The origin row in the storage database is missing or does not match this
+  // OriginInfo. Cleared when the row is upserted.
+  bool mCacheRowStale = true;
 };
 
 class OriginInfoAccessTimeComparator {

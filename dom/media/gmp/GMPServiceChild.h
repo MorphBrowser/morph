@@ -25,7 +25,6 @@ class GeckoMediaPluginServiceChild : public GeckoMediaPluginService {
 
  public:
   static already_AddRefed<GeckoMediaPluginServiceChild> GetSingleton();
-  nsresult Init() override;
 
   NS_DECL_ISUPPORTS_INHERITED
 
@@ -49,9 +48,17 @@ class GeckoMediaPluginServiceChild : public GeckoMediaPluginService {
   static void UpdateGMPCapabilities(
       nsTArray<mozilla::dom::GMPCapabilityData>&& aCapabilities);
 
+  // Returns whether the GMP capabilities received from the parent process
+  // support aAPI with aTags. This does not need the GMP service to exist.
+  static bool HasCapabilityForAPI(const nsACString& aAPI,
+                                  const nsTArray<nsCString>& aTags);
+
   void BeginShutdown();
 
  protected:
+  nsresult InitMainThread() override;
+  void UninitMainThread() override;
+
   void InitializePlugins(nsISerialEventTarget*) override {
     // Nothing to do here.
   }
@@ -144,14 +151,14 @@ class GMPServiceChild : public PGMPServiceChild {
       : mService(aService) {}
 
   already_AddRefed<GMPContentParent> GetBridgedGMPContentParent(
-      ProcessId aOtherPid, ipc::Endpoint<PGMPContentParent>&& endpoint);
+      GeckoChildID aOtherChildID, ipc::Endpoint<PGMPContentParent>&& endpoint);
 
   void RemoveGMPContentParent(GMPContentParent* aGMPContentParent);
 
-  bool HasAlreadyBridgedTo(base::ProcessId aPid) const;
+  bool HasAlreadyBridgedTo(GeckoChildID aChildID) const;
 
   void GetAndBlockAlreadyBridgedTo(
-      nsTArray<ProcessId>& aAlreadyBridgedTo,
+      nsTArray<GeckoChildID>& aAlreadyBridgedTo,
       nsTArray<RefPtr<GMPContentParentCloseBlocker>>& aBlockers);
 
   static bool Create(Endpoint<PGMPServiceChild>&& aGMPService);
@@ -165,7 +172,8 @@ class GMPServiceChild : public PGMPServiceChild {
  private:
   ~GMPServiceChild() = default;
 
-  nsRefPtrHashtable<nsUint64HashKey, GMPContentParent> mContentParents;
+  nsRefPtrHashtable<nsIntegralHashKey<GeckoChildID>, GMPContentParent>
+      mContentParents;
 
   // Raw pointer to our owning service. The service owns us via a RefPtr in
   // mServiceChild, so it strictly outlives us.

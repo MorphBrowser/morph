@@ -4,14 +4,21 @@ support-files = [
   "file_FinderSample.html",
   "file_getSelectionDetails_inputs.html",
   "head.js",
+  "head_EyeDropper.js",
 ]
 
 ["browser_AsyncPrefs.js"]
 
 ["browser_BrowserUtils.js"]
 
+["browser_BrowserUtils_idle_window_leak.js"]
+
 ["browser_CreditCard.js"]
 tags = "bleedover"
+
+["browser_EyeDropper.js"]
+
+["browser_EyeDropper_cancel.js"]
 
 ["browser_Finder.js"]
 
@@ -49,9 +56,14 @@ skip-if = [
 
 ["browser_InlineSpellChecker.js"]
 
-["browser_toTopLevelWidgetRect.js"]
+["browser_ShortcutUtils_modifierOrder.js"]
+run-if = [
+  "os == 'mac'",
+]
 
 ["browser_Troubleshoot.js"]
+
+["browser_toTopLevelWidgetRect.js"]
 
 ["browser_web_channel.js"]
 https_first_disabled = true

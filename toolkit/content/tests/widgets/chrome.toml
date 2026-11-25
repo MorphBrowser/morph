@@ -1,5 +1,4 @@
 [DEFAULT]
-dupe-manifest = true
 support-files = [
   "tree_shared.js",
   "popup_shared.js",
@@ -10,7 +9,6 @@ support-files = [
 ]
 prefs = [
   "app.support.baseURL='https://support.mozilla.org/'",
-  "browser.nova.enabled=false",
 ]
 
 ["test_contextmenu_menugroup.xhtml"]
@@ -133,6 +131,8 @@ support-files = [
 
 ["test_panel_item_mouseup_click.html"]
 
+["test_panel_item_no_icon.html"]
+
 ["test_panel_item_shortcut.html"]
 
 ["test_panel_list_accessibility.html"]
@@ -154,9 +154,6 @@ support-files = [
 ["test_panel_list_submenu_click.html"]
 
 ["test_popupanchor.xhtml"]
-skip-if = [
-  "os == 'win' && standalone", # Bug 2026600
-]
 
 ["test_popupreflows.xhtml"]
 

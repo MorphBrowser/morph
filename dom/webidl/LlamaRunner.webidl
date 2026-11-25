@@ -62,20 +62,8 @@ enum LlamaKVCacheDtype {
  * Name are chosen to map directly to the ones from llama.cpp.
  */
 dictionary LlamaContextOptions {
-  /**
-   * Maximum combined length of input & generate tokens.
-   */
-  unsigned long nCtx = 2048;
-
-  /**
-   * Logical max batch size submitted to llama_decode.
-   */
-  unsigned long nBatch = 2048;
-
-  /**
-   * Physical max batch size for actual processing.
-   */
-  unsigned long nUbatch = 512;
+  /** Tokens per decode call; sets llama.cpp n_batch and n_ubatch. */
+  unsigned long nBatch = 512;
 
   /**
    * Maximum number of concurrent sequences (distinct KV states).
@@ -103,12 +91,6 @@ dictionary LlamaContextOptions {
   LlamaKVCacheDtype vCacheDtype = "f16";
 
   /**
-   * If true, offload K, Q, V ops (including KV cache) to the GPU.
-   * Only active if GPU is used with NGpULayers != 0 in LlamaModelOptions
-   */
-  boolean offloadKqv = true;
-
-  /**
    * If true, use FlashAttention (experimental).
    */
   boolean flashAttn = false;
@@ -117,12 +99,6 @@ dictionary LlamaContextOptions {
    * If true, disable performance measurement (no timing output).
    */
   boolean noPerf = false;
-
-  /**
-   * If true, offload host-side tensor operations to the device.
-   * Only active if GPU is used with NGpULayers != 0 in LlamaModelOptions
-   */
-  boolean opOffload = true;
 
   /**
    * If true, use a full-size SWA (sliding window attention) cache.
@@ -152,13 +128,14 @@ dictionary LlamaModelOptions {
   boolean checkTensors = false;
 
   /**
-   * Number of model layers to offload to GPU.
-   * A value of 0 disables GPU offloading.
+   * Where to load: the first device matching it that takes the model serves
+   * it, an accelerator with every layer. Empty loads on the CPU.
    */
-  long nGpuLayers = 0;
+  HWInferencePlacement placement = {};
 
   /**
-   * Context configuration (e.g. nCtx, threads).
+   * Context configuration (e.g. threads, batch size). Each generation sizes
+   * the context to its prompt and maxGeneratedTokens.
    */
   LlamaContextOptions context = {};
 

@@ -3,6 +3,7 @@
 * file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
+use sql_support::open_database;
 use viaduct::Response;
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +25,9 @@ pub enum CallbackRequestError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("OHTTP request has no user agent to send")]
+    MissingUserAgent,
 
     #[error("Error sending request: {0}")]
     Request(#[from] viaduct::ViaductError),
@@ -47,7 +51,7 @@ pub enum FetchAdsError {
     Request(#[from] viaduct::ViaductError),
 
     #[error("Internal database error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(#[from] open_database::Error),
 
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
@@ -66,7 +70,7 @@ pub enum HTTPError {
 }
 
 impl HTTPError {
-    pub fn check(response: &Response) -> Result<(), Self> {
+    pub(crate) fn check(response: &Response) -> Result<(), Self> {
         let status = response.status;
 
         if status == 200 {
@@ -110,7 +114,7 @@ pub enum ReportAdError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TransportError {
+pub(crate) enum TransportError {
     #[error("HTTP error: {0}")]
     Http(#[from] HTTPError),
 

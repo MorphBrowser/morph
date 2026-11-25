@@ -141,6 +141,10 @@ class ScrollContainerFrame : public nsContainerFrame,
   // at different rates.
   void AdjustForPerspective(nsRect& aScrollableOverflow);
 
+  // Stores the overflow areas of the scrolled frame, given its scrollable
+  // overflow.
+  void StoreScrolledFrameOverflow(const nsRect& aScrollableOverflow);
+
   // Called to set the child frames. We typically have three: the scroll area,
   // the vertical scrollbar, and the horizontal scrollbar.
   void SetInitialChildList(ChildListID aListID,
@@ -1182,7 +1186,6 @@ class ScrollContainerFrame : public nsContainerFrame,
   MOZ_CAN_RUN_SCRIPT nsresult FireScrollPortEvent();
   void PostScrollEndEvent();
   void PostOrDeferScrollEndEvent();
-  MOZ_CAN_RUN_SCRIPT void FireScrollEndEvent();
   void PostOverflowEvent();
 
   // Add display items for the top-layer (which includes things like
@@ -1205,10 +1208,12 @@ class ScrollContainerFrame : public nsContainerFrame,
                            bool aPositioned);
 
   void PostScrollEvent(const nsPoint& aOldScrollPosition);
-  MOZ_CAN_RUN_SCRIPT void FireScrollEvent();
   void PostScrolledAreaEvent();
   MOZ_CAN_RUN_SCRIPT void FireScrolledAreaEvent();
 
+  bool IsScrollbarPartShown(const nsIFrame* aPart) const;
+  // The scrollbar, if it's shown.
+  nsScrollbarFrame* GetShownScrollbarBox(bool aVertical) const;
   void FinishReflowForScrollbar(nsScrollbarFrame*, nscoord aMinXY,
                                 nscoord aMaxXY, nscoord aCurPosXY,
                                 nscoord aPageIncrement);

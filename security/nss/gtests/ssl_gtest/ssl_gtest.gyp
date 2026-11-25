@@ -13,6 +13,7 @@
       'sources': [
         'bloomfilter_unittest.cc',
         'libssl_internals.c',
+        '<(DEPTH)/gtests/common/pk11_import.cc',
         'selfencrypt_unittest.cc',
         'ssl_0rtt_unittest.cc',
         'ssl_aead_unittest.cc',
@@ -40,8 +41,10 @@
         'ssl_loopback_unittest.cc',
         'ssl_masking_unittest.cc',
         'ssl_misc_unittest.cc',
+        'ssl_ocsp_stapling_unittest.cc',
         'ssl_reconfig_unittest.cc',
         'ssl_option_unittest.cc',
+        'ssl_peer_cert_unittest.cc',
         'ssl_record_unittest.cc',
         'ssl_recordsep_unittest.cc',
         'ssl_recordsize_unittest.cc',

@@ -170,6 +170,9 @@ async function doTailSearchSuggestTest({ trigger, assert }) {
 }
 
 async function doTopPickTest({ trigger, assert }) {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.urlbar.suggest.searches", true]],
+  });
   const cleanupQuickSuggest = await ensureQuickSuggestInit({
     merinoSuggestions: [
       {
@@ -193,17 +196,20 @@ async function doTopPickTest({ trigger, assert }) {
   });
 
   await cleanupQuickSuggest();
+  await SpecialPowers.popPrefEnv();
 }
 
 async function doTopSiteTest({ trigger, assert }) {
   await doTest(async () => {
-    await addTopSites("https://example.com/");
+    let cleanupTopSites = await addTopSites("https://example.com/");
 
     await showResultByArrowDown();
     await selectRowByURL("https://example.com/");
 
     await trigger();
     await assert();
+
+    await cleanupTopSites();
   });
 }
 
@@ -306,6 +312,52 @@ async function doSuggestTest({ trigger, assert }) {
   await cleanupQuickSuggest();
 }
 
+async function doTemporalTest({ trigger, assert }) {
+  await doTest(async () => {
+    await SpecialPowers.pushPrefEnv({
+      set: [
+        ["browser.search.suggest.enabled", true],
+        ["browser.urlbar.suggest.searches", true],
+        ["browser.urlbar.suggest.topsites", false],
+      ],
+    });
+    let today = Temporal.Now.plainDateISO();
+    const cleanupQuickSuggest = await ensureQuickSuggestInit({
+      remoteSettingsRecords: [
+        {
+          type: "dynamic-suggestions",
+          suggestion_type: "temporal",
+          attachment: [
+            {
+              keywords: [""],
+              dismissal_key: "temporal",
+              data: {
+                group: "test-group",
+                title: "Test group",
+                type: "seasonal",
+                startDate: today.subtract({ days: 1 }).toString(),
+                endDate: today.add({ days: 1 }).toString(),
+                engines: [SearchService.defaultEngine.id],
+                query: "temporal",
+              },
+            },
+          ],
+        },
+      ],
+      prefs: [["temporal.featureGate", true]],
+    });
+
+    await openPopup("");
+    await selectRowByProvider("UrlbarProviderQuickSuggest");
+
+    await trigger();
+    await assert();
+
+    await cleanupQuickSuggest();
+    await SpecialPowers.popPrefEnv();
+  });
+}
+
 async function doAboutPageTest({ trigger, assert }) {
   await SpecialPowers.pushPrefEnv({
     set: [["browser.urlbar.maxRichResults", 3]],
@@ -381,6 +433,7 @@ async function doSemanticHistoryTest({ trigger, assert }) {
         title: "Test Page",
         url: historyUrl,
         frecency: 100,
+        distance: 0.25,
       },
     ],
     async () => {
@@ -429,6 +482,9 @@ async function doBookmarkSerpHistoryTest({ trigger, assert }) {
 }
 
 async function doTabAdaptiveTest({ trigger, assert }) {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.urlbar.autoFill", false]],
+  });
   let visited = PlacesTestUtils.waitForNotification("page-visited", visits =>
     visits.some(({ url }) => url == "https://example.com/")
   );
@@ -447,6 +503,7 @@ async function doTabAdaptiveTest({ trigger, assert }) {
   });
 
   BrowserTestUtils.removeTab(tab);
+  await SpecialPowers.popPrefEnv();
 }
 
 async function doTabAdaptiveSerpHistoryTest({ trigger, assert }) {
@@ -473,6 +530,12 @@ async function doTabAdaptiveSerpHistoryTest({ trigger, assert }) {
 }
 
 async function doTabSerpHistoryTest({ trigger, assert }) {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["browser.urlbar.autoFill", false],
+      ["browser.urlbar.maxHistoricalSearchSuggestions", 0],
+    ],
+  });
   let defaultEngine = await SearchService.getDefault();
   const searchUrl = defaultEngine.getSubmission("serp history", null).uri.spec;
   let visited = PlacesTestUtils.waitForNotification("page-visited", visits =>
@@ -490,6 +553,7 @@ async function doTabSerpHistoryTest({ trigger, assert }) {
   });
 
   BrowserTestUtils.removeTab(tab);
+  await SpecialPowers.popPrefEnv();
 }
 
 /**

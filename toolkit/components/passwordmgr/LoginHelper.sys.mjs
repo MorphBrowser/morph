@@ -10,14 +10,13 @@
  * of nsILoginManager and nsILoginManagerStorage.
  */
 
-import { Logic } from "resource://gre/modules/LoginManager.shared.sys.mjs";
+import { LoginOriginUtils } from "moz-src:///toolkit/components/passwordmgr/shared/LoginOriginUtils.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   OSKeyStore: "resource://gre/modules/OSKeyStore.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
-  NewPasswordModel: "resource://gre/modules/shared/NewPasswordModel.sys.mjs",
 });
 
 export class ParentAutocompleteOption {
@@ -551,7 +550,7 @@ export const LoginHelper = {
     // Create a new instance of the ConsoleAPI so we can control the maxLogLevel with a pref.
     let consoleOptions = {
       maxLogLevel: getMaxLogLevel(),
-      prefix: aLogPrefix,
+      logModule: aLogPrefix,
     };
     let logger = console.createInstance(consoleOptions);
 
@@ -624,6 +623,22 @@ export const LoginHelper = {
       throw new Error("login values can't contain nulls");
     }
 
+    // Lone surrogates can't be encoded as UTF-8 and would be replaced with
+    // U+FFFD by the storage, so the stored login wouldn't match the caller's.
+    if (
+      [
+        aLogin.origin,
+        aLogin.formActionOrigin,
+        aLogin.httpRealm,
+        aLogin.username,
+        aLogin.password,
+        aLogin.usernameField,
+        aLogin.passwordField,
+      ].some(value => typeof value == "string" && !value.isWellFormed())
+    ) {
+      throw new Error("login values can't contain lone surrogates");
+    }
+
     // Newlines are invalid for any field stored as plaintext.
     if (
       badCharacterPresent(aLogin, "\r") ||
@@ -690,11 +705,7 @@ export const LoginHelper = {
    * Strip out things like the userPass portion and handle javascript:.
    */
   getLoginOrigin(uriString, allowJS = false) {
-    return Logic.getLoginOrigin(uriString, allowJS);
-  },
-
-  getFormActionOrigin(form) {
-    return Logic.getFormActionOrigin(form);
+    return LoginOriginUtils.getLoginOrigin(uriString, allowJS);
   },
 
   /**
@@ -1231,7 +1242,8 @@ export const LoginHelper = {
   },
 
   /**
-   * Open the password manager window.
+   * Open the password manager in a new tab and bring the browser window
+   * containing it to the foreground.
    *
    * @param {Window} window
    *                 the window from where we want to open the dialog
@@ -1272,154 +1284,10 @@ export const LoginHelper = {
     });
 
     tab.setAttribute("preselect-login", preselectedLogin);
-  },
 
-  /**
-   * Checks if a field type is password compatible.
-   *
-   * @param {Element} element
-   *                  the field we want to check.
-   * @param {object} options
-   * @param {bool} [options.ignoreConnect] - Whether to ignore checking isConnected
-   *                                         of the element.
-   *
-   * @returns {boolean} true if the field can
-   *                    be treated as a password input
-   */
-  isPasswordFieldType(element, { ignoreConnect = false } = {}) {
-    return Logic.isPasswordFieldType(element, { ignoreConnect });
-  },
-
-  /**
-   * Checks if a field type is username compatible.
-   *
-   * @param {Element} element
-   *                  the field we want to check.
-   * @param {object} options
-   * @param {bool} [options.ignoreConnect] - Whether to ignore checking isConnected
-   *                                         of the element.
-   *
-   * @returns {boolean} true if the field type is one
-   *                    of the username types.
-   */
-  isUsernameFieldType(element, { ignoreConnect = false } = {}) {
-    return Logic.isUsernameFieldType(element, { ignoreConnect });
-  },
-
-  /**
-   * Infer whether a form is a sign-in form by searching keywords
-   * in its attributes
-   *
-   * @param {Element} element
-   *                  the form we want to check.
-   *
-   * @returns {boolean} True if any of the rules matches
-   */
-  isInferredLoginForm(formElement) {
-    if (
-      Logic.elementAttrsMatchRegex(
-        formElement,
-        lazy.NewPasswordModel.LoginRegex
-      )
-    ) {
-      return true;
-    }
-
-    const buttons = Array.from(
-      formElement.querySelectorAll("button[type=submit]")
-    );
-    // Limit to form with only one submit button to avoid false positives.
-    if (
-      buttons.length == 1 &&
-      Logic.hasTextContentMatchingRegex(
-        buttons[0],
-        lazy.NewPasswordModel.LoginFormAttrRegex
-      )
-    ) {
-      return true;
-    }
-
-    return false;
-  },
-
-  /**
-   * Infer whether an input field is a username field by searching
-   * 'username' keyword in its attributes
-   *
-   * @param {Element} element
-   *                  the field we want to check.
-   *
-   * @returns {boolean} True if any of the rules matches
-   */
-  isInferredUsernameField(element) {
-    const expr = /username/i;
-
-    let ac = element.getAutocompleteInfo()?.fieldName;
-    if (ac && (ac == "username" || ac == "webauthn")) {
-      return true;
-    }
-
-    if (
-      Logic.elementAttrsMatchRegex(element, expr) ||
-      Logic.hasLabelMatchingRegex(element, expr)
-    ) {
-      return true;
-    }
-
-    return false;
-  },
-
-  /**
-   * Search for keywords that indicates the input field is not likely a
-   * field of a username login form.
-   *
-   * @param {Element} element
-   *                  the input field we want to check.
-   *
-   * @returns {boolean} True if any of the rules matches
-   */
-  isInferredNonUsernameField(element) {
-    const expr = /\b(search|code|add)\b/i;
-
-    if (
-      Logic.elementAttrsMatchRegex(element, expr) ||
-      Logic.hasLabelMatchingRegex(element, expr)
-    ) {
-      return true;
-    }
-
-    return false;
-  },
-
-  /**
-   * Infer whether an input field is an email field by searching
-   * 'email' keyword in its attributes.
-   *
-   * @param {Element} element
-   *                  the field we want to check.
-   *
-   * @returns {boolean} True if any of the rules matches
-   */
-  isInferredEmailField(element) {
-    const expr = /email|邮箱/i;
-
-    if (element.type == "email") {
-      return true;
-    }
-
-    let ac = element.getAutocompleteInfo()?.fieldName;
-    if (ac && ac == "email") {
-      return true;
-    }
-
-    if (
-      Logic.elementAttrsMatchRegex(element, expr) ||
-      Logic.hasLabelMatchingRegex(element, expr)
-    ) {
-      return true;
-    }
-
-    return false;
+    // The caller may live in a different window (e.g. Page Info), so bring
+    // the browser window showing about:logins to the foreground.
+    browser.documentGlobal.focus();
   },
 
   /**
@@ -1896,7 +1764,7 @@ ChromeUtils.defineLazyGetter(lazy, "log", () => {
     Services.appinfo.processType === Services.appinfo.PROCESS_TYPE_DEFAULT
       ? "Main"
       : "Content";
-  return LoginHelper.createLogger(`LoginHelper(${processName})`);
+  return LoginHelper.createLogger(`LoginHelper.${processName}`);
 });
 
 LoginHelper.init();

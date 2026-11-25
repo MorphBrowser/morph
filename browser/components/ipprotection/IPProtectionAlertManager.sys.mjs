@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { BANDWIDTH } from "chrome://browser/content/ipprotection/ipprotection-constants.mjs";
+import { getSitePrincipal } from "chrome://browser/content/ipprotection/ipprotection-utils.mjs";
 
 const lazy = {};
 
@@ -12,6 +13,12 @@ ChromeUtils.defineLazyGetter(lazy, "ipProtectionLocalization", () => {
 
 ChromeUtils.defineESModuleGetters(lazy, {
   EveryWindow: "resource:///modules/EveryWindow.sys.mjs",
+  IPPMode:
+    "moz-src:///toolkit/components/ipprotection/IPPChannelFilter.sys.mjs",
+  IPPPrincipalRules:
+    "moz-src:///toolkit/components/ipprotection/IPPSiteRuleManager.sys.mjs",
+  IPPSiteRuleManager:
+    "moz-src:///toolkit/components/ipprotection/IPPSiteRuleManager.sys.mjs",
   IPPProxyManager:
     "moz-src:///toolkit/components/ipprotection/IPPProxyManager.sys.mjs",
   IPPProxyStates:
@@ -59,32 +66,22 @@ class IPProtectionAlertManagerClass {
 
   get localizationMessages() {
     if (!this.#localizationMessages) {
-      const [
-        pausedTitle,
-        pausedBody,
-        closeTabsButton,
-        continueButton,
-        errorTitle,
-        errorBody,
-      ] = lazy.ipProtectionLocalization.formatMessagesSync([
-        { id: "vpn-paused-alert-title" },
-        {
-          id: "vpn-paused-alert-body",
-          args: { maxUsage: this.#getMaxBandwidthUsage() },
-        },
-        { id: "vpn-paused-alert-close-tabs-button" },
-        { id: "vpn-paused-alert-continue-wo-vpn-button" },
-        { id: "vpn-error-alert-title" },
-        { id: "vpn-error-alert-body" },
-      ]);
+      const [pausedTitle, pausedBody, closeTabsButton, continueButton] =
+        lazy.ipProtectionLocalization.formatMessagesSync([
+          { id: "vpn-paused-alert-title" },
+          {
+            id: "vpn-paused-alert-body",
+            args: { maxUsage: this.#getMaxBandwidthUsage() },
+          },
+          { id: "vpn-paused-alert-close-tabs-button" },
+          { id: "vpn-paused-alert-continue-wo-vpn-button" },
+        ]);
 
       this.#localizationMessages = {
         pausedTitle: pausedTitle.value,
         pausedBody: pausedBody.value,
         closeTabsButton: closeTabsButton.value,
         continueButton: continueButton.value,
-        errorTitle: errorTitle.value,
-        errorBody: errorBody.value,
       };
     }
 
@@ -127,11 +124,36 @@ class IPProtectionAlertManagerClass {
         this.showPausedPrompts();
         break;
       }
-      case lazy.IPPProxyStates.ERROR: {
-        this.showErrorPrompts();
-        break;
-      }
     }
+  }
+
+  /**
+   * Whether the proxy error should be shown for the selected tab of a window.
+   * A failed connection that only carries included sites is not shown on a
+   * tab it does not carry.
+   *
+   * @param {object} gBrowser
+   * @returns {boolean}
+   */
+  isErrorShown(gBrowser) {
+    if (lazy.IPPProxyManager.state !== lazy.IPPProxyStates.ERROR) {
+      return false;
+    }
+    return (
+      lazy.IPPProxyManager.mode !== lazy.IPPMode.MODE_INCLUSION ||
+      this.#isIncludedSiteSelected(gBrowser)
+    );
+  }
+
+  #isIncludedSiteSelected(gBrowser) {
+    const principal = getSitePrincipal(gBrowser);
+    return (
+      !!principal &&
+      lazy.IPPSiteRuleManager.getRule(
+        principal,
+        gBrowser.selectedBrowser.browserId
+      ) === lazy.IPPPrincipalRules.INCLUDED
+    );
   }
 
   /**
@@ -171,7 +193,7 @@ class IPProtectionAlertManagerClass {
         )
       );
     }
-    this.#promptsOpen = true;
+    this.#promptsOpen = !!promises.length;
     return promises;
   }
 
@@ -183,11 +205,11 @@ class IPProtectionAlertManagerClass {
       return;
     }
 
+    this.#promptsOpen = false;
+
     for (let window of lazy.EveryWindow.readyWindows) {
       window.gDialogBox.dialog?.close();
     }
-
-    this.#promptsOpen = false;
   }
 
   /**
@@ -217,42 +239,12 @@ class IPProtectionAlertManagerClass {
     }
 
     let result = await Promise.any(promises);
+    if (!this.#promptsOpen) {
+      return;
+    }
     let buttonClicked = result.getProperty("buttonNumClicked");
 
     this.#handlePromptAction(buttonClicked, "paused");
-  }
-
-  /**
-   * Show the VPN error alert. This notifies the user that the VPN isn't
-   * working.
-   *
-   * @returns {number} The button clicked. 0 meaning continue without vpn and
-   *  1 meaning close all tabs.
-   */
-  async showErrorPrompts() {
-    if (!lazy.IPPProxyManager.active) {
-      // If the proxy isn't active, no need to alert the user.
-      return;
-    }
-
-    let { errorTitle, errorBody, continueButton, closeTabsButton } =
-      this.localizationMessages;
-
-    const promises = this.#createAllPrompts(
-      errorTitle,
-      errorBody,
-      continueButton,
-      closeTabsButton
-    );
-
-    if (promises.length === 0) {
-      return;
-    }
-
-    let result = await Promise.any(promises);
-    let buttonClicked = result.getProperty("buttonNumClicked");
-
-    this.#handlePromptAction(buttonClicked, "error");
   }
 
   /**
@@ -261,7 +253,7 @@ class IPProtectionAlertManagerClass {
    * @param {number} buttonClicked Either 0 or 1.
    *  0 means continue without vpn
    *  1 means close all tabs
-   * @param {"paused"|"error"} reason Reason why the alert was triggered.
+   * @param {"paused"} reason Reason why the alert was triggered.
    */
   #handlePromptAction(buttonClicked, reason) {
     this.#closeAllPrompts();

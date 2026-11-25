@@ -7,6 +7,7 @@
 #include "mozAutoDocUpdate.h"
 #include "mozilla/AsyncEventDispatcher.h"
 #include "mozilla/EventDispatcher.h"
+#include "mozilla/FocusModel.h"
 #include "mozilla/MappedDeclarationsBuilder.h"
 #include "mozilla/MouseEvents.h"
 #include "mozilla/PresState.h"
@@ -148,7 +149,7 @@ bool HTMLTextAreaElement::IsHTMLFocusable(IsFocusableFlags aFlags,
   }
 
   // disabled textareas are not focusable
-  *aIsFocusable = !IsDisabled();
+  *aIsFocusable = (aFlags & IsFocusableFlags::IgnoreDisabled) || !IsDisabled();
   return false;
 }
 
@@ -394,6 +395,7 @@ void HTMLTextAreaElement::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
   // Don't dispatch a second select event if we are already handling
   // one.
   if (aVisitor.mEvent->mMessage == eFormSelect) {
+    aVisitor.mWantsPostHandleEvent = true;
     if (mHandlingSelect) {
       return;
     }
@@ -445,6 +447,8 @@ void HTMLTextAreaElement::FireChangeEventIfNeeded() {
 nsresult HTMLTextAreaElement::PostHandleEvent(EventChainPostVisitor& aVisitor) {
   if (aVisitor.mEvent->mMessage == eFormSelect) {
     mHandlingSelect = false;
+  } else {
+    MOZ_ASSERT_UNREACHABLE("Didn't want post handle");
   }
   return NS_OK;
 }

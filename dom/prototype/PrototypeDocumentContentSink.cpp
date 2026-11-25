@@ -1116,8 +1116,12 @@ nsresult PrototypeDocumentContentSink::CreateElementFromPrototype(
 
   // FIXME(bug 1627474): Is this right if this is inside an <html:template>?
   if (result->HasAttr(nsGkAtoms::datal10nid)) {
-    mDocument->mL10nProtoElements.InsertOrUpdate(result, RefPtr{aPrototype});
-    result->SetElementCreatedFromPrototypeAndHasUnmodifiedL10n();
+    if (aPrototype->mTranslated) {
+      result->SetElementTranslatedFromPrototype();
+    } else {
+      mDocument->mUntranslatedL10nProtoElements.InsertOrUpdate(
+          result, RefPtr{aPrototype});
+    }
   }
   result.forget(aResult);
   return NS_OK;
@@ -1132,9 +1136,9 @@ nsresult PrototypeDocumentContentSink::AddAttributes(
     nsAutoString valueStr;
     protoattr->mValue.ToString(valueStr);
 
-    rv = aElement->SetAttr(protoattr->mName.NamespaceID(),
-                           protoattr->mName.LocalName(),
-                           protoattr->mName.GetPrefix(), valueStr, false);
+    rv = aElement->SetAttr(
+        protoattr->mName.NamespaceID(), protoattr->mName.LocalName(),
+        protoattr->mName.GetPrefix(), valueStr, false, IsKnownNewAttr::Yes);
     if (NS_FAILED(rv)) return rv;
   }
 

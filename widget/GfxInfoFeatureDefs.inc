@@ -163,3 +163,7 @@ GFXINFO_FEATURE(VIDEO_HDR, "video-hdr")
 GFXINFO_FEATURE(WEBGL_ANGLE_METAL, "webgl.angle-metal")
 /* Whether webrender is supported on ANGLE's Metal backend, starting in 154. */
 GFXINFO_FEATURE(WEBRENDER_ANGLE_METAL, "webrender.angle-metal")
+/* Whether WebRender is supported via ANGLE's OpenGL/OpenGL ES backend. */
+GFXINFO_FEATURE(WEBRENDER_ANGLE_GL, "webrender.angle-gl")
+/* Whether YUV DMA-BUFs can be passed directly to the Wayland compositor. */
+GFXINFO_FEATURE(DMABUF_YUV_DIRECT_COMPOSITION, "dmabuf-yuv-direct-composition")

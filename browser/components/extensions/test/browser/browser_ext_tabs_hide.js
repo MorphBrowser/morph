@@ -282,20 +282,14 @@ const doorHangerDisable = (
       description.textContent.includes(addon.name),
       "The extension name is in the description"
     );
-    let images = Array.from(description.querySelectorAll("image"));
+    let images = Array.from(description.querySelectorAll("img"));
     is(images.length, 2, "There are two images");
     ok(
       images.some(img => img.src.includes("addon-icon.png")),
       "There's an icon for the extension"
     );
     ok(
-      images.some(img =>
-        getComputedStyle(img).backgroundImage.includes(
-          AppConstants.platform == "win" && !gBrowser.tabContainer.verticalMode
-            ? "/arrow-down.svg"
-            : "/search-tabs.svg"
-        )
-      ),
+      images.some(img => img.src.includes("/search-tabs.svg")),
       "There's an icon for the all tabs menu"
     );
 
@@ -314,11 +308,11 @@ add_task(async function test_doorhanger_disable() {
   await doorHangerDisable();
 });
 
-add_task(async function test_no_doorhanger_when_locked_by_policy() {
+add_task(async function test_no_doorhanger_when_force_installed_by_policy() {
   const { EnterprisePolicyTesting } = ChromeUtils.importESModule(
     "resource://testing-common/EnterprisePolicyTesting.sys.mjs"
   );
-  const ID = "tabhide-locked@mochi.test";
+  const ID = "tabhide-force-installed@mochi.test";
 
   await doorhangerTest(
     async function (extension) {
@@ -326,13 +320,19 @@ add_task(async function test_no_doorhanger_when_locked_by_policy() {
       is(gBrowser.visibleTabs.length, 3, "There are 3 visible tabs");
 
       await EnterprisePolicyTesting.setupPolicyEngineWithJson({
-        policies: { Extensions: { Locked: [ID] } },
+        policies: {
+          ExtensionSettings: { [ID]: { installation_mode: "force_installed" } },
+        },
       });
 
       extension.sendMessage("hide", { url: "*://*/?one" });
       await extension.awaitMessage("done");
       is(gBrowser.visibleTabs.length, 2, "There are 2 visible tabs now");
-      is(panel.state, "closed", "No doorhanger while the add-on is locked");
+      is(
+        panel.state,
+        "closed",
+        "No doorhanger while the add-on is force-installed"
+      );
 
       // Dropping the policy lets the doorhanger appear again.
       await EnterprisePolicyTesting.setupPolicyEngineWithJson("");

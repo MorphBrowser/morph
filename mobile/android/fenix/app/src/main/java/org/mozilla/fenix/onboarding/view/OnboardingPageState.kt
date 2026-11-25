@@ -15,8 +15,9 @@ import org.mozilla.fenix.nimbus.MarketingCardVariant
  * @property description Description of the page.
  * @property primaryButton [Action] for the primary button.
  * @property secondaryButton Optional [Action] for the secondary button.
+ * @property onSkipClick Optional callback invoked when the skip button above the card is clicked. When null, the skip
+ *   button is hidden.
  * @property termsOfService Optional term of service page data.
- * @property toolbarOptions Optional list of toolbar selection options.
  * @property marketingData Optional marketing page data.
  * @property onRecordImpressionEvent Callback for recording impression event.
  * @property isSmallDevice Whether to apply layout optimizations for constrained screen heights.
@@ -27,38 +28,25 @@ data class OnboardingPageState(
     val description: String,
     val primaryButton: Action,
     val secondaryButton: Action? = null,
+    val onSkipClick: (() -> Unit)? = null,
     val termsOfService: OnboardingTermsOfService? = null,
-    val toolbarOptions: List<ToolbarOption>? = null,
     val marketingData: OnboardingMarketingData? = null,
     val onRecordImpressionEvent: () -> Unit = {},
     val isSmallDevice: Boolean = false,
 )
 
-/** Model containing text and action for a button. */
+/**
+ * Model for an onboarding card button.
+ *
+ * @property text The button text.
+ * @property onClick The action to be performed when the button is clicked.
+ * @property leadingIconRes An optional drawable resource shown before the button text.
+ */
 data class Action(
     val text: String,
     val onClick: () -> Unit,
+    @param:DrawableRes val leadingIconRes: Int? = null,
 )
-
-/** Model containing data for a toolbar placement. */
-data class ToolbarOption(
-    val toolbarType: ToolbarOptionType,
-    @param:DrawableRes val imageRes: Int,
-    val label: String,
-)
-
-/**
- * Types of toolbar placement options available.
- *
- * @property id Identifier for the toolbar option type, used in telemetry.
- */
-enum class ToolbarOptionType(val id: String) {
-    /** Sets the toolbar placement to the top. */
-    TOOLBAR_TOP("toolbar_top"),
-
-    /** Sets the toolbar placement to the bottom. */
-    TOOLBAR_BOTTOM("toolbar_bottom"),
-}
 
 /** Model containing data for the terms of service page during onboarding. */
 data class OnboardingTermsOfService(

@@ -2,8 +2,10 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+import configparser
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -12,11 +14,12 @@ import tempfile
 from functools import cache
 from typing import Optional
 
+import requests
 from mach.util import get_state_dir
 from mozbuild.base import MozbuildObject
 from mozversioncontrol import MissingVCSExtension, get_repository_object
 
-from .lando import push_to_lando_try
+from .lando import get_lando_api_domain, push_to_lando_try
 from .util.project import get_project_topsrcdir, is_thunderbird_try
 from .util.taskcluster import get_client
 
@@ -50,6 +53,14 @@ UNCOMMITTED_CHANGES = """
 error: commit changes before continuing
 """.strip()
 
+TREE_CLOSED = """
+error: the '{tree}' tree is {status}{reason}.
+
+Wait for it to re-open, or pass `--closed-tree` to push anyway.
+""".strip()
+
+TREESTATUS_URL = "https://{domain}/api/treestatus/trees/{tree}"
+
 LARGE_PUSH_THRESHOLD = 1000
 LARGE_PUSH_WARNING = f"""
 Your push would schedule at least {{}} tasks. To avoid backlogs that cause delays for
@@ -70,7 +81,15 @@ GIT_BACKING_REPO = "https://github.com/mozilla-releng/git-backing"
 GIT_BACKING_SSH = "git@github.com:mozilla-releng/git-backing.git"
 GIT_BACKING_SECRET = "project/releng/releng-github-git-backing-ssh"
 
+GITHUB_REMOTE_RE = re.compile(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$")
+TREEHERDER_REVISION_URL = (
+    "https://treeherder.mozilla.org/jobs?repo={repo_name}&revision={revision}"
+)
 TREEHERDER_LANDO_TRY_RUN_URL = "https://treeherder.mozilla.org/jobs?repo={repo_name}&landoInstance={lando_instance}&landoCommitID={job_id}"
+TREEHERDER_GITHUB_REMOTES = {
+    "mozilla/enterprise-firefox-try",
+    "mozilla-firefox/firefox-dev",
+}
 
 here = os.path.abspath(os.path.dirname(__file__))
 build = MozbuildObject.from_environment(cwd=here)
@@ -118,6 +137,36 @@ def check_working_directory(push=True):
         sys.exit(1)
 
 
+VERIFY_PATH_RULE = (
+    "test-verify-path only accepts directories that contain a test manifest, "
+    "directly or in one of their direct subdirectories; the tests deeper below "
+    "them are verified too."
+)
+
+
+def check_test_verify_paths(labels, env):
+    """Exit when test-verify-path is selected with paths it refuses."""
+    if not any("test-verify-path" in label for label in labels):
+        return
+    paths = sorted({
+        path
+        for suite_paths in json.loads(env.get("MOZHARNESS_TEST_PATHS", "{}")).values()
+        for path in suite_paths
+    })
+    if not paths:
+        return
+
+    from .tasks import unverifiable_test_paths
+
+    rejected = unverifiable_test_paths(paths)
+    if rejected:
+        print(
+            f"error: cannot verify {', '.join(rejected)}: {VERIFY_PATH_RULE}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def generate_try_task_config(method, labels, params=None, routes=None):
     params = params or {}
 
@@ -136,6 +185,8 @@ def generate_try_task_config(method, labels, params=None, routes=None):
 
     try_config = params.setdefault("try_task_config", {})
     try_config.setdefault("env", {})["TRY_SELECTOR"] = method
+
+    check_test_verify_paths(labels, try_config["env"])
 
     # In reality, the number of tasks will likely be much larger thanks to test
     # chunks being collapsed behind a wildcard. However because we use
@@ -197,6 +248,14 @@ def get_sys_argv(injected_argv=None):
     return " ".join(formatted_argv)
 
 
+def get_github_repo(remote):
+    """Return the ``owner/repo`` of a GitHub remote, or None if not on GitHub."""
+    if remote_url := vcs.get_remote_url(remote, push=True):
+        remote = remote_url
+    if match := GITHUB_REMOTE_RE.search(remote):
+        return match.group(1).lower()
+
+
 @cache
 def _is_hg_try(remote):
     if not remote:
@@ -209,6 +268,30 @@ def _is_hg_try(remote):
 
 def _is_git_try(remote):
     return not _is_hg_try(remote)
+
+
+def check_tree_status(remote):
+    if remote_url := vcs.get_remote_url(remote, push=True):
+        remote = remote_url
+    tree = re.split(r"[/:]", remote.rstrip("/"))[-1].removesuffix(".git")
+
+    try:
+        url = TREESTATUS_URL.format(domain=get_lando_api_domain(vcs), tree=tree)
+        response = requests.get(url, timeout=10)
+        if response.status_code == 404:
+            return
+        response.raise_for_status()
+        result = response.json().get("result")
+    except (requests.RequestException, configparser.Error, ValueError) as e:
+        print(f"warning: could not query treestatus for '{tree}': {e}")
+        return
+
+    if not result or result.get("status", "open") == "open":
+        return
+
+    reason = f" ({result['reason']})" if result.get("reason") else ""
+    print(TREE_CLOSED.format(tree=tree, status=result["status"], reason=reason))
+    sys.exit(1)
 
 
 def push_to_git_backing(prefix: str) -> str:
@@ -287,8 +370,20 @@ def push_to_try(
     push_to_vcs |= MACH_TRY_PUSH_TO_VCS or not _is_hg_try(remote)
     check_working_directory(push)
 
+    if (
+        push
+        and push_to_vcs
+        and not closed_tree
+        and not (write_task_config and try_task_config)
+    ):
+        check_tree_status(remote)
+
     # Format the commit message
-    closed_tree_string = " ON A CLOSED TREE" if closed_tree else ""
+    closed_tree_string = (
+        " ON A CLOSED TREE"
+        if closed_tree and push_to_vcs and _is_hg_try(remote)
+        else ""
+    )
     the_cmdline = get_sys_argv()
     full_commandline_entry = f"mach try command: `{the_cmdline}`"
     commit_message = f"{msg}{closed_tree_string}\n\n{full_commandline_entry}\n\nPushed via `mach try {method}`"
@@ -362,12 +457,20 @@ def push_to_try(
     print("Pushing to try...")
     try:
         if push_to_vcs:
-            vcs.push_to_try(
+            rev = vcs.push_to_try(
                 commit_message,
                 changed_files=changed_files,
                 allow_log_capture=allow_log_capture,
                 remote=remote,
             )
+            if rev and (github_repo := get_github_repo(remote)) in (
+                TREEHERDER_GITHUB_REMOTES
+            ):
+                repo_name = github_repo.rsplit("/", 1)[-1]
+                treeherder_url = TREEHERDER_REVISION_URL.format(
+                    repo_name=repo_name, revision=rev
+                )
+                print(f"\nView push in Treeherder:\n {treeherder_url}")
         else:
             try_repo = get_try_repo(vcs.path)
             push_data = push_to_lando_try(

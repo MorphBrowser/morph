@@ -6,6 +6,7 @@
 #define mozilla_CycleCollectedJSRuntime_h
 
 #include "js/TypeDecls.h"
+#include "js/friend/CycleCollector.h"
 #include "jsapi.h"
 #include "jsfriendapi.h"
 #include "mozilla/CycleCollectedJSContext.h"
@@ -516,7 +517,6 @@ class CycleCollectedJSRuntime {
 
   nsresult TraverseRoots(nsCycleCollectionNoteRootCallback& aCb);
   virtual bool UsefulToMergeZones() const;
-  void FixWeakMappingGrayBits() const;
   void CheckGrayBits() const;
   bool AreGCGrayBitsValid() const;
   void GarbageCollect(JS::GCOptions options, JS::GCReason aReason) const;
@@ -548,9 +548,16 @@ class CycleCollectedJSRuntime {
   // triggered by the JS engine, prepare for a full GC.
   void PrepareWaitingZonesForGC(JS::GCReason aReason);
 
+  virtual void ClearWhiteJSWeakReferences(
+      JS::ShouldClearWeakRefTargetCallback aCallback, void* aData);
+
   // Get the current thread's CycleCollectedJSRuntime.  Returns null if there
   // isn't one.
   static CycleCollectedJSRuntime* Get();
+
+  // True while the GC callback is running. A GC can be triggered from a JS
+  // interrupt check, where JIT and C++ code assume that script does not run.
+  bool IsInGCCallback() const { return mInGCCallback; }
 
   void SetContext(CycleCollectedJSContext* aContext);
 
@@ -593,6 +600,8 @@ class CycleCollectedJSRuntime {
 
   OOMState mOutOfMemoryState;
   OOMState mLargeAllocationFailureState;
+
+  bool mInGCCallback = false;
 
   // Keeps sizeof(Segment) within mozjemalloc's largest bin size class (3840);
   // past that each segment gets its own page run.

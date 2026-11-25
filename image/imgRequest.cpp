@@ -17,6 +17,7 @@
 #include "imgRequestProxy.h"
 #include "mozilla/IntegerPrintfMacros.h"
 #include "mozilla/SizeOfState.h"
+#include "mozilla/dom/CacheablePerformanceTimingData.h"
 #include "mozilla/dom/Document.h"
 #include "nsComponentManagerUtils.h"
 #include "nsContentUtils.h"
@@ -807,6 +808,17 @@ imgRequest::OnStopRequest(nsIRequest* aRequest, nsresult status) {
     // loading compressed source data, which is part of our size calculus.
     UpdateCacheEntrySize();
 
+    // Keep what a reuse from the cache needs to report this load, unless this
+    // load itself was not reported.
+    bool reportTiming = false;
+    nsCOMPtr<nsITimedChannel> timedChannel = do_QueryInterface(aRequest);
+    if (timedChannel &&
+        NS_SUCCEEDED(timedChannel->GetReportResourceTiming(&reportTiming)) &&
+        reportTiming) {
+      nsCOMPtr<nsIHttpChannel> httpChannel = do_QueryInterface(aRequest);
+      mPerfData = std::make_unique<dom::CacheablePerformanceTimingData>(
+          timedChannel, httpChannel);
+    }
   } else if (isPartial) {
     // Remove the partial image from the cache.
     this->EvictFromCache();
@@ -1127,9 +1139,9 @@ void imgRequest::SetProperties(const nsACString& aContentType,
   }
 }
 
-static nsresult sniff_mimetype_callback(nsIInputStream* in, void* data,
+static nsresult sniff_mimetype_callback(nsIInputStream* /*in*/, void* data,
                                         const char* fromRawSegment,
-                                        uint32_t toOffset, uint32_t count,
+                                        uint32_t /*toOffset*/, uint32_t count,
                                         uint32_t* writeCount) {
   mimetype_closure* closure = static_cast<mimetype_closure*>(data);
 

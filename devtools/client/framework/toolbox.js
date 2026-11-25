@@ -3789,6 +3789,9 @@ class Toolbox extends EventEmitter {
     if (frameInfo.targetFront) {
       const inspectorFront = await frameInfo.targetFront.getFront("inspector");
       nodeFront = await inspectorFront.walker.documentElement();
+      if (!nodeFront) {
+        return null;
+      }
     } else {
       const inspectorFront = await this.target.getFront("inspector");
       nodeFront = await inspectorFront.walker.getNodeActorFromWindowID(
@@ -4774,7 +4777,12 @@ class Toolbox extends EventEmitter {
     }
 
     // Instead view the stylesheet in the debugger since the pref is enabled
-    if (Services.prefs.getBoolPref(DEVTOOLS_STYLESHEETS_IN_DEBUGGER)) {
+    // TODO: Viewing inline styles in debugger is not currently supported (See Bug 2037006)
+    // Lets fallback to showing inline styles in the style editor until Bug 2037006 lands.
+    if (
+      Services.prefs.getBoolPref(DEVTOOLS_STYLESHEETS_IN_DEBUGGER) &&
+      stylesheetResource.href
+    ) {
       Glean.devtoolsDebuggerStylesheets.linksOpenedInDebuggerCount.add(1);
       return viewSource.viewSourceInDebugger(
         this,
@@ -4960,10 +4968,10 @@ class Toolbox extends EventEmitter {
    * @see devtools/client/framework/toolbox-options.js
    */
   listWebExtensions() {
-    // Return the array of the enabled webextensions (we can't use the prefs list here,
+    // Return an iterator of the enabled webextensions (we can't use the prefs list here,
     // because some of them may be disabled by the Addon Manager and still have a devtools
     // preference).
-    return Array.from(this.#webExtensions).map(([uuid, { name, pref }]) => {
+    return this.#webExtensions.entries().map(([uuid, { name, pref }]) => {
       return { uuid, name, pref };
     });
   }

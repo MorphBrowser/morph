@@ -11,11 +11,13 @@ import com.android.installreferrer.api.InstallReferrerClient
 import com.android.installreferrer.api.InstallReferrerStateListener
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import mozilla.components.support.test.robolectric.testContext
 import mozilla.telemetry.glean.Glean
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -28,6 +30,8 @@ import org.mozilla.fenix.GleanMetrics.Pings
 import org.mozilla.fenix.GleanMetrics.PlayStoreAttribution
 import org.mozilla.fenix.GleanMetrics.Referrals
 import org.mozilla.fenix.helpers.FenixGleanTestRule
+import org.mozilla.fenix.nimbus.FxNimbus
+import org.mozilla.fenix.nimbus.PairingSigninPrompt
 import org.mozilla.fenix.utils.Settings
 import org.robolectric.RobolectricTestRunner
 
@@ -36,6 +40,11 @@ class InstallReferrerWorkerTest {
     val context: Context = ApplicationProvider.getApplicationContext()
 
     @get:Rule val gleanTestRule = FenixGleanTestRule(testContext)
+
+    @After
+    fun tearDown() {
+        FxNimbus.features.pairingSigninPrompt.withCachedValue(null)
+    }
 
     @Test
     fun `WHEN retrieving minimum UTM params from setting THEN result should match`() {
@@ -326,7 +335,7 @@ class InstallReferrerWorkerTest {
     }
 
     @Test
-    fun `WHEN service disconnects THEN returns SERVICE_UNAVAILABLE with null response`() = runTest {
+    fun `WHEN service disconnects THEN returns SERVICE_UNAVAILABLE with null response and ends connection`() = runTest {
         val fakeClient = FakeInstallReferrerClient(simulateDisconnect = true)
 
         val (responseCode, referrerResponse) = InstallReferrerWorker.fetchInstallReferrer(fakeClient)
@@ -334,7 +343,7 @@ class InstallReferrerWorkerTest {
         assertEquals(InstallReferrerClient.InstallReferrerResponse.SERVICE_UNAVAILABLE, responseCode)
         assertNull(referrerResponse)
         assertTrue(fakeClient.connectionStarted)
-        assertFalse(fakeClient.connectionEnded)
+        assertTrue(fakeClient.connectionEnded)
     }
 
     @Test
@@ -395,6 +404,81 @@ class InstallReferrerWorkerTest {
         yield()
 
         assertTrue(fakeClient.connectionEnded)
+    }
+
+    @Test
+    fun `GIVEN client throws IllegalStateException WHEN setup finishes OK THEN returns SERVICE_UNAVAILABLE with null response and ends connection`() =
+        runTest {
+            val fakeClient =
+                FakeInstallReferrerClient(
+                    responseCode = InstallReferrerClient.InstallReferrerResponse.OK,
+                    throwIllegalStateException = true,
+                )
+
+            val (responseCode, referrerResponse) = InstallReferrerWorker.fetchInstallReferrer(fakeClient)
+
+            assertEquals(InstallReferrerClient.InstallReferrerResponse.SERVICE_UNAVAILABLE, responseCode)
+            assertNull(referrerResponse)
+            assertTrue(fakeClient.connectionEnded)
+        }
+
+    @Test
+    fun `GIVEN the coroutine was cancelled WHEN setup finishes afterwards THEN getInstallReferrer is not called`() =
+        runTest {
+            val fakeClient =
+                FakeInstallReferrerClient(
+                    responseCode = InstallReferrerClient.InstallReferrerResponse.OK,
+                    throwIllegalStateException = true,
+                    delayCallback = true,
+                )
+
+            val job =
+                launch(start = CoroutineStart.UNDISPATCHED) { InstallReferrerWorker.fetchInstallReferrer(fakeClient) }
+            job.cancel()
+            job.join()
+
+            fakeClient.fireSetupFinished()
+
+            assertFalse(fakeClient.getInstallReferrerCalled)
+        }
+
+    @Test
+    fun `GIVEN setup already finished WHEN service disconnects afterwards THEN the original result is kept`() =
+        runTest {
+            val fakeClient =
+                FakeInstallReferrerClient(
+                    responseCode = InstallReferrerClient.InstallReferrerResponse.OK,
+                    referrerResponse = "test",
+                    delayCallback = true,
+                )
+
+            val result =
+                async(start = CoroutineStart.UNDISPATCHED) { InstallReferrerWorker.fetchInstallReferrer(fakeClient) }
+            fakeClient.fireSetupFinished()
+            fakeClient.fireServiceDisconnected()
+
+            assertEquals(Pair(InstallReferrerClient.InstallReferrerResponse.OK, "test"), result.await())
+        }
+
+    @Test
+    fun `GIVEN service disconnected WHEN setup finishes again after a rebind THEN the connection is ended`() = runTest {
+        val fakeClient =
+            FakeInstallReferrerClient(
+                responseCode = InstallReferrerClient.InstallReferrerResponse.OK,
+                referrerResponse = "test",
+                delayCallback = true,
+            )
+
+        val result =
+            async(start = CoroutineStart.UNDISPATCHED) { InstallReferrerWorker.fetchInstallReferrer(fakeClient) }
+        fakeClient.fireServiceDisconnected()
+        fakeClient.connectionEnded = false
+
+        fakeClient.fireSetupFinished()
+
+        assertEquals(Pair(InstallReferrerClient.InstallReferrerResponse.SERVICE_UNAVAILABLE, null), result.await())
+        assertTrue(fakeClient.connectionEnded)
+        assertFalse(fakeClient.getInstallReferrerCalled)
     }
 
     @Test
@@ -657,6 +741,43 @@ class InstallReferrerWorkerTest {
     }
 
     @Test
+    fun `WHEN handleSuccess receives a Quora-attributed referrer THEN isUserQuoraAttributed is set to true`() {
+        val worker = TestListenableWorkerBuilder<InstallReferrerWorker>(context).build()
+        val settings = Settings(context)
+        val referrer = "utm_source=quora&utm_medium=paid"
+
+        worker.handleSuccess(referrer, InstallReferrerClient.InstallReferrerResponse.OK, settings)
+
+        assertTrue(settings.isUserQuoraAttributed)
+    }
+
+    @Test
+    fun `WHEN handleSuccess receives a non-Quora referrer THEN isUserQuoraAttributed is set to false`() {
+        val worker = TestListenableWorkerBuilder<InstallReferrerWorker>(context).build()
+        val settings = Settings(context)
+        settings.isUserQuoraAttributed = true
+
+        worker.handleSuccess(
+            "utm_source=google&utm_medium=cpc",
+            InstallReferrerClient.InstallReferrerResponse.OK,
+            settings,
+        )
+
+        assertFalse(settings.isUserQuoraAttributed)
+    }
+
+    @Test
+    fun `WHEN handleSuccess receives a null referrer THEN isUserQuoraAttributed is not changed`() {
+        val worker = TestListenableWorkerBuilder<InstallReferrerWorker>(context).build()
+        val settings = Settings(context)
+        settings.isUserQuoraAttributed = true
+
+        worker.handleSuccess(null, InstallReferrerClient.InstallReferrerResponse.OK, settings)
+
+        assertTrue(settings.isUserQuoraAttributed)
+    }
+
+    @Test
     fun `GIVEN a referral referrer WHEN handleSuccess runs THEN the referrals ping is submitted with the code`() {
         val worker = TestListenableWorkerBuilder<InstallReferrerWorker>(context).build()
         val settings = Settings(context)
@@ -793,6 +914,57 @@ class InstallReferrerWorkerTest {
         assertEquals("", settings.referralCode)
     }
 
+    @Test
+    fun `GIVEN a referrer with the pairing campaign WHEN handleSuccess is called THEN pairingCampaign is recorded as true`() {
+        FxNimbus.features.pairingSigninPrompt.withCachedValue(PairingSigninPrompt(campaignUtmContent = "pairing123"))
+
+        val worker = TestListenableWorkerBuilder<InstallReferrerWorker>(context).build()
+        val settings = Settings(context)
+        val referrer = "utm_source=accounts.firefox.com&utm_medium=referral&utm_content=pairing123"
+
+        val job =
+            Pings.playStoreAttribution.testBeforeNextSubmit {
+                assertEquals(true, PlayStoreAttribution.pairingCampaign.testGetValue())
+            }
+
+        worker.handleSuccess(referrer, InstallReferrerClient.InstallReferrerResponse.OK, settings)
+
+        job.join()
+    }
+
+    @Test
+    fun `GIVEN a referrer with a campaign which is not the pairing campaign WHEN handleSuccess is called THEN pairingCampaign is recorded as false`() {
+        FxNimbus.features.pairingSigninPrompt.withCachedValue(PairingSigninPrompt(campaignUtmContent = "pairing123"))
+
+        val worker = TestListenableWorkerBuilder<InstallReferrerWorker>(context).build()
+        val settings = Settings(context)
+        val referrer = "utm_source=google&utm_medium=referral&utm_content=other_campaign"
+
+        val job =
+            Pings.playStoreAttribution.testBeforeNextSubmit {
+                assertEquals(false, PlayStoreAttribution.pairingCampaign.testGetValue())
+            }
+
+        worker.handleSuccess(referrer, InstallReferrerClient.InstallReferrerResponse.OK, settings)
+
+        job.join()
+    }
+
+    @Test
+    fun `GIVEN a null referrer WHEN handleSuccess is called THEN pairingCampaign is not recorded`() {
+        val worker = TestListenableWorkerBuilder<InstallReferrerWorker>(context).build()
+        val settings = Settings(context)
+
+        val job =
+            Pings.playStoreAttribution.testBeforeNextSubmit {
+                assertNull(PlayStoreAttribution.pairingCampaign.testGetValue())
+            }
+
+        worker.handleSuccess(null, InstallReferrerClient.InstallReferrerResponse.OK, settings)
+
+        job.join()
+    }
+
     private fun referralReferrer() =
         "utm_source=SOURCE&utm_content=$REFERRAL_UTM_CONTENT_PREFIX$REFERRAL_CODE&utm_term=TERM"
 }
@@ -805,11 +977,21 @@ private class FakeInstallReferrerClient(
     private val simulateDisconnect: Boolean = false,
     private val throwRemoteException: Boolean = false,
     private val throwSecurityException: Boolean = false,
+    private val throwIllegalStateException: Boolean = false,
     private val delayCallback: Boolean = false,
 ) : InstallReferrerClientWrapper {
     var connectionStarted = false
     var connectionEnded = false
+    var getInstallReferrerCalled = false
     private var storedListener: InstallReferrerStateListener? = null
+
+    fun fireSetupFinished() {
+        storedListener?.onInstallReferrerSetupFinished(responseCode)
+    }
+
+    fun fireServiceDisconnected() {
+        storedListener?.onInstallReferrerServiceDisconnected()
+    }
 
     override fun startConnection(listener: InstallReferrerStateListener) {
         connectionStarted = true
@@ -825,6 +1007,10 @@ private class FakeInstallReferrerClient(
     }
 
     override fun getInstallReferrer(): String? {
+        getInstallReferrerCalled = true
+        if (throwIllegalStateException) {
+            throw IllegalStateException("Service not connected. Please start a connection before using the service.")
+        }
         if (throwRemoteException) {
             throw android.os.RemoteException("Test remote exception")
         }

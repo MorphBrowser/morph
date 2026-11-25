@@ -310,7 +310,6 @@ static const char* gCallbackPrefs[] = {
     PREF_MAX_SCRIPT_RUN_TIME_CONTENT,
     PREF_MAX_SCRIPT_RUN_TIME_CHROME,
     PREF_MAX_SCRIPT_RUN_TIME_EXT_CONTENT,
-    nullptr,
 };
 
 class WatchdogManager {
@@ -458,7 +457,7 @@ class WatchdogManager {
 
   void StartWatchdog() {
     MOZ_ASSERT(!mWatchdog);
-    mWatchdog = mozilla::MakeUnique<Watchdog>(this);
+    mWatchdog = std::make_unique<Watchdog>(this);
     mWatchdog->Init();
   }
 
@@ -1337,8 +1336,8 @@ nsresult XPCJSContext::Initialize() {
 #  endif
 #elif defined(XP_WIN)
   // 1MB is the default stack size on Windows. We use the -STACK linker flag
-  // (see WIN32_EXE_LDFLAGS in config/config.mk) to request a larger stack, so
-  // we determine the stack size at runtime.
+  // (see WIN32_EXE_DEFAULT_LDFLAGS in build/moz.configure/windows.configure) to
+  // request a larger stack, so we determine the stack size at runtime.
   const size_t kUncappedStackQuota = GetWindowsStackSize();
 #  if defined(MOZ_ASAN)
   // See the standalone MOZ_ASAN branch below for the ASan case.

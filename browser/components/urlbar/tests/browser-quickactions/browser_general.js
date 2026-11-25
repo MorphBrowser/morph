@@ -263,10 +263,28 @@ add_task(async function test_refresh() {
 });
 
 add_task(async function test_clear() {
+  const { Sanitizer } = ChromeUtils.importESModule(
+    "resource:///modules/Sanitizer.sys.mjs"
+  );
+  let originalShowUI = Sanitizer.showUI;
+  let showUIOptions = [];
+  Sanitizer.showUI = function (window, mode, options) {
+    showUIOptions.push(options);
+    return originalShowUI.call(this, window, mode, options);
+  };
+  registerCleanupFunction(() => {
+    Sanitizer.showUI = originalShowUI;
+  });
   await doAlertDialogTest({
     input: "clear",
     dialogContentURI: "chrome://browser/content/sanitize_v2.xhtml",
   });
+  Assert.deepEqual(
+    showUIOptions,
+    [{ entryPoint: "quick_action" }],
+    "The dialog is told it was opened from the quick action."
+  );
+  Sanitizer.showUI = originalShowUI;
 });
 
 async function doUpdateActionTest(isActiveExpected) {
@@ -713,7 +731,7 @@ add_task(async function test_query_context_supplied_without_query() {
     );
     // Paste & Go on a tab whose urlbar never ran a query: no session in
     // progress and nothing cached, which is the state bug 1886140 reproduces.
-    gURLBar.controller.engagementEvent.discard();
+    gURLBar.controller.session.discard();
     gURLBar.parentController.clearLastQueryContextCache();
 
     let loaded = BrowserTestUtils.browserLoaded(browser, false, url);

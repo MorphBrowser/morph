@@ -61,11 +61,16 @@
  *     pointer, we ensure that if the backtrack stack has been reallocated,
  *     we will store a pointer into the current buffer, not the old one.
  *
+ * On platforms with enough registers, we also pin a copy of the
+ * regexp::Stack's limit to backtrack_stack_limit_, because it is checked on
+ * most pushes. On x86, we load the limit from memory instead.
+ *
  * Whenever we call into C++ that can reallocate the backtrack stack (that is,
  * GrowBacktrackStack or HandleRegExpInterrupt), we update the stack pointer
  * in the regexp::Stack with the current value of backtrack_stack_pointer_.
- * When we return, we reload backtrack_stack_pointer_ and backtrackStackBase,
- * and store the stack base into our local FrameData.
+ * When we return, we reload backtrack_stack_pointer_, backtrackStackBase, and
+ * (if available) backtrack_stack_limit_, and store the stack base into our
+ * local FrameData.
  *
  */
 
@@ -118,6 +123,7 @@ class SMRegExpMacroAssembler final : public NativeRegExpMacroAssembler {
 
   virtual void Backtrack();
   virtual void Bind(Label* label);
+  virtual void BindJumpTarget(Label* label);
   virtual void GoTo(Label* label);
   virtual void PushBacktrack(Label* label);
 
@@ -181,6 +187,7 @@ class SMRegExpMacroAssembler final : public NativeRegExpMacroAssembler {
 
  private:
   size_t frameSize_ = 0;
+  uint32_t overrecursedFramePushed_ = 0;
 
   void createStackFrame();
   void initFrameAndRegs();
@@ -188,6 +195,10 @@ class SMRegExpMacroAssembler final : public NativeRegExpMacroAssembler {
   void exitHandler();
   void backtrackHandler();
   void stackOverflowHandler();
+
+  bool needsUnderflowCheck() const {
+    return frameSize_ > js::jit::MAX_UNCHECKED_UNDERFLOW_SIZE;
+  }
 
   // Push a register on the backtrack stack.
   void Push(js::jit::Register value);
@@ -227,6 +238,7 @@ class SMRegExpMacroAssembler final : public NativeRegExpMacroAssembler {
 
   void StoreBacktrackStackToMemory();
   void LoadBacktrackStackFromMemory(js::jit::Address backtrackStackBaseAddr);
+  void LoadBacktrackStackRegsFromMemory();
 
  public:
   static bool GrowBacktrackStack(Stack* regexp_stack);
@@ -313,6 +325,8 @@ class SMRegExpMacroAssembler final : public NativeRegExpMacroAssembler {
    *     downward (like the native stack).
    * - temp0_, temp1_, temp2_:
    *     Scratch registers.
+   * - backtrack_stack_limit_:
+   *     Copy of the regexp::Stack's stack limit. Not available on x86.
    *
    * The native stack pointer is used to access arguments (InputOutputData),
    * local variables (FrameData), and irregexp's internal virtual registers
@@ -324,6 +338,7 @@ class SMRegExpMacroAssembler final : public NativeRegExpMacroAssembler {
   js::jit::Register input_end_pointer_;
   js::jit::Register backtrack_stack_pointer_;
   js::jit::Register temp0_, temp1_, temp2_;
+  js::jit::Register backtrack_stack_limit_;
 
   // These labels are used in various API calls and bound (if used) in
   // GetCode. If we abort in the middle of a compilation, as may
@@ -336,7 +351,7 @@ class SMRegExpMacroAssembler final : public NativeRegExpMacroAssembler {
   js::jit::NonAssertingLabel exit_label_;
   js::jit::NonAssertingLabel stack_overflow_label_;
   js::jit::NonAssertingLabel exit_with_exception_label_;
-  js::jit::NonAssertingLabel exit_overrecursed_label_;
+  js::jit::NonAssertingLabel overrecursed_label_;
 
   // When we generate the code to push a backtrack label's address
   // onto the backtrack stack, we don't know its final address. We

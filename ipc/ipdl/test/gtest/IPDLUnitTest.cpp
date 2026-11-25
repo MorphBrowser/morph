@@ -44,7 +44,7 @@ already_AddRefed<IPDLUnitTestParent> IPDLUnitTestParent::CreateCrossProcess() {
 
   geckoargs::ChildProcessArgs extraArgs;
 
-  auto prefSerializer = MakeUnique<ipc::SharedPreferenceSerializer>();
+  auto prefSerializer = std::make_unique<ipc::SharedPreferenceSerializer>();
   if (!prefSerializer->SerializeToSharedMemory(GeckoProcessType_IPDLUnitTest,
                                                /* remoteType */ {})) {
     ADD_FAILURE()
@@ -53,7 +53,8 @@ already_AddRefed<IPDLUnitTestParent> IPDLUnitTestParent::CreateCrossProcess() {
   }
   prefSerializer->AddSharedPrefCmdLineArgs(*parent->mSubprocess, extraArgs);
 
-  if (!parent->mSubprocess->SyncLaunch(std::move(extraArgs))) {
+  if (!parent->mSubprocess->LaunchAndWaitForProcessHandle(
+          std::move(extraArgs))) {
     ADD_FAILURE() << "Subprocess launch failed";
     return nullptr;
   }
@@ -87,10 +88,7 @@ already_AddRefed<IPDLUnitTestParent> IPDLUnitTestParent::CreateCrossThread() {
 }
 
 IPDLUnitTestParent::~IPDLUnitTestParent() {
-  if (mSubprocess) {
-    mSubprocess->Destroy();
-    mSubprocess = nullptr;
-  }
+  mSubprocess = nullptr;
   if (mOtherThread) {
     mOtherThread->Shutdown();
   }
@@ -120,7 +118,7 @@ ipc::IPCResult IPDLUnitTestParent::RecvReport(const TestPartResult& aReport) {
 
   // Report the failure
   ADD_FAILURE_AT(aReport.filename().get(), aReport.lineNumber())
-      << "[child " << OtherPid() << "] " << aReport.summary();
+      << "[child " << OtherChildID() << "] " << aReport.summary();
 
   // If the failure was fatal, kill the child process to avoid hangs.
   if (aReport.fatal()) {
@@ -189,7 +187,7 @@ ipc::IPCResult IPDLUnitTestChild::RecvStart(const nsCString& aName,
   return IPC_OK();
 }
 
-void IPDLUnitTestChild::ActorDestroy(ActorDestroyReason aWhy) {
+void IPDLUnitTestChild::ActorDestroy(ActorDestroyReason /*aWhy*/) {
   if (!XRE_IsParentProcess()) {
     XRE_ShutdownChildProcess();
   }
@@ -299,8 +297,8 @@ MOZ_RUNINIT int _childProcessEntryPointStaticConstructor = ([] {
   gMakeIPDLUnitTestProcessChild =
       [](IPC::Channel::ChannelHandle aClientChannel, base::ProcessId aParentPid,
          const nsID& aMessageChannelId) -> UniquePtr<ipc::ProcessChild> {
-    return MakeUnique<IPDLUnitTestProcessChild>(std::move(aClientChannel),
-                                                aParentPid, aMessageChannelId);
+    return std::make_unique<IPDLUnitTestProcessChild>(
+        std::move(aClientChannel), aParentPid, aMessageChannelId);
   };
   return 0;
 })();

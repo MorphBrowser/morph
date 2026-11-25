@@ -2,24 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import { html, nothing } from "chrome://global/content/vendor/lit.all.mjs";
+import {
+  html,
+  live,
+  nothing,
+} from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-input-text.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-input-url.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-textarea.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-select.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-button.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/monitor-icon.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/monitor-status-chip.mjs";
-// eslint-disable-next-line import/no-unassigned-import
-import "chrome://browser/content/aiwindow/components/ai-website-chip.mjs";
+// eslint-disable-next-line import-x/no-unassigned-import
+import "chrome://browser/content/aiwindow/components/smartwindow-chip.mjs";
 import { monitorErrorL10nId } from "chrome://browser/content/aiwindow/components/monitor-error-copy.mjs";
 
 // What a finished check can say about the condition. A run that failed reports
@@ -53,6 +57,20 @@ const DEFAULT_MAX_WATCH_URLS = 5;
 
 // How long to coalesce typing before mirroring the form to the host
 const DRAFT_PERSIST_DELAY_MS = 250;
+
+// Poll rather than wait in one go, since a long setTimeout can
+// overshoot its deadline across a suspend or clock change.
+const MAX_REENABLE_DELAY_MS = 60_000;
+
+// How long "Write it for me" waits for an answer. Hosts give up sooner.
+const SUGGESTION_TIMEOUT_MS = 45 * 1000;
+
+const SUGGEST_ICON = "chrome://global/skin/icons/highlights.svg";
+// A spinner, shown on the button while a suggestion is being written
+const SUGGESTING_ICON = "chrome://global/skin/icons/loading.svg";
+
+// How many of the drafts "Write it for me" wrote are sent along with a retry
+const MAX_PREVIOUS_DRAFTS = 3;
 
 // Check times offered by the create card in 30-minute increments
 const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
@@ -125,6 +143,13 @@ const WEEKDAYS = [
  *  - agent-monitor-item:edit-toggle  detail: { editing }
  *  - agent-monitor-item:submit       detail: { mode, id, monitorName, condition, watchUrls, schedule }
  *  - agent-monitor-item:draft-change detail: { draft: MonitorDraft|null }
+ *  - agent-monitor-item:resolve-titles detail: { urls } - Asks for the page
+ *    titles of form pages that have none. Whoever answers dispatches
+ *    agent-monitor-item:titles-resolved, detail: { titles }, on this card.
+ *  - agent-monitor-item:request-suggestion detail: { requestId, watchUrls,
+ *    previousDrafts } - Asks for a task name and a condition for the create
+ *    form. Whoever answers dispatches agent-monitor-item:suggestion, detail:
+ *    { requestId, title, condition }, on this card.
  *  - agent-monitor-item:cancel
  *  - agent-monitor-item:delete       detail: { id }
  *  - agent-monitor-item:pause        detail: { id, paused }
@@ -159,6 +184,8 @@ const WEEKDAYS = [
  *    watchUrls?: string[],
  *    pendingUrl?: string,
  *    schedule?: { frequency: string, time: string, weekday: number },
+ *    suggested?: boolean,      // "Write it for me" wrote a draft
+ *    previousDrafts?: object[], // those drafts, { title, condition } each
  *  }
  * @property {"display"|"create"} mode - Which card layout to render
  * @property {boolean} expanded - Whether the display card is expanded
@@ -173,6 +200,10 @@ const WEEKDAYS = [
  *  (defaults to true). Hosts that cap how many monitors run at once set this to
  *  false once the cap is reached, so Resume reads as unavailable rather than
  *  failing after the user presses it. Pausing is never blocked.
+ * @property {boolean} hasChatContext - Whether the host has chat a suggestion
+ *  can draw on (defaults to false). Without it "Write it for me" needs a page.
+ * @property {boolean} canSuggest - Whether the create form offers "Write it
+ *  for me" (defaults to true). False for a host that doesn't answer it.
  */
 export class AgentMonitorItem extends MozLitElement {
   static properties = {
@@ -189,6 +220,8 @@ export class AgentMonitorItem extends MozLitElement {
       attribute: "self-contained",
     },
     canResume: { type: Boolean },
+    hasChatContext: { type: Boolean },
+    canSuggest: { type: Boolean },
     checkFrequency: { type: String, state: true },
     scheduleTime: { type: String, state: true },
     scheduleWeekday: { type: Number, state: true },
@@ -197,6 +230,10 @@ export class AgentMonitorItem extends MozLitElement {
     pendingUrl: { type: String, state: true },
     pendingUrlError: { type: Object, state: true },
     fieldErrors: { type: Object, state: true },
+    resolvedTitles: { type: Object, state: true },
+    suggesting: { type: Boolean, state: true },
+    suggested: { type: Boolean, state: true },
+    suggestionError: { type: Object, state: true },
   };
 
   constructor() {
@@ -210,6 +247,8 @@ export class AgentMonitorItem extends MozLitElement {
     this.maxWatchUrls = DEFAULT_MAX_WATCH_URLS;
     this.selfContained = true;
     this.canResume = true;
+    this.hasChatContext = false;
+    this.canSuggest = true;
     this.checkFrequency = SCHEDULE_TYPES.DAILY;
     this.scheduleTime = nextTimeOption();
     this.scheduleWeekday = 1;
@@ -218,31 +257,272 @@ export class AgentMonitorItem extends MozLitElement {
     this.pendingUrl = "";
     this.pendingUrlError = null;
     this.fieldErrors = { name: null, condition: null, pages: null };
+    this.resolvedTitles = {};
+    this.suggesting = false;
+    this.suggested = false;
+    this.suggestionError = null;
     this.#draftName = null;
+    this.addEventListener("agent-monitor-item:titles-resolved", event => {
+      this.resolvedTitles = { ...this.resolvedTitles, ...event.detail?.titles };
+    });
+    this.addEventListener("agent-monitor-item:suggestion", event =>
+      this.#applySuggestion(event.detail)
+    );
   }
 
   #draftName;
   #draftPersistTimer = null;
+  #requestedTitleUrls = new Set();
+  #checkLimitTimer = null;
+  #suggestionTimer = null;
+  #suggestionRequestId = null;
+  #suggestionRequestCount = 0;
+  #suggestButtonHadFocus = false;
+  #previousDrafts = [];
 
   willUpdate(changed) {
     if (changed.has("agent")) {
       this.#seedFromAgent();
+      this.#armCheckLimitTimer();
     }
 
     if (changed.has("agent") || changed.has("draft")) {
       this.#applyDraft();
     }
+
+    if (changed.has("mode") && this.mode !== "create") {
+      this.#endSuggestion();
+      this.#forgetSuggestions();
+      this.suggestionError = null;
+    }
+
+    // Without the button, a request in flight and its error go too
+    if (!this.#offersSuggestion && (this.suggesting || this.suggestionError)) {
+      this.#endSuggestion();
+      this.suggestionError = null;
+    }
+  }
+
+  updated(changed) {
+    if (
+      changed.has("pageUrls") ||
+      changed.has("mode") ||
+      changed.has("editing")
+    ) {
+      this.#requestMissingTitles();
+    }
+  }
+
+  /**
+   * "Write it for me": asks the host for a task name and a condition. The
+   * button stays busy until #applySuggestion gets the answer.
+   */
+  #onSuggestClick() {
+    if (this.suggesting || this.mode !== "create" || !this.#offersSuggestion) {
+      return;
+    }
+    // The button is disabled while it waits, which drops keyboard focus
+    this.#suggestButtonHadFocus =
+      this.shadowRoot.activeElement === this.#suggestButton;
+    this.suggesting = true;
+    this.suggestionError = null;
+    this.#suggestionRequestId = ++this.#suggestionRequestCount;
+    this.#suggestionTimer = setTimeout(
+      () => this.#failSuggestion(),
+      SUGGESTION_TIMEOUT_MS
+    );
+    this.#dispatch("agent-monitor-item:request-suggestion", {
+      requestId: this.#suggestionRequestId,
+      watchUrls: [...this.pageUrls],
+      previousDrafts: this.#previousDrafts.map(draft => ({ ...draft })),
+    });
+  }
+
+  // A suggestion needs a page or chat to go on, and a host that answers
+  get #offersSuggestion() {
+    return this.canSuggest && (!!this.pageUrls.length || this.hasChatContext);
+  }
+
+  get #suggestButton() {
+    return this.shadowRoot?.querySelector(".suggest-button");
+  }
+
+  // The button names what a press does: write a first draft, or another one
+  get #suggestButtonL10nId() {
+    if (this.suggesting) {
+      return "ai-tasks-alert-suggest-generating-button";
+    }
+    return this.suggested
+      ? "ai-tasks-alert-suggest-retry-button"
+      : "ai-tasks-alert-suggest-button";
+  }
+
+  // Leaves the busy state. An answer that arrives after this is dropped.
+  #endSuggestion() {
+    if (this.#suggestionTimer) {
+      clearTimeout(this.#suggestionTimer);
+      this.#suggestionTimer = null;
+    }
+    this.#suggestionRequestId = null;
+    this.#suggestButtonHadFocus = false;
+    this.suggesting = false;
+  }
+
+  // The form starts over: the next press writes a first draft again
+  #forgetSuggestions() {
+    this.suggested = false;
+    this.#previousDrafts = [];
+  }
+
+  // A failed suggestion's error goes once the user moves on to the fields
+  #onFormFocusOrInput(event) {
+    if (this.suggestionError && !event.target.closest(".create-top")) {
+      this.suggestionError = null;
+    }
+  }
+
+  #failSuggestion() {
+    const restoreFocus = this.#suggestButtonHadFocus;
+    this.#endSuggestion();
+    this.suggestionError = { id: "ai-tasks-alert-error-suggestion-failed" };
+    if (restoreFocus) {
+      this.#restoreSuggestButtonFocus();
+    }
+  }
+
+  /**
+   * Refocuses the button once it is enabled again, unless the user moved
+   * focus somewhere else while waiting.
+   */
+  async #restoreSuggestButtonFocus() {
+    await this.updateComplete;
+    const button = this.#suggestButton;
+    await button?.updateComplete;
+    const doc = this.ownerDocument;
+    const active = doc.activeElement;
+    if (
+      button &&
+      !this.suggesting &&
+      (!active || active === doc.body || active === doc.documentElement)
+    ) {
+      button.focus();
+    }
+  }
+
+  /**
+   * Fills the form from the answer to the request in flight. An answer with
+   * no title and no condition is a failure, and a stale one is dropped.
+   *
+   * @param {object} [suggestion]
+   * @param {number} suggestion.requestId
+   * @param {string} [suggestion.title] - Empty leaves the name as it is
+   * @param {string} [suggestion.condition] - Empty leaves the condition as it is
+   */
+  #applySuggestion({ requestId, title, condition } = {}) {
+    if (
+      this.#suggestionRequestId === null ||
+      requestId !== this.#suggestionRequestId
+    ) {
+      return;
+    }
+    if (!title && !condition) {
+      this.#failSuggestion();
+      return;
+    }
+    const restoreFocus = this.#suggestButtonHadFocus;
+    this.#endSuggestion();
+    this.suggested = true;
+    this.#previousDrafts = [
+      ...this.#previousDrafts,
+      { title: title || "", condition: condition || "" },
+    ].slice(-MAX_PREVIOUS_DRAFTS);
+    if (title) {
+      this.#draftName = title;
+      this.#clearFieldError("name");
+    }
+    if (condition) {
+      this.alertDescription = condition;
+      this.#clearFieldError("condition");
+    }
+    this.requestUpdate();
+    this.#persistDraft();
+    if (restoreFocus) {
+      this.#restoreSuggestButtonFocus();
+    }
+  }
+
+  #requestMissingTitles() {
+    if (this.mode !== "create" && !this.editing) {
+      return;
+    }
+    const urls = this.pageUrls.filter(
+      url => !this.#titleFor(url) && !this.#requestedTitleUrls.has(url)
+    );
+    if (!urls.length) {
+      return;
+    }
+    urls.forEach(url => this.#requestedTitleUrls.add(url));
+    this.#dispatch("agent-monitor-item:resolve-titles", { urls });
+  }
+
+  #titleFor(url) {
+    return this.resolvedTitles[url] || this.agent?.watchUrlTitles?.[url];
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.#armCheckLimitTimer();
   }
 
   disconnectedCallback() {
     if (this.#draftPersistTimer) {
       this.#flushDraft();
     }
+    this.#clearCheckLimitTimer();
+    this.#endSuggestion();
     super.disconnectedCallback();
+  }
+
+  /**
+   * The service's refusal that checks are waiting out, or null when they are
+   * available.
+   *
+   * @returns {?{until: number, reason: string, errorCode: string}}
+   */
+  get #activeCheckLimit() {
+    const limit = this.agent?.checkLimit;
+    return limit?.until > Date.now() ? limit : null;
+  }
+
+  #clearCheckLimitTimer() {
+    if (this.#checkLimitTimer) {
+      clearTimeout(this.#checkLimitTimer);
+      this.#checkLimitTimer = null;
+    }
+  }
+
+  // render again once the wait is over, so the button comes back on its own
+  #armCheckLimitTimer() {
+    this.#clearCheckLimitTimer();
+    const until = this.agent?.checkLimit?.until;
+    if (!this.isConnected || !(until > Date.now())) {
+      return;
+    }
+    const delay = Math.min(until - Date.now(), MAX_REENABLE_DELAY_MS);
+    this.#checkLimitTimer = setTimeout(() => {
+      this.#checkLimitTimer = null;
+      if (this.agent?.checkLimit?.until > Date.now()) {
+        this.#armCheckLimitTimer();
+      } else {
+        this.requestUpdate();
+      }
+    }, delay);
   }
 
   #seedFromAgent() {
     this.#draftName = null;
+    this.#forgetSuggestions();
+    this.#requestedTitleUrls.clear();
 
     const { watchUrls, url, condition, expanded } = this.agent ?? {};
     let seededUrls = [];
@@ -281,8 +561,16 @@ export class AgentMonitorItem extends MozLitElement {
     if (!this.draft) {
       return;
     }
-    const { editing, monitorName, condition, watchUrls, pendingUrl, schedule } =
-      this.draft;
+    const {
+      editing,
+      monitorName,
+      condition,
+      watchUrls,
+      pendingUrl,
+      schedule,
+      suggested,
+      previousDrafts,
+    } = this.draft;
 
     // A draft only outlives the card while an edit is unsubmitted, so reopen
     // the form the user was in the middle of. The edit affordances live in the
@@ -302,6 +590,17 @@ export class AgentMonitorItem extends MozLitElement {
     }
     if (pendingUrl !== undefined) {
       this.pendingUrl = pendingUrl;
+    }
+    if (suggested !== undefined) {
+      this.suggested = !!suggested;
+    }
+    if (Array.isArray(previousDrafts)) {
+      this.#previousDrafts = previousDrafts
+        .map(draft => ({
+          title: String(draft?.title ?? ""),
+          condition: String(draft?.condition ?? ""),
+        }))
+        .slice(-MAX_PREVIOUS_DRAFTS);
     }
     if (schedule?.frequency) {
       this.checkFrequency = schedule.frequency;
@@ -349,6 +648,8 @@ export class AgentMonitorItem extends MozLitElement {
           time: this.scheduleTime,
           weekday: this.scheduleWeekday,
         },
+        suggested: this.suggested,
+        previousDrafts: this.#previousDrafts,
       },
     });
   }
@@ -375,6 +676,10 @@ export class AgentMonitorItem extends MozLitElement {
     return this.#draftName ?? this.agent?.monitorName ?? "";
   }
 
+  get #isAtMaxUrls() {
+    return this.pageUrls.length >= this.maxWatchUrls;
+  }
+
   focusName() {
     this.shadowRoot?.querySelector(".monitor-name-input")?.focus();
   }
@@ -397,8 +702,11 @@ export class AgentMonitorItem extends MozLitElement {
   // focused. Returns the keys that failed.
   #validateForm() {
     // A URL left in the input has to be committed before submit, so a valid one
-    // isn't silently dropped and an invalid one sets pendingUrlError.
-    if (this.pendingUrl.trim()) {
+    // isn't silently dropped and an invalid one sets pendingUrlError. Once the
+    // cap is reached there's no room for it, so it's ignored instead.
+    if (this.#isAtMaxUrls) {
+      this.pendingUrlError = null;
+    } else if (this.pendingUrl.trim()) {
       this.#addUrl();
     }
     const errors = { name: null, condition: null, pages: null };
@@ -534,7 +842,7 @@ export class AgentMonitorItem extends MozLitElement {
       this.pendingUrlError = { id: "ai-tasks-alert-error-duplicate-url" };
       return;
     }
-    if (this.pageUrls.length >= this.maxWatchUrls) {
+    if (this.#isAtMaxUrls) {
       this.pendingUrlError = {
         id: "ai-tasks-alert-error-max-urls",
         args: { maxUrls: this.maxWatchUrls },
@@ -546,6 +854,15 @@ export class AgentMonitorItem extends MozLitElement {
     this.pendingUrlError = null;
     this.#clearFieldError("pages");
     this.#persistDraft();
+  }
+
+  async #handleAddUrl() {
+    this.#addUrl();
+    if (this.#isAtMaxUrls) {
+      await this.updateComplete;
+      // Give a fallback focus to the pages field if the add button is removed
+      this.#focusField("pages");
+    }
   }
 
   #removeUrl(url) {
@@ -581,10 +898,13 @@ export class AgentMonitorItem extends MozLitElement {
     // Cancelling drops the whole card, and with it the draft the host holds,
     // so this only has to stop a coalesced edit from landing after that
     this.#clearDraftTimer();
+    this.#endSuggestion();
+    this.#forgetSuggestions();
     this.#dispatch("agent-monitor-item:cancel", {});
   }
 
   async #onSubmit() {
+    this.suggestionError = null;
     const invalidFields = this.#validateForm();
     if (invalidFields.length) {
       await this.updateComplete;
@@ -594,6 +914,8 @@ export class AgentMonitorItem extends MozLitElement {
     // The host drops the draft as it commits the form, so make sure a coalesced
     // edit can't land after that and resurrect it
     this.#clearDraftTimer();
+    this.#endSuggestion();
+    this.#forgetSuggestions();
     const isCreateMode = this.mode === "create";
     this.#dispatch("agent-monitor-item:submit", {
       mode: this.mode,
@@ -660,7 +982,7 @@ export class AgentMonitorItem extends MozLitElement {
           data-l10n-attrs="placeholder,label,description"
           required
           ?invalid=${!!this.fieldErrors.condition}
-          .value=${this.alertDescription}
+          .value=${live(this.alertDescription)}
           @input=${this.#onConditionInput}
           @change=${this.#onConditionInput}
         ></moz-textarea>
@@ -701,15 +1023,17 @@ export class AgentMonitorItem extends MozLitElement {
               @input=${this.#onPendingUrlInput}
               @keydown=${this.#onPendingUrlKeydown}
             ></moz-input-url>
-            <moz-button
-              size="small"
-              type="icon ghost"
-              class="add-page-btn"
-              iconsrc="chrome://global/skin/icons/plus.svg"
-              data-l10n-id="ai-tasks-alert-add-url"
-              data-l10n-attrs="aria-label"
-              @click=${() => this.#addUrl()}
-            ></moz-button>
+            ${this.#isAtMaxUrls
+              ? nothing
+              : html`<moz-button
+                  size="small"
+                  type="icon ghost"
+                  class="add-page-btn"
+                  iconsrc="chrome://global/skin/icons/plus.svg"
+                  data-l10n-id="ai-tasks-alert-add-url"
+                  data-l10n-attrs="aria-label"
+                  @click=${() => this.#handleAddUrl()}
+                ></moz-button>`}
           </div>
           ${this.#renderFieldError(
             this.pendingUrlError ?? this.fieldErrors.pages
@@ -718,16 +1042,14 @@ export class AgentMonitorItem extends MozLitElement {
             ? html`<div class="page-pills-row">
                 ${this.pageUrls.map(
                   url =>
-                    html`<ai-website-chip
-                      type="context-chip"
-                      size="small"
+                    html`<smartwindow-chip
+                      type="source"
                       removable
-                      label=${this.agent?.watchUrlTitles?.[url] ??
-                      this.#displayUrl(url)}
+                      label=${this.#titleFor(url) || this.#displayUrl(url)}
                       .iconSrc=${`page-icon:${url}`}
                       title=${url}
-                      @ai-website-chip:remove=${() => this.#removeUrl(url)}
-                    ></ai-website-chip>`
+                      @smartwindow-chip:remove=${() => this.#removeUrl(url)}
+                    ></smartwindow-chip>`
                 )}
               </div>`
             : nothing}
@@ -983,14 +1305,50 @@ export class AgentMonitorItem extends MozLitElement {
 
   #renderCreate() {
     return html`
-      <div class="monitor-card">
-        ${this.selfContained
-          ? html`<div class="title-container">
-              <monitor-icon size="small"></monitor-icon>
-              <h2
-                class="monitor-card-state-title"
-                data-l10n-id="ai-tasks-alert-modal-title"
-              ></h2>
+      <div
+        class="monitor-card"
+        @focusin=${this.#onFormFocusOrInput}
+        @input=${this.#onFormFocusOrInput}
+      >
+        ${this.selfContained || this.#offersSuggestion
+          ? html`<div class="create-top">
+              <div class="create-header">
+                ${this.selfContained
+                  ? html`<div class="title-container">
+                      <monitor-icon size="small"></monitor-icon>
+                      <h2
+                        class="monitor-card-state-title"
+                        data-l10n-id="ai-tasks-alert-modal-title"
+                      ></h2>
+                    </div>`
+                  : nothing}
+                ${this.#offersSuggestion
+                  ? html`<moz-button
+                      class="suggest-button ${this.suggesting
+                        ? "suggesting"
+                        : ""}"
+                      size="small"
+                      type="default"
+                      iconsrc=${this.suggesting
+                        ? SUGGESTING_ICON
+                        : SUGGEST_ICON}
+                      data-l10n-id=${this.#suggestButtonL10nId}
+                      data-l10n-attrs="label"
+                      ?disabled=${this.suggesting}
+                      @click=${this.#onSuggestClick}
+                    ></moz-button>`
+                  : nothing}
+              </div>
+              ${this.#offersSuggestion
+                ? html`<div class="suggest-status" aria-live="polite">
+                    ${this.suggesting
+                      ? html`<span
+                          class="sr-only"
+                          data-l10n-id="ai-tasks-alert-suggest-generating-button"
+                        ></span>`
+                      : this.#renderFieldError(this.suggestionError)}
+                  </div>`
+                : nothing}
             </div>`
           : nothing}
         <div class="monitor-card-head">
@@ -1001,7 +1359,7 @@ export class AgentMonitorItem extends MozLitElement {
               data-l10n-attrs="label"
               required
               ?invalid=${!!this.fieldErrors.name}
-              .value=${this.#monitorName}
+              .value=${live(this.#monitorName)}
               @input=${this.#onNameInput}
               @change=${this.#onNameInput}
             ></moz-input-text>
@@ -1068,6 +1426,7 @@ export class AgentMonitorItem extends MozLitElement {
 
   #renderExpand() {
     const agent = this.agent ?? {};
+    const checkLimit = this.#activeCheckLimit;
     return html`
       <div class="watch-expand" @click=${e => e.stopPropagation()}>
         ${this.editing
@@ -1089,21 +1448,27 @@ export class AgentMonitorItem extends MozLitElement {
                     <div class="url-chips">
                       ${agent.watchUrls.map(
                         url =>
-                          html`<ai-website-chip
-                            type="context-chip"
-                            size="small"
+                          html`<smartwindow-chip
+                            type="source"
                             label=${agent.watchUrlTitles?.[url] ??
                             this.#displayUrl(url)}
                             .iconSrc=${`page-icon:${url}`}
                             title=${url}
                             .href=${url}
-                          ></ai-website-chip>`
+                          ></smartwindow-chip>`
                       )}
                     </div>
                   </div>`
                 : nothing}
               <div class="monitor-row">${this.#renderScheduleSummary()}</div>`}
         ${!this.editing ? this.#renderHistory() : nothing}
+        ${!this.editing && checkLimit
+          ? html`<p
+              id="check-limit-reason"
+              class="check-limit-reason"
+              data-l10n-id=${monitorErrorL10nId(checkLimit.errorCode)}
+            ></p>`
+          : nothing}
 
         <div class="monitor-card-actions">
           ${!this.editing
@@ -1132,7 +1497,9 @@ export class AgentMonitorItem extends MozLitElement {
                   data-l10n-attrs="label"
                 ></moz-button>
                 <moz-button
+                  id="check-now-button"
                   type="default"
+                  ?disabled=${!!checkLimit}
                   @click=${() =>
                     this.#dispatch("agent-monitor-item:check-now", {
                       id: agent.id,

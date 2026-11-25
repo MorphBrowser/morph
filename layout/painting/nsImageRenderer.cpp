@@ -16,6 +16,7 @@
 #include "gfxContext.h"
 #include "gfxDrawable.h"
 #include "mozilla/ISVGDisplayableFrame.h"
+#include "mozilla/SVGImageContext.h"
 #include "mozilla/SVGIntegrationUtils.h"
 #include "mozilla/SVGObserverUtils.h"
 #include "mozilla/SVGPaintServerFrame.h"
@@ -117,7 +118,8 @@ static already_AddRefed<imgIContainer> GetSymbolicIconImage(nsAtom* aName,
   return do_AddRef(lookup.Data().mImage);
 }
 
-bool nsImageRenderer::PrepareImage() {
+bool nsImageRenderer::PrepareImage(
+    const Maybe<PositionParams>& aPositionParams) {
   if (mImage->IsNone()) {
     mPrepareResult = ImgDrawResult::BAD_IMAGE;
     return false;
@@ -137,7 +139,14 @@ bool nsImageRenderer::PrepareImage() {
   }
 
   if (!mImage->IsComplete()) {
-    MOZ_DIAGNOSTIC_ASSERT(isImageRequest);
+    MOZ_DIAGNOSTIC_ASSERT(isImageRequest && request);
+
+    if (aPositionParams &&
+        ImageIsDefinitelyNotVisible(*aPositionParams, *request)) {
+      // May become in-bound at some point due to property changes.
+      mPrepareResult = ImgDrawResult::NOT_READY;
+      return false;
+    }
 
     // Make sure the image is actually decoding.
     bool frameComplete = request->StartDecodingWithResult(
@@ -261,6 +270,33 @@ bool nsImageRenderer::PrepareImage() {
   return IsReady();
 }
 
+static CSSSizeOrRatio ComputeIntrinsicSize(imgIContainer* aImage,
+                                           const ImageResolution& aResolution) {
+  CSSSizeOrRatio result;
+  bool haveWidth, haveHeight;
+  CSSIntSize imageIntSize;
+  nsLayoutUtils::ComputeSizeForDrawing(aImage, aResolution, imageIntSize,
+                                       result.mRatio, haveWidth, haveHeight);
+  if (haveWidth) {
+    result.SetWidth(CSSPixel::ToAppUnits(imageIntSize.width));
+  }
+  if (haveHeight) {
+    result.SetHeight(CSSPixel::ToAppUnits(imageIntSize.height));
+  }
+
+  // If we know the aspect ratio and one of the dimensions,
+  // we can compute the other missing width or height.
+  if (!haveHeight && haveWidth && result.mRatio) {
+    CSSIntCoord intrinsicHeight =
+        result.mRatio.Inverted().ApplyTo(imageIntSize.width);
+    result.SetHeight(nsPresContext::CSSPixelsToAppUnits(intrinsicHeight));
+  } else if (haveHeight && !haveWidth && result.mRatio) {
+    CSSIntCoord intrinsicWidth = result.mRatio.ApplyTo(imageIntSize.height);
+    result.SetWidth(nsPresContext::CSSPixelsToAppUnits(intrinsicWidth));
+  }
+  return result;
+}
+
 CSSSizeOrRatio nsImageRenderer::ComputeIntrinsicSize() {
   NS_ASSERTION(IsReady(),
                "Ensure PrepareImage() has returned true "
@@ -270,29 +306,7 @@ CSSSizeOrRatio nsImageRenderer::ComputeIntrinsicSize() {
   switch (mType) {
     case StyleImage::Tag::MozSymbolicIcon:
     case StyleImage::Tag::Url: {
-      bool haveWidth, haveHeight;
-      CSSIntSize imageIntSize;
-      nsLayoutUtils::ComputeSizeForDrawing(mImageContainer, mImageResolution,
-                                           imageIntSize, result.mRatio,
-                                           haveWidth, haveHeight);
-      if (haveWidth) {
-        result.SetWidth(CSSPixel::ToAppUnits(imageIntSize.width));
-      }
-      if (haveHeight) {
-        result.SetHeight(CSSPixel::ToAppUnits(imageIntSize.height));
-      }
-
-      // If we know the aspect ratio and one of the dimensions,
-      // we can compute the other missing width or height.
-      if (!haveHeight && haveWidth && result.mRatio) {
-        CSSIntCoord intrinsicHeight =
-            result.mRatio.Inverted().ApplyTo(imageIntSize.width);
-        result.SetHeight(nsPresContext::CSSPixelsToAppUnits(intrinsicHeight));
-      } else if (haveHeight && !haveWidth && result.mRatio) {
-        CSSIntCoord intrinsicWidth = result.mRatio.ApplyTo(imageIntSize.height);
-        result.SetWidth(nsPresContext::CSSPixelsToAppUnits(intrinsicWidth));
-      }
-
+      result = ::ComputeIntrinsicSize(mImageContainer, mImageResolution);
       break;
     }
     case StyleImage::Tag::Element: {
@@ -635,14 +649,18 @@ ImgDrawResult nsImageRenderer::Draw(nsPresContext* aPresContext,
   return result;
 }
 
+WebRenderImageItemInfo::WebRenderImageItemInfo(nsDisplayItem* aItem)
+    : WebRenderImageItemInfo(aItem->Frame(), aItem->BackfaceIsHidden(),
+                             aItem->GetPerFrameKey()) {}
+
 ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItems(
     nsPresContext* aPresContext, mozilla::wr::DisplayListBuilder& aBuilder,
     mozilla::wr::IpcResourceUpdateQueue& aResources,
     const mozilla::layers::StackingContextHelper& aSc,
-    mozilla::layers::RenderRootStateManager* aManager, nsDisplayItem* aItem,
-    const nsRect& aDirtyRect, const nsRect& aDest, const nsRect& aFill,
-    const nsPoint& aAnchor, const nsSize& aRepeatSize, const CSSIntRect& aSrc,
-    float aOpacity) {
+    mozilla::layers::RenderRootStateManager* aManager,
+    const WebRenderImageItemInfo& aItem, const nsRect& aDirtyRect,
+    const nsRect& aDest, const nsRect& aFill, const nsPoint& aAnchor,
+    const nsSize& aRepeatSize, const CSSIntRect& aSrc, float aOpacity) {
   if (!IsReady()) {
     MOZ_ASSERT_UNREACHABLE(
         "Ensure PrepareImage() has returned true before "
@@ -663,7 +681,7 @@ ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItems(
 
       renderer.BuildWebRenderDisplayItems(aBuilder, aSc, aDest, aFill,
                                           aRepeatSize, aSrc,
-                                          !aItem->BackfaceIsHidden(), aOpacity);
+                                          !aItem.mBackfaceHidden, aOpacity);
       break;
     }
     case StyleImage::Tag::MozSymbolicIcon:
@@ -693,7 +711,7 @@ ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItems(
       bool rasterizedForDest = false;
       gfx::IntSize decodeSize =
           nsLayoutUtils::ComputeImageContainerDrawingParameters(
-              mImageContainer, mForFrame, destRect, clipRect, aSc,
+              mImageContainer, mForFrame, destRect, clipRect, aBuilder, aSc,
               containerFlags, svgContext, region, &rasterizedForDest);
 
       RefPtr<image::WebRenderImageProvider> provider;
@@ -703,13 +721,13 @@ ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItems(
 
       Maybe<wr::ImageKey> key =
           aManager->CommandBuilder().CreateImageProviderKey(
-              aItem, provider, drawResult, aResources);
+              aItem.mFrame, aItem.mPerFrameKey, provider, drawResult,
+              aResources);
       if (key.isNothing()) {
         break;
       }
 
-      auto rendering =
-          wr::ToImageRendering(aItem->Frame()->UsedImageRendering());
+      auto rendering = wr::ToImageRendering(aItem.mFrame->UsedImageRendering());
       wr::LayoutRect clip = wr::ToLayoutRect(clipRect);
 
       // If we provided a region to the provider, then it already took the
@@ -718,8 +736,8 @@ ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItems(
 
       if (extendMode == ExtendMode::CLAMP) {
         // The image is not repeating. Just push as a regular image.
-        aBuilder.PushImage(dest, clip, !aItem->BackfaceIsHidden(), false,
-                           rendering, key.value(), true,
+        aBuilder.PushImage(dest, clip, !aItem.mBackfaceHidden, false, rendering,
+                           key.value(), true,
                            wr::ColorF{1.0f, 1.0f, 1.0f, aOpacity}, false, false,
                            rasterizedForDest);
       } else {
@@ -750,7 +768,7 @@ ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItems(
         LayoutDeviceSize gapSize = LayoutDeviceSize::FromAppUnits(
             aRepeatSize - aDest.Size(), appUnitsPerDevPixel);
 
-        aBuilder.PushRepeatingImage(fill, clip, !aItem->BackfaceIsHidden(),
+        aBuilder.PushRepeatingImage(fill, clip, !aItem.mBackfaceHidden,
                                     stretchSize, wr::ToLayoutSize(gapSize),
                                     rendering, key.value(), true,
                                     wr::ColorF{1.0f, 1.0f, 1.0f, aOpacity});
@@ -763,7 +781,7 @@ ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItems(
         const int32_t appUnitsPerDevPixel = aPresContext->AppUnitsPerDevPixel();
         auto fillRect = wr::ToLayoutRect(
             LayoutDeviceRect::FromAppUnits(aFill, appUnitsPerDevPixel));
-        aBuilder.PushRect(fillRect, fillRect, !aItem->BackfaceIsHidden(),
+        aBuilder.PushRect(fillRect, fillRect, !aItem.mBackfaceHidden,
                           /* aFoceAntiAliasing = */ false,
                           /* aIsCheckerboard = */ false,
                           wr::ToColorF(ToDeviceColor(color)));
@@ -818,6 +836,83 @@ already_AddRefed<gfxDrawable> nsImageRenderer::DrawableForElement(
       mImageElementSurface.mSize);
 }
 
+bool nsImageRenderer::ImageIsDefinitelyNotVisible(
+    const PositionParams& aPositionParams, imgRequestProxy& aRequest) {
+  if (!StaticPrefs::image_decode_defer_if_not_visible()) {
+    return false;
+  }
+
+  const auto* bgFrame = nsCSSRendering::FindBackgroundFrame(mForFrame);
+  if (bgFrame != mForFrame) {
+    // Bail if this frame requires some special handling.
+    return false;
+  }
+
+  const auto& layer = aPositionParams.mLayer;
+  if (layer.mAttachment != StyleImageLayerAttachment::Scroll) {
+    // Scrolling may unveil more of the background image.
+    return false;
+  }
+
+  const bool xRepeat =
+      layer.mRepeat.mXRepeat != StyleImageLayerRepeat::NoRepeat;
+  const bool yRepeat =
+      layer.mRepeat.mYRepeat != StyleImageLayerRepeat::NoRepeat;
+  if (xRepeat && yRepeat) {
+    // Guaranteed to cover the visible area.
+    return false;
+  }
+
+  if (!mImage->IsSizeAvailable()) {
+    return false;
+  }
+
+  nsCOMPtr<imgIContainer> image;
+  if (NS_FAILED(aRequest.GetImage(getter_AddRefs(image)))) {
+    return false;
+  }
+  const auto size = ::ComputeIntrinsicSize(image, mImageResolution);
+  if (!size.IsConcrete()) {
+    return false;
+  }
+
+  auto* presContext = mForFrame->PresContext();
+  nsIFrame* attachedToFrame = mForFrame;
+  bool transformedFixed = false;
+  nsRect positionArea = nsCSSRendering::ComputeImageLayerPositioningArea(
+      presContext, mForFrame, aPositionParams.mBorderArea, layer,
+      &attachedToFrame, &transformedFixed);
+
+  if (transformedFixed) {
+    // Treat it like `scroll`.
+    return false;
+  }
+
+  const auto imageInfo = nsCSSRendering::ComputeBackgroundImageInfo(
+      size, positionArea.Size(), layer);
+
+  if (imageInfo.IsEmpty()) {
+    return false;
+  }
+
+  nsRect imageRect{imageInfo.mTopLeft + positionArea.TopLeft() +
+                       aPositionParams.mBorderArea.TopLeft(),
+                   imageInfo.mSize};
+  const nsRect& rectInBorderArea = aPositionParams.mBackgroundClipRect;
+
+  // If we repeat on one axis, force that axis to overlap.
+  if (xRepeat) {
+    imageRect.x = rectInBorderArea.x;
+    imageRect.width = rectInBorderArea.width;
+  }
+  if (yRepeat) {
+    imageRect.y = rectInBorderArea.y;
+    imageRect.height = rectInBorderArea.height;
+  }
+
+  return !rectInBorderArea.Intersects(imageRect);
+}
+
 ImgDrawResult nsImageRenderer::DrawLayer(
     nsPresContext* aPresContext, gfxContext& aRenderingContext,
     const nsRect& aDest, const nsRect& aFill, const nsPoint& aAnchor,
@@ -846,9 +941,10 @@ ImgDrawResult nsImageRenderer::BuildWebRenderDisplayItemsForLayer(
     nsPresContext* aPresContext, mozilla::wr::DisplayListBuilder& aBuilder,
     mozilla::wr::IpcResourceUpdateQueue& aResources,
     const mozilla::layers::StackingContextHelper& aSc,
-    mozilla::layers::RenderRootStateManager* aManager, nsDisplayItem* aItem,
-    const nsRect& aDest, const nsRect& aFill, const nsPoint& aAnchor,
-    const nsRect& aDirty, const nsSize& aRepeatSize, float aOpacity) {
+    mozilla::layers::RenderRootStateManager* aManager,
+    const WebRenderImageItemInfo& aItem, const nsRect& aDest,
+    const nsRect& aFill, const nsPoint& aAnchor, const nsRect& aDirty,
+    const nsSize& aRepeatSize, float aOpacity) {
   if (!IsReady()) {
     MOZ_ASSERT_UNREACHABLE(
         "Ensure PrepareImage() has returned true before "

@@ -360,8 +360,11 @@ class XPCJSContext final : public mozilla::CycleCollectedJSContext,
     IDX_INDEXEDDB,
     IDX_STRUCTUREDCLONE,
     IDX_LOCKS,
+    IDX_STORAGE,
     IDX_SUPPRESSED,
     IDX_ERROR,
+    // Bug 2072122: Trusted Types readiness experiment only, to be removed.
+    IDX_REACT_DEVTOOLS_GLOBAL_HOOK,
     IDX_TOTAL_COUNT  // just a count of the above
   };
 
@@ -495,6 +498,8 @@ class XPCJSRuntime final : public mozilla::CycleCollectedJSRuntime {
       mozilla::CycleCollectorResults& aResults) override;
   void DispatchDeferredDeletion(bool aContinuation,
                                 bool aPurge = false) override;
+  void ClearWhiteJSWeakReferences(
+      JS::ShouldClearWeakRefTargetCallback aCallback, void* aData) override;
 
   void CustomOutOfMemoryCallback() override;
   void OnLargeAllocationFailure();
@@ -1279,7 +1284,7 @@ class XPCWrappedNativeTearOff final {
 
   XPCWrappedNativeTearOff* AddTearOff() {
     MOZ_ASSERT(!mNextTearOff);
-    mNextTearOff = mozilla::MakeUnique<XPCWrappedNativeTearOff>();
+    mNextTearOff = std::make_unique<XPCWrappedNativeTearOff>();
     return mNextTearOff.get();
   }
 
@@ -2796,6 +2801,7 @@ bool SandboxCreateCrypto(JSContext* cx, JS::Handle<JSObject*> obj);
 bool SandboxCreateFetch(JSContext* cx, JS::Handle<JSObject*> obj);
 bool SandboxCreateStructuredClone(JSContext* cx, JS::Handle<JSObject*> obj);
 bool SandboxCreateLocks(JSContext* cx, JS::Handle<JSObject*> obj);
+bool SandboxCreateStorage(JSContext* cx, JS::Handle<JSObject*> obj);
 
 }  // namespace xpc
 

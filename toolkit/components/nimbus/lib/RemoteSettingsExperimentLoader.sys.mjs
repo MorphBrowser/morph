@@ -58,7 +58,6 @@ const lazy = XPCOMUtils.declareLazy({
 
 const TIMER_NAME = "rs-experiment-loader-timer";
 const TIMER_LAST_UPDATE_PREF = `app.update.lastUpdateTime.${TIMER_NAME}`;
-// Use the same update interval as normandy
 const RUN_INTERVAL_PREF = "app.normandy.run_interval_seconds";
 const NIMBUS_DEBUG_PREF = "nimbus.debug";
 const NIMBUS_VALIDATION_PREF = "nimbus.validation.enabled";
@@ -495,7 +494,11 @@ export class RemoteSettingsExperimentLoader {
     // See-also: https://bugzilla.mozilla.org/show_bug.cgi?id=1936317
     // See-also: https://bugzilla.mozilla.org/show_bug.cgi?id=1936319
     if (lazy.TARGETING_CONTEXT_TELEMETRY_ENABLED) {
-      await lazy.recordTargetingContext();
+      // Some targeting context attributes end up doing IO (e.g., places
+      // queries).
+      //
+      // Prevent waiting for disk IO causing a shutdown crash.
+      await this.#raceShutdown(() => lazy.recordTargetingContext());
     }
 
     try {
@@ -529,12 +532,11 @@ export class RemoteSettingsExperimentLoader {
       }
 
       if (allRecipes !== null) {
-        let unenrolledExperimentSlugs = undefined;
-
         // We are about to attempt to do disk IO. We have not yet made any
         // irreversible changes, so we can attempt to abort the update if shutdown
         // has begun.
-        if (lazy.NimbusEnrollments.syncEnrollmentsEnabled) {
+        let unenrolledExperimentSlugs = undefined;
+        if (lazy.NimbusEnrollments.persistenceEnabled) {
           unenrolledExperimentSlugs = await this.#raceShutdown(() =>
             lazy.NimbusEnrollments.loadUnenrolledExperimentSlugsFromOtherProfiles()
           );
@@ -628,12 +630,7 @@ export class RemoteSettingsExperimentLoader {
     try {
       const recipes = [];
 
-      // We may be in an xpcshell test that has not initialized the
-      // ProfilesDatastoreService.
-      //
-      // TODO(bug 1967779): require the ProfilesDatastoreService to be initialized
-      // and remove this check.
-      const timestamps = lazy.NimbusEnrollments.databaseEnabled
+      const timestamps = lazy.NimbusEnrollments.persistenceEnabled
         ? new Map()
         : null;
 

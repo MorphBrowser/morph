@@ -1,0 +1,52 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+syntax = "proto3";
+
+package proto;
+
+option java_package = "org.mozilla.fenix.datastore";
+option java_multiple_files = true;
+
+// Order and visibility of the browser menu sections chosen by the user.
+// See [org.mozilla.fenix.components.menu.CustomizedMenuInfo]
+message CustomizedMenuRecord {
+  // Version of this format. Records of any other version are ignored.
+  uint32 schema_version = 1;
+  // Sections to show, in the order they should be shown in.
+  repeated Section sections = 2;
+  // Sections the user removed from the menu.
+  repeated Section hidden_sections = 3;
+  // Whether the user moved the navigation section, which is then shown where it was saved until the menu is restored
+  // to its default structure. Otherwise it is shown on the same side of the menu as the toolbar.
+  bool is_navigation_section_moved = 4;
+  // Items of the sections the user customized. Sections not here show the items of the app's default configuration.
+  repeated CustomizedSection customized_sections = 5;
+
+  // A menu section as customized by the user.
+  // Anything not set here, like the section's items, comes from the app's default menu configuration.
+  message Section {
+    // Id of the section, as declared in [org.mozilla.fenix.components.menu.configuration.BrowserMenuConfiguration].
+    string id = 1;
+  }
+
+  // The items of a menu section as customized by the user.
+  // See [org.mozilla.fenix.components.menu.CustomizedSectionInfo]
+  message CustomizedSection {
+    // Id of the section, as declared in [org.mozilla.fenix.components.menu.configuration.BrowserMenuConfiguration].
+    string section_id = 1;
+    // Items to show, in the order they should be shown in.
+    repeated Item items = 2;
+    // Items the user removed from the section.
+    repeated Item hidden_items = 3;
+
+    // A menu item as customized by the user.
+    message Item {
+      // Id of the item, as declared in [org.mozilla.fenix.components.menu.configuration.FenixMenuItem].
+      string id = 1;
+      // Ids of the items this expands to, in the order they should be shown in.
+      repeated string sub_item_ids = 2;
+    }
+  }
+}

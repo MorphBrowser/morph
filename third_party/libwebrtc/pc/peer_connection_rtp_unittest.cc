@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/functional/any_invocable.h"
 #include "absl/strings/string_view.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
@@ -100,27 +101,20 @@ class PeerConnectionRtpBaseTest : public ::testing::Test {
  public:
   explicit PeerConnectionRtpBaseTest(SdpSemantics sdp_semantics)
       : sdp_semantics_(sdp_semantics),
-        pc_factory_(CreatePeerConnectionFactory(
-            Thread::Current(),
-            Thread::Current(),
-            Thread::Current(),
-            FakeAudioCaptureModule::Create(),
-            CreateBuiltinAudioEncoderFactory(),
-            CreateBuiltinAudioDecoderFactory(),
-            std::make_unique<
-                VideoEncoderFactoryTemplate<LibvpxVp8EncoderTemplateAdapter,
-                                            LibvpxVp9EncoderTemplateAdapter,
-                                            OpenH264EncoderTemplateAdapter,
-                                            LibaomAv1EncoderTemplateAdapter>>(),
-            std::make_unique<
-                VideoDecoderFactoryTemplate<LibvpxVp8DecoderTemplateAdapter,
-                                            LibvpxVp9DecoderTemplateAdapter,
-                                            OpenH264DecoderTemplateAdapter,
-                                            Dav1dDecoderTemplateAdapter>>(),
-            nullptr /* audio_mixer */,
-            nullptr /* audio_processing */,
-            nullptr /* audio_frame_processor */,
-            CreateTestFieldTrialsPtr())) {
+        network_thread_(Thread::CreateWithSocketServer()) {
+    network_thread_->Start();
+    pc_factory_ = CreatePeerConnectionFactory(
+        network_thread_.get(), Thread::Current(),
+        FakeAudioCaptureModule::Create(), CreateBuiltinAudioEncoderFactory(),
+        CreateBuiltinAudioDecoderFactory(),
+        std::make_unique<VideoEncoderFactoryTemplate<
+            LibvpxVp8EncoderTemplateAdapter, LibvpxVp9EncoderTemplateAdapter,
+            OpenH264EncoderTemplateAdapter, LibaomAv1EncoderTemplateAdapter>>(),
+        std::make_unique<VideoDecoderFactoryTemplate<
+            LibvpxVp8DecoderTemplateAdapter, LibvpxVp9DecoderTemplateAdapter,
+            OpenH264DecoderTemplateAdapter, Dav1dDecoderTemplateAdapter>>(),
+        nullptr /* audio_mixer */, nullptr /* audio_processing */,
+        nullptr /* audio_frame_processor */, CreateTestFieldTrialsPtr());
     metrics::Reset();
   }
 
@@ -163,9 +157,25 @@ class PeerConnectionRtpBaseTest : public ::testing::Test {
     return CreatePeerConnectionInternal(modified_config, field_trials);
   }
 
+  // Like CreatePeerConnection(), but uses the given `observer`, which allows
+  // tests to hook into the PeerConnectionObserver callbacks.
+  std::unique_ptr<PeerConnectionWrapper> CreatePeerConnectionWithObserver(
+      std::unique_ptr<MockPeerConnectionObserver> observer) {
+    RTCConfiguration config;
+    config.sdp_semantics = sdp_semantics_;
+    PeerConnectionDependencies pc_dependencies(observer.get());
+    auto result = pc_factory_->CreatePeerConnectionOrError(
+        config, std::move(pc_dependencies));
+    EXPECT_TRUE(result.ok());
+    observer->SetPeerConnectionInterface(result.value().get());
+    return std::make_unique<PeerConnectionWrapper>(
+        pc_factory_, result.MoveValue(), std::move(observer));
+  }
+
  protected:
   const SdpSemantics sdp_semantics_;
   test::RunLoop run_loop_;
+  std::unique_ptr<Thread> network_thread_;
   scoped_refptr<PeerConnectionFactoryInterface> pc_factory_;
 
  private:
@@ -233,6 +243,29 @@ class PeerConnectionRtpTestUnifiedPlan : public PeerConnectionRtpBaseTest {
     bool set_remote_answer = caller->SetRemoteDescription(std::move(answer));
     EXPECT_TRUE(set_remote_answer);
     return set_remote_answer;
+  }
+
+  // Returns the parameters that the media channel reports for the send stream
+  // of `sender`, read on the worker thread.
+  RtpParameters GetMediaChannelParameters(PeerConnectionWrapper* pc,
+                                          const RtpSenderInterface& sender) {
+    const uint32_t ssrc = sender.ssrc();
+    for (const auto& transceiver :
+         pc->GetInternalPeerConnection()->GetTransceiversInternal()) {
+      if (transceiver->sender()->id() != sender.id()) {
+        continue;
+      }
+      MediaSendChannelInterface* media_channel =
+          transceiver->internal()->media_send_channel();
+      if (!media_channel) {
+        ADD_FAILURE() << "No media channel for sender " << sender.id();
+        return RtpParameters();
+      }
+      return pc->GetInternalPeerConnection()->worker_thread()->BlockingCall(
+          [&] { return media_channel->GetRtpSendParameters(ssrc); });
+    }
+    ADD_FAILURE() << "No transceiver for sender " << sender.id();
+    return RtpParameters();
   }
 };
 
@@ -1137,6 +1170,30 @@ TEST_F(PeerConnectionRtpTestUnifiedPlan,
 
   auto result = caller->pc()->AddTransceiver(MediaType::DATA);
   EXPECT_EQ(RTCErrorType::INVALID_PARAMETER, result.error().type());
+}
+
+// Test that AddTransceiver fails with INVALID_STATE once the PeerConnection is
+// closed, for both the track and the media type overloads.
+TEST_F(PeerConnectionRtpTestUnifiedPlan, AddTransceiverErrorIfClosed) {
+  auto caller = CreatePeerConnection();
+
+  auto audio_track = caller->CreateAudioTrack("a");
+  auto video_track = caller->CreateVideoTrack("v");
+  caller->pc()->Close();
+
+  caller->observer()->clear_legacy_renegotiation_needed();
+  caller->observer()->clear_latest_negotiation_needed_event();
+  EXPECT_EQ(RTCErrorType::INVALID_STATE,
+            caller->pc()->AddTransceiver(audio_track).error().type());
+  EXPECT_EQ(RTCErrorType::INVALID_STATE,
+            caller->pc()->AddTransceiver(video_track).error().type());
+  EXPECT_EQ(RTCErrorType::INVALID_STATE,
+            caller->pc()->AddTransceiver(MediaType::AUDIO).error().type());
+  EXPECT_EQ(RTCErrorType::INVALID_STATE,
+            caller->pc()->AddTransceiver(MediaType::VIDEO).error().type());
+  EXPECT_THAT(caller->pc()->GetTransceivers(), ElementsAre());
+  EXPECT_FALSE(caller->observer()->legacy_renegotiation_needed());
+  EXPECT_FALSE(caller->observer()->has_negotiation_needed_event());
 }
 
 TEST_F(PeerConnectionRtpTestUnifiedPlan,
@@ -2117,12 +2174,58 @@ TEST_F(PeerConnectionRtpTestUnifiedPlan,
   // change the send codec without notifying RtpSender!
   ASSERT_TRUE(caller->ExchangeOfferAnswerWith(callee.get()));
 
-  // Call GetParameters(). The DCHECK evaluates cached_parameters_ against
-  // what's actually on the worker thread. Since we bypassed SetParameters,
-  // this should crash if the bug is present, or return the right values.
+  // GetParameters() must return the parameters of the media channel, although
+  // the send codec was changed without a call to SetParameters().
   auto parameters2 = sender->GetParameters();
   ASSERT_GT(parameters2.codecs.size(), 0u);
   EXPECT_NE(parameters1.codecs[0].name, parameters2.codecs[0].name);
+  EXPECT_EQ(parameters2, GetMediaChannelParameters(caller.get(), *sender));
+}
+
+// Observer that allows tests to run code from within OnSignalingChange(), i.e.
+// at the exact point where the application is told about the new state.
+class SignalingChangeHookObserver : public MockPeerConnectionObserver {
+ public:
+  void OnSignalingChange(
+      PeerConnectionInterface::SignalingState new_state) override {
+    MockPeerConnectionObserver::OnSignalingChange(new_state);
+    if (on_signaling_change) {
+      on_signaling_change(new_state);
+    }
+  }
+  absl::AnyInvocable<void(PeerConnectionInterface::SignalingState)>
+      on_signaling_change;
+};
+
+// OnSignalingChange() must fire after the description has been applied, so
+// that the negotiated send codecs are visible, for audio and video alike.
+TEST_F(PeerConnectionRtpTestUnifiedPlan,
+       SendCodecsAreAppliedBeforeOnSignalingChange) {
+  auto observer = std::make_unique<SignalingChangeHookObserver>();
+  SignalingChangeHookObserver* hook = observer.get();
+  auto caller = CreatePeerConnectionWithObserver(std::move(observer));
+  auto callee = CreatePeerConnection();
+  auto audio_sender = caller->AddAudioTrack("a");
+  auto video_sender = caller->AddVideoTrack("v");
+
+  // Snapshot the parameters as seen from within OnSignalingChange(stable).
+  std::optional<RtpParameters> audio_parameters;
+  std::optional<RtpParameters> video_parameters;
+  hook->on_signaling_change =
+      [&](PeerConnectionInterface::SignalingState state) {
+        if (state == PeerConnectionInterface::kStable) {
+          audio_parameters = audio_sender->GetParameters();
+          video_parameters = video_sender->GetParameters();
+        }
+      };
+  ASSERT_TRUE(caller->ExchangeOfferAnswerWith(callee.get()));
+  hook->on_signaling_change = nullptr;
+
+  // The negotiated send codecs must already have been applied.
+  ASSERT_TRUE(audio_parameters.has_value());
+  ASSERT_TRUE(video_parameters.has_value());
+  EXPECT_FALSE(audio_parameters->codecs.empty());
+  EXPECT_FALSE(video_parameters->codecs.empty());
 }
 
 TEST_F(PeerConnectionRtpTestUnifiedPlan,
@@ -2156,13 +2259,11 @@ TEST_F(PeerConnectionRtpTestUnifiedPlan,
   // on the worker thread.
   track->set_content_hint(VideoTrackInterface::ContentHint::kDetailed);
 
-  // Calling GetParameters will fetch the new parameters from the worker thread
-  // and compare them to the signaling thread cache, triggering the DCHECK if
-  // the cache is stale.
+  // GetParameters() must return the parameters of the media channel, which
+  // were changed on the worker thread.
   auto parameters_after = sender->GetParameters();
-
-  // If the DCHECK is not fatal, we manually verify the mismatch happened.
   EXPECT_EQ(parameters_after.encodings.size(), 1u);
+  EXPECT_EQ(parameters_after, GetMediaChannelParameters(caller.get(), *sender));
 }
 
 TEST_F(PeerConnectionRtpTestUnifiedPlan,
@@ -2231,12 +2332,13 @@ TEST_F(PeerConnectionRtpTestUnifiedPlan,
   // by RequestEncoderSwitch.
   run_loop_.Flush();
 
-  // Calling GetParameters will fetch the new parameters from the worker thread
-  // and compare them to the signaling thread cache, triggering the DCHECK if
-  // the cache is stale.
+  // GetParameters() must return the parameters of the media channel, which
+  // were changed by the encoder switch.
   auto parameters_after = sender->GetParameters();
 
   EXPECT_EQ(parameters_after.encodings.size(), 1u);
+  EXPECT_EQ(parameters_after, GetMediaChannelParameters(caller.get(), *sender));
+  EXPECT_EQ(parameters_after.codecs, parameters.codecs);
 }
 
 TEST_F(PeerConnectionRtpTestUnifiedPlan, SendParamsCorrectWhenEncoderFallback) {
@@ -2277,10 +2379,223 @@ TEST_F(PeerConnectionRtpTestUnifiedPlan, SendParamsCorrectWhenEncoderFallback) {
   // by RequestEncoderSwitch(std::nullopt, true).
   run_loop_.Flush();
 
-  // Call GetParameters. This triggers an internal consistency check in the
-  // `GetParameters()` implementation.
+  // GetParameters() must return the parameters of the media channel, which
+  // were changed by the encoder fallback.
   auto parameters_after = sender->GetParameters();
   EXPECT_EQ(parameters_after.codecs.size(), parameters.codecs.size());
+  EXPECT_EQ(parameters_after, GetMediaChannelParameters(caller.get(), *sender));
+  EXPECT_EQ(parameters_after.codecs, parameters.codecs);
+}
+
+TEST_F(PeerConnectionRtpTestUnifiedPlan,
+       SetParametersSucceedsAfterEncoderFallback) {
+  auto caller = CreatePeerConnection();
+  auto callee = CreatePeerConnection();
+
+  auto track = caller->CreateVideoTrack("video");
+  auto transceiver = caller->AddTransceiver(track);
+  ASSERT_TRUE(transceiver != nullptr);
+  auto sender = transceiver->sender();
+
+  ASSERT_TRUE(caller->ExchangeOfferAnswerWith(callee.get()));
+
+  // Fetch parameters before the encoder fallback occurs.
+  auto parameters = sender->GetParameters();
+  ASSERT_EQ(parameters.encodings.size(), 1u);
+  ASSERT_GE(parameters.codecs.size(), 2u);
+
+  auto transceivers =
+      caller->GetInternalPeerConnection()->GetTransceiversInternal();
+  ASSERT_FALSE(transceivers.empty());
+  auto* transceiver_internal = transceivers[0]->internal();
+  ASSERT_TRUE(transceiver_internal != nullptr);
+  auto* media_channel = transceiver_internal->media_send_channel();
+  ASSERT_TRUE(media_channel != nullptr);
+  auto* worker_thread = caller->GetInternalPeerConnection()->worker_thread();
+  ASSERT_TRUE(worker_thread != nullptr);
+  auto* video_send_channel = static_cast<webrtc::WebRtcVideoSendChannel*>(
+      media_channel->AsVideoSendChannel());
+
+  std::optional<Codec> initial_send_codec;
+  worker_thread->BlockingCall([&] {
+    initial_send_codec = video_send_channel->GetSendCodec();
+    video_send_channel->RequestEncoderSwitch(std::nullopt,
+                                             /*allow_default_fallback=*/true);
+  });
+  ASSERT_TRUE(initial_send_codec.has_value());
+
+  run_loop_.Flush();
+
+  std::optional<Codec> fallback_send_codec;
+  worker_thread->BlockingCall(
+      [&] { fallback_send_codec = video_send_channel->GetSendCodec(); });
+  ASSERT_TRUE(fallback_send_codec.has_value());
+  EXPECT_NE(*fallback_send_codec, *initial_send_codec);
+
+  // Flush again so that OnParametersChanged() posted by ApplyEncoderSwitch()
+  // runs on the signaling thread before SetParameters() is called.
+  run_loop_.Flush();
+
+  // SetParameters with the parameters fetched before the fallback must succeed
+  // and preserve the fallback send codec.
+  parameters.encodings[0].max_bitrate_bps = 500000;
+  RTCError error = sender->SetParameters(parameters);
+  EXPECT_TRUE(error.ok()) << error.message();
+
+  auto updated_parameters = sender->GetParameters();
+  EXPECT_EQ(updated_parameters.encodings[0].max_bitrate_bps, 500000);
+  EXPECT_EQ(updated_parameters.codecs, parameters.codecs);
+
+  worker_thread->BlockingCall([&] {
+    EXPECT_EQ(video_send_channel->GetSendCodec(), fallback_send_codec);
+  });
+}
+
+TEST_F(PeerConnectionRtpTestUnifiedPlan,
+       SetParametersAsyncSucceedsAfterEncoderFallback) {
+  auto caller = CreatePeerConnection();
+  auto callee = CreatePeerConnection();
+
+  auto track = caller->CreateVideoTrack("video");
+  auto transceiver = caller->AddTransceiver(track);
+  ASSERT_TRUE(transceiver != nullptr);
+  auto sender = transceiver->sender();
+
+  ASSERT_TRUE(caller->ExchangeOfferAnswerWith(callee.get()));
+
+  // Fetch parameters before the encoder fallback occurs.
+  auto parameters = sender->GetParameters();
+  ASSERT_EQ(parameters.encodings.size(), 1u);
+  ASSERT_GE(parameters.codecs.size(), 2u);
+
+  auto transceivers =
+      caller->GetInternalPeerConnection()->GetTransceiversInternal();
+  ASSERT_FALSE(transceivers.empty());
+  auto* transceiver_internal = transceivers[0]->internal();
+  ASSERT_TRUE(transceiver_internal != nullptr);
+  auto* media_channel = transceiver_internal->media_send_channel();
+  ASSERT_TRUE(media_channel != nullptr);
+  auto* worker_thread = caller->GetInternalPeerConnection()->worker_thread();
+  ASSERT_TRUE(worker_thread != nullptr);
+  auto* video_send_channel = static_cast<webrtc::WebRtcVideoSendChannel*>(
+      media_channel->AsVideoSendChannel());
+
+  std::optional<Codec> initial_send_codec;
+  worker_thread->BlockingCall([&] {
+    initial_send_codec = video_send_channel->GetSendCodec();
+    video_send_channel->RequestEncoderSwitch(std::nullopt,
+                                             /*allow_default_fallback=*/true);
+  });
+  ASSERT_TRUE(initial_send_codec.has_value());
+
+  run_loop_.Flush();
+
+  std::optional<Codec> fallback_send_codec;
+  worker_thread->BlockingCall(
+      [&] { fallback_send_codec = video_send_channel->GetSendCodec(); });
+  ASSERT_TRUE(fallback_send_codec.has_value());
+  EXPECT_NE(*fallback_send_codec, *initial_send_codec);
+
+  // Flush again so that OnParametersChanged() posted by ApplyEncoderSwitch()
+  // runs on the signaling thread before SetParametersAsync() is called.
+  run_loop_.Flush();
+
+  // SetParametersAsync with the parameters fetched before the fallback must
+  // succeed and preserve the fallback send codec.
+  parameters.encodings[0].max_bitrate_bps = 500000;
+  std::optional<RTCError> error;
+  sender->SetParametersAsync(parameters, [&](RTCError result) {
+    error = std::move(result);
+    run_loop_.Quit();
+  });
+  run_loop_.Run();
+  ASSERT_TRUE(error.has_value());
+  EXPECT_TRUE(error->ok()) << error->message();
+
+  auto updated_parameters = sender->GetParameters();
+  EXPECT_EQ(updated_parameters.encodings[0].max_bitrate_bps, 500000);
+  EXPECT_EQ(updated_parameters.codecs, parameters.codecs);
+
+  worker_thread->BlockingCall([&] {
+    EXPECT_EQ(video_send_channel->GetSendCodec(), fallback_send_codec);
+  });
+}
+
+TEST_F(PeerConnectionRtpTestUnifiedPlan,
+       CacheInvalidatedWhenScalabilityModeChangesOnEncoderSwitch) {
+  auto caller = CreatePeerConnection();
+  auto callee = CreatePeerConnection();
+
+  auto track = caller->CreateVideoTrack("video");
+  RtpTransceiverInit init;
+  init.direction = RtpTransceiverDirection::kSendRecv;
+  RtpEncodingParameters encoding;
+  encoding.active = true;
+  encoding.scalability_mode = "L3T3_KEY";
+  init.send_encodings.push_back(encoding);
+
+  auto transceiver = caller->AddTransceiver(track, init);
+  ASSERT_TRUE(transceiver != nullptr);
+
+  // Prefer AV1 (which supports L3T3_KEY) followed by VP8 (which does not).
+  auto capabilities =
+      caller->pc_factory()->GetRtpSenderCapabilities(MediaType::VIDEO);
+  std::vector<RtpCodecCapability> preferred_codecs;
+  for (const RtpCodecCapability& codec : capabilities.codecs) {
+    if (codec.name == "AV1") {
+      preferred_codecs.push_back(codec);
+    }
+  }
+  for (const RtpCodecCapability& codec : capabilities.codecs) {
+    if (codec.name == "VP8") {
+      preferred_codecs.push_back(codec);
+    }
+  }
+  ASSERT_GE(preferred_codecs.size(), 2u);
+  ASSERT_TRUE(transceiver->SetCodecPreferences(preferred_codecs).ok());
+
+  ASSERT_TRUE(caller->ExchangeOfferAnswerWith(callee.get()));
+
+  auto sender = transceiver->sender();
+  auto parameters = sender->GetParameters();
+  ASSERT_EQ(parameters.encodings.size(), 1u);
+  EXPECT_EQ(parameters.encodings[0].scalability_mode, "L3T3_KEY");
+
+  auto transceivers =
+      caller->GetInternalPeerConnection()->GetTransceiversInternal();
+  ASSERT_FALSE(transceivers.empty());
+  auto* media_channel = transceivers[0]->internal()->media_send_channel();
+  ASSERT_TRUE(media_channel != nullptr);
+  auto* worker_thread = caller->GetInternalPeerConnection()->worker_thread();
+  ASSERT_TRUE(worker_thread != nullptr);
+
+  worker_thread->BlockingCall([&] {
+    auto* video_send_channel = static_cast<webrtc::WebRtcVideoSendChannel*>(
+        media_channel->AsVideoSendChannel());
+    video_send_channel->RequestEncoderSwitch(SdpVideoFormat("VP8"),
+                                             /*allow_default_fallback=*/false);
+  });
+
+  // Runs anything that RequestEncoderSwitch() posted to the worker thread,
+  // while this (signaling) thread doesn't process notifications. Because the
+  // encoder switch callback invalidates the cache on the signaling thread
+  // before posting ApplyEncoderSwitch() to the worker thread, the signaling
+  // thread must not observe stale cached parameters.
+  worker_thread->BlockingCall([] {});
+  EXPECT_EQ(sender->GetParameters(),
+            GetMediaChannelParameters(caller.get(), *sender));
+
+  run_loop_.Flush();
+
+  // Switching to VP8 mutates `scalability_mode` via
+  // FallbackToDefaultScalabilityModeIfNotSupported; the cache invalidation must
+  // cause GetParameters() to reflect the updated media channel parameters while
+  // keeping `codecs` in negotiated order.
+  auto parameters_after = sender->GetParameters();
+  ASSERT_EQ(parameters_after.encodings.size(), 1u);
+  EXPECT_NE(parameters_after.encodings[0].scalability_mode, "L3T3_KEY");
+  EXPECT_EQ(parameters_after, GetMediaChannelParameters(caller.get(), *sender));
+  EXPECT_EQ(parameters_after.codecs, parameters.codecs);
 }
 
 RTC_ALLOW_PLAN_B_DEPRECATION_BEGIN()

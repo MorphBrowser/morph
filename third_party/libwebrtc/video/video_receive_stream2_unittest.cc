@@ -60,6 +60,7 @@
 #include "modules/video_coding/nack_requester.h"
 #include "rtc_base/logging.h"
 #include "system_wrappers/include/clock.h"
+#include "system_wrappers/include/metrics.h"
 #include "test/create_test_environment.h"
 #include "test/fake_decoder.h"
 #include "test/fake_encoded_frame.h"
@@ -186,13 +187,6 @@ Timestamp ReceiveTimeForFrame(int id) {
 
 }  // namespace
 
-class DummySinkValidator : public RtpSinkValidator {
- public:
-  void OnSinkAdded(RtpPacketSinkInterface* sink) override {}
-  void OnSinkRemoved(RtpPacketSinkInterface* sink) override {}
-  bool IsValidSink(RtpPacketSinkInterface* sink) const override { return true; }
-};
-
 class VideoReceiveStream2Test : public ::testing::TestWithParam<bool> {
  public:
   auto DefaultDecodeAction() {
@@ -210,9 +204,7 @@ class VideoReceiveStream2Test : public ::testing::TestWithParam<bool> {
         call_stats_(&env_.clock(), time_controller_.GetMainThread()),
         fake_renderer_(&time_controller_),
         fake_call_(env_),
-        rtp_stream_receiver_controller_(time_controller_.GetMainThread(),
-                                        time_controller_.GetMainThread(),
-                                        &dummy_validator_),
+        rtp_stream_receiver_controller_(time_controller_.GetMainThread()),
         fake_metronome_(TimeDelta::Millis(16)),
         decode_sync_(&env_.clock(),
                      &fake_metronome_,
@@ -313,7 +305,6 @@ class VideoReceiveStream2Test : public ::testing::TestWithParam<bool> {
   MockTransport mock_transport_;
   test::RtcpPacketParser rtcp_packet_parser_;
   PacketRouter packet_router_;
-  DummySinkValidator dummy_validator_;
   RtpStreamReceiverController rtp_stream_receiver_controller_;
   std::unique_ptr<internal::VideoReceiveStream2> video_receive_stream_;
   VCMTiming* timing_;
@@ -547,6 +538,7 @@ TEST_P(VideoReceiveStream2Test, UseLowLatencyRenderingSetFromPlayoutDelay) {
 }
 
 TEST_P(VideoReceiveStream2Test, MaxCompositionDelaySetFromMaxPlayoutDelay) {
+  metrics::Reset();
   // The max composition delay is dependent on the number of frames in the
   // pre-decode queue. It's therefore important to advance the time as the test
   // runs to get the correct expectations of max_composition_delay_in_frames.
@@ -606,6 +598,11 @@ TEST_P(VideoReceiveStream2Test, MaxCompositionDelaySetFromMaxPlayoutDelay) {
   video_receive_stream_->OnCompleteFrame(std::move(test_frame3));
   EXPECT_THAT(timing_->RenderParameters().max_composition_delay_in_frames,
               Optional(kExpectedMaxCompositionDelayInFrames));
+
+  video_receive_stream_->Stop();
+  // All 4 modes (1 | 2 | 8 | 4 = 15) were used during the session.
+  EXPECT_METRIC_EQ(1, metrics::NumSamples("WebRTC.Video.PlayoutDelayMode"));
+  EXPECT_METRIC_EQ(1, metrics::NumEvents("WebRTC.Video.PlayoutDelayMode", 15));
 }
 
 TEST_P(VideoReceiveStream2Test, LazyDecoderCreation) {
@@ -899,6 +896,7 @@ TEST_P(VideoReceiveStream2Test,
                                              .AsLast()
                                              .Build());
   time_controller_.AdvanceTime(TimeDelta::Millis(100));
+  const int pli_packets = rtcp_packet_parser_.pli()->num_packets();
 
   // Reconfigure PT kH264PayloadType with modified video_format parameters.
   VideoReceiveStreamInterface::Decoder new_decoder;
@@ -907,6 +905,9 @@ TEST_P(VideoReceiveStream2Test,
 
   video_receive_stream_->SetDecoders({new_decoder});
   time_controller_.AdvanceTime(TimeDelta::Millis(100));
+
+  // Replacing the decoder that is in use requires a keyframe.
+  EXPECT_EQ(rtcp_packet_parser_.pli()->num_packets(), pli_packets + 1);
 
   // Verify that modified format causes old decoder to be deregistered and a
   // new decoder created.
@@ -925,6 +926,63 @@ TEST_P(VideoReceiveStream2Test,
                                              .Build());
 
   time_controller_.AdvanceTime(TimeDelta::Millis(100));
+}
+
+// Changing the set of decoders while running should not affect an unchanged
+// decoder that is in use. Releasing and configuring it again would require a
+// keyframe and isn't supported by all decoders, e.g. hardware decoders may fall
+// back to software decoding.
+TEST_P(VideoReceiveStream2Test, SetDecodersKeepsUnchangedDecoder) {
+  video_receive_stream_->Start();
+  time_controller_.AdvanceTime(TimeDelta::Zero());
+
+  // Decode initial frame to create and configure the AV1 decoder.
+  EXPECT_CALL(mock_decoder_factory_,
+              Create(_, Field(&SdpVideoFormat::name, Eq("AV1"))));
+  EXPECT_CALL(mock_decoder_, Configure);
+  EXPECT_CALL(mock_decoder_, RegisterDecodeCompleteCallback);
+  EXPECT_CALL(mock_decoder_, Decode(_, _));
+
+  video_receive_stream_->OnCompleteFrame(test::FakeFrameBuilder()
+                                             .Id(0)
+                                             .PayloadType(kAv1PayloadType)
+                                             .Time(10000)
+                                             .AsLast()
+                                             .Build());
+  time_controller_.AdvanceTime(TimeDelta::Millis(100));
+  const int pli_packets = rtcp_packet_parser_.pli()->num_packets();
+
+  // Verify that the AV1 decoder keeps decoding without being released,
+  // configured again or recreated.
+  EXPECT_CALL(mock_decoder_factory_, Create).Times(0);
+  EXPECT_CALL(mock_decoder_, Release).Times(0);
+  EXPECT_CALL(mock_decoder_, Configure).Times(0);
+  EXPECT_CALL(mock_decoder_, Decode(_, _));
+
+  // Add a decoder while keeping the AV1 decoder unchanged, as happens when the
+  // receiving side creates an offer listing all of its receive codecs.
+  VideoReceiveStreamInterface::Decoder vp9_decoder;
+  vp9_decoder.video_format = SdpVideoFormat("VP9");
+  vp9_decoder.payload_type = kVp9PayloadType;
+  std::vector<VideoReceiveStreamInterface::Decoder> decoders = config_.decoders;
+  decoders.push_back(vp9_decoder);
+
+  video_receive_stream_->SetDecoders(std::move(decoders));
+  time_controller_.AdvanceTime(TimeDelta::Millis(100));
+
+  video_receive_stream_->OnCompleteFrame(test::FakeFrameBuilder()
+                                             .Id(1)
+                                             .PayloadType(kAv1PayloadType)
+                                             .Time(12345)
+                                             .AsLast()
+                                             .Build());
+  time_controller_.AdvanceTime(TimeDelta::Millis(100));
+
+  // No keyframe is needed since the decoder state is intact.
+  EXPECT_EQ(rtcp_packet_parser_.pli()->num_packets(), pli_packets);
+
+  // Allow the decoder to be released when the stream is stopped.
+  EXPECT_TRUE(testing::Mock::VerifyAndClearExpectations(&mock_decoder_));
 }
 
 TEST_P(VideoReceiveStream2Test, SetDecodersWhileStoppedUpdatesCodecs) {

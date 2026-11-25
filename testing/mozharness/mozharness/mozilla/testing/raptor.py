@@ -21,7 +21,10 @@ from mozsystemmonitor.resourcemonitor import SystemResourceMonitor
 import mozharness
 from mozharness.base.errors import PythonErrorList
 from mozharness.base.log import CRITICAL, DEBUG, ERROR, INFO, OutputParser
-from mozharness.base.python import perfherder_schema_path
+from mozharness.base.python import (
+    perf_expected_changes_path,
+    perfherder_schema_path,
+)
 from mozharness.base.vcs.vcsbase import MercurialScript
 from mozharness.mozilla.automation import (
     EXIT_STATUS_DICT,
@@ -622,6 +625,19 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
                 },
             ],
             [
+                ["--perfherder-extra-option"],
+                {
+                    "action": "append",
+                    "metavar": "OPTION",
+                    "dest": "perfherder_extra_options",
+                    "default": [],
+                    "help": (
+                        "Add an extra option to the Perfherder data, which puts "
+                        "the results in a separate series."
+                    ),
+                },
+            ],
+            [
                 ["--benchmark-repository"],
                 {
                     "dest": "benchmark_repository",
@@ -1194,6 +1210,11 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
                 f"--extra-summary-methods={method}"
                 for method in self.config.get("extra_summary_methods")
             ])
+        if self.config.get("perfherder_extra_options"):
+            options.extend([
+                f"--perfherder-extra-option={option}"
+                for option in self.config.get("perfherder_extra_options")
+            ])
         if self.config.get("page_timeout"):
             options.extend([f"--page-timeout={self.page_timeout}"])
         if self.config.get("post_startup_delay"):
@@ -1265,6 +1286,15 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             extract_dirs=extract_dirs, suite_categories=["common", "condprof", "raptor"]
         )
 
+    def query_python_constraints(self):
+        return [
+            os.path.abspath(
+                os.path.join(
+                    self.raptor_path, "..", "config", "requirements-raptor.txt"
+                )
+            )
+        ]
+
     def create_virtualenv(self, **kwargs):
         """VirtualenvMixin.create_virtualenv() assumes we're using
         self.config['virtualenv_modules']. Since we're installing
@@ -1300,36 +1330,21 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             sys.path.append(_path)
             return
 
-        # virtualenv doesn't already exist so create it
-        # Install mozbase first, so we use in-tree versions
-        # Additionally, decide where to pull raptor requirements from.
-        if not self.run_local:
-            mozbase_requirements = os.path.join(
-                self.query_abs_dirs()["abs_test_install_dir"],
-                "config",
-                "mozbase_requirements.txt",
-            )
-            raptor_requirements = os.path.join(self.raptor_path, "requirements.txt")
-        else:
-            mozbase_requirements = os.path.join(
-                os.path.dirname(self.raptor_path),
-                "config",
-                "mozbase_source_requirements.txt",
-            )
-            raptor_requirements = os.path.join(
-                self.raptor_path, "source_requirements.txt"
-            )
-        self.register_virtualenv_module(
-            requirements=[mozbase_requirements],
-            editable=True,
+        requirements_file = (
+            "source_requirements.txt" if self.run_local else "requirements.txt"
         )
+        raptor_requirements = os.path.join(self.raptor_path, requirements_file)
+        common_requirements = os.path.join(self.raptor_path, "requirements-common.txt")
+        self.register_virtualenv_module(requirements=[raptor_requirements])
 
         modules = ["pip>=1.5"]
 
         # Add modules required for visual metrics. Packages with non-Python
         # components are particularly fussy about python version.
         py3_minor = sys.version_info.minor
-        if py3_minor <= 11:
+        if not (self.run_local or self.browsertime_visualmetrics):
+            pass
+        elif py3_minor <= 11:
             modules.extend([
                 "numpy==1.23.5",
                 "Pillow==9.2.0",
@@ -1350,10 +1365,7 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             self.setup_local_ffmpeg()
 
         # Require pip >= 1.5 so pip will prefer .whl files to install
-        super().create_virtualenv(modules=modules)
-
-        # Install Raptor dependencies
-        self.install_module(requirements=[raptor_requirements])
+        super().create_virtualenv(modules=modules, requirements=[common_requirements])
 
     def setup_local_ffmpeg(self):
         """Make use of the users local ffmpeg when running browsertime visual
@@ -1410,15 +1422,7 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
         if not self.config.get("no_install", False):
             if self.app in self.firefox_android_browsers:
                 self.device.uninstall_app(self.binary_path)
-
-                # Check if the user supplied their own APK, and install
-                # that instead
-                installer_path = pathlib.Path(
-                    self.raptor_path, "raptor", "user_upload.apk"
-                )
-                if not installer_path.exists():
-                    installer_path = self.installer_path
-
+                installer_path = self.installer_path
                 self.info(f"Installing APK from: {installer_path}")
                 if self.app == "fenix":
                     self.info("Installing Fenix APK with baseline profile")
@@ -1472,6 +1476,7 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
         env["SCRIPTSPATH"] = scripts_path
         env["EXTERNALTOOLSPATH"] = external_tools_path
         env["PERFHERDER_SCHEMA_PATH"] = perfherder_schema_path()
+        env["PERF_EXPECTED_CHANGES_PATH"] = perf_expected_changes_path()
 
         # xpcshell may come from local build, or fetched from build artifacts in
         # the case of CI.

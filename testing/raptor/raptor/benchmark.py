@@ -87,6 +87,17 @@ class Benchmark:
 
         return ThreadingHTTPServer((self.host, int(self.port)), CustomHandler)
 
+    def get_source_path_mapping(self):
+        """Map the URLs of the benchmark server to the directory it serves.
+
+        profiler-edit uses this to embed the benchmark's JS sources and their
+        source maps into the profile, after the server has been stopped.
+        """
+        return {
+            "urlPrefix": f"http://{self.host}:{self.port}/",
+            "localPath": str(pathlib.Path(self.bench_dir).resolve()),
+        }
+
     def stop_http_server(self):
         try:
             if self.httpd:
@@ -303,7 +314,7 @@ class Benchmark:
                 LOG.info(
                     "Removing repo with a different remote origin before installing new one"
                 )
-                mozfile.remove(external_repo_path)
+                mozfile.remove(str(external_repo_path))
                 self._full_clone(benchmark_repository, external_repo_path)
             else:
                 self._update_benchmark_repo(external_repo_path)

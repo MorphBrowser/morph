@@ -242,8 +242,8 @@ CacheLoadHandler::CacheLoadHandler(ThreadSafeWorkerRef* aWorkerRef,
   AssertIsOnMainThread();
 
   // Worker scripts are always decoded as UTF-8 per spec.
-  mDecoder = MakeUnique<ScriptDecoder>(UTF_8_ENCODING,
-                                       ScriptDecoder::BOMHandling::Remove);
+  mDecoder = std::make_unique<ScriptDecoder>(
+      UTF_8_ENCODING, ScriptDecoder::BOMHandling::Remove);
 }
 
 void CacheLoadHandler::Fail(nsresult aRv) {
@@ -409,9 +409,16 @@ void CacheLoadHandler::ResolvedCallback(JSContext* aCx,
 
   InternalHeaders* headers = response->GetInternalHeaders();
 
-  headers->Get("content-security-policy"_ns, mCSPHeaderValue, IgnoreErrors());
+  headers->Get("content-security-policy"_ns,
+               mPolicyContainerHeaders.mContentSecurityPolicy, IgnoreErrors());
   headers->Get("content-security-policy-report-only"_ns,
-               mCSPReportOnlyHeaderValue, IgnoreErrors());
+               mPolicyContainerHeaders.mContentSecurityPolicyReportOnly,
+               IgnoreErrors());
+  headers->Get("connection-allowlist"_ns,
+               mPolicyContainerHeaders.mConnectionAllowlist, IgnoreErrors());
+  headers->Get("connection-allowlist-report-only"_ns,
+               mPolicyContainerHeaders.mConnectionAllowlistReportOnly,
+               IgnoreErrors());
   headers->Get("referrer-policy"_ns, mReferrerPolicyHeaderValue,
                IgnoreErrors());
 
@@ -441,7 +448,7 @@ void CacheLoadHandler::ResolvedCallback(JSContext* aCx,
   mChannelInfo = response->GetChannelInfo();
   const UniquePtr<PrincipalInfo>& pInfo = response->GetPrincipalInfo();
   if (pInfo) {
-    mPrincipalInfo = mozilla::MakeUnique<PrincipalInfo>(*pInfo);
+    mPrincipalInfo = std::make_unique<PrincipalInfo>(*pInfo);
   }
 
   if (!inputStream) {
@@ -457,7 +464,7 @@ void CacheLoadHandler::ResolvedCallback(JSContext* aCx,
 
     nsresult rv = DataReceivedFromCache(
         (uint8_t*)"", 0, mChannelInfo, std::move(mPrincipalInfo),
-        mCSPHeaderValue, mCSPReportOnlyHeaderValue, mReferrerPolicyHeaderValue,
+        mPolicyContainerHeaders, mReferrerPolicyHeaderValue,
         mReportingEndpointsHeaderValue);
 
     mRequestHandle->OnStreamComplete(rv);
@@ -539,7 +546,7 @@ CacheLoadHandler::OnStreamComplete(nsIStreamLoader* aLoader,
 
   nsresult rv = DataReceivedFromCache(
       aString, aStringLen, mChannelInfo, std::move(mPrincipalInfo),
-      mCSPHeaderValue, mCSPReportOnlyHeaderValue, mReferrerPolicyHeaderValue,
+      mPolicyContainerHeaders, mReferrerPolicyHeaderValue,
       mReportingEndpointsHeaderValue);
   return mRequestHandle->OnStreamComplete(rv);
 }
@@ -547,8 +554,8 @@ CacheLoadHandler::OnStreamComplete(nsIStreamLoader* aLoader,
 nsresult CacheLoadHandler::DataReceivedFromCache(
     const uint8_t* aString, uint32_t aStringLen,
     const mozilla::dom::ChannelInfo& aChannelInfo,
-    UniquePtr<PrincipalInfo> aPrincipalInfo, const nsACString& aCSPHeaderValue,
-    const nsACString& aCSPReportOnlyHeaderValue,
+    UniquePtr<PrincipalInfo> aPrincipalInfo,
+    const PolicyContainer::Headers& aPolicyContainerHeaders,
     const nsACString& aReferrerPolicyHeaderValue,
     const nsACString& aReportingEndpointsHeaderValue) {
   AssertIsOnMainThread();
@@ -634,12 +641,12 @@ nsresult CacheLoadHandler::DataReceivedFromCache(
     // XXX: force the partitionedPrincipal to be equal to the response one.
     // This is OK for now because we don't want to expose partitionedPrincipal
     // functionality in ServiceWorkers yet.
-    rv = mWorkerRef->Private()->SetPrincipalsAndCSPOnMainThread(
-        responsePrincipal, responsePrincipal, loadGroup, nullptr);
+    rv = mWorkerRef->Private()->SetPrincipalsOnMainThread(
+        responsePrincipal, responsePrincipal, loadGroup);
     MOZ_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv));
 
-    rv = mWorkerRef->Private()->SetCSPFromHeaderValues(
-        aCSPHeaderValue, aCSPReportOnlyHeaderValue);
+    rv = mWorkerRef->Private()->SetPolicyContainerFromHeaders(
+        aPolicyContainerHeaders);
     MOZ_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv));
 
     mWorkerRef->Private()->UpdateReferrerInfoFromHeader(
@@ -664,8 +671,9 @@ nsresult CacheLoadHandler::DataReceived() {
       // XHR Params Allowed
       mWorkerRef->Private()->SetXHRParamsAllowed(parent->XHRParamsAllowed());
 
-      // Set ContentSecurityPolicy
-      nsresult rv = mWorkerRef->Private()->SetCsp(parent->GetCsp());
+      // Set Policy-Container
+      nsresult rv = mWorkerRef->Private()->SetPolicyContainerOnMainThread(
+          parent->GetPolicyContainer());
       NS_ENSURE_SUCCESS(rv, rv);
     }
   }

@@ -13,7 +13,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   Database: "resource://services-settings/Database.sys.mjs",
   FilterExpressions:
     "resource://gre/modules/components-utils/FilterExpressions.sys.mjs",
-  pushBroadcastService: "resource://gre/modules/PushBroadcastService.sys.mjs",
+  pushBroadcastService: "moz-src:///dom/push/PushBroadcastService.sys.mjs",
   RemoteSettingsClient:
     "resource://services-settings/RemoteSettingsClient.sys.mjs",
   SyncHistory: "resource://services-settings/SyncHistory.sys.mjs",
@@ -440,14 +440,14 @@ function remoteSettingsFunction() {
       : lazy.gPrefs.getStringPref(PREF_SETTINGS_LAST_ETAG, "");
 
     if (
-      trigger == "startup" &&
+      ["startup", "broadcast"].includes(trigger) &&
       lastEtag &&
       expectedTimestamp &&
       lastEtag > expectedTimestamp
     ) {
-      // startup trigger event can fire with a stale timestamp when clients reconnect to push
+      // Push events can fire with a stale timestamp, let's skip sync.
       await lazy.UptakeTelemetry.report(
-        lazy.UptakeTelemetry.STATUS.STALE_EXPECTED,
+        lazy.UptakeTelemetry.STATUS.STALE_TIMESTAMP_ERROR,
         pollTelemetryArgs
       );
       return;

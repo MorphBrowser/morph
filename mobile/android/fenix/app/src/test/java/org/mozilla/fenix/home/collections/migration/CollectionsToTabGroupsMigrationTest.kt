@@ -5,6 +5,7 @@
 package org.mozilla.fenix.home.collections.migration
 
 import android.content.Context
+import android.database.sqlite.SQLiteException
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -13,18 +14,28 @@ import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
 import java.io.File
+import kotlin.test.assertIs
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import mozilla.components.browser.state.state.recover.RecoverableTab
 import mozilla.components.browser.state.state.recover.TabState
+import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.concept.base.crash.Breadcrumb
 import mozilla.components.concept.base.crash.CrashReporting
 import mozilla.components.concept.engine.Engine
 import mozilla.components.feature.tab.collections.Tab
 import mozilla.components.feature.tab.collections.TabCollection
+import mozilla.components.feature.tabgroups.storage.data.TabGroup
 import mozilla.components.feature.tabgroups.storage.fakes.FakeTabGroupRepository
+import mozilla.components.feature.tabgroups.storage.repository.TabGroupRepository
 import mozilla.components.feature.tabs.TabsUseCases
 import mozilla.components.support.test.fakes.engine.FakeEngine
 import mozilla.components.support.utils.FakeDateTimeProvider
@@ -43,7 +54,7 @@ import org.mozilla.fenix.tabstray.data.TabGroupTheme
 class CollectionsToTabGroupsMigrationTest {
 
     private val tabGroupRepository = FakeTabGroupRepository()
-    private val restoreUseCase = mockk<TabsUseCases.RestoreUseCase>(relaxed = true)
+    private val browserStore = BrowserStore()
     private val dateTimeProvider = FakeDateTimeProvider()
     private val crashReporter = mockk<CrashReporting>(relaxed = true)
     private val ioDispatcher = UnconfinedTestDispatcher()
@@ -63,20 +74,32 @@ class CollectionsToTabGroupsMigrationTest {
         title: String,
         tabIds: List<String>,
         restorableTabIds: List<String> = tabIds,
+        failingTabIds: List<String> = emptyList(),
     ): TabCollection =
         FakeTabCollection(
             id = id,
             title = title,
-            tabs = tabIds.map { tabId -> FakeCollectionTab(tabId = tabId, restorable = tabId in restorableTabIds) },
+            tabs =
+                tabIds.map { tabId ->
+                    FakeCollectionTab(
+                        tabId = tabId,
+                        restorable = tabId in restorableTabIds,
+                        restoreException =
+                            IllegalStateException("Unable to read the session snapshot of $tabId").takeIf {
+                                tabId in failingTabIds
+                            },
+                    )
+                },
         )
 
     private fun collectionsToTabGroupsMigration(
         repository: CollectionsMigrationRepository,
         storage: TabCollectionStorage,
+        tabGroupRepository: TabGroupRepository = this.tabGroupRepository,
     ) =
         CollectionsToTabGroupsMigration(
             tabCollectionStorage = storage,
-            restoreUseCase = restoreUseCase,
+            restoreUseCase = TabsUseCases(browserStore).restore,
             tabGroupRepository = tabGroupRepository,
             collectionsMigrationRepository = repository,
             engine = FakeEngine(),
@@ -86,14 +109,17 @@ class CollectionsToTabGroupsMigrationTest {
             ioDispatcher = ioDispatcher,
         )
 
+    private fun restoredTabIds(): Set<String> = browserStore.state.tabs.map { it.id }.toSet()
+
     @Test
     fun `GIVEN stored collections WHEN collections are migrated to tab groups THEN a tab group is created per collection`() =
         runTest {
             val storage =
                 mockCollectionStorage(
                     listOf(
+                        collection(id = 3L, title = "News", tabIds = listOf("c")),
+                        collection(id = 2L, title = "Empty", tabIds = emptyList()),
                         collection(id = 1L, title = "Recipes", tabIds = listOf("a", "b")),
-                        collection(id = 2L, title = "News", tabIds = listOf("c")),
                     )
                 )
 
@@ -101,6 +127,32 @@ class CollectionsToTabGroupsMigrationTest {
 
             val storedGroups = tabGroupRepository.tabGroupDataFlow.first()
             assertEquals(listOf("Recipes", "News"), storedGroups.tabGroups.map { it.title })
+            assertEquals(
+                listOf(TabGroupTheme.Yellow.name, TabGroupTheme.Orange.name),
+                storedGroups.tabGroups.map { it.theme },
+            )
+        }
+
+    @Test
+    fun `GIVEN collections stored newest first WHEN collections are migrated to tab groups THEN they are migrated oldest first`() =
+        runTest {
+            val storage =
+                mockCollectionStorage(
+                    listOf(
+                        collection(id = 3L, title = "Added third", tabIds = listOf("c")),
+                        collection(id = 2L, title = "Added second", tabIds = listOf("b")),
+                        collection(id = 1L, title = "Added first", tabIds = listOf("a")),
+                    )
+                )
+
+            collectionsToTabGroupsMigration(FakeCollectionsMigrationRepository(), storage).migrateIfNeeded()
+
+            val storedGroups = tabGroupRepository.tabGroupDataFlow.first()
+            assertEquals(listOf("Added first", "Added second", "Added third"), storedGroups.tabGroups.map { it.title })
+            assertEquals(
+                listOf(TabGroupTheme.Yellow.name, TabGroupTheme.Orange.name, TabGroupTheme.Red.name),
+                storedGroups.tabGroups.map { it.theme },
+            )
         }
 
     @Test
@@ -116,6 +168,80 @@ class CollectionsToTabGroupsMigrationTest {
             assertEquals(TabGroupTheme.default.name, tabGroup.theme)
             assertEquals(dateTimeProvider.currentTimeMillis(), tabGroup.lastModified)
             assertTrue(tabGroup.closed)
+        }
+
+    @Test
+    fun `GIVEN existing tab groups WHEN collections are migrated THEN the tab group themes iterate from the last used theme`() =
+        runTest {
+            tabGroupRepository.addNewTabGroup(
+                TabGroup(title = "Oldest", theme = TabGroupTheme.Blue.name, lastModified = 1L, tabIds = emptyList())
+            )
+            tabGroupRepository.addNewTabGroup(
+                TabGroup(title = "Newest", theme = TabGroupTheme.Pink.name, lastModified = 2L, tabIds = emptyList())
+            )
+            val storage =
+                mockCollectionStorage(
+                    listOf(
+                        collection(id = 2L, title = "News", tabIds = listOf("b")),
+                        collection(id = 1L, title = "Recipes", tabIds = listOf("a")),
+                    )
+                )
+
+            collectionsToTabGroupsMigration(FakeCollectionsMigrationRepository(), storage).migrateIfNeeded()
+
+            val migratedGroups =
+                tabGroupRepository.tabGroupDataFlow.first().tabGroups.filter { it.title in listOf("Recipes", "News") }
+            assertEquals(
+                listOf(TabGroupTheme.Purple.name, TabGroupTheme.Blue.name),
+                migratedGroups.map { it.theme },
+            )
+        }
+
+    @Test
+    fun `GIVEN the tab group repository cannot be read WHEN a collection is migrated THEN the tab group is given the default theme`() =
+        runTest {
+            val createdTabGroup = slot<TabGroup>()
+            val tabGroupRepository =
+                mockk<TabGroupRepository>(relaxed = true) {
+                    every { tabGroupDataFlow } returns flow { throw SQLiteException("Unable to read the tab groups") }
+                    coEvery { createTabGroupWithTabs(capture(createdTabGroup)) } returns Unit
+                }
+            val storage = mockCollectionStorage(listOf(collection(id = 1L, title = "Recipes", tabIds = listOf("a"))))
+
+            val migrated =
+                collectionsToTabGroupsMigration(
+                        repository = FakeCollectionsMigrationRepository(),
+                        storage = storage,
+                        tabGroupRepository = tabGroupRepository,
+                    )
+                    .migrateIfNeeded()
+
+            assertTrue(migrated)
+            assertEquals(TabGroupTheme.default.name, createdTabGroup.captured.theme)
+            verify { crashReporter.submitCaughtException(any<SQLiteException>()) }
+        }
+
+    @Test
+    fun `GIVEN reading the tab group repository is cancelled WHEN collections are migrated THEN the cancellation is not reported`() =
+        runTest {
+            val tabGroupRepository =
+                mockk<TabGroupRepository>(relaxed = true) {
+                    every { tabGroupDataFlow } returns flow { throw CancellationException("Migration cancelled") }
+                }
+            val storage = mockCollectionStorage(listOf(collection(id = 1L, title = "Recipes", tabIds = listOf("a"))))
+
+            val result = runCatching {
+                collectionsToTabGroupsMigration(
+                        repository = FakeCollectionsMigrationRepository(),
+                        storage = storage,
+                        tabGroupRepository = tabGroupRepository,
+                    )
+                    .migrateIfNeeded()
+            }
+
+            assertIs<CancellationException>(result.exceptionOrNull())
+            verify(exactly = 0) { crashReporter.submitCaughtException(any()) }
+            coVerify(exactly = 0) { tabGroupRepository.createTabGroupWithTabs(any()) }
         }
 
     @Test
@@ -137,8 +263,89 @@ class CollectionsToTabGroupsMigrationTest {
             assertEquals(recipesTabGroupId, storedGroups.tabGroupAssignments["a"])
             assertEquals(recipesTabGroupId, storedGroups.tabGroupAssignments["b"])
             assertEquals(newsTabGroupId, storedGroups.tabGroupAssignments["c"])
+            assertEquals(setOf("a", "b", "c"), restoredTabIds())
+        }
 
-            verify(exactly = 2) { restoreUseCase.invoke(tabs = any(), selectTabId = any(), restoreLocation = any()) }
+    @Test
+    fun `GIVEN the tab group cannot be created WHEN a collection is migrated THEN its tabs are not restored`() =
+        runTest {
+            val tabGroupRepository =
+                FakeTabGroupRepository(
+                    onCreateTabGroupWithTabs = { throw SQLiteException("Unable to create the tab group") }
+                )
+            val repository = FakeCollectionsMigrationRepository()
+            val storage = mockCollectionStorage(listOf(collection(id = 1L, title = "Recipes", tabIds = listOf("a"))))
+
+            val migrated =
+                collectionsToTabGroupsMigration(
+                        repository = repository,
+                        storage = storage,
+                        tabGroupRepository = tabGroupRepository,
+                    )
+                    .migrateIfNeeded()
+
+            assertFalse(migrated)
+            assertTrue(tabGroupRepository.tabGroupDataFlow.first().tabGroups.isEmpty())
+            assertTrue(restoredTabIds().isEmpty())
+            assertTrue(repository.getMigratedCollectionIds().isEmpty())
+        }
+
+    @Test
+    fun `GIVEN the migration is cancelled while a tab group is created WHEN collections are migrated THEN only that collection finishes migrating`() =
+        runTest(StandardTestDispatcher(ioDispatcher.scheduler)) {
+            lateinit var migrationJob: Job
+            val tabGroupRepository =
+                FakeTabGroupRepository(
+                    onCreateTabGroupWithTabs = {
+                        // Cancel the migration while the tab group is written in a NonCancellable context.
+                        migrationJob.cancel()
+                        yield()
+                    }
+                )
+            val repository = FakeCollectionsMigrationRepository()
+            val storage =
+                mockCollectionStorage(
+                    listOf(
+                        collection(id = 2L, title = "News", tabIds = listOf("b")),
+                        collection(id = 1L, title = "Recipes", tabIds = listOf("a")),
+                    )
+                )
+
+            migrationJob = launch {
+                collectionsToTabGroupsMigration(
+                        repository = repository,
+                        storage = storage,
+                        tabGroupRepository = tabGroupRepository,
+                    )
+                    .migrateIfNeeded()
+            }
+            migrationJob.join()
+
+            assertEquals(listOf("Recipes"), tabGroupRepository.tabGroupDataFlow.first().tabGroups.map { it.title })
+            assertEquals(setOf("a"), restoredTabIds())
+            assertEquals(setOf("1"), repository.getMigratedCollectionIds())
+            verify(exactly = 0) { crashReporter.submitCaughtException(any()) }
+        }
+
+    @Test
+    fun `GIVEN the migration is cancelled while a collection's tabs are being restored WHEN collections are migrated THEN nothing is migrated and the cancellation is not reported`() =
+        runTest {
+            // A cancellation happens when the tabs are converted to recoverable tabs before the NonCancellable context.
+            val cancelledTab =
+                FakeCollectionTab(tabId = "a", restoreException = CancellationException("Migration cancelled"))
+            val repository = FakeCollectionsMigrationRepository()
+            val storage =
+                mockCollectionStorage(
+                    listOf(FakeTabCollection(id = 1L, title = "Recipes", tabs = listOf(cancelledTab)))
+                )
+
+            val result = runCatching { collectionsToTabGroupsMigration(repository, storage).migrateIfNeeded() }
+
+            assertIs<CancellationException>(result.exceptionOrNull())
+            assertTrue(tabGroupRepository.tabGroupDataFlow.first().tabGroups.isEmpty())
+            assertTrue(restoredTabIds().isEmpty())
+            assertTrue(repository.getMigratedCollectionIds().isEmpty())
+            verify(exactly = 0) { crashReporter.submitCaughtException(any()) }
         }
 
     @Test
@@ -251,7 +458,7 @@ class CollectionsToTabGroupsMigrationTest {
             assertEquals(listOf("News"), storedGroups.tabGroups.map { it.title })
             assertEquals(storedGroups.tabGroups.single().id, storedGroups.tabGroupAssignments["c"])
 
-            verify(exactly = 1) { restoreUseCase.invoke(tabs = any(), selectTabId = any(), restoreLocation = any()) }
+            assertEquals(setOf("c"), restoredTabIds())
             assertTrue(repository.hasMigratedCollections())
             assertTrue(repository.getMigratedCollectionIds().isEmpty())
             assertTrue(repository.shouldShowCollectionsMigrationCard())
@@ -264,23 +471,18 @@ class CollectionsToTabGroupsMigrationTest {
             val storage =
                 mockCollectionStorage(
                     listOf(
-                        collection(id = 1L, title = "Recipes", tabIds = listOf("a"), restorableTabIds = emptyList()),
                         collection(id = 2L, title = "News", tabIds = listOf("c")),
+                        collection(id = 1L, title = "Recipes", tabIds = listOf("a"), restorableTabIds = emptyList()),
                     )
                 )
 
             collectionsToTabGroupsMigration(repository, storage).migrateIfNeeded()
 
-            val restoredTabs = mutableListOf<List<RecoverableTab>>()
-            verify(exactly = 2) {
-                restoreUseCase.invoke(tabs = capture(restoredTabs), selectTabId = any(), restoreLocation = any())
-            }
-
             // The tab that could not be restored is recreated from the collection's stored url and title.
-            val recipesTab = restoredTabs.first().single()
-            assertNull(recipesTab.engineSessionState)
-            assertEquals("https://example.com/a", recipesTab.state.url)
-            assertEquals("Title of a", recipesTab.state.title)
+            val recipesTab = browserStore.state.tabs.single { it.content.url == "https://example.com/a" }
+            assertNull(recipesTab.engineState.engineSessionState)
+            assertEquals("Title of a", recipesTab.content.title)
+            assertEquals(2, browserStore.state.tabs.size)
 
             val storedGroups = tabGroupRepository.tabGroupDataFlow.first()
             assertEquals(listOf("Recipes", "News"), storedGroups.tabGroups.map { it.title })
@@ -310,15 +512,13 @@ class CollectionsToTabGroupsMigrationTest {
         }
 
     @Test
-    fun `GIVEN a collection cannot be migrated WHEN collections are migrated to tab groups THEN it is not recorded as migrated`() =
+    fun `GIVEN a collection cannot be migrated WHEN collections are migrated to tab groups THEN it is not recorded as migrated and nothing is created for it`() =
         runTest {
-            every { restoreUseCase.invoke(tabs = any(), selectTabId = any(), restoreLocation = any()) } throws
-                IllegalStateException("Unable to restore the tabs")
             val repository = FakeCollectionsMigrationRepository()
             val storage =
                 mockCollectionStorage(
                     listOf(
-                        collection(id = 1L, title = "Recipes", tabIds = listOf("a")),
+                        collection(id = 1L, title = "Recipes", tabIds = listOf("a"), failingTabIds = listOf("a")),
                         collection(id = 2L, title = "Empty", tabIds = emptyList()),
                     )
                 )
@@ -329,24 +529,22 @@ class CollectionsToTabGroupsMigrationTest {
             assertFalse(repository.hasMigratedCollections())
             assertEquals(setOf("2"), repository.getMigratedCollectionIds())
             assertFalse(repository.shouldShowCollectionsMigrationCard())
+
+            val storedGroups = tabGroupRepository.tabGroupDataFlow.first()
+            assertTrue(storedGroups.tabGroups.isEmpty())
+            assertTrue(storedGroups.tabGroupAssignments.isEmpty())
+            assertTrue(restoredTabIds().isEmpty())
         }
 
     @Test
     fun `GIVEN a collection failed to migrate WHEN another collection created a tab group THEN the card is not shown`() =
         runTest {
-            every {
-                restoreUseCase.invoke(
-                    tabs = match { tabs -> tabs.any { it.state.id == "c" } },
-                    selectTabId = any(),
-                    restoreLocation = any(),
-                )
-            } throws IllegalStateException("Unable to restore the tabs")
             val repository = FakeCollectionsMigrationRepository()
             val storage =
                 mockCollectionStorage(
                     listOf(
                         collection(id = 1L, title = "Recipes", tabIds = listOf("a")),
-                        collection(id = 2L, title = "News", tabIds = listOf("c")),
+                        collection(id = 2L, title = "News", tabIds = listOf("c"), failingTabIds = listOf("c")),
                     )
                 )
 
@@ -405,11 +603,13 @@ class CollectionsToTabGroupsMigrationTest {
     @Test
     fun `GIVEN a collection cannot be migrated WHEN collections are migrated to tab groups THEN the failure is reported`() =
         runTest {
-            every { restoreUseCase.invoke(tabs = any(), selectTabId = any(), restoreLocation = any()) } throws
-                IllegalStateException("Unable to restore the tabs")
             val repository = FakeCollectionsMigrationRepository()
             val storage =
-                mockCollectionStorage(listOf(collection(id = 1L, title = "Recipes", tabIds = listOf("a", "b"))))
+                mockCollectionStorage(
+                    listOf(
+                        collection(id = 1L, title = "Recipes", tabIds = listOf("a", "b"), failingTabIds = listOf("b"))
+                    )
+                )
 
             collectionsToTabGroupsMigration(repository, storage).migrateIfNeeded()
 
@@ -446,6 +646,7 @@ private class FakeTabCollection(
 private class FakeCollectionTab(
     private val tabId: String,
     private val restorable: Boolean = true,
+    private val restoreException: Exception? = null,
 ) : Tab {
 
     override val id: Long = tabId.hashCode().toLong()
@@ -453,7 +654,9 @@ private class FakeCollectionTab(
     override val url: String = "https://example.com/$tabId"
 
     override fun restore(filesDir: File, engine: Engine, restoreSessionId: Boolean): RecoverableTab? =
-        if (restorable) {
+        if (restoreException != null) {
+            throw restoreException
+        } else if (restorable) {
             RecoverableTab(engineSessionState = null, state = TabState(id = tabId, url = url))
         } else {
             null

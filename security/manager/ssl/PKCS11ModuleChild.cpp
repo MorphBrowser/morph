@@ -2,9 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#if !defined(NIGHTLY_BUILD) || defined(MOZ_NO_SMART_CARDS)
-#  error This file should only be used under NIGHTLY_BUILD and when MOZ_NO_SMART_CARDS is not defined.
-#endif  // !NIGHTLY_BUILD || MOZ_NO_SMART_CARDS
+#if defined(MOZ_NO_SMART_CARDS)
+#  error This file should only be used when MOZ_NO_SMART_CARDS is not defined.
+#endif  // MOZ_NO_SMART_CARDS
 
 #include "mozilla/psm/PKCS11ModuleChild.h"
 
@@ -13,11 +13,14 @@
 #include "PKCS11Token.h"
 #include "ScopedNSSTypes.h"
 #include "certdb.h"
+#include "mozilla/Logging.h"
 #include "mozilla/ipc/Endpoint.h"
-#include "mozilla/psm/IPCClientCertsParent.h"
 #include "nsDebugImpl.h"
+#include "nss.h"
 
 namespace mozilla::psm {
+
+static LazyLogModule gRemotePKCS11Log("remotepkcs11");
 
 char* RemotePKCS11PasswordPrompt(PK11SlotInfo* slot, PRBool _retry, void* ctx) {
   MOZ_ASSERT(ctx);
@@ -31,15 +34,26 @@ char* RemotePKCS11PasswordPrompt(PK11SlotInfo* slot, PRBool _retry, void* ctx) {
   return pkcs11ModuleChild->PromptForPassword(slot);
 }
 
-nsresult ConfigureNSSInPKCS11UtilityProcess(const nsACString& profilePath) {
-  if (InitializeNSS(profilePath, NSSDBConfig::ReadWrite,
-                    PKCS11DBConfig::LoadModules) != SECSuccess) {
-    return NS_ERROR_FAILURE;
+void ConfigureNSSInPKCS11UtilityProcess(const nsACString& profilePath) {
+  MOZ_LOG(gRemotePKCS11Log, LogLevel::Debug,
+          ("ConfigureNSSInPKCS11UtilityProcess: profilePath: '%s'",
+           PromiseFlatCString(profilePath).get()));
+  NSSDBConfig readWriteConfig = NSSDBConfig::ReadWrite;
+  // If NSS is initialized in read-write mode with an empty path, it will
+  // create a `pkcs11.txt` file in the current working directory, which is not
+  // the desired behavior.
+  if (profilePath.IsEmpty()) {
+    MOZ_LOG(gRemotePKCS11Log, LogLevel::Debug,
+            ("profilePath is empty: initializing in read-only mode"));
+    readWriteConfig = NSSDBConfig::ReadOnly;
   }
-
+  if (InitializeNSS(profilePath, readWriteConfig,
+                    PKCS11DBConfig::LoadModules) != SECSuccess) {
+    MOZ_LOG(gRemotePKCS11Log, LogLevel::Error,
+            ("Failed to initialize NSS: %d", PR_GetError()));
+    return;
+  }
   PK11_SetPasswordFunc(RemotePKCS11PasswordPrompt);
-
-  return NS_OK;
 }
 
 nsresult PKCS11ModuleChild::Start(Endpoint<PPKCS11ModuleChild>&& aEndpoint,
@@ -66,17 +80,7 @@ nsresult PKCS11ModuleChild::Start(Endpoint<PPKCS11ModuleChild>&& aEndpoint,
       "PKCS11ModuleChild::StartBind",
       [self = RefPtr{this}, endpoint = std::move(aEndpoint),
        profilePath = std::move(aProfilePath)]() mutable {
-        if (profilePath.IsEmpty()) {
-          NS_WARNING(
-              "no profile path for utility process: loading PKCS#11 modules "
-              "will fail");
-        } else {
-          if (NS_FAILED(ConfigureNSSInPKCS11UtilityProcess(profilePath))) {
-            NS_WARNING(
-                "could not load NSS in utility process: loading PKCS#11 "
-                "modules will fail");
-          }
-        }
+        ConfigureNSSInPKCS11UtilityProcess(profilePath);
         MOZ_ALWAYS_TRUE(endpoint.Bind(self));
       }));
   return rv;
@@ -87,6 +91,10 @@ ipc::IPCResult PKCS11ModuleChild::RecvAddModule(nsCString&& aModuleName,
                                                 uint32_t aMechanismFlags,
                                                 uint32_t aCipherFlags,
                                                 AddModuleResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(NS_ERROR_NOT_AVAILABLE);
+    return IPC_OK();
+  }
   aResolver(PKCS11ModuleDB::DoAddModule(aModuleName, aLibraryPath,
                                         aMechanismFlags, aCipherFlags));
   return IPC_OK();
@@ -94,16 +102,25 @@ ipc::IPCResult PKCS11ModuleChild::RecvAddModule(nsCString&& aModuleName,
 
 ipc::IPCResult PKCS11ModuleChild::RecvDeleteModule(
     nsCString&& aModuleName, DeleteModuleResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(NS_ERROR_NOT_AVAILABLE);
+    return IPC_OK();
+  }
   aResolver(PKCS11ModuleDB::DoDeleteModule(aModuleName));
   return IPC_OK();
 }
 
 ipc::IPCResult PKCS11ModuleChild::RecvListModules(
     ListModulesResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(std::make_tuple(NS_ERROR_NOT_AVAILABLE, nsTArray<ModuleInfo>{}));
+    return IPC_OK();
+  }
   nsTArray<ModuleInfo> modules;
   nsresult rv = PKCS11ModuleDB::DoListModules(modules);
-  using Type = std::tuple<const nsresult&, nsTArray<ModuleInfo>&&>;
-  aResolver(Type(rv, std::move(modules)));
+  MOZ_LOG(gRemotePKCS11Log, LogLevel::Debug,
+          ("RecvListModules returning %zu modules", modules.Length()));
+  aResolver(std::make_tuple(rv, std::move(modules)));
   return IPC_OK();
 }
 
@@ -125,6 +142,10 @@ nsresult DoWithToken(SECMODModuleID aModuleID, CK_SLOT_ID aSlotID,
 ipc::IPCResult PKCS11ModuleChild::RecvResetToken(
     SECMODModuleID aModuleID, CK_SLOT_ID aSlotID,
     ResetTokenResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(std::make_tuple(NS_ERROR_NOT_AVAILABLE, TokenInfo{}));
+    return IPC_OK();
+  }
   TokenInfo tokenInfo;
   nsresult rv =
       DoWithToken(aModuleID, aSlotID, tokenInfo, [](PK11SlotInfo* slot) {
@@ -134,14 +155,17 @@ ipc::IPCResult PKCS11ModuleChild::RecvResetToken(
         }
         return NS_OK;
       });
-  using Type = std::tuple<const nsresult&, TokenInfo&&>;
-  aResolver(Type(rv, std::move(tokenInfo)));
+  aResolver(std::make_tuple(rv, std::move(tokenInfo)));
   return IPC_OK();
 }
 
 ipc::IPCResult PKCS11ModuleChild::RecvLoginToken(
     SECMODModuleID aModuleID, CK_SLOT_ID aSlotID,
     LoginTokenResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(std::make_pair(NS_ERROR_NOT_AVAILABLE, TokenInfo{}));
+    return IPC_OK();
+  }
   mAuthTaskQueue->Dispatch(NS_NewRunnableFunction(
       __func__, [self = RefPtr{this}, moduleID(aModuleID), slotID(aSlotID),
                  resolver(std::move(aResolver))] {
@@ -166,6 +190,10 @@ ipc::IPCResult PKCS11ModuleChild::RecvLoginToken(
 ipc::IPCResult PKCS11ModuleChild::RecvLogoutToken(
     SECMODModuleID aModuleID, CK_SLOT_ID aSlotID,
     LogoutTokenResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(std::make_pair(NS_ERROR_NOT_AVAILABLE, TokenInfo{}));
+    return IPC_OK();
+  }
   TokenInfo tokenInfo;
   nsresult rv =
       DoWithToken(aModuleID, aSlotID, tokenInfo, [](PK11SlotInfo* slot) {
@@ -175,8 +203,7 @@ ipc::IPCResult PKCS11ModuleChild::RecvLogoutToken(
         (void)PK11_Logout(slot);
         return NS_OK;
       });
-  using Type = std::tuple<const nsresult&, TokenInfo&&>;
-  aResolver(Type(rv, std::move(tokenInfo)));
+  aResolver(std::make_tuple(rv, std::move(tokenInfo)));
   return IPC_OK();
 }
 
@@ -199,11 +226,14 @@ nsresult DoChangeTokenPassword(SECMODModuleID aModuleID, CK_SLOT_ID aSlotID,
 ipc::IPCResult PKCS11ModuleChild::RecvChangeTokenPassword(
     SECMODModuleID aModuleID, CK_SLOT_ID aSlotID, const nsCString& aOldPassword,
     const nsCString& aNewPassword, ChangeTokenPasswordResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(std::make_pair(NS_ERROR_NOT_AVAILABLE, TokenInfo{}));
+    return IPC_OK();
+  }
   TokenInfo tokenInfo;
   nsresult rv = DoChangeTokenPassword(aModuleID, aSlotID, aOldPassword,
                                       aNewPassword, tokenInfo);
-  using Type = std::tuple<const nsresult&, TokenInfo&&>;
-  aResolver(Type(rv, std::move(tokenInfo)));
+  aResolver(std::make_tuple(rv, std::move(tokenInfo)));
   return IPC_OK();
 }
 
@@ -384,10 +414,14 @@ Trust GetTrustForCert(CERTCertificate* cert) {
 
 ipc::IPCResult PKCS11ModuleChild::RecvFindObjects(
     SearchingFor aSearchingFor, FindObjectsResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(nsTArray<CryptokiObject>{});
+    return IPC_OK();
+  }
   mAuthTaskQueue->Dispatch(NS_NewRunnableFunction(
       __func__, [searchingFor(aSearchingFor), self = RefPtr{this},
                  resolver(std::move(aResolver))] {
-        nsTArray<IPCClientCertObject> objects;
+        nsTArray<CryptokiObject> objects;
         PK11CertListType certListType;
         switch (searchingFor) {
           case SearchingFor::ClientCertificates:
@@ -460,16 +494,78 @@ ipc::IPCResult PKCS11ModuleChild::RecvFindObjects(
         self->mTaskQueue->Dispatch(NS_NewRunnableFunction(
             __func__,
             [objects(std::move(objects)), resolver(std::move(resolver))] {
+              MOZ_LOG(
+                  gRemotePKCS11Log, LogLevel::Debug,
+                  ("RecvFindObjects returning %zu objects", objects.Length()));
               resolver(std::move(objects));
             }));
       }));
   return IPC_OK();
 }
 
+static void SignDataGivenCertificate(const nsTArray<uint8_t>& certificate,
+                                     const nsTArray<uint8_t>& data,
+                                     const nsTArray<uint8_t>& params,
+                                     nsTArray<uint8_t>& signature, void* ctx) {
+  signature.Clear();
+  SECItem certItem = {siBuffer, const_cast<uint8_t*>(certificate.Elements()),
+                      static_cast<unsigned int>(certificate.Length())};
+  UniqueCERTCertificate cert(CERT_NewTempCertificate(
+      CERT_GetDefaultCertDB(), &certItem, nullptr, false, true));
+  if (!cert) {
+    return;
+  }
+  UniqueSECKEYPrivateKey key(PK11_FindKeyByAnyCert(cert.get(), ctx));
+  if (!key) {
+    return;
+  }
+  SECItem hashItem = {siBuffer, const_cast<uint8_t*>(data.Elements()),
+                      static_cast<unsigned int>(data.Length())};
+  SECItem paramsItem = {siBuffer, const_cast<uint8_t*>(params.Elements()),
+                        static_cast<unsigned int>(params.Length())};
+  SECItem* paramsPtr = params.Length() > 0 ? &paramsItem : nullptr;
+  CK_MECHANISM_TYPE mechanism;
+  switch (key->keyType) {
+    case ecKey:
+      mechanism = CKM_ECDSA;
+      break;
+    case rsaKey:
+      // If we have params, this is RSA-PSS.
+      if (params.Length() > 0) {
+        mechanism = CKM_RSA_PKCS_PSS;
+      } else {
+        // If this is a DigestInfo or a TLS 1.0 MD5/SHA1 hash, this is RSA-PKCS.
+        // Otherwise, this is an emsa-pss-encoded digest that should be signed
+        // with raw RSA.
+        UniqueSGNDigestInfo digestInfo(SGN_DecodeDigestInfo(&hashItem));
+        if (digestInfo || data.Length() == 36) {
+          mechanism = CKM_RSA_PKCS;
+        } else {
+          mechanism = CKM_RSA_X_509;
+        }
+      }
+      break;
+    default:
+      return;
+  }
+  uint32_t len = PK11_SignatureLen(key.get());
+  UniqueSECItem sig(::SECITEM_AllocItem(nullptr, nullptr, len));
+  SECStatus srv = PK11_SignWithMechanism(key.get(), mechanism, paramsPtr,
+                                         sig.get(), &hashItem);
+  if (srv != SECSuccess) {
+    return;
+  }
+  signature.AppendElements(sig->data, sig->len);
+}
+
 ipc::IPCResult PKCS11ModuleChild::RecvSign(nsTArray<uint8_t> aCertificate,
                                            nsTArray<uint8_t> aData,
                                            nsTArray<uint8_t> aParams,
                                            SignResolver&& aResolver) {
+  if (!NSS_IsInitialized()) {
+    aResolver(nsTArray<uint8_t>{});
+    return IPC_OK();
+  }
   mAuthTaskQueue->Dispatch(NS_NewRunnableFunction(
       __func__, [self = RefPtr{this}, certificate(std::move(aCertificate)),
                  data(std::move(aData)), params(std::move(aParams)),
@@ -479,6 +575,9 @@ ipc::IPCResult PKCS11ModuleChild::RecvSign(nsTArray<uint8_t> aCertificate,
         self->mTaskQueue->Dispatch(NS_NewRunnableFunction(
             __func__,
             [signature(std::move(signature)), resolver(std::move(resolver))] {
+              MOZ_LOG(gRemotePKCS11Log, LogLevel::Debug,
+                      ("RecvSign returning signature of length %zu",
+                       signature.Length()));
               resolver(std::move(signature));
             }));
       }));

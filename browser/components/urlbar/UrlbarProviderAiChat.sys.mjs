@@ -5,16 +5,16 @@
 /**
  * @import {AISmartBarParent} from "moz-src:///browser/components/aiwindow/ui/actors/AISmartBarParent.sys.mjs"
  * @import {SmartbarInput} from "chrome://browser/content/urlbar/SmartbarInput.mjs"
+ * @import {SmartbarAction} from "chrome://browser/content/aiwindow/components/input-cta.mjs"
  */
 import {
   SkippableTimer,
   UrlbarProvider,
   UrlbarUtils,
 } from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-const lazy = {};
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   AIWindow:
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   AIWindowUI:
@@ -130,10 +130,14 @@ export class UrlbarProviderAiChat extends UrlbarProvider {
 
     let intent = await this.#determineIntent(queryContext);
 
+    // No chat row when the query was canceled, the input is a URL, or this is
+    // the urlbar and the intent is not chat. Pinning search still shows Ask.
     if (
       instance != this.queryInstance ||
       intent == "navigate" ||
-      (intent != "chat" && queryContext.sapName == "urlbar")
+      (intent != "chat" &&
+        queryContext.sapName == "urlbar" &&
+        lazy.IntentClassifier.smartbarIntent != "search")
     ) {
       return;
     }
@@ -223,7 +227,7 @@ export class UrlbarProviderAiChat extends UrlbarProvider {
     );
     actor.ask({
       contextMentions: controller.input.getResolvedContextWebsites?.() ?? [],
-      contextPageUrl: controller.input.getContextPageUrl?.() ?? null,
+      contextPageUrl: controller.input.getContextPageUrl?.()?.href ?? null,
       detectedIntent: this.#lastIntentEvaluation.intent ?? "chat",
       location: controller.input.sapLocation ?? "urlbar",
       submitType: isCtaButtonClick ? "button" : "enter",
@@ -256,7 +260,7 @@ export class UrlbarProviderAiChat extends UrlbarProvider {
    * Determine the user intent for the given query context.
    *
    * @param {UrlbarQueryContext} queryContext
-   * @returns {Promise<string>} "chat", "search", or "navigate"
+   * @returns {Promise<SmartbarAction>} "chat", "search", or "navigate"
    */
   async #determineIntent(queryContext) {
     // If the string looks like a URL, don't show the chat result.
@@ -300,7 +304,7 @@ export class UrlbarProviderAiChat extends UrlbarProvider {
   #lastIntentEvaluation = {
     timestamp: 0,
     queryString: "",
-    /** @type {?string} */
+    /** @type {?SmartbarAction} */
     intent: null,
   };
 }

@@ -6,9 +6,13 @@
 ChromeUtils.defineESModuleGetters(this, {
   actionTypes: "resource://newtab/common/Actions.mjs",
   sinon: "resource://testing-common/Sinon.sys.mjs",
+  MerinoClient: "moz-src:///browser/components/urlbar/MerinoClient.sys.mjs",
+  MerinoTestUtils: "resource://testing-common/MerinoTestUtils.sys.mjs",
   PictureOfTheDayFeed:
     "resource://newtab/lib/Widgets/PictureOfTheDayFeed.sys.mjs",
 });
+
+MerinoTestUtils.init(this);
 
 const ENDPOINT =
   "https://merino.services.mozilla.com/api/v1/rss/picture-of-the-day";
@@ -72,6 +76,47 @@ add_task(async function test_isEnabled() {
     }).isEnabled(),
     "disabled when the system pref is false"
   );
+  sandbox.restore();
+});
+
+add_task(async function test_region_resolves_after_init() {
+  const sandbox = sinon.createSandbox();
+  const prefs = {
+    ...ENABLED_PREFS,
+    "widgets.system.pictureOfTheDay.enabled": false,
+    trainhopConfig: { widgetPictureOfTheDay: { visible: true } },
+  };
+  const feed = makeFeed(sandbox, { prefs });
+  const loadPicture = sandbox.stub(feed, "loadPicture").resolves();
+  await feed.onAction({ type: actionTypes.INIT });
+  Assert.ok(loadPicture.notCalled, "No picture before the region resolves");
+
+  prefs.region = "FR";
+  await feed.onAction({
+    type: actionTypes.PREF_CHANGED,
+    data: { name: "region", value: "FR" },
+  });
+  Assert.ok(
+    loadPicture.calledOnce,
+    "Loads the picture when the region resolves"
+  );
+  sandbox.restore();
+});
+
+add_task(async function test_disable_keeps_picture_in_store() {
+  const sandbox = sinon.createSandbox();
+  const feed = makeFeed(sandbox, {
+    prefs: { ...ENABLED_PREFS, "widgets.pictureOfTheDay.enabled": false },
+  });
+  feed.loaded = true;
+
+  await feed.onAction({
+    type: actionTypes.PREF_CHANGED,
+    data: { name: "widgets.pictureOfTheDay.enabled", value: false },
+  });
+
+  Assert.strictEqual(feed.loaded, false, "marks the feed as not loaded");
+  Assert.ok(!findUpdate(feed), "does not send an empty picture to content");
   sandbox.restore();
 });
 
@@ -186,6 +231,136 @@ add_task(async function test_fetch_error_falls_back() {
   const update = findUpdate(feed);
   Assert.equal(update.args[0].data.imageUrl, "", "broadcasts empty image");
   Assert.equal(update.args[0].data.error, "load_error", "reports the error");
+  sandbox.restore();
+});
+
+add_task(async function test_fetch_keeps_the_previous_picture() {
+  const sandbox = sinon.createSandbox();
+  const feed = makeFeed(sandbox, { prefs: ENABLED_PREFS });
+  const today = {
+    high_res_image_url: "https://img/today.jpg",
+    published_date: "2026-10-09",
+  };
+  feed.merino = {
+    fetchPictureOfTheDay: sandbox.stub().resolves({
+      data: {
+        ...today,
+        previous: {
+          high_res_image_url: "https://img/previous.jpg",
+          published_date: "2026-10-08",
+          author: "A",
+        },
+      },
+      error: null,
+    }),
+  };
+
+  await feed.fetch();
+
+  const { previous } = findUpdate(feed).args[0].data;
+  Assert.equal(previous.imageUrl, "https://img/previous.jpg");
+  Assert.equal(previous.publishedDate, "2026-10-08");
+  Assert.equal(previous.author, "A", "keeps the attribution");
+  Assert.equal(
+    feed.cache.set.firstCall.args[1].previous.imageUrl,
+    "https://img/previous.jpg",
+    "caches it with today's picture"
+  );
+
+  feed.store.dispatch.resetHistory();
+  feed.merino.fetchPictureOfTheDay.resolves({
+    data: { ...today, previous: { ...today } },
+    error: null,
+  });
+  await feed.fetch();
+  Assert.strictEqual(
+    findUpdate(feed).args[0].data.previous,
+    null,
+    "drops a previous picture with today's date"
+  );
+
+  feed.store.dispatch.resetHistory();
+  feed.merino.fetchPictureOfTheDay.resolves({
+    data: {
+      ...today,
+      previous: { high_res_image_url: "https://img/undated.jpg" },
+    },
+    error: null,
+  });
+  await feed.fetch();
+  Assert.strictEqual(
+    findUpdate(feed).args[0].data.previous,
+    null,
+    "drops an undated previous picture"
+  );
+  sandbox.restore();
+});
+
+add_task(
+  async function test_setWallpaper_uses_the_requested_previous_picture() {
+    const sandbox = sinon.createSandbox();
+    const feed = makeFeed(sandbox, { prefs: ENABLED_PREFS });
+    feed.currentImageUrl = "https://img/today.jpg";
+    feed.store.getState = () => ({
+      Prefs: { values: ENABLED_PREFS },
+      PictureOfTheDay: {
+        description: "Today",
+        publishedDate: "2026-10-09",
+        previous: {
+          imageUrl: "https://img/previous.jpg",
+          description: "Previous",
+          publishedDate: "2026-10-08",
+        },
+      },
+    });
+    sandbox.stub(feed, "fetchImage").resolves({
+      ok: true,
+      headers: { get: () => "image/jpeg" },
+      blob: async () => new Blob(["previous"], { type: "image/jpeg" }),
+    });
+
+    await feed.onAction({
+      type: actionTypes.WIDGETS_PICTURE_SET_WALLPAPER,
+      data: { publishedDate: "2026-10-08" },
+    });
+
+    Assert.ok(feed.fetchImage.calledWith("https://img/previous.jpg"));
+    const calls = feed.store.dispatch.getCalls();
+    const upload = calls.find(
+      c => c.args[0]?.type === actionTypes.WALLPAPER_UPLOAD
+    );
+    Assert.equal(upload.args[0].data.name, "Previous");
+    const select = calls.find(
+      c => c.args[0]?.type === actionTypes.SET_MULTIPLE_PREFS
+    );
+    Assert.equal(
+      select.args[0].data.values["widgets.pictureOfTheDay.wallpaperActive"],
+      "2026-10-08"
+    );
+    sandbox.restore();
+  }
+);
+
+add_task(async function test_setWallpaper_ignores_a_stale_date() {
+  const sandbox = sinon.createSandbox();
+  const feed = makeFeed(sandbox, { prefs: ENABLED_PREFS });
+  feed.currentImageUrl = "https://img/today.jpg";
+  feed.store.getState = () => ({
+    Prefs: { values: ENABLED_PREFS },
+    PictureOfTheDay: {
+      publishedDate: "2026-10-10",
+      previous: {
+        imageUrl: "https://img/previous.jpg",
+        publishedDate: "2026-10-09",
+      },
+    },
+  });
+  sandbox.stub(feed, "fetchImage");
+
+  // The widget showed October 8, then the feed rolled over a day.
+  await feed.setWallpaper(null, "2026-10-08");
+
+  Assert.ok(feed.fetchImage.notCalled, "sets neither picture");
   sandbox.restore();
 });
 
@@ -509,5 +684,74 @@ add_task(async function test_set_wallpaper_names_the_page_that_asked() {
     "The upload names the page that asked for it"
   );
 
+  sandbox.restore();
+});
+
+add_task(async function test_merino_client_sends_source_and_accept_language() {
+  await MerinoTestUtils.server.start();
+  MerinoTestUtils.server.reset();
+
+  const client = new PictureOfTheDayFeed().MerinoClient("POTD_TEST");
+  const { data, error } = await client.fetchPictureOfTheDay({
+    source: "newtab",
+    endpointUrl: MerinoTestUtils.server.url.toString(),
+    acceptLanguage: "fr",
+  });
+
+  Assert.equal(error, null, "No error on a successful fetch");
+  Assert.ok(data, "The response body comes back as data");
+  Assert.equal(MerinoTestUtils.server.requests.length, 1, "One request made");
+  const [request] = MerinoTestUtils.server.requests;
+  Assert.equal(
+    new URLSearchParams(request.queryString).get("source"),
+    "newtab",
+    "The source param is set"
+  );
+  Assert.equal(
+    request.getHeader("Accept-Language"),
+    "fr",
+    "The Accept-Language header is sent"
+  );
+
+  info("A failed response comes back as a load error");
+  MerinoTestUtils.server.response = { status: 500 };
+  const failed = await client.fetchPictureOfTheDay({
+    endpointUrl: MerinoTestUtils.server.url.toString(),
+  });
+  Assert.deepEqual(failed, { data: null, error: "load_error" });
+});
+
+add_task(async function test_merino_client_uses_platform_method_when_present() {
+  await MerinoTestUtils.server.start();
+  MerinoTestUtils.server.reset();
+
+  const sandbox = sinon.createSandbox();
+  const result = { data: { title: "From MerinoClient" }, error: null };
+  const platformMethod = sandbox
+    .stub(MerinoClient.prototype, "fetchPictureOfTheDay")
+    .resolves(result);
+  const client = new PictureOfTheDayFeed().MerinoClient("POTD_TEST");
+  const options = {
+    source: "newtab",
+    endpointUrl: MerinoTestUtils.server.url.toString(),
+    acceptLanguage: "fr",
+  };
+  const returned = await client.fetchPictureOfTheDay(options);
+
+  Assert.equal(returned, result, "MerinoClient's result is returned");
+  Assert.ok(
+    platformMethod.calledOnceWithExactly(options),
+    "MerinoClient's method gets the same options"
+  );
+  Assert.equal(
+    platformMethod.firstCall.thisValue,
+    client,
+    "MerinoClient's method runs on the wrapper"
+  );
+  Assert.equal(
+    MerinoTestUtils.server.requests.length,
+    0,
+    "The fallback copy makes no request"
+  );
   sandbox.restore();
 });

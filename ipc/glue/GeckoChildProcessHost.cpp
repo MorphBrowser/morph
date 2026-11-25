@@ -40,7 +40,6 @@
 #endif
 
 #include "ProtocolUtils.h"
-#include "mozilla/LinkedList.h"
 #include "mozilla/Logging.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/GeckoArgs.h"
@@ -56,7 +55,6 @@
 #include "mozilla/ipc/IOThread.h"
 #include "mozilla/ipc/EnvironmentMap.h"
 #include "mozilla/ipc/NodeController.h"
-#include "mozilla/net/SocketProcessHost.h"
 #include "nsCharSeparatedTokenizer.h"
 #include "nsDirectoryService.h"
 #include "nsDirectoryServiceDefs.h"
@@ -84,9 +82,12 @@
 #  include "mozilla/SandboxLaunch.h"
 #endif
 
+#ifdef XP_MACOSX
+#  include "nsMacUtilsImpl.h"
+#endif
+
 #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
 #  include "GMPProcessParent.h"
-#  include "nsMacUtilsImpl.h"
 #  include "mozilla/gfx/GPUProcessHost.h"
 #endif
 
@@ -368,10 +369,9 @@ using base::ProcessHandle;
 using mozilla::ipc::BaseProcessLauncher;
 using mozilla::ipc::ProcessLauncher;
 
-mozilla::StaticAutoPtr<mozilla::LinkedList<GeckoChildProcessHost>>
-    GeckoChildProcessHost::sGeckoChildProcessHosts;
-
-mozilla::StaticMutex GeckoChildProcessHost::sMutex;
+static StaticMutex sGeckoChildProcessHostsMutex;
+static StaticAutoPtr<nsTArray<ThreadSafeWeakPtr<GeckoChildProcessHost>>>
+    sGeckoChildProcessHosts MOZ_GUARDED_BY(sGeckoChildProcessHostsMutex);
 
 GeckoChildProcessHost::GeckoChildProcessHost(GeckoProcessType aProcessType,
                                              bool aIsFileContent)
@@ -379,7 +379,7 @@ GeckoChildProcessHost::GeckoChildProcessHost(GeckoProcessType aProcessType,
       mChildID(++gChildCounter),
       mIsFileContent(aIsFileContent),
       mMonitor("mozilla.ipc.GeckoChildProcessHost.mMonitor"),
-      mLaunchOptions(MakeUnique<base::LaunchOptions>()),
+      mLaunchOptions(std::make_unique<base::LaunchOptions>()),
       mInitialChannelId(nsID::GenerateUUID()),
       mProcessState(CREATING_CHANNEL),
 #ifdef XP_WIN
@@ -390,21 +390,18 @@ GeckoChildProcessHost::GeckoChildProcessHost(GeckoProcessType aProcessType,
       mSandboxLevel(0),
 #endif
       mHandleLock("mozilla.ipc.GeckoChildProcessHost.mHandleLock"),
-      mChildProcessHandle(0),
+      mChildProcessHandle(0)
 #if defined(XP_MACOSX)
-      mChildTask(MACH_PORT_NULL),
+      ,
+      mChildTask(MACH_PORT_NULL)
+#  if defined(MOZ_SANDBOX)
+      ,
+      mDisableOSActivityMode(false)
+#  endif
 #endif
-#if defined(MOZ_SANDBOX) && defined(XP_MACOSX)
-      mDisableOSActivityMode(false),
-#endif
-      mDestroying(false) {
+{
   MOZ_COUNT_CTOR(GeckoChildProcessHost);
   MOZ_RELEASE_ASSERT(mChildID > 0, "gChildCounter overflowed");
-  StaticMutexAutoLock lock(sMutex);
-  if (!sGeckoChildProcessHosts) {
-    sGeckoChildProcessHosts = new mozilla::LinkedList<GeckoChildProcessHost>();
-  }
-  sGeckoChildProcessHosts->insertBack(this);
 #if defined(MOZ_SANDBOX) && defined(XP_LINUX)
   if (aProcessType == GeckoProcessType_RDD) {
     // The RDD process makes limited use of EGL.  If Mesa's shader
@@ -421,10 +418,18 @@ GeckoChildProcessHost::GeckoChildProcessHost(GeckoProcessType aProcessType,
 }
 
 GeckoChildProcessHost::~GeckoChildProcessHost() {
-  AssertIOThread();
-  MOZ_RELEASE_ASSERT(mDestroying);
-
   MOZ_COUNT_DTOR(GeckoChildProcessHost);
+
+  // Clean up the weak pointer from the global GeckoChildProcessHost array.
+  {
+    StaticMutexAutoLock lock(sGeckoChildProcessHostsMutex);
+    if (sGeckoChildProcessHosts) {
+      sGeckoChildProcessHosts->RemoveElement(this);
+      if (sGeckoChildProcessHosts->IsEmpty()) {
+        sGeckoChildProcessHosts = nullptr;
+      }
+    }
+  }
 
   {
     mozilla::AutoWriteLock hLock(mHandleLock);
@@ -452,7 +457,19 @@ GeckoChildProcessHost::~GeckoChildProcessHost() {
            base::GetProcId(mChildProcessHandle), mChildID,
            XRE_GeckoProcessTypeToString(mProcessType)));
 
-      ProcessWatcher::EnsureProcessTerminated(mChildProcessHandle);
+      // If we still have a child process handle, asynchronously dispatch a task
+      // to ensure that the child process is reaped to the background thread.
+      nsCOMPtr<nsIRunnable> ensureProcessTerminated = NS_NewRunnableFunction(
+          "GeckoChildProcessHost EnsureProcessTerminated",
+          [handle = mChildProcessHandle] {
+            ProcessWatcher::EnsureProcessTerminated(handle);
+          });
+      if (XRE_GetAsyncIOEventTarget()->IsOnCurrentThread()) {
+        ensureProcessTerminated->Run();
+      } else {
+        MOZ_ALWAYS_SUCCEEDS(XRE_GetAsyncIOEventTarget()->Dispatch(
+            ensureProcessTerminated.forget()));
+      }
       mChildProcessHandle = 0;
     }
   }
@@ -478,46 +495,6 @@ task_t GeckoChildProcessHost::GetChildTask() {
 }
 #endif
 
-void GeckoChildProcessHost::RemoveFromProcessList() {
-  StaticMutexAutoLock lock(sMutex);
-  if (!sGeckoChildProcessHosts) {
-    return;
-  }
-  LinkedListElement<GeckoChildProcessHost>::removeFrom(
-      *sGeckoChildProcessHosts);
-}
-
-void GeckoChildProcessHost::Destroy() {
-  MOZ_RELEASE_ASSERT(!mDestroying);
-  // We can remove from the list before it's really destroyed
-  RemoveFromProcessList();
-  RefPtr<ProcessHandlePromise> whenReady = mHandlePromise;
-
-  if (!whenReady) {
-    // AsyncLaunch not called yet, so dispatch immediately.
-    whenReady = ProcessHandlePromise::CreateAndReject(
-        LaunchError("DestroyEarly"), __func__);
-  }
-
-  using Value = ProcessHandlePromise::ResolveOrRejectValue;
-  mDestroying = true;
-
-  // Synchronously invoke `delete this` if we're already shutting the IO thread
-  // down to ensure we're cleaned up before the thread dies. This is safe as we
-  // can never resolve `mHandlePromise` after the IO thread goes away.
-  MessageLoop* loop = MessageLoop::current();
-  if (loop && MessageLoop::TYPE_IO == loop->type() &&
-      !loop->IsAcceptingTasks()) {
-    delete this;
-    return;
-  }
-
-  // If we're not in shutdown, do this async, as we may still be waiting for the
-  // child process PID from the launcher thread.
-  whenReady->Then(XRE_GetAsyncIOEventTarget(), __func__,
-                  [this](const Value&) { delete this; });
-}
-
 #ifdef MOZ_WIDGET_COCOA
 
 static mozilla::StaticMutex sCachedExecutablePathMutex;
@@ -538,7 +515,7 @@ static MacOSChildProcessBundleType GetMacOSChildProcessBundleType(
       mozilla::StaticPrefs::layers_gpu_process_executable_enabled()) {
     return MacOSChildProcessBundleType::GPU;
   }
-#  if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#  if !defined(MOZ_NO_SMART_CARDS)
   if (processType == GeckoProcessType_Utility &&
       utilitySandbox == PKCS11_MODULE) {
     return MacOSChildProcessBundleType::PKCS11;
@@ -554,7 +531,7 @@ static nsLiteralCString GetBundleNameForType(
       return nsLiteralCString(MOZ_EME_PROCESS_BUNDLENAME);
     case MacOSChildProcessBundleType::GPU:
       return nsLiteralCString(MOZ_GPU_PROCESS_BUNDLENAME);
-#  if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#  if !defined(MOZ_NO_SMART_CARDS)
     case MacOSChildProcessBundleType::PKCS11:
       return nsLiteralCString(MOZ_PKCS11_PROCESS_BUNDLENAME);
 #  else
@@ -580,7 +557,7 @@ static const char* GetBundleExecutablePathForType(
       return BUNDLE_EXEC_PATH(EME);
     case MacOSChildProcessBundleType::GPU:
       return BUNDLE_EXEC_PATH(GPU);
-#  if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#  if !defined(MOZ_NO_SMART_CARDS)
     case MacOSChildProcessBundleType::PKCS11:
       return BUNDLE_EXEC_PATH(PKCS11);
 #  else
@@ -714,7 +691,7 @@ bool ResolveChildProcessPathFromPlistForTesting(
 // static
 mozilla::BinPathType BaseProcessLauncher::GetPathToBinary(
     FilePath& exePath, GeckoProcessType processType,
-    SandboxingKind utilitySandbox) {
+    [[maybe_unused]] SandboxingKind utilitySandbox) {
   exePath = {};
   BinPathType pathType = XRE_GetChildProcBinPathType(processType);
 
@@ -780,7 +757,7 @@ class AutoCFTypeObject {
 
 // We start the unique IDs at 1 so that 0 can be used to mean that
 // a component has no unique ID assigned to it.
-uint32_t GeckoChildProcessHost::sNextUniqueID = 1;
+std::atomic<uint32_t> GeckoChildProcessHost::sNextUniqueID = 1;
 
 /* static */
 uint32_t GeckoChildProcessHost::GetUniqueID() { return sNextUniqueID++; }
@@ -874,14 +851,6 @@ void GeckoChildProcessHost::InitWindowsGroupID() {
 }
 #endif
 
-bool GeckoChildProcessHost::SyncLaunch(geckoargs::ChildProcessArgs aExtraOpts,
-                                       int aTimeoutMs) {
-  if (!AsyncLaunch(std::move(aExtraOpts))) {
-    return false;
-  }
-  return WaitUntilConnected(aTimeoutMs);
-}
-
 // Note: for most process types, we currently call AsyncLaunch, and therefore
 // the *ProcessLauncher constructor, on the main thread, while the
 // ProcessLauncher methods to actually execute the launch are called on the IO
@@ -909,17 +878,24 @@ bool GeckoChildProcessHost::AsyncLaunch(
   launcher->SetLaunchArchitecture(mLaunchArch);
 #endif
 
-  // Note: Destroy() waits on mHandlePromise to delete |this|. As such, we want
-  // to be sure that all of our post-launch processing on |this| happens before
-  // mHandlePromise notifies.
+  if (!mHandlePromise) {
+    StaticMutexAutoLock lock(sGeckoChildProcessHostsMutex);
+    if (!sGeckoChildProcessHosts) {
+      sGeckoChildProcessHosts =
+          new nsTArray<ThreadSafeWeakPtr<GeckoChildProcessHost>>();
+    }
+    sGeckoChildProcessHosts->AppendElement(this);
+  }
+
   MOZ_ASSERT(mHandlePromise == nullptr);
   mHandlePromise =
-      mozilla::InvokeAsync<GeckoChildProcessHost*>(
+      mozilla::InvokeAsync<RefPtr<GeckoChildProcessHost>>(
           XRE_GetAsyncIOEventTarget(), launcher.get(), __func__,
           &BaseProcessLauncher::Launch, this)
           ->Then(
               XRE_GetAsyncIOEventTarget(), __func__,
-              [this, startTimeStamp](LaunchResults&& aResults) {
+              [self = RefPtr{this}, this,
+               startTimeStamp](LaunchResults&& aResults) {
                 {
                   {
                     mozilla::AutoWriteLock handleLock(mHandleLock);
@@ -977,18 +953,18 @@ bool GeckoChildProcessHost::AsyncLaunch(
                       TimeStamp::Now() - startTimeStamp);
 
                   MonitorAutoLock lock(mMonitor);
-                  // The OnChannel{Connected,Error} may have already advanced
-                  // the state.
-                  if (mProcessState < PROCESS_CREATED) {
-                    mProcessState = PROCESS_CREATED;
-                  }
+                  MOZ_ASSERT(mProcessState ==
+                             (mProcessType == GeckoProcessType_ForkServer
+                                  ? CREATING_CHANNEL
+                                  : CHANNEL_INITIALIZED));
+                  mProcessState = PROCESS_CREATED;
                   lock.Notify();
                 }
                 return ProcessHandlePromise::CreateAndResolve(
                     GetChildProcessHandle(), __func__);
               },
-              [this](const LaunchError aError) {
-                // WaitUntilConnected might be waiting for us to signal.
+              [self = RefPtr{this}, this](const LaunchError aError) {
+                // WaitForProcessHandle might be waiting for us to signal.
                 // If something failed let's set the error state and notify.
                 CHROMIUM_LOG(ERROR)
                     << "Failed to launch "
@@ -1024,14 +1000,14 @@ bool GeckoChildProcessHost::AsyncLaunch(
   return true;
 }
 
-void GeckoChildProcessHost::OnProcessLaunchError(const LaunchError aError) {
+void GeckoChildProcessHost::OnProcessLaunchError(const LaunchError /*aError*/) {
   MonitorAutoLock lock(mMonitor);
   mProcessState = PROCESS_ERROR;
   lock.Notify();
 }
 
-bool GeckoChildProcessHost::WaitUntilConnected(int32_t aTimeoutMs) {
-  AUTO_PROFILER_LABEL("GeckoChildProcessHost::WaitUntilConnected", OTHER);
+bool GeckoChildProcessHost::WaitForProcessHandle(int32_t aTimeoutMs) {
+  AUTO_PROFILER_LABEL("GeckoChildProcessHost::WaitForProcessHandle", OTHER);
 
   // NB: this uses a different mechanism than the chromium parent
   // class.
@@ -1045,12 +1021,7 @@ bool GeckoChildProcessHost::WaitUntilConnected(int32_t aTimeoutMs) {
 
   // We'll receive several notifications, we need to exit when we
   // have either successfully launched or have timed out.
-  while (mProcessState != PROCESS_CONNECTED) {
-    // If there was an error then return it, don't wait out the timeout.
-    if (mProcessState == PROCESS_ERROR) {
-      break;
-    }
-
+  while (mProcessState < PROCESS_CREATED) {
     CVStatus status = lock.Wait(timeout);
     if (status == CVStatus::Timeout) {
       break;
@@ -1062,32 +1033,23 @@ bool GeckoChildProcessHost::WaitUntilConnected(int32_t aTimeoutMs) {
       waitStart = current;
     }
   }
+  MOZ_ASSERT(mProcessState != PROCESS_CREATED || GetChildProcessHandle());
 
-  return mProcessState == PROCESS_CONNECTED;
-}
-
-bool GeckoChildProcessHost::WaitForProcessHandle() {
-  MonitorAutoLock lock(mMonitor);
-  while (mProcessState < PROCESS_CREATED) {
-    lock.Wait();
-  }
-  MOZ_ASSERT(mProcessState == PROCESS_ERROR || GetChildProcessHandle());
-
-  return mProcessState < PROCESS_ERROR;
+  return mProcessState == PROCESS_CREATED;
 }
 
 bool GeckoChildProcessHost::LaunchAndWaitForProcessHandle(
-    geckoargs::ChildProcessArgs aExtraOpts) {
+    geckoargs::ChildProcessArgs aExtraOpts, int32_t aTimeoutMs) {
   if (!AsyncLaunch(std::move(aExtraOpts))) {
     return false;
   }
-  return WaitForProcessHandle();
+  return WaitForProcessHandle(aTimeoutMs);
 }
 
 bool GeckoChildProcessHost::InitializeChannel(
     IPC::Channel::ChannelHandle* aClientHandle) {
   mNodeController = NodeController::GetSingleton();
-  if (!mNodeController->InviteChildProcess(this, aClientHandle, &mInitialPort,
+  if (!mNodeController->InviteChildProcess(aClientHandle, &mInitialPort,
                                            getter_AddRefs(mNodeChannel))) {
     return false;
   }
@@ -1170,8 +1132,8 @@ class IPCLaunchThreadObserver final : public nsIObserver {
 NS_IMPL_ISUPPORTS(IPCLaunchThreadObserver, nsIObserver, nsISupports)
 
 NS_IMETHODIMP
-IPCLaunchThreadObserver::Observe(nsISupports* aSubject, const char* aTopic,
-                                 const char16_t* aData) {
+IPCLaunchThreadObserver::Observe(nsISupports* /*aSubject*/, const char* aTopic,
+                                 const char16_t* /*aData*/) {
   MOZ_RELEASE_ASSERT(strcmp(aTopic, "xpcom-shutdown-threads") == 0);
 
   nsCOMPtr<nsIThread> thread;
@@ -1212,7 +1174,7 @@ void
 AddAppDirToCommandLine(CommandLine& aCmdLine, nsIFile* aAppDir)
 #else
 AddAppDirToCommandLine(geckoargs::ChildProcessArgs& aCmdLine,
-                       nsIFile* aAppDir, nsIFile* aProfileDir)
+                       nsIFile* aAppDir, [[maybe_unused]] nsIFile* aProfileDir)
 #endif
 {
   // Content processes need access to application resources, so pass
@@ -1575,8 +1537,6 @@ RefPtr<ProcessLaunchPromise> IosProcessLauncher::DoLaunch() {
   ExtensionKitProcess::Kind kind = ExtensionKitProcess::Kind::WebContent;
   if (mProcessType == GeckoProcessType_GPU) {
     kind = ExtensionKitProcess::Kind::Rendering;
-  } else if (mProcessType == GeckoProcessType_Socket) {
-    kind = ExtensionKitProcess::Kind::Networking;
   }
 
   DarwinObjectPtr<xpc_object_t> bootstrapMessage =
@@ -1772,7 +1732,7 @@ Result<Ok, LaunchError> WindowsProcessLauncher::DoSetup() {
   }
 
 #  if defined(MOZ_SANDBOX)
-  mResults.mSandboxBroker = MakeUnique<SandboxBroker>();
+  mResults.mSandboxBroker = std::make_unique<SandboxBroker>();
 
   // XXX: Bug 1124167: We should get rid of the process specific logic for
   // sandboxing in this class at some point. Unfortunately it will take a bit
@@ -1829,15 +1789,6 @@ Result<Ok, LaunchError> WindowsProcessLauncher::DoSetup() {
         if (NS_WARN_IF(
                 !mResults.mSandboxBroker->SetSecurityLevelForRDDProcess())) {
           return Err(LaunchError("SetSecurityLevelForRDDProcess"));
-        }
-        mUseSandbox = true;
-      }
-      break;
-    case GeckoProcessType_Socket:
-      if (!PR_GetEnv("MOZ_DISABLE_SOCKET_PROCESS_SANDBOX")) {
-        if (NS_WARN_IF(
-                !mResults.mSandboxBroker->SetSecurityLevelForSocketProcess())) {
-          return Err(LaunchError("SetSecurityLevelForSocketProcess"));
         }
         mUseSandbox = true;
       }
@@ -1962,18 +1913,6 @@ bool GeckoChildProcessHost::OpenPrivilegedHandle(base::ProcessId aPid) {
   return base::OpenPrivilegedProcessHandle(aPid, &mChildProcessHandle);
 }
 
-void GeckoChildProcessHost::OnChannelConnected(base::ProcessId peer_pid) {
-  {
-    mozilla::AutoWriteLock hLock(mHandleLock);
-    if (!OpenPrivilegedHandle(peer_pid)) {
-      MOZ_CRASH("can't open handle to child process");
-    }
-  }
-  MonitorAutoLock lock(mMonitor);
-  mProcessState = PROCESS_CONNECTED;
-  lock.Notify();
-}
-
 RefPtr<ProcessHandlePromise> GeckoChildProcessHost::WhenProcessHandleReady() {
   MOZ_ASSERT(mHandlePromise != nullptr);
   return mHandlePromise;
@@ -2057,9 +1996,6 @@ bool GeckoChildProcessHost::StartMacSandbox(int aArgc, char** aArgv,
     case GeckoProcessType_RDD:
       sandboxType = RDDProcessHost::GetMacSandboxType();
       break;
-    case GeckoProcessType_Socket:
-      sandboxType = net::SocketProcessHost::GetMacSandboxType();
-      break;
     case GeckoProcessType_GMPlugin:
       sandboxType = gmp::GMPProcessParent::GetMacSandboxType();
       break;
@@ -2080,16 +2016,21 @@ bool GeckoChildProcessHost::StartMacSandbox(int aArgc, char** aArgv,
 #endif /* XP_MACOSX && MOZ_SANDBOX */
 
 /* static */
-void GeckoChildProcessHost::GetAll(const GeckoProcessCallback& aCallback) {
-  StaticMutexAutoLock lock(sMutex);
-  if (!sGeckoChildProcessHosts) {
-    return;
+nsTArray<RefPtr<GeckoChildProcessHost>> GeckoChildProcessHost::GetAll() {
+  nsTArray<RefPtr<GeckoChildProcessHost>> allHosts;
+  {
+    StaticMutexAutoLock lock(sGeckoChildProcessHostsMutex);
+    if (sGeckoChildProcessHosts) {
+      allHosts.SetCapacity(sGeckoChildProcessHosts->Length());
+      for (auto& weak : *sGeckoChildProcessHosts) {
+        RefPtr<GeckoChildProcessHost> host(weak);
+        if (host) {
+          allHosts.AppendElement(host);
+        }
+      }
+    }
   }
-  for (GeckoChildProcessHost* gp = sGeckoChildProcessHosts->getFirst(); gp;
-       gp = static_cast<mozilla::LinkedListElement<GeckoChildProcessHost>*>(gp)
-                ->getNext()) {
-    aCallback(gp);
-  }
+  return allHosts;
 }
 
 RefPtr<ProcessLaunchPromise> BaseProcessLauncher::Launch(

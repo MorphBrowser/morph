@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,16 +33,18 @@ import androidx.compose.ui.tooling.preview.PreviewParameterProvider
 import androidx.compose.ui.unit.dp
 import mozilla.components.compose.base.annotation.FlexibleWindowLightDarkPreview
 import mozilla.components.compose.base.button.IconButton
+import mozilla.components.compose.draggable.ItemInteractionHandler
+import mozilla.components.compose.draggable.NoOpItemInteractionHandler
 import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.tabstray.TabsTrayTestTag
-import org.mozilla.fenix.tabstray.controller.ItemInteractionHandler
-import org.mozilla.fenix.tabstray.controller.NoOpItemInteractionHandler
 import org.mozilla.fenix.tabstray.data.TabGroupTheme
 import org.mozilla.fenix.tabstray.data.TabsTrayItem
 import org.mozilla.fenix.tabstray.data.createTab
 import org.mozilla.fenix.tabstray.data.createTabGroup
 import org.mozilla.fenix.tabstray.redux.state.TabsTrayState
+import org.mozilla.fenix.tabstray.telemetry.OnTabClose
+import org.mozilla.fenix.tabstray.telemetry.TabCloseType
 import org.mozilla.fenix.tabstray.ui.tabitems.LOREM_IPSUM
 import org.mozilla.fenix.tabstray.ui.tabitems.TabGroupMenuButton
 import org.mozilla.fenix.tabstray.ui.tabpage.TabLayout
@@ -57,7 +58,6 @@ import org.mozilla.fenix.theme.FirefoxTheme
  * @param displayTabsInGrid Whether the group's tabs are displayed in a grid (vs a list).
  * @param itemInteractionHandler Handler for tab interactions.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExpandedTabGroup(
     group: TabsTrayItem.TabGroup,
@@ -206,7 +206,7 @@ private fun ExpandedTabGroupPreview(
                 actions =
                     ExpandedTabGroupActions(
                         onItemClick = {},
-                        onTabClose = {},
+                        onTabClose = { _, _ -> },
                         onDeleteTabGroupClick = {},
                         onEditTabGroupClick = {},
                         onCloseTabGroupClick = {},
@@ -326,7 +326,8 @@ private class ExpandedTabGroupPreviewProvider : PreviewParameterProvider<Expande
  * User interactions handled by the [ExpandedTabGroup] view.
  *
  * @property onItemClick Invoked when the user clicks on a [TabsTrayItem] in the group.
- * @property onTabClose Invoked when the user clicks to close a [TabsTrayItem.Tab] in the group.
+ * @property onTabClose Invoked when the user closes a [TabsTrayItem.Tab] in the group, with the [TabCloseType] of the
+ *   interaction.
  * @property onDeleteTabGroupClick Invoked when the user clicks on delete tab group.
  * @property onEditTabGroupClick Invoked when the user clicks to edit the group.
  * @property onCloseTabGroupClick Invoked when the user clicks to close a tab group.
@@ -337,7 +338,7 @@ private class ExpandedTabGroupPreviewProvider : PreviewParameterProvider<Expande
  */
 data class ExpandedTabGroupActions(
     val onItemClick: (TabsTrayItem) -> Unit,
-    val onTabClose: (TabsTrayItem.Tab) -> Unit,
+    val onTabClose: OnTabClose,
     val onDeleteTabGroupClick: () -> Unit,
     val onEditTabGroupClick: () -> Unit,
     val onCloseTabGroupClick: () -> Unit,

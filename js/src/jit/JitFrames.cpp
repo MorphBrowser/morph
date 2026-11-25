@@ -24,11 +24,14 @@
 #include "jit/VMFunctions.h"
 #include "js/Exception.h"
 #include "js/friend/DumpFunctions.h"  // js::DumpObject, js::DumpValue
+#include "vm/Activation.h"
+#include "vm/FrameIter.h"
 #include "vm/Interpreter.h"
 #include "vm/JSContext.h"
 #include "vm/JSFunction.h"
 #include "vm/JSObject.h"
 #include "vm/JSScript.h"
+#include "vm/SavedFrame.h"
 #include "vm/Stack.h"  // js::ResumeFrameArgs
 #include "wasm/WasmBuiltins.h"
 #include "wasm/WasmInstance.h"
@@ -37,9 +40,14 @@
 #include "debugger/DebugAPI-inl.h"
 #include "jit/JitFrames-inl.h"
 #include "jit/JSJitFrameIter-inl.h"
+#include "jit/VMFunctionList-inl.h"
 #include "vm/GeckoProfiler-inl.h"
 #include "vm/JSScript-inl.h"
 #include "vm/Probes-inl.h"
+
+#ifdef JS_HW_SHADOW_STACK
+#  include "util/HardwareShadowStack.h"
+#endif
 
 namespace js {
 namespace jit {
@@ -82,20 +90,6 @@ static uint32_t NumArgAndLocalSlots(const InlineFrameIterator& frame) {
   JSScript* script = frame.script();
   return CountArgSlots(script, frame.maybeCalleeTemplate()) + script->nfixed();
 }
-
-#ifdef JS_HW_SHADOW_STACK
-// Advance the tracked shadow stack pointer by one entry if it matches the
-// native JIT frame. This ensures that we unwind the shadow stack only for
-// native stack frames corresponding to real calls.
-static void MaybeUnwindShadowStackEntry(CommonFrameLayout* frame,
-                                        ResumeFromException* rfe) {
-  if (rfe->shadowStackPointer &&
-      *rfe->shadowStackPointer ==
-          reinterpret_cast<uintptr_t>(frame->returnAddress())) {
-    rfe->shadowStackPointer++;
-  }
-}
-#endif
 
 static TrampolineNative TrampolineNativeForFrame(
     JSRuntime* rt, TrampolineNativeFrameLayout* layout) {
@@ -610,6 +604,7 @@ static void HandleExceptionBaseline(JSContext* cx, JSJitFrameIter& frame,
     // JSOp::AfterYield) and the environment chain is the suspended generator's
     // environment, so it must not be unwound here. Just pop the frame.
     MOZ_ASSERT(pc == frame.baselineFrame()->script()->code());
+    MOZ_ASSERT(!frame.baselineFrame()->hasPendingDebugModeOSRReturn());
     EnsureUnwoundJitExitFrame(cx->activation()->asJit(),
                               frame.baselineFrame()->framePrefix());
     return;
@@ -622,16 +617,25 @@ static void HandleExceptionBaseline(JSContext* cx, JSJitFrameIter& frame,
   // address. We could set the return address to nullptr to ensure it's never
   // used, but the profiler expects a non-null return value for its JitCode map
   // lookup so we have to use an address in the interpreter code instead.
-  if (!frame.baselineFrame()->runningInInterpreter()) {
+  BaselineFrame* baselineFrame = frame.baselineFrame();
+  if (!baselineFrame->runningInInterpreter() ||
+      baselineFrame->hasPendingDebugModeOSRReturn()) {
     const BaselineInterpreter& interp =
         cx->runtime()->jitRuntime()->baselineInterpreter();
     uint8_t* retAddr = interp.codeRaw();
-    BaselineFrame* baselineFrame = frame.baselineFrame();
-
     // Suppress profiler sampling while we fix up the frame to ensure the
     // sampler thread doesn't see an inconsistent state.
     AutoSuppressProfilerSampling suppressProfilerSampling(cx);
-    baselineFrame->switchFromJitToInterpreterForExceptionHandler(cx, pc);
+    if (!baselineFrame->runningInInterpreter()) {
+      baselineFrame->switchFromJitToInterpreterForExceptionHandler(cx, pc);
+    }
+    if (baselineFrame->hasPendingDebugModeOSRReturn()) {
+      auto* site = cx->runtime()->jitRuntime()->lookupDebugModeOSRReturnSite(
+          prevFrame->returnAddress());
+      MOZ_RELEASE_ASSERT(site);
+      baselineFrame->clearPendingDebugModeOSRReturn();
+      cx->runtime()->jitRuntime()->releaseDebugModeOSRReturnSite(site);
+    }
     prevFrame->setReturnAddress(retAddr);
 
     // Ensure the current iterator's resumePCInCurrentFrame_ isn't used
@@ -718,9 +722,7 @@ static JitFrameLayout* GetLastProfilingFrame(ResumeFromException* rfe) {
 void HandleException(ResumeFromException* rfe) {
   JSContext* cx = TlsContext.get();
 
-  if (!CheckForOOMStackTraceInterrupt(cx)) {
-    return;
-  }
+  MaybeCaptureOOMStackTrace(cx);
 
   cx->realm()->localAllocSite = nullptr;
 #ifdef DEBUG
@@ -750,6 +752,9 @@ void HandleException(ResumeFromException* rfe) {
   });
 
   rfe->kind = ExceptionResumeKind::EntryFrame;
+#ifdef JS_HW_SHADOW_STACK
+  rfe->shadowStackSwitchPointer = nullptr;
+#endif
 
   JitSpew(JitSpew_IonInvalidate, "handling exception");
 
@@ -775,20 +780,24 @@ void HandleException(ResumeFromException* rfe) {
     keepAlive = activation->wasmExitInstance()->object();
   }
 
-  JitFrameIter iter(activation, /* mustUnwindActivation = */ true);
+  uintptr_t* shadowStackPointer = nullptr;
+#ifdef JS_HW_SHADOW_STACK
+  shadowStackPointer = rfe->shadowStackPointer;
+#endif
+  JitFrameIter iter(activation, /* mustUnwindActivation = */ true,
+                    shadowStackPointer);
 
 #ifdef JS_HW_SHADOW_STACK
-  if (rfe->shadowStackPointer && iter.isJSJit() &&
-      iter.asJSJit().isUnwoundJitExit()) {
-    uintptr_t returnAddress =
-        reinterpret_cast<uintptr_t>(iter.asJSJit().current()->returnAddress());
-    if (*rfe->shadowStackPointer != returnAddress) {
-      // An already-unwound frame can leave one extra shadow stack entry, for
-      // example when DebugEpilogue discards its VM exit frame.
-      MOZ_RELEASE_ASSERT(rfe->shadowStackPointer[1] == returnAddress);
-      rfe->shadowStackPointer++;
-    }
-  }
+  auto syncShadowStackPointer = mozilla::MakeScopeExit([&] {
+    rfe->shadowStackPointer = iter.shadowStackPointer();
+    // We expect to require switching shadow stacks only when resuming in a Wasm
+    // catch handler, and the shadow stack we switch to must have a valid
+    // restore token.
+    MOZ_ASSERT_IF(rfe->shadowStackSwitchPointer,
+                  rfe->kind == ExceptionResumeKind::WasmCatch);
+    MOZ_ASSERT_IF(rfe->shadowStackSwitchPointer,
+                  CanSwitchToShadowStack(rfe->shadowStackSwitchPointer));
+  });
 #endif
 
   CommonFrameLayout* prevJitFrame = nullptr;
@@ -821,8 +830,9 @@ void HandleException(ResumeFromException* rfe) {
 
       // Invalidation state will be the same for all inlined scripts in the
       // frame.
-      IonScript* ionScript = nullptr;
-      bool invalidated = frame.checkInvalidation(&ionScript);
+      IonScript* rawIonScript = nullptr;
+      bool invalidated = frame.checkInvalidation(&rawIonScript);
+      RootedBuffer<IonScript> ionScript(cx, rawIonScript);
 
       // If we hit OOM or overrecursion while bailing out, we don't
       // attempt to bail out a second time for this Ion frame. Just unwind
@@ -834,7 +844,7 @@ void HandleException(ResumeFromException* rfe) {
         if (rfe->kind == ExceptionResumeKind::Bailout ||
             rfe->kind == ExceptionResumeKind::ForcedReturnIon) {
           if (invalidated) {
-            ionScript->decrementInvalidationCount(cx->gcContext());
+            ionScript->decrementInvalidationCount();
           }
           return;
         }
@@ -861,7 +871,7 @@ void HandleException(ResumeFromException* rfe) {
       // If invalidated, decrement the number of frames remaining on the
       // stack for the given IonScript.
       if (invalidated) {
-        ionScript->decrementInvalidationCount(cx->gcContext());
+        ionScript->decrementInvalidationCount();
       }
 
     } else if (frame.isBaselineJS()) {
@@ -886,13 +896,6 @@ void HandleException(ResumeFromException* rfe) {
 
     prevJitFrame = frame.current();
     ++iter;
-#ifdef JS_HW_SHADOW_STACK
-    if (!iter.done()) {
-      // Unwind the topmost entry on the shadow stack if it corresponds to the
-      // native-stack frame we just processed.
-      MaybeUnwindShadowStackEntry(prevJitFrame, rfe);
-    }
-#endif
   }
 
   // Return to C++ code by returning to the activation's JS or Wasm entry frame.
@@ -1079,7 +1082,7 @@ static void TraceIonJSFrame(JSTracer* trc, const JSJitFrameIter& frame) {
     // This frame has been invalidated, meaning that its IonScript is no
     // longer reachable through the callee token (JSFunction/JSScript->ion
     // is now nullptr or recompiled). Manually trace it here.
-    ionScript->trace(trc);
+    TraceEdgeAndBuffer(trc, &ionScript, "ion-frame-ionscript");
   } else {
     ionScript = frame.ionScriptFromCalleeToken();
   }
@@ -1308,6 +1311,7 @@ static void TraceJitExitFrame(JSTracer* trc, const JSJitFrameIter& frame) {
     size_t len = native->argc() + 2;
     Value* vp = native->vp();
     TraceRootRange(trc, len, vp, "ion-native-args");
+    TraceRoot(trc, native->savedCallee(), "ion-native-saved-callee");
     if (frame.isExitFrameLayout<ConstructNativeExitFrameLayout>()) {
       TraceRoot(trc, vp + len, "ion-native-new-target");
     }
@@ -1319,6 +1323,7 @@ static void TraceJitExitFrame(JSTracer* trc, const JSJitFrameIter& frame) {
         frame.exitFrame()->as<IonOOLNativeExitFrameLayout>();
     TraceRoot(trc, oolnative->stubCode(), "ion-ool-native-code");
     TraceRoot(trc, oolnative->vp(), "iol-ool-native-vp");
+    TraceRoot(trc, oolnative->savedCallee(), "ion-ool-native-saved-callee");
     size_t len = oolnative->argc() + 1;
     TraceRootRange(trc, len, oolnative->thisp(), "ion-ool-native-thisargs");
     return;
@@ -1487,10 +1492,6 @@ void TraceJitFrames(JSTracer* trc, JitActivation* activation) {
   uintptr_t highestByteVisitedInPrevWasmFrame = 0;
 
   for (JitFrameIter frames(activation); !frames.done(); ++frames) {
-    if (wasm::Instance* exitInstance = frames.wasmExitInstance()) {
-      // Exit instance of a wasm segment a return_call left with no frame.
-      wasm::TraceInstanceEdge(trc, exitInstance, "JitFrameIter exit instance");
-    }
     if (frames.isJSJit()) {
       const JSJitFrameIter& jitFrame = frames.asJSJit();
       switch (jitFrame.type()) {
@@ -1549,6 +1550,10 @@ void TraceJitFrames(JSTracer* trc, JitActivation* activation) {
           // Trace the fields on the continuation stack itself. The frames on
           // the stack will be traced below.
           wasmFrameIter.contStack()->traceFields(trc);
+        }
+        // A stack whose only frame was torn down has no frame to visit.
+        if (wasm::ContStack* unwound = wasmFrameIter.unwoundContStack()) {
+          unwound->traceFields(trc);
         }
       }
 #endif
@@ -1672,8 +1677,14 @@ RInstructionResults::RInstructionResults(JitFrameLayout* fp)
 RInstructionResults::RInstructionResults(RInstructionResults&& src)
     : results_(std::move(src.results_)),
       fp_(src.fp_),
-      initialized_(src.initialized_) {
+      initialized_(src.initialized_),
+      failureStatus_(src.failureStatus_),
+      exception_(src.exception_),
+      exceptionStack_(src.exceptionStack_) {
   src.initialized_ = false;
+  src.failureStatus_.reset();
+  src.exception_ = UndefinedValue();
+  src.exceptionStack_ = nullptr;
 }
 
 RInstructionResults& RInstructionResults::operator=(RInstructionResults&& rhs) {
@@ -1710,6 +1721,21 @@ bool RInstructionResults::isInitialized() const { return initialized_; }
 
 size_t RInstructionResults::length() const { return results_->length(); }
 
+void RInstructionResults::saveFailure(JSContext* cx) {
+  MOZ_ASSERT(!hasFailure());
+  failureStatus_.emplace(cx->exceptionStatus());
+  if (JS::IsCatchableExceptionStatus(*failureStatus_)) {
+    exception_ = cx->getPendingExceptionUnwrapped();
+    exceptionStack_ = cx->getPendingExceptionStack();
+  }
+}
+
+void RInstructionResults::restoreFailure(JSContext* cx) const {
+  MOZ_ASSERT(hasFailure());
+  cx->restorePendingExceptionState(*failureStatus_, exception_,
+                                   exceptionStack_);
+}
+
 JitFrameLayout* RInstructionResults::frame() const {
   MOZ_ASSERT(fp_);
   return fp_;
@@ -1720,9 +1746,12 @@ HeapPtr<Value>& RInstructionResults::operator[](size_t index) {
 }
 
 void RInstructionResults::trace(JSTracer* trc) {
-  // Note: The vector necessary exists, otherwise this object would not have
-  // been stored on the activation from where the trace function is called.
-  TraceRange(trc, results_->length(), results_->begin(), "ion-recover-results");
+  if (results_) {
+    TraceRange(trc, results_->length(), results_->begin(),
+               "ion-recover-results");
+  }
+  TraceEdge(trc, &exception_, "ion-recover-exception");
+  TraceEdge(trc, &exceptionStack_, "ion-recover-exception-stack");
 }
 
 SnapshotIterator::SnapshotIterator(const JSJitFrameIter& iter,
@@ -1744,6 +1773,15 @@ SnapshotIterator::SnapshotIterator()
       machine_(nullptr),
       ionScript_(nullptr),
       instructionResults_(nullptr) {}
+
+void SnapshotIterator::trace(JSTracer* trc) {
+  void* prior = ionScript_;
+  TraceBufferEdge(trc, &ionScript_, "SnapshotIterator::ionScript_");
+
+  // Interior pointers in snapshot_ and recover_ need to be updated if buffers
+  // can move.
+  MOZ_RELEASE_ASSERT(ionScript_ == prior);
+}
 
 uintptr_t SnapshotIterator::fromStack(int32_t offset) const {
   return ReadFrameSlot(fp_, offset);
@@ -1858,6 +1896,7 @@ bool SnapshotIterator::allocationReadable(const RValueAllocation& alloc,
     case RValueAllocation::CST_NULL:
     case RValueAllocation::INTPTR_CST:
     case RValueAllocation::INT64_CST:
+    case RValueAllocation::NURSERY_OBJECT:
       return true;
 
     default:
@@ -1876,6 +1915,9 @@ Value SnapshotIterator::allocationValue(const RValueAllocation& alloc,
 
     case RValueAllocation::CST_NULL:
       return NullValue();
+
+    case RValueAllocation::NURSERY_OBJECT:
+      return ObjectValue(*ionScript_->getNurseryObject(alloc.index()));
 
     case RValueAllocation::DOUBLE_REG:
       return DoubleValue(fromRegister<double>(alloc.fpuReg()));
@@ -2147,8 +2189,8 @@ void SnapshotIterator::writeAllocationValuePayload(
 
   switch (alloc.mode()) {
     case RValueAllocation::CONSTANT:
-      ionScript_->getConstant(alloc.index()) = v;
-      break;
+    case RValueAllocation::NURSERY_OBJECT:
+      MOZ_CRASH("Constants and nursery objects are traced by the IonScript");
 
     case RValueAllocation::CST_UNDEFINED:
     case RValueAllocation::CST_NULL:
@@ -2232,6 +2274,12 @@ void SnapshotIterator::traceAllocation(JSTracer* trc) {
     return;
   }
 
+  // Constants and nursery objects are traced by the IonScript.
+  if (alloc.mode() == RValueAllocation::CONSTANT ||
+      alloc.mode() == RValueAllocation::NURSERY_OBJECT) {
+    return;
+  }
+
   Value v = allocationValue(alloc, ReadMethod::AlwaysDefault);
   if (!v.isGCThing()) {
     return;
@@ -2282,7 +2330,15 @@ bool SnapshotIterator::initInstructionResults(MaybeReadFallback& fallback) {
 
   JitFrameLayout* fp = fallback.frame->jsFrame();
   RInstructionResults* results = fallback.activation->maybeIonFrameRecovery(fp);
-  if (!results) {
+  if (results) {
+    // If a previous attempt failed, report the same failure. RObjectState and
+    // RArrayState may have already written to objects allocated by Ion, and we
+    // must not run them again.
+    if (results->hasFailure()) {
+      results->restoreFailure(cx);
+      return false;
+    }
+  } else {
     AutoRealm ar(cx, fallback.frame->script());
 
     // We are going to run recover instructions. To avoid problems where recover
@@ -2315,14 +2371,12 @@ bool SnapshotIterator::initInstructionResults(MaybeReadFallback& fallback) {
     MachineState machine = fallback.frame->machineState();
     SnapshotIterator s(*fallback.frame, &machine);
     if (!s.computeInstructionResults(cx, results)) {
-      // If the evaluation failed because of OOMs, then we discard the
-      // current set of result that we collected so far.
-      fallback.activation->removeIonFrameRecovery(fp);
+      results->saveFailure(cx);
       return false;
     }
   }
 
-  MOZ_ASSERT(results->isInitialized());
+  MOZ_RELEASE_ASSERT(results->isInitialized());
   MOZ_RELEASE_ASSERT(results->length() == recover_.numInstructions() - 1);
   instructionResults_ = results;
   return true;
@@ -2422,17 +2476,22 @@ Value SnapshotIterator::maybeReadAllocByIndex(size_t index) {
 
 InlineFrameIterator::InlineFrameIterator(JSContext* cx,
                                          const JSJitFrameIter* iter)
-    : calleeTemplate_(cx), script_(cx), pc_(nullptr), numActualArgs_(0) {
+    : CustomAutoRooter(cx),
+      calleeTemplate_(nullptr),
+      script_(nullptr),
+      pc_(nullptr),
+      numActualArgs_(0) {
   resetOn(iter);
 }
 
 InlineFrameIterator::InlineFrameIterator(JSContext* cx,
                                          const InlineFrameIterator* iter)
-    : frame_(iter ? iter->frame_ : nullptr),
+    : CustomAutoRooter(cx),
+      frame_(iter ? iter->frame_ : nullptr),
       framesRead_(0),
       frameCount_(iter ? iter->frameCount_ : UINT32_MAX),
-      calleeTemplate_(cx),
-      script_(cx),
+      calleeTemplate_(nullptr),
+      script_(nullptr),
       pc_(nullptr),
       numActualArgs_(0) {
   if (frame_) {
@@ -2444,6 +2503,13 @@ InlineFrameIterator::InlineFrameIterator(JSContext* cx,
     framesRead_ = iter->framesRead_ - 1;
     findNextFrame();
   }
+}
+
+void InlineFrameIterator::trace(JSTracer* trc) {
+  start_.trace(trc);
+  si_.trace(trc);
+  TraceRoot(trc, &calleeTemplate_, "InlineFrameIterator::calleeTemplate_");
+  TraceRoot(trc, &script_, "InlineFrameIterator::script_");
 }
 
 void InlineFrameIterator::resetOn(const JSJitFrameIter* iter) {
@@ -2837,6 +2903,115 @@ void InvalidationBailoutStack::checkInvariants() const {
   MOZ_ASSERT(rawBase <= osiPoint && osiPoint <= rawLimit);
 #endif
 }
+
+#ifdef DEBUG
+// Baseline call ICs switch to the callee's realm before calling
+// CreateThisFromIC{WithAllocSite}. The callee is the first argument and is
+// traced by TraceJitExitFrame.
+static Realm* MaybeCreateThisCalleeRealm(ExitFrameLayout* exitFrame) {
+  static_assert(std::is_same_v<decltype(&CreateThisFromIC),
+                               bool (*)(JSContext*, HandleObject, HandleObject,
+                                        Value*, uint32_t, MutableHandleValue)>);
+  static_assert(std::is_same_v<decltype(&CreateThisFromICWithAllocSite),
+                               bool (*)(JSContext*, HandleObject, HandleObject,
+                                        gc::AllocSite*, Value*, uint32_t,
+                                        MutableHandleValue)>);
+
+  VMFunctionId id = exitFrame->footer()->functionId();
+  if (id != VMFunctionId::CreateThisFromIC &&
+      id != VMFunctionId::CreateThisFromICWithAllocSite) {
+    return nullptr;
+  }
+
+  const VMFunctionData& f = GetVMFunction(id);
+  MOZ_ASSERT(f.explicitArgs >= 1);
+  MOZ_ASSERT(f.argRootType(0) == VMFunctionData::RootObject);
+
+  JSObject* callee = *reinterpret_cast<JSObject**>(exitFrame->argBase());
+  MOZ_ASSERT(callee->is<JSFunction>());
+  MOZ_ASSERT(callee->as<JSFunction>().isConstructor());
+  return callee->as<JSFunction>().realm();
+}
+
+static bool JitActivationHasFrameInRealm(JitActivation* activation,
+                                         Realm* realm) {
+  for (JitFrameIter iter(activation); !iter.done(); ++iter) {
+    Realm* frameRealm = nullptr;
+    if (iter.isWasm()) {
+      // The exit stub's frame is skipped by the iterator, so check the
+      // instance owning it too, see TraceJitFrames.
+      if (wasm::Instance* instance = iter.asWasm().exitInstance()) {
+        if (instance->realm() == realm) {
+          return true;
+        }
+      }
+#  ifdef ENABLE_WASM_JSPI
+      // A return_call_indirect signature mismatch in a continuation's entry
+      // function can tear down its frame. The base frame's instance is then
+      // traced instead, see TraceJitFrames.
+      auto baseInRealm = [realm](wasm::ContStack* stack) {
+        return stack && stack->baseInstance() &&
+               stack->baseInstance()->realm() == realm;
+      };
+      if ((iter.asWasm().currentFrameStackSwitched() &&
+           baseInRealm(iter.asWasm().contStack())) ||
+          baseInRealm(iter.asWasm().unwoundContStack())) {
+        return true;
+      }
+#  endif
+      frameRealm = iter.realm();
+    } else {
+      const JSJitFrameIter& frame = iter.asJSJit();
+      if (frame.isScripted() || frame.isTrampolineNative()) {
+        frameRealm = iter.realm();
+      } else if (frame.isExitFrameLayout<NativeExitFrameLayout>()) {
+        auto* layout = frame.exitFrame()->as<NativeExitFrameLayout>();
+        frameRealm = (*layout->savedCallee())->nonCCWRealm();
+      } else if (frame.isExitFrameLayout<IonOOLNativeExitFrameLayout>()) {
+        auto* layout = frame.exitFrame()->as<IonOOLNativeExitFrameLayout>();
+        frameRealm = (*layout->savedCallee())->nonCCWRealm();
+      } else if (frame.isExitFrameLayout<CalledFromJitExitFrameLayout>()) {
+        auto* layout = frame.exitFrame()->as<CalledFromJitExitFrameLayout>();
+        CalleeToken token = layout->jsFrame()->calleeToken();
+        frameRealm = CalleeTokenIsFunction(token)
+                         ? CalleeTokenToFunction(token)->realm()
+                         : CalleeTokenToScript(token)->realm();
+      } else if (frame.isExitFrame() && frame.exitFrame()->isWrapperExit()) {
+        frameRealm = MaybeCreateThisCalleeRealm(frame.exitFrame());
+      }
+    }
+    if (frameRealm == realm) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void AssertCurrentRealmIsOnStack(JSContext* cx) {
+  // When JIT code calls a function in a different realm within the same
+  // compartment, we set cx->realm_ to the callee's realm without marking this
+  // realm as entered. This is safe because we assume the realm will be kept
+  // alive by the callee frame's script or Wasm instance.
+  // See Realm::enterRealmDepthIgnoringJit_.
+  //
+  // This function checks that assumption at the start of GC: if the context's
+  // current realm wasn't entered, there must be a frame on the stack in that
+  // realm to ensure the realm is kept alive.
+
+  Realm* realm = cx->realm();
+  if (!realm || realm->hasBeenEnteredIgnoringJit()) {
+    return;
+  }
+
+  for (JitActivationIterator iter(cx); !iter.done(); ++iter) {
+    if (JitActivationHasFrameInRealm(iter->asJit(), realm)) {
+      return;
+    }
+  }
+
+  MOZ_CRASH("Realm set by JIT code without a frame in that realm");
+}
+#endif
 
 void AssertJitStackInvariants(JSContext* cx) {
   for (JitActivationIterator activations(cx); !activations.done();

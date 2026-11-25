@@ -8,39 +8,36 @@
 #include <gtk/gtk.h>
 
 #include "GRefPtr.h"
+#include "ScreenHelperGTK.h"
+#include "gfxPlatform.h"
 #include "mozilla/Logging.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPrefs_widget.h"
 #include "mozilla/WidgetUtilsGtk.h"
+#include "mozilla/dom/Document.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/widget/nsGtkHtmlUtils.h"
 #include "nsAppShell.h"
 #include "nsArrayUtils.h"
 #include "nsCRT.h"
 #include "nsComponentManagerUtils.h"
-#include "nsICookieJarSettings.h"
-#include "nsIFileURL.h"
-#include "nsIIOService.h"
-#include "nsISupportsPrimitives.h"
-#include "nsNetUtil.h"
-#include "nsPrimitiveHelpers.h"
-#include "nsSystemInfo.h"
-#include "nsWidgetsCID.h"
-#include "nsWindow.h"
-#ifdef MOZ_X11
-#  include "gfxXlibSurface.h"
-#endif
-#include "ScreenHelperGTK.h"
-#include "gfxPlatform.h"
-#include "mozilla/dom/Document.h"
-#include "mozilla/gfx/2D.h"
-#include "mozilla/widget/nsGtkHtmlUtils.h"
 #include "nsDirectoryServiceDefs.h"
 #include "nsEscape.h"
 #include "nsGtkUtils.h"
 #include "nsIContent.h"
+#include "nsICookieJarSettings.h"
+#include "nsIFileURL.h"
+#include "nsIIOService.h"
+#include "nsISupportsPrimitives.h"
 #include "nsImageToPixbuf.h"
+#include "nsNetUtil.h"
 #include "nsPresContext.h"
+#include "nsPrimitiveHelpers.h"
 #include "nsStringStream.h"
+#include "nsSystemInfo.h"
+#include "nsWidgetsCID.h"
+#include "nsWindow.h"
 
 using namespace mozilla;
 using namespace mozilla::widget;
@@ -103,7 +100,7 @@ static constexpr nsLiteralString kDisallowedExportedSchemes[] = {
     u"chrome"_ns,         u"imap"_ns,        u"javascript"_ns,
     u"mailbox"_ns,        u"news"_ns,        u"page-icon"_ns,
     u"resource"_ns,       u"view-source"_ns, u"moz-extension"_ns,
-    u"moz-page-thumb"_ns,
+    u"moz-page-thumb"_ns, u"x-moz-ews"_ns,
 };
 
 // See https://docs.gtk.org/gtk3/enum.DragResult.html
@@ -325,7 +322,13 @@ nsresult nsDragSessionSource::InvokeDragSessionImpl(
   if (!aArrayTransferables) return NS_ERROR_INVALID_ARG;
   mSourceDataItems = aArrayTransferables;
 
-  GdkDevice* device = widget::GdkGetPointer();
+  // Use the device that pressed the button, which GTK also drags with.
+  //
+  // With several seats, another seat's pointer may not be over any of our
+  // windows, so asking it for the origin window would fail the drag.
+  GdkEvent* existingEvent = widget::GetLastPointerDownEvent();
+  GdkDevice* device = existingEvent ? gdk_event_get_device(existingEvent)
+                                    : widget::GdkGetPointer();
   GdkWindow* originGdkWindow = nullptr;
   if (widget::GdkIsWaylandDisplay() || widget::IsXWaylandProtocol()) {
     originGdkWindow =
@@ -361,7 +364,6 @@ nsresult nsDragSessionSource::InvokeDragSessionImpl(
   if (aActionType & nsIDragService::DRAGDROP_ACTION_LINK)
     action = (GdkDragAction)(action | GDK_ACTION_LINK);
 
-  GdkEvent* existingEvent = widget::GetLastPointerDownEvent();
   GdkEvent fakeEvent;
   if (!existingEvent) {
     memset(&fakeEvent, 0, sizeof(GdkEvent));

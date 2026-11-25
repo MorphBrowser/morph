@@ -709,13 +709,53 @@ bool WeakMap<K, V, AP>::sweepAfterMinorGC() {
 template <class K, class V, class AP>
 void WeakMap<K, V, AP>::traceMappings(WeakMapTracer* tracer) {
   for (auto iter = this->iter(); !iter.done(); iter.next()) {
-    gc::Cell* key = gc::ToMarkable(iter.get().key());
-    gc::Cell* value = gc::ToMarkable(iter.get().value());
-    if (key && value) {
-      tracer->trace(memberOf, JS::GCCellPtr(iter.get().key().get()),
-                    JS::GCCellPtr(iter.get().value().get()));
+    K key = iter.get().key();
+    V value = iter.get().value();
+
+    MOZ_ASSERT(gc::ToMarkable(key));
+    JS::GCCellPtr keyPtr(key);
+
+    JS::GCCellPtr delegatePtr;
+    if (gc::Cell* delegate = gc::detail::GetDelegate(key)) {
+      delegatePtr = JS::GCCellPtr(delegate, keyPtr.kind());
+    }
+
+    JS::GCCellPtr valuePtr;
+    if (gc::ToMarkable(value)) {
+      valuePtr = JS::GCCellPtr(value);
+    }
+
+    tracer->trace(memberOf, keyPtr, delegatePtr, valuePtr);
+  }
+}
+
+template <class K, class V, class AP>
+bool WeakMap<K, V, AP>::fixGrayMappings() {
+  bool anyMarked = false;
+  for (auto iter = this->iter(); !iter.done(); iter.next()) {
+    const K& key = iter.get().key();
+    gc::Cell* keyCell = gc::ToMarkable(key);
+    MOZ_ASSERT(keyCell);
+    gc::Cell* delegate = gc::detail::GetDelegate(key);
+    gc::Cell* valueCell = gc::ToMarkable(iter.get().value());
+
+    bool keyShouldBeBlack;
+    bool valueShouldBeBlack;
+    gc::ShouldWeakMappingEntryBeBlack(memberOf, keyCell, delegate, valueCell,
+                                      &keyShouldBeBlack, &valueShouldBeBlack);
+
+    if (keyShouldBeBlack && JS::UnmarkGrayGCThingRecursively(JS::GCCellPtr(
+                                keyCell, keyCell->getTraceKind()))) {
+      anyMarked = true;
+    }
+
+    if (valueShouldBeBlack && JS::UnmarkGrayGCThingRecursively(JS::GCCellPtr(
+                                  valueCell, valueCell->getTraceKind()))) {
+      anyMarked = true;
     }
   }
+
+  return anyMarked;
 }
 
 #ifdef DEBUG

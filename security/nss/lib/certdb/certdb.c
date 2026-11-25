@@ -177,6 +177,21 @@ SEC_ASN1_CHOOSER_IMPLEMENT(CERT_CertificateTemplate)
 SEC_ASN1_CHOOSER_IMPLEMENT(SEC_SignedCertificateTemplate)
 SEC_ASN1_CHOOSER_IMPLEMENT(CERT_SequenceOfCertExtensionTemplate)
 
+const SEC_ASN1Template CERT_SignedDataTemplate[] = {
+    { SEC_ASN1_SEQUENCE,
+      0, NULL, sizeof(CERTSignedData) },
+    { SEC_ASN1_ANY,
+      offsetof(CERTSignedData, data) },
+    { SEC_ASN1_INLINE | SEC_ASN1_XTRN,
+      offsetof(CERTSignedData, signatureAlgorithm),
+      SEC_ASN1_SUB(SECOID_AlgorithmIDTemplate) },
+    { SEC_ASN1_BIT_STRING,
+      offsetof(CERTSignedData, signature) },
+    { 0 }
+};
+
+SEC_ASN1_CHOOSER_IMPLEMENT(CERT_SignedDataTemplate)
+
 SECStatus
 CERT_KeyFromIssuerAndSN(PLArenaPool *arena, SECItem *issuer, SECItem *sn,
                         SECItem *key)
@@ -1235,6 +1250,7 @@ CERT_CheckKeyUsage(CERTCertificate *cert, unsigned int requiredUsage)
 
         switch (keyType) {
             case rsaKey:
+            case kyberKey: /* See RFC 9935, Section 5. */
                 requiredUsage |= KU_KEY_ENCIPHERMENT;
                 break;
             case rsaPssKey:
@@ -1243,7 +1259,6 @@ CERT_CheckKeyUsage(CERTCertificate *cert, unsigned int requiredUsage)
                 requiredUsage |= KU_DIGITAL_SIGNATURE;
                 break;
             case dhKey:
-            case kyberKey:
                 requiredUsage |= KU_KEY_AGREEMENT;
                 break;
             case ecKey:
@@ -3078,20 +3093,6 @@ cert_AddSubjectKeyIDMapping(SECItem *subjKeyID, CERTCertificate *cert)
                                                              : SECFailure;
     PR_Unlock(gSubjKeyIDLock);
 done:
-    return rv;
-}
-
-SECStatus
-cert_RemoveSubjectKeyIDMapping(SECItem *subjKeyID)
-{
-    SECStatus rv;
-    if (!gSubjKeyIDLock)
-        return SECFailure;
-
-    PR_Lock(gSubjKeyIDLock);
-    rv = (PL_HashTableRemove(gSubjKeyIDHash, subjKeyID)) ? SECSuccess
-                                                         : SECFailure;
-    PR_Unlock(gSubjKeyIDLock);
     return rv;
 }
 

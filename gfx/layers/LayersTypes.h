@@ -55,6 +55,8 @@ struct LayersId final {
   // Allow explicit cast to a uint64_t for now
   explicit operator uint64_t() const { return mId; }
 
+  friend uint64_t format_as(const LayersId& aId) { return aId.mId; }
+
   // Implement some operators so this class can be used as a key in
   // stdlib classes.
   auto operator<=>(const LayersId& aOther) const = default;
@@ -141,7 +143,6 @@ enum class TextureType : int8_t {
   Unknown = 0,
   D3D11,
   MacIOSurface,
-  AndroidNativeWindow,
   AndroidHardwareBuffer,
   DMABUF,
   EGLImage,
@@ -411,10 +412,15 @@ struct CompositeProcessFencesHolderId {
   };
 };
 
-// AndroidImageReaderId allocated in GPU process
+// Identifies an AndroidImageReader in the compositing process (GPU or parent).
+// Zero is invalid. Locally generated IDs occupy the low half of the uint64_t
+// range; IDs derived from remote allocation handles always set kRemoteIdBit.
 struct GpuProcessAndroidImageReaderId {
+  static constexpr uint64_t kRemoteIdBit = uint64_t(1) << 63;
+
   uint64_t mId = 0;
 
+  // Allocates a local GPU-process ID. Fails before entering the remote range.
   static GpuProcessAndroidImageReaderId GetNext();
 
   bool IsValid() const { return mId != 0; }
@@ -542,7 +548,8 @@ MOZ_DEFINE_ENUM_CLASS_WITH_BASE(
     DMABuf,
     MacIOSurface,
     DcompSurface,
-    AndroidImageReaderImage
+    AndroidImageReaderImage,
+    AndroidSurfaceTexture
 ));
 // clang-format on
 

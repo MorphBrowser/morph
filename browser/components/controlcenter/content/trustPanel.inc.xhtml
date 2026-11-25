@@ -69,6 +69,12 @@
           </hbox>
           <label id="trustpanel-etp-description"></label>
         </vbox>
+        <vbox id="trackercount-toggle-section">
+          <hbox id="trackercount-toggle-checkbox-container">
+            <label id="trackercount-toggle-label" data-l10n-id="trustpanel-trackercount-label" class="trustpanel-header"></label>
+            <html:moz-toggle data-l10n-attrs="aria-label" id="trackercount-toggle" data-l10n-id="trustpanel-trackercount-toggle"></html:moz-toggle>
+          </hbox>
+        </vbox>
 
         <vbox id="trustpanel-clear-cookies-footer">
           <toolbarseparator></toolbarseparator>
@@ -78,6 +84,104 @@
         <toolbarseparator></toolbarseparator>
         <toolbarbutton id="trustpanel-privacy-link" data-l10n-id="trustpanel-privacy-link" class="subviewbutton"></toolbarbutton>
       </vbox>
+    </panelview>
+
+    <panelview id="trustpanel-popup-mainView-redesign"
+               class="PanelUI-subView trustpanel-redesign"
+               role="document"
+               mainview-with-header="true"
+               has-custom-header="true">
+
+      <vbox id="trustpanel-header-section-redesign">
+        <hbox id="trustpanel-header-row-redesign">
+          <hbox id="trustpanel-popup-host-wrapper-redesign">
+            <image id="trustpanel-popup-icon-redesign"></image>
+            <label id="trustpanel-popup-host-redesign" crop="start"></label>
+          </hbox>
+          <toolbarbutton id="trustpanel-popup-connection-redesign" class="subviewbutton subviewbutton-nav">
+            <image id="trustpanel-connection-icon-redesign"></image>
+            <label id="trustpanel-connection-label-redesign"></label>
+          </toolbarbutton>
+        </hbox>
+
+        <html:script type="module" src="chrome://browser/content/controlcenter/components/breach-alert-panel.mjs"></html:script>
+        <html:breach-alert-panel id="trustpanel-breach-alert-section-redesign">
+        </html:breach-alert-panel>
+        <vbox id="trustpanel-graphic-section-redesign">
+          <vbox id="trustpanel-graphic-section-inner-redesign">
+            <hbox id="trustpanel-toggle-checkbox-container-redesign">
+              <hbox id="trustpanel-etp-label-wrapper-redesign">
+                <image id="trustpanel-etp-indicator-redesign"></image>
+                <label id="trustpanel-etp-label-redesign" class="trustpanel-header"></label>
+              </hbox>
+              <html:moz-toggle data-l10n-attrs="label, description" id="trustpanel-toggle-redesign"></html:moz-toggle>
+            </hbox>
+            <hbox class="trustpanel-card-main">
+              <image id="trustpanel-graphic-image-redesign"></image>
+            </hbox>
+            <vbox id="trustpanel-blocker-section-redesign" class="trustpanel-card-content trustpanel-graphic-inner">
+              <label data-l10n-id="trustpanel-blocker-section-header2-redesign" data-l10n-args='{"count":0}' id="trustpanel-blocker-section-header-redesign" class="trustpanel-header"></label>
+              <label data-l10n-id="trustpanel-blocker-description-redesign" id="trustpanel-blocker-description-text-redesign"></label>
+              <label data-l10n-id="trustpanel-no-trackers-header-redesign" id="trustpanel-no-trackers-header-redesign" class="trustpanel-header" hidden="true"></label>
+              <label data-l10n-id="trustpanel-no-trackers-description-redesign" id="trustpanel-no-trackers-description-text-redesign" hidden="true"></label>
+              <label data-l10n-id="trustpanel-etp-off-description-redesign" id="trustpanel-etp-off-description-text-redesign" hidden="true"></label>
+              <html:moz-button-group id="trustpanel-blocker-button-group-redesign">
+                <html:moz-button id="trustpanel-blocker-see-trackers-button" data-l10n-id="trustpanel-blocker-see-trackers-button" default="true" type="primary"></html:moz-button>
+              </html:moz-button-group>
+            </vbox>
+            <vbox id="trustpanel-insecure-section-redesign" class="trustpanel-card-content trustpanel-card-divided trustpanel-graphic-inner" when-connection="not-secure">
+              <label data-l10n-id="trustpanel-insecure-section-header" class="trustpanel-header"></label>
+              <label data-l10n-id="trustpanel-insecure-description"></label>
+            </vbox>
+          </vbox>
+        </vbox>
+
+        <vbox id="trustpanel-clear-cookies-footer-redesign">
+          <toolbarbutton id="trustpanel-delete-site-data-button" class="subviewbutton subviewbutton-iconic subviewbutton-nav">
+            <image class="toolbarbutton-icon" src="chrome://browser/skin/controlcenter/flame.svg"></image>
+            <label class="toolbarbutton-text" data-l10n-id="trustpanel-delete-site-data-button"></label>
+          </toolbarbutton>
+        </vbox>
+
+        <toolbarbutton id="trustpanel-fix-site-issue-button" class="subviewbutton subviewbutton-iconic subviewbutton-nav">
+          <image class="toolbarbutton-icon" src="chrome://browser/skin/controlcenter/wrench.svg"></image>
+          <label class="toolbarbutton-text" data-l10n-id="trustpanel-fix-site-issue-button"></label>
+        </toolbarbutton>
+
+        <toolbarbutton id="trustpanel-manage-settings-button" class="subviewbutton subviewbutton-iconic">
+          <image class="toolbarbutton-icon" src="chrome://browser/skin/controlcenter/cog.svg"></image>
+          <label class="toolbarbutton-text" data-l10n-id="trustpanel-manage-settings-button"></label>
+        </toolbarbutton>
+      </vbox>
+    </panelview>
+
+    <panelview id="trustpanel-siteIssueView"
+               class="PanelUI-subView"
+               role="document"
+               data-l10n-id="trustpanel-site-issue-header"
+               data-l10n-attrs="title"
+               shrink-to-fit="true">
+      <toolbarseparator></toolbarseparator>
+      <hbox class="trustpanel-section" id="trustpanel-site-issue-steps">
+        <image class="trustpanel-site-issue-icon" src="chrome://browser/skin/controlcenter/wrench.svg"></image>
+        <vbox>
+          <label data-l10n-id="trustpanel-site-issue-steps-intro"></label>
+          <html:ul id="trustpanel-site-issue-steps-list">
+            <html:li data-l10n-id="trustpanel-site-issue-step-extensions"></html:li>
+            <html:li id="trustpanel-site-issue-step-vpn" data-l10n-id="trustpanel-site-issue-step-vpn"></html:li>
+            <html:li data-l10n-id="trustpanel-site-issue-step-etp"></html:li>
+          </html:ul>
+          <html:a is="moz-support-link" id="trustpanel-site-issue-learn-more" support-page="websites-look-wrong-or-appear-differently"></html:a>
+        </vbox>
+      </hbox>
+      <toolbarseparator observes="cmd_reportBrokenSite"></toolbarseparator>
+      <toolbarbutton id="trustpanel-report-broken-site-button" class="subviewbutton subviewbutton-iconic subviewbutton-nav" closemenu="none">
+        <image class="toolbarbutton-icon" src="chrome://global/skin/icons/comment-24.svg"></image>
+        <vbox class="toolbarbutton-text" flex="1">
+          <label data-l10n-id="trustpanel-report-broken-site-button"></label>
+          <label class="trustpanel-report-broken-site-description" data-l10n-id="trustpanel-report-broken-site-description"></label>
+        </vbox>
+      </toolbarbutton>
     </panelview>
 
     <panelview id="trustpanel-securityInformationView"
@@ -134,6 +238,20 @@
         <html:moz-button-group>
           <html:moz-button data-l10n-id="trustpanel-clear-cookies-subview-button-cancel" id="trustpanel-clear-cookie-cancel"></html:moz-button>
           <html:moz-button type="primary" data-l10n-id="trustpanel-clear-cookies-subview-button-clear"  id="trustpanel-clear-cookie-clear"></html:moz-button>
+        </html:moz-button-group>
+      </vbox>
+    </panelview>
+
+    <panelview id="trustpanel-clearcookiesView-redesign"
+               class="PanelUI-subView"
+               role="document"
+               shrink-to-fit="true">
+      <toolbarseparator></toolbarseparator>
+      <vbox class="trustpanel-section">
+        <label data-l10n-id="trustpanel-clear-cookies-description-redesign"></label>
+        <html:moz-button-group>
+          <html:moz-button data-l10n-id="trustpanel-clear-cookies-subview-button-cancel" id="trustpanel-clear-cookie-cancel-redesign"></html:moz-button>
+          <html:moz-button type="primary" data-l10n-id="trustpanel-clear-cookies-subview-button-clear" id="trustpanel-clear-cookie-clear-redesign"></html:moz-button>
         </html:moz-button-group>
       </vbox>
     </panelview>

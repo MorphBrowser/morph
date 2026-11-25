@@ -8,6 +8,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.Configurator
 import androidx.test.uiautomator.UiDevice
 import kotlinx.coroutines.runBlocking
 import mockwebserver3.MockWebServer
@@ -20,6 +21,7 @@ import org.mozilla.fenix.helpers.AppAndSystemHelper.allowOrPreventSystemUIFromRe
 import org.mozilla.fenix.helpers.AppAndSystemHelper.clearDownloadsFolder
 import org.mozilla.fenix.helpers.AppAndSystemHelper.disableDebugDrawer
 import org.mozilla.fenix.helpers.AppAndSystemHelper.enableDataSaverSystemSetting
+import org.mozilla.fenix.helpers.AppAndSystemHelper.ensureNetworkConnected
 import org.mozilla.fenix.helpers.AppAndSystemHelper.runWithCondition
 import org.mozilla.fenix.helpers.NetworkConnectionStatusHelper.getNetworkDetails
 import org.mozilla.fenix.helpers.TestHelper.appContext
@@ -74,6 +76,10 @@ private class EfficiencyTestEnvironment(private val context: EfficiencyExecution
         val before = snapshot()
         initialSnapshot = before
         applyRequirements()
+        // Recover connectivity a prior network-toggling test may have left disabled, before this one
+        // launches the app. Best-effort and logged; the subsequent getNetworkDetails() in
+        // clearExternalState() then reports the recovered state.
+        ensureNetworkConnected()
         clearExternalState()
         val after = snapshot()
         record("environmentPreflight", before, after)
@@ -83,6 +89,10 @@ private class EfficiencyTestEnvironment(private val context: EfficiencyExecution
     fun restore() {
         val before = snapshot()
         restoreSnapshot(checkNotNull(initialSnapshot) { "Environment was not sampled before restore" })
+        // Symmetry with prepare(): recover connectivity a network-toggling test may have left disabled
+        // (e.g. if it died before its own cleanup) so the test ends connected and the end-of-test
+        // getNetworkDetails() below reports the restored state.
+        ensureNetworkConnected()
         clearExternalState()
         val after = snapshot()
         record("environmentRestore", before, after)
@@ -99,6 +109,7 @@ private class EfficiencyTestEnvironment(private val context: EfficiencyExecution
             }
         }
         applyPostNotificationPermission(requirements.postNotificationPermission)
+        requirements.uiAutomatorIdleTimeoutMillis?.let { Configurator.getInstance().waitForIdleTimeout = it }
     }
 
     private fun clearExternalState() {
@@ -182,6 +193,7 @@ private class EfficiencyTestEnvironment(private val context: EfficiencyExecution
             systemUiClipboardAccess = systemUiClipboardAccess(),
             postNotificationPermission = if (Build.VERSION.SDK_INT >= 33) hasPostNotificationPermission() else null,
             foregroundWindow = focusedWindow(),
+            uiAutomatorIdleTimeoutMillis = Configurator.getInstance().waitForIdleTimeout,
         )
     }
 
@@ -224,6 +236,7 @@ private class EfficiencyTestEnvironment(private val context: EfficiencyExecution
         if (Build.VERSION.SDK_INT == Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             snapshot.systemUiClipboardAccess?.let(::allowOrPreventSystemUIFromReadingTheClipboard)
         }
+        Configurator.getInstance().waitForIdleTimeout = snapshot.uiAutomatorIdleTimeoutMillis
     }
 
     private fun verifyRestored(snapshot: EnvironmentSnapshot) {
@@ -243,6 +256,9 @@ private class EfficiencyTestEnvironment(private val context: EfficiencyExecution
                 snapshot.systemUiClipboardAccess != initial.systemUiClipboardAccess
         ) {
             violations += "systemUiClipboardAccess=${snapshot.systemUiClipboardAccess}"
+        }
+        if (snapshot.uiAutomatorIdleTimeoutMillis != initial.uiAutomatorIdleTimeoutMillis) {
+            violations += "uiAutomatorIdleTimeoutMillis=${snapshot.uiAutomatorIdleTimeoutMillis}"
         }
         check(violations.isEmpty()) {
             "Device environment was not restored for ${context.testId}: ${violations.joinToString()}"
@@ -292,6 +308,7 @@ private class EfficiencyTestEnvironment(private val context: EfficiencyExecution
         val systemUiClipboardAccess: Boolean?,
         val postNotificationPermission: Boolean?,
         val foregroundWindow: String,
+        val uiAutomatorIdleTimeoutMillis: Long,
     ) {
         fun asMeta(): Map<String, Any?> =
             mapOf(

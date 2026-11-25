@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 #include "HTMLDataListElement.h"
 #include "HTMLFormSubmissionConstants.h"
@@ -16,6 +17,7 @@
 #include "mozilla/DebugOnly.h"
 #include "mozilla/EventDispatcher.h"
 #include "mozilla/EventStateManager.h"
+#include "mozilla/FocusModel.h"
 #include "mozilla/MappedDeclarationsBuilder.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MouseEvents.h"
@@ -874,6 +876,10 @@ nsresult HTMLInputElement::InitColorPicker() {
   // GeckoView to handle MozOpenColorPicker and let it keep using its current
   // picker, but for now this is ok.
 #ifndef ANDROID
+  if (EyeDropper()) {
+    OpenEyeDropper();
+    return NS_OK;
+  }
   if (StaticPrefs::dom_forms_html_color_picker_enabled()) {
     OpenColorPicker();
     return NS_OK;
@@ -1159,8 +1165,7 @@ HTMLInputElement::HTMLInputElement(already_AddRefed<dom::NodeInfo> aNodeInfo,
       mHasBeenTypePassword(false),
       mHasPatternAttribute(false),
       mUserChangedSinceFocus(false),
-      mIsUserInteracting(false),
-      mRadioGroupContainer(nullptr) {
+      mIsUserInteracting(false) {
   // If size is above 512, mozjemalloc allocates 1kB, see
   // memory/build/mozjemalloc.cpp
   static_assert(sizeof(HTMLInputElement) <= 512,
@@ -1213,7 +1218,15 @@ void HTMLInputElement::FreeData(TextControlStateDisposition aStateDisposition) {
 void HTMLInputElement::EnsureEditorState() {
   MOZ_ASSERT(IsSingleLineTextControl(false));
   if (!mInputData.mState) {
-    mInputData.mState = TextControlState::Construct(this);
+    nsAutoString value;
+    GetAttr(nsGkAtoms::value, value);
+    // Skip sanitization before DoneCreatingElement; Clone() can call
+    // SetValueInternal (and thus EnsureEditorState) before mDoneCreating
+    // is true, and DoneCreatingElement will sanitize the value later.
+    if (mDoneCreating) {
+      SanitizeValue(value, SanitizationKind::ForValueGetter);
+    }
+    mInputData.mState = TextControlState::Construct(this, value);
   }
 }
 
@@ -1241,6 +1254,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(HTMLInputElement,
                                                   TextControlElement)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mValidity)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mControllers)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mRadioGroupContainer)
   if (tmp->IsSingleLineTextControl(false) && tmp->mInputData.mState) {
     tmp->mInputData.mState->Traverse(cb);
   }
@@ -1254,6 +1268,9 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(HTMLInputElement,
                                                 TextControlElement)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mValidity)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mControllers)
+  // We don't need to unlink mRadioGroupContainer here, as it will call
+  // DisconnectRadioGroupContainer on us when it is unlinked. Otherwise we may
+  // end up re-added to the radio group before we've been properly removed.
   if (tmp->IsSingleLineTextControl(false) && tmp->mInputData.mState) {
     tmp->mInputData.mState->Unlink();
   }
@@ -1340,10 +1357,9 @@ void HTMLInputElement::BeforeSetAttr(int32_t aNameSpaceID, nsAtom* aName,
     }
 
     // When name or type changes, radio should be removed from radio group.
-    // If we are not done creating the radio, we also should not do it.
     if (mType == FormControlType::InputRadio) {
-      if ((aName == nsGkAtoms::name || (aName == nsGkAtoms::type && !mForm)) &&
-          (mForm || mDoneCreating)) {
+      if (aName == nsGkAtoms::name || (aName == nsGkAtoms::type && !mForm)) {
+        mRemovedFromRadioGroupForAttrChange = !!GetCurrentRadioGroupContainer();
         RemoveFromRadioGroup();
       } else if (aName == nsGkAtoms::required) {
         auto* container = GetCurrentRadioGroupContainer();
@@ -1374,7 +1390,9 @@ void HTMLInputElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
       // is the default value. So if the elements value didn't change from the
       // default, we have to re-set it.
       if (!mValueChanged && GetValueMode() == VALUE_MODE_VALUE) {
-        SetDefaultValueAsValue();
+        if (mDoneCreating) {
+          SetDefaultValueAsValue();
+        }
       } else if (GetValueMode() == VALUE_MODE_DEFAULT) {
         ResetDirFormAssociatedElement(this, aNotify, HasDirAuto());
       }
@@ -1534,10 +1552,13 @@ void HTMLInputElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
     }
 
     // When name or type changes, radio should be added to radio group.
-    // If we are not done creating the radio, we also should not do it.
+    // If we are not done creating the radio, we also should not do it, unless
+    // the radio was in a group before the change.
+    const bool wasInRadioGroup = mRemovedFromRadioGroupForAttrChange;
+    mRemovedFromRadioGroupForAttrChange = false;
     if (mType == FormControlType::InputRadio) {
       if ((aName == nsGkAtoms::name || (aName == nsGkAtoms::type && !mForm)) &&
-          (mForm || mDoneCreating)) {
+          (mForm || mDoneCreating || GetParentNode() || wasInRadioGroup)) {
         AddToRadioGroup();
         UpdateValueMissingValidityStateForRadio(false);
         needValidityUpdate = true;
@@ -1614,6 +1635,13 @@ bool HTMLInputElement::Alpha() const {
     return false;
   }
   return HasAttr(nsGkAtoms::alpha);
+}
+
+bool HTMLInputElement::EyeDropper() const {
+  if (!StaticPrefs::dom_input_color_eyedropper_enabled()) {
+    return false;
+  }
+  return HasAttr(nsGkAtoms::eyedropper);
 }
 
 void HTMLInputElement::GetAutocomplete(nsAString& aValue) {
@@ -1764,8 +1792,10 @@ void HTMLInputElement::GetNonFileValueInternal(nsAString& aValue) const {
         if (mInputData.mState) {
           mInputData.mState->GetValue(aValue, /* aForDisplay = */ false);
         } else {
-          // Value hasn't been set yet.
-          aValue.Truncate();
+          GetAttr(nsGkAtoms::value, aValue);
+          if (mDoneCreating) {
+            SanitizeValue(aValue, SanitizationKind::ForValueGetter);
+          }
         }
       } else if (!aValue.Assign(mInputData.mValue, fallible)) {
         aValue.Truncate();
@@ -2470,7 +2500,7 @@ void HTMLInputElement::OpenDateTimePicker(const DateTimeValue& aInitialValue) {
     return;
   }
 
-  mDateTimeInputBoxValue = MakeUnique<DateTimeValue>(aInitialValue);
+  mDateTimeInputBoxValue = std::make_unique<DateTimeValue>(aInitialValue);
   nsContentUtils::DispatchChromeEvent(this, u"MozOpenDateTimePicker"_ns,
                                       CanBubble::eYes, Cancelable::eYes);
 }
@@ -2492,6 +2522,15 @@ void HTMLInputElement::OpenColorPicker() {
     return;
   }
   nsContentUtils::DispatchChromeEvent(this, u"MozOpenColorPicker"_ns,
+                                      CanBubble::eYes, Cancelable::eYes);
+}
+
+void HTMLInputElement::OpenEyeDropper() {
+  if (NS_WARN_IF(mType != FormControlType::InputColor)) {
+    return;
+  }
+  MOZ_ASSERT(StaticPrefs::dom_input_color_eyedropper_enabled());
+  nsContentUtils::DispatchChromeEvent(this, u"MozOpenEyeDropper"_ns,
                                       CanBubble::eYes, Cancelable::eYes);
 }
 
@@ -2984,7 +3023,8 @@ nsresult HTMLInputElement::SetValueInternal(
 
       // Treat value == defaultValue for other input elements.
       return nsGenericHTMLFormControlElementWithState::SetAttr(
-          kNameSpaceID_None, nsGkAtoms::value, aValue, true);
+          kNameSpaceID_None, nsGkAtoms::value, aValue, true,
+          IsKnownNewAttr::No);
 
     case VALUE_MODE_FILENAME:
       return NS_ERROR_UNEXPECTED;
@@ -3133,8 +3173,14 @@ RadioGroupContainer* HTMLInputElement::FindTreeRadioGroupContainer() const {
               ->OwnedRadioGroupContainer();
 }
 
-void HTMLInputElement::DisconnectRadioGroupContainer() {
-  mRadioGroupContainer = nullptr;
+void HTMLInputElement::DisconnectRadioGroupContainer(
+    RadioGroupContainer* aContainer) {
+  MOZ_ASSERT(mRadioGroupContainer == aContainer,
+             "Requested unlink by container that does not really contain this "
+             "element.");
+  if (mRadioGroupContainer == aContainer) {
+    mRadioGroupContainer = nullptr;
+  }
 }
 
 HTMLInputElement* HTMLInputElement::GetSelectedRadioButton() const {
@@ -3205,11 +3251,13 @@ void HTMLInputElement::SetCheckedInternal(bool aChecked, bool aNotify,
     SetStates(ElementState::CHECKED, aChecked, aNotify);
   }
 
-  // No need to update element state, since we're about to call
-  // UpdateState anyway.
-  UpdateAllValidityStatesButNotElementState();
+  // Checkedness only affects the valueMissing validity state.
+  const bool validBefore = IsValid();
+  UpdateValueMissingValidityState();
   UpdateIndeterminateState(aNotify);
-  UpdateValidityElementStates(aNotify);
+  if (validBefore != IsValid()) {
+    UpdateValidityElementStates(aNotify);
+  }
 
   // Notify all radios in the group that value has changed, this is to let
   // radios to have the chance to update its states, e.g., :indeterminate.
@@ -3327,6 +3375,8 @@ void HTMLInputElement::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
   if (IsDisabledForEvents(aVisitor.mEvent)) {
     return;
   }
+
+  aVisitor.mWantsPostHandleEvent = true;
 
   // Initialize the editor if needed.
   if (NeedToInitializeEditorForEvent(aVisitor)) {
@@ -3872,13 +3922,20 @@ nsresult HTMLInputElement::PostHandleEvent(EventChainPostVisitor& aVisitor) {
 
   bool preventDefault =
       aVisitor.mEventStatus == nsEventStatus_eConsumeNoDefault;
-  if (IsDisabled() && oldType != FormControlType::InputCheckbox &&
-      oldType != FormControlType::InputRadio) {
-    // Behave as if defaultPrevented when the element becomes disabled by event
-    // listeners. Checkboxes and radio buttons should still process clicks for
-    // web compat. See:
-    // https://html.spec.whatwg.org/multipage/input.html#the-input-element:activation-behaviour
-    preventDefault = true;
+  if (IsDisabled()) {
+    if (oldType != FormControlType::InputCheckbox &&
+        oldType != FormControlType::InputRadio) {
+      // Behave as if defaultPrevented when the element becomes disabled by
+      // event listeners. Checkboxes and radio buttons should still process
+      // clicks for web compat. See:
+      // https://html.spec.whatwg.org/multipage/input.html#the-input-element:activation-behaviour
+      preventDefault = true;
+    }
+    if (StaticPrefs::dom_forms_retain_focus_on_disabled_enabled() &&
+        aVisitor.mEvent->AsKeyboardEvent()) {
+      UnsetFlags(HTML_ELEMENT_ACTIVE_FOR_KEYBOARD);
+      preventDefault = true;
+    }
   }
 
   if (NS_SUCCEEDED(rv)) {
@@ -4571,20 +4628,25 @@ void HTMLInputElement::SetupShadowTree(bool aNotify) {
   TextControlElement::SetupShadowTree(*shadow, aNotify);
 }
 
-ShadowRoot* HTMLInputElement::CreateShadowTreeFromLayoutIfNeeded() {
-  if (!CreatesUAShadowTree()) {
+ShadowRoot* HTMLInputElement::CreateShadowTreeBeforeLayoutIfNeeded(
+    FromFrameConstruction aFromFrameConstruction) {
+  if (!CreatesUAShadowTree() || GetShadowRoot()) {
     return nullptr;
   }
-  auto* existing = GetShadowRoot();
-  if (existing) {
-    return nullptr;
-  }
-  if (HasChildren()) [[unlikely]] {
-    // In the unlikely case we have any child, they are guaranteed to not have
-    // frames, but they might still be styled and about to go out of the flat
-    // tree, so need to clear their styles now, before creating the shadow tree.
-    RestyleManager::ClearServoDataFromSubtree(this,
-                                              RestyleManager::IncludeRoot::No);
+  if (HasChildren() && IsInComposedDoc()) [[unlikely]] {
+    if (aFromFrameConstruction == FromFrameConstruction::Yes) {
+      // In the unlikely case we have any child, they are guaranteed to not have
+      // frames if we're running from frame construction, but they might still
+      // be styled and about to go out of the flat tree, so need to clear their
+      // styles now, before creating the shadow tree.
+      RestyleManager::ClearServoDataFromSubtree(
+          this, RestyleManager::IncludeRoot::No);
+    } else if (RefPtr ps = OwnerDoc()->GetPresShell()) {
+      // If we're not running from frame construction, we do need to tear down
+      // the frames now (there could be frames in the case our type dynamically
+      // switched to text).
+      ps->DestroyFramesForAndRestyle(this);
+    }
   }
   SetupShadowTree(/* aNotify = */ false);
   return GetShadowRoot();
@@ -4728,7 +4790,7 @@ void HTMLInputElement::HandleTypeChange(FormControlType aNewType,
   if (aNewType == FormControlType::InputFile ||
       oldType == FormControlType::InputFile) {
     if (aNewType == FormControlType::InputFile) {
-      mFileData.reset(new FileData());
+      mFileData = std::make_unique<FileData>();
     } else {
       mFileData->Unlink();
       mFileData = nullptr;
@@ -4798,7 +4860,8 @@ void HTMLInputElement::HandleTypeChange(FormControlType aNewType,
       //    mode, then set the element's value content attribute to the
       //    element's value.
       if (oldValueMode == VALUE_MODE_VALUE && !oldValue.IsEmpty()) {
-        SetAttr(kNameSpaceID_None, nsGkAtoms::value, oldValue, true);
+        SetAttr(kNameSpaceID_None, nsGkAtoms::value, oldValue, true,
+                IsKnownNewAttr::No);
       }
       break;
     case VALUE_MODE_VALUE: {
@@ -4918,11 +4981,8 @@ void HTMLInputElement::HandleTypeChange(FormControlType aNewType,
       }
     }
     // We should update our mapped attribute mapping function.
-    if (mAttrs.HasAttrs() && !mAttrs.IsPendingMappedAttributeEvaluation()) {
-      mAttrs.InfallibleMarkAsPendingPresAttributeEvaluation();
-      if (auto* doc = GetComposedDoc()) {
-        doc->ScheduleForPresAttrEvaluation(this);
-      }
+    if (mAttrs.HasAttrs()) {
+      ScheduleForPresAttrEvaluationIfNeeded();
     }
   }
 
@@ -6394,16 +6454,26 @@ void HTMLInputElement::DoneCreatingElement() {
   // Sanitize the value and potentially set mFocusedValue.
   if (GetValueMode() == VALUE_MODE_VALUE) {
     nsAutoString value;
-    GetValue(value, CallerType::System);
-    // TODO: What should we do if SetValueInternal fails?  (The allocation
-    // may potentially be big, but most likely we've failed to allocate
-    // before the type change.)
-    SetValueInternal(value, ValueSetterOption::ByInternalAPI);
+    if (mValueChanged) {
+      GetValue(value, CallerType::System);
+      SetValueInternal(value, ValueSetterOption::ByInternalAPI);
+    } else {
+      GetDefaultValue(value);
+      if (mType == FormControlType::InputText && !mInputData.mState) {
+        SanitizeValue(value, SanitizationKind::ForValueSetter);
+        OnValueChanged(ValueChangeKind::Internal, value.IsEmpty(), &value);
+      } else {
+        // TODO: What should we do if SetValueInternal fails?  (The allocation
+        // may potentially be big, but most likely we've failed to allocate
+        // before the type change.)
+        SetValueInternal(value, ValueSetterOption::ByInternalAPI);
+      }
+    }
 
     if (CreatesDateTimeWidget()) {
       // mFocusedValue has to be set here, so that `FireChangeEventIfNeeded` can
       // fire a change event if necessary.
-      mFocusedValue = value;
+      GetValue(mFocusedValue, CallerType::System);
     }
   }
 
@@ -6624,7 +6694,7 @@ bool HTMLInputElement::IsHTMLFocusable(IsFocusableFlags aFlags,
     return true;
   }
 
-  if (IsDisabled()) {
+  if (!(aFlags & IsFocusableFlags::IgnoreDisabled) && IsDisabled()) {
     *aIsFocusable = false;
     return true;
   }
@@ -6696,7 +6766,7 @@ bool HTMLInputElement::IsHTMLFocusable(IsFocusableFlags aFlags,
 
 template <typename VisitCallback>
 void HTMLInputElement::VisitGroup(VisitCallback&& aCallback, bool aSkipThis) {
-  if (auto* container = GetCurrentRadioGroupContainer()) {
+  if (RefPtr container = GetCurrentRadioGroupContainer()) {
     nsAutoString name;
     GetAttr(nsGkAtoms::name, name);
     container->WalkRadioGroup(name, aCallback, aSkipThis ? this : nullptr);

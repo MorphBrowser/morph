@@ -1,9 +1,5 @@
 "use strict";
 
-const { isBrowserContextMenuClickSupported } = ChromeUtils.importESModule(
-  "resource://newtab/lib/TelemetryFeed.sys.mjs"
-);
-
 const TOPIC = "webNavigation-createdNavigationTarget";
 const TEST_LINK = "https://example.com/";
 const TOP_SITE_SELECTOR =
@@ -68,10 +64,6 @@ async function openNewtabWithTopSites() {
  */
 function checkTopSiteClick(background) {
   let clicks = Glean.topsites.click.testGetValue() ?? [];
-  if (!isBrowserContextMenuClickSupported()) {
-    is(clicks.length, 0, "Recorded no topsites.click on an older Firefox");
-    return;
-  }
   is(clicks.length, 1, "Recorded 1 topsites.click");
   is(clicks[0].extra.background, background, "Recorded the background extra");
 }
@@ -200,6 +192,7 @@ test_newtab({
         "https://example.com/browser/browser/extensions/newtab/test/browser/link_open_stories.json"
       );
     await pushPrefs(
+      ["browser.newtabpage.activity-stream.feeds.discoverystreamfeed", true],
       [
         "browser.newtabpage.activity-stream.discoverystream.config",
         JSON.stringify({

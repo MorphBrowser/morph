@@ -8,6 +8,25 @@ Services.scriptloader.loadSubScript(
   this
 );
 
+const { LanguageDetector: PageLanguageDetector } = ChromeUtils.importESModule(
+  "moz-src:///toolkit/components/translations/LanguageDetector.sys.mjs"
+);
+
+add_setup(async function () {
+  // When these browser tests run in chaos mode, such as for a --verify test run, I have found that
+  // the browser spends an inordinate amount of time handling continuous animations, such as for the
+  // loading spinner on the Translations URL-bar button. This can cause tests to time out in the worst
+  // case, and certainly makes them all run longer than they otherwise should in the best case.
+  //
+  // Reduced motion limits that cost in chaos-mode runs while leaving animations fully enabled on normal
+  // runs, including the non-chaos --verify passes.
+  if (parseInt(Services.env.get("MOZ_CHAOSMODE"), 16)) {
+    await SpecialPowers.pushPrefEnv({
+      set: [["ui.prefersReducedMotion", 1]],
+    });
+  }
+});
+
 /**
  * Converts milliseconds to seconds.
  *
@@ -1167,6 +1186,69 @@ class TranslationsBencher {
  */
 class SharedTranslationsTestUtils {
   /**
+   * Loads or reloads a PDF and waits for its first page's text layer to render.
+   *
+   * @param {object} options
+   * @param {MozBrowser} options.browser - The browser containing the PDF viewer.
+   * @param {string} options.url - The PDF URL.
+   * @param {boolean} [options.reload=false] - Whether to reload the current PDF.
+   * @returns {Promise<void>}
+   */
+  static async loadPdfPage({ browser, url, reload = false }) {
+    const rendered = BrowserTestUtils.waitForContentEvent(
+      browser,
+      "textlayerrendered",
+      false,
+      event => {
+        const document = event.target.ownerDocument || event.target;
+
+        return Boolean(
+          document.querySelector(
+            ".page[data-page-number='1'] .textLayer .endOfContent"
+          )
+        );
+      },
+      true
+    );
+    const loaded = BrowserTestUtils.browserLoaded(browser, { wantLoad: url });
+
+    if (reload) {
+      browser.reload();
+    } else {
+      BrowserTestUtils.startLoadingURIString(browser, url);
+    }
+
+    await Promise.all([loaded, rendered]);
+  }
+
+  /**
+   * Asserts the detected page language and confidence.
+   *
+   * @param {object} options
+   * @param {MozBrowser} options.browser - The browser containing the document.
+   * @param {string} options.language - The expected BCP-47 language tag.
+   * @param {boolean} options.confident - The expected confidence.
+   * @returns {Promise<void>}
+   */
+  static async assertDetectedPageLanguage({ browser, language, confident }) {
+    const metadata = await requestDocumentLanguageMetadata(browser);
+    const detected = await PageLanguageDetector.detectLanguage(
+      metadata.textSample
+    );
+
+    is(
+      detected.language,
+      language,
+      "The document text has the expected language"
+    );
+    is(
+      detected.confident,
+      confident,
+      "The document language detection has the expected confidence"
+    );
+  }
+
+  /**
    * Asserts that the specified element currently has focus.
    *
    * @param {Element} element - The element to check for focus.
@@ -1333,10 +1415,63 @@ class SharedTranslationsTestUtils {
  */
 class FullPageTranslationsTestUtils {
   /**
+   * Asserts that a page cannot offer or start full-page translations.
+   *
+   * @param {object} options
+   * @param {MozBrowser} options.browser - The browser containing the restricted page.
+   * @param {LanguagePair} options.languagePair - The translation to attempt.
+   * @returns {Promise<void>}
+   */
+  static async assertPageTranslationIsRestricted({ browser, languagePair }) {
+    const actor = TranslationsParent.getTranslationsActor(browser);
+
+    await actor.maybeOfferTranslations();
+
+    is(
+      actor.languageState.requestedLanguagePair,
+      null,
+      "The restricted page is not automatically translated"
+    );
+    await FullPageTranslationsTestUtils.assertTranslationsButton(
+      { button: false },
+      "The URL-bar translations button is hidden on the restricted page"
+    );
+
+    await actor.translate(languagePair, false);
+    is(
+      actor.languageState.requestedLanguagePair,
+      null,
+      "Explicit full-page translation requests are restricted"
+    );
+
+    const shown = BrowserTestUtils.waitForEvent(
+      window.PanelUI.mainView,
+      "ViewShown"
+    );
+    window.PanelUI.show();
+    await shown;
+
+    try {
+      ok(
+        document.getElementById("appMenu-translate-button").disabled,
+        "The app-menu translate button is disabled on the restricted page"
+      );
+    } finally {
+      const hidden = BrowserTestUtils.waitForEvent(
+        window.PanelUI.panel,
+        "popuphidden"
+      );
+      window.PanelUI.hide();
+      await hidden;
+    }
+  }
+
+  /**
    * A collection of element visibility expectations for the default panel view.
    */
   static #defaultViewVisibilityExpectations = {
     cancelButton: true,
+    companionButton: true,
     fromMenuList: true,
     fromLabel: true,
     header: true,
@@ -2481,10 +2616,10 @@ class FullPageTranslationsTestUtils {
     let callback;
     if (endToEndTest) {
       callback = async TranslationsTest => {
-        const { getFinalParagraph } = TranslationsTest.getSelectors();
+        const { getLastOfTypeParagraph } = TranslationsTest.getSelectors();
         await TranslationsTest.assertTranslationResult(
           "The page's final paragraph is translated.",
-          getFinalParagraph,
+          getLastOfTypeParagraph,
           [
             // TODO (Bug 1967764) We need to investigate why some machines may produce
             // a different translated output, given the same models and the same WASM binary.
@@ -2495,10 +2630,10 @@ class FullPageTranslationsTestUtils {
       };
     } else {
       callback = async (TranslationsTest, { fromLang, toLang }) => {
-        const { getFinalParagraph } = TranslationsTest.getSelectors();
+        const { getLastOfTypeParagraph } = TranslationsTest.getSelectors();
         await TranslationsTest.assertTranslationResult(
           "The page's final paragraph is translated.",
-          getFinalParagraph,
+          getLastOfTypeParagraph,
           `— PUES, AUNQUE MOVÁIS MÁS BRAZOS QUE LOS DEL GIGANTE BRIAREO, ME LO HABÉIS DE PAGAR. [${fromLang} to ${toLang}]`
         );
       };
@@ -2525,10 +2660,10 @@ class FullPageTranslationsTestUtils {
 
     info("Checking that the page's final paragraph is not translated");
     await runInPage(async TranslationsTest => {
-      const { getFinalParagraph } = TranslationsTest.getSelectors();
+      const { getLastOfTypeParagraph } = TranslationsTest.getSelectors();
       await TranslationsTest.assertTranslationResult(
         "The page's final paragraph is not translated and is in the original Spanish.",
-        getFinalParagraph,
+        getLastOfTypeParagraph,
         "— Pues, aunque mováis más brazos que los del gigante Briareo, me lo habéis de pagar."
       );
     });
@@ -2559,19 +2694,19 @@ class FullPageTranslationsTestUtils {
     let callback;
     if (endToEndTest) {
       callback = async TranslationsTest => {
-        const { getFinalParagraphTitle } = TranslationsTest.getSelectors();
+        const { getLastOfTypeParagraph } = TranslationsTest.getSelectors();
         await TranslationsTest.assertTranslationResult(
           "The final paragraph's title attribute is translated.",
-          getFinalParagraphTitle,
+          () => getLastOfTypeParagraph()?.getAttribute("title"),
           "This is the title of the final paragraph"
         );
       };
     } else {
       callback = async (TranslationsTest, { fromLang, toLang }) => {
-        const { getFinalParagraphTitle } = TranslationsTest.getSelectors();
+        const { getLastOfTypeParagraph } = TranslationsTest.getSelectors();
         await TranslationsTest.assertTranslationResult(
           "The final paragraph's title attribute is translated.",
-          getFinalParagraphTitle,
+          () => getLastOfTypeParagraph()?.getAttribute("title"),
           `ESTE ES EL TÍTULO DEL ÚLTIMO PÁRRAFO [${fromLang} to ${toLang}]`
         );
       };
@@ -2600,10 +2735,10 @@ class FullPageTranslationsTestUtils {
       "Checking that the final paragraph's title attribute is not translated"
     );
     await runInPage(async TranslationsTest => {
-      const { getFinalParagraphTitle } = TranslationsTest.getSelectors();
+      const { getLastOfTypeParagraph } = TranslationsTest.getSelectors();
       await TranslationsTest.assertTranslationResult(
         "The final paragraph's title attribute is not translated and is in the original Spanish.",
-        getFinalParagraphTitle,
+        () => getLastOfTypeParagraph()?.getAttribute("title"),
         "Este es el título del último párrafo"
       );
     });
@@ -2748,6 +2883,7 @@ class FullPageTranslationsTestUtils {
       {
         cancelButton: false,
         changeSourceLanguageButton: false,
+        companionButton: false,
         dismissErrorButton: false,
         error: false,
         errorMessage: false,
@@ -2825,14 +2961,18 @@ class FullPageTranslationsTestUtils {
 
   /**
    * Asserts that panel element visibility matches the default panel view.
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.companionButtonVisible=true]
    */
-  static assertPanelViewDefault() {
+  static assertPanelViewDefault({ companionButtonVisible = true } = {}) {
     info("Checking that the panel shows the default view");
     FullPageTranslationsTestUtils.#assertPanelMainViewId(
       "full-page-translations-panel-view-default"
     );
     FullPageTranslationsTestUtils.#assertPanelElementVisibility({
       ...FullPageTranslationsTestUtils.#defaultViewVisibilityExpectations,
+      companionButton: companionButtonVisible,
     });
     FullPageTranslationsTestUtils.#assertPanelHeaderL10nId(
       "translations-panel-header"
@@ -2853,6 +2993,7 @@ class FullPageTranslationsTestUtils {
     );
     FullPageTranslationsTestUtils.#assertPanelElementVisibility({
       cancelButton: true,
+      companionButton: false,
       error: true,
       errorMessage: true,
       errorMessageHint: true,
@@ -2896,7 +3037,9 @@ class FullPageTranslationsTestUtils {
    */
   static assertPanelViewLoading() {
     info("Checking that the panel shows the loading view");
-    FullPageTranslationsTestUtils.assertPanelViewDefault();
+    FullPageTranslationsTestUtils.assertPanelViewDefault({
+      companionButtonVisible: false,
+    });
     const loadingButton = getByL10nId(
       "translations-panel-translate-button-loading"
     );
@@ -2906,8 +3049,11 @@ class FullPageTranslationsTestUtils {
 
   /**
    * Asserts that panel element visibility matches the panel intro view.
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.companionButtonVisible=true]
    */
-  static assertPanelViewIntro() {
+  static assertPanelViewIntro({ companionButtonVisible = true } = {}) {
     info("Checking that the panel shows the intro view");
     FullPageTranslationsTestUtils.#assertPanelMainViewId(
       "full-page-translations-panel-view-default"
@@ -2916,6 +3062,7 @@ class FullPageTranslationsTestUtils {
       intro: true,
       introLearnMoreLink: true,
       ...FullPageTranslationsTestUtils.#defaultViewVisibilityExpectations,
+      companionButton: companionButtonVisible,
     });
     FullPageTranslationsTestUtils.#assertPanelHeaderL10nId(
       "translations-panel-intro-header"
@@ -2950,6 +3097,7 @@ class FullPageTranslationsTestUtils {
       "full-page-translations-panel-view-default"
     );
     FullPageTranslationsTestUtils.#assertPanelElementVisibility({
+      companionButton: true,
       header: true,
       langSelection: true,
       restoreButton: true,
@@ -3113,6 +3261,590 @@ class FullPageTranslationsTestUtils {
         click(cancelButton, "Clicking the cancel button");
       }
     );
+  }
+
+  /**
+   * Verifies companion placement and button visibility before, during, and after Split View.
+   *
+   * @param {object} options
+   * @param {boolean} options.rtl
+   *   Whether the browser uses a right-to-left locale.
+   * @param {boolean} options.openFromAppMenu
+   *   Whether to open the panel through the application menu.
+   * @returns {Promise<void>}
+   */
+  static async assertCompanionButtonOpensSplitView({ rtl, openFromAppMenu }) {
+    const prefs = [["browser.tabs.splitView.enabled", true]];
+    if (rtl) {
+      prefs.push(["intl.l10n.pseudo", "bidi"]);
+    }
+
+    const { cleanup, tab: sourceTab } = await loadTestPage({
+      page: SPANISH_PAGE_URL,
+      languagePairs: LANGUAGE_PAIRS,
+      prefs,
+    });
+    let aboutTranslationsTab = null;
+
+    try {
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: this.assertPanelViewIntro,
+      });
+
+      const tabOpenPromise = BrowserTestUtils.waitForNewTab(
+        gBrowser,
+        url => url.startsWith("about:translations"),
+        true
+      );
+      const splitViewCreated = BrowserTestUtils.waitForEvent(
+        gBrowser.tabContainer,
+        "SplitViewCreated"
+      );
+      const companionSelected = BrowserTestUtils.waitForEvent(
+        gBrowser.tabContainer,
+        "TabSelect",
+        false,
+        event =>
+          event.target !== sourceTab &&
+          event.target.splitview === sourceTab.splitview
+      );
+      await this.clickCompanionButton();
+      aboutTranslationsTab = await tabOpenPromise;
+      await Promise.all([splitViewCreated, companionSelected]);
+
+      const splitView = sourceTab.splitview;
+      ok(splitView, "The source page is in a Split View");
+      is(
+        aboutTranslationsTab.splitview,
+        splitView,
+        "about:translations is in the same Split View"
+      );
+      is(
+        splitView.tabs[0],
+        aboutTranslationsTab,
+        "about:translations is at the logical start of the Split View"
+      );
+      is(
+        splitView.tabs[1],
+        sourceTab,
+        "The source page is at the logical end of the Split View"
+      );
+      is(
+        gBrowser.selectedTab,
+        aboutTranslationsTab,
+        "The translations companion is selected"
+      );
+      await AboutTranslationsTestUtils.assertSelectedLanguages(
+        aboutTranslationsTab.linkedBrowser,
+        { sourceLanguage: "es", targetLanguage: "en" }
+      );
+      await SpecialPowers.spawn(aboutTranslationsTab.linkedBrowser, [], () => {
+        Assert.ok(
+          content.document.hasFocus(),
+          "The companion document has focus"
+        );
+        Assert.equal(
+          content.document.activeElement,
+          content.document.body,
+          "Focus remains at the document level without focusing a control"
+        );
+      });
+
+      const aboutTranslationsPanel = gBrowser.getPanel(
+        aboutTranslationsTab.linkedBrowser
+      );
+      const sourcePanel = gBrowser.getPanel(sourceTab.linkedBrowser);
+      const { aboutTranslationsBounds, sourceBounds, expectedCompanionWidth } =
+        await window.promiseDocumentFlushed(() => ({
+          aboutTranslationsBounds:
+            aboutTranslationsPanel.getBoundingClientRect(),
+          sourceBounds: sourcePanel.getBoundingClientRect(),
+          expectedCompanionWidth: gBrowser.tabpanels.clientWidth * 0.33,
+        }));
+
+      Assert.lessOrEqual(
+        Math.abs(aboutTranslationsBounds.width - expectedCompanionWidth),
+        1,
+        "about:translations opens at 33% of the Split View width"
+      );
+
+      if (rtl) {
+        Assert.greaterOrEqual(
+          aboutTranslationsBounds.left,
+          sourceBounds.right,
+          "about:translations is physically right of the source page in RTL"
+        );
+      } else {
+        Assert.lessOrEqual(
+          aboutTranslationsBounds.right,
+          sourceBounds.left,
+          "about:translations is physically left of the source page in LTR"
+        );
+      }
+
+      await AboutTranslationsTestUtils.assertSplitViewCloseButton(
+        aboutTranslationsTab.linkedBrowser,
+        { visible: true }
+      );
+
+      info(
+        "The companion button is hidden while paired with about:translations"
+      );
+      await BrowserTestUtils.switchTab(gBrowser, sourceTab);
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: () =>
+          this.assertCompanionButtonVisibility({ visible: false }),
+      });
+      await this.clickCancelButton();
+
+      info("Close the translations companion and keep the source page open");
+      const tabClosed = BrowserTestUtils.waitForEvent(
+        aboutTranslationsTab,
+        "TabClose"
+      );
+      const splitViewRemoved = BrowserTestUtils.waitForEvent(
+        gBrowser.tabContainer,
+        "SplitViewRemoved",
+        false,
+        () => !sourceTab.splitview
+      );
+      await AboutTranslationsTestUtils.clickSplitViewCloseButton(
+        aboutTranslationsTab.linkedBrowser
+      );
+      await Promise.all([tabClosed, splitViewRemoved]);
+
+      ok(
+        !aboutTranslationsTab.isConnected,
+        "The translations companion tab is closed"
+      );
+      ok(sourceTab.isConnected, "The source page remains open");
+      ok(!sourceTab.splitview, "The source page has left Split View");
+
+      info("The companion button returns when the source page is standalone");
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: () =>
+          this.assertCompanionButtonVisibility({ visible: true }),
+      });
+      await this.clickCancelButton();
+    } finally {
+      sourceTab.splitview?.unsplitTabs();
+      if (aboutTranslationsTab?.isConnected) {
+        await BrowserTestUtils.removeTab(aboutTranslationsTab);
+      }
+      await cleanup();
+    }
+  }
+
+  /**
+   * Opens a translations companion for the selected tab through the panel.
+   *
+   * @param {object} options
+   * @param {boolean} options.openFromAppMenu
+   *   Whether to open the panel through the application menu.
+   * @returns {Promise<MozTabbrowserTab>}
+   *   The newly opened companion tab.
+   */
+  static async openTranslationsCompanion({ openFromAppMenu }) {
+    await this.openPanel({
+      openFromAppMenu,
+    });
+    this.assertCompanionButtonVisibility({ visible: true });
+
+    const companionOpened = BrowserTestUtils.waitForNewTab(
+      gBrowser,
+      url => url.startsWith("about:translations"),
+      true
+    );
+    const splitCreated = BrowserTestUtils.waitForEvent(
+      gBrowser.tabContainer,
+      "SplitViewCreated"
+    );
+    await this.clickCompanionButton();
+    const [companionTab] = await Promise.all([companionOpened, splitCreated]);
+
+    return companionTab;
+  }
+
+  /**
+   * Verifies companion activation telemetry and panel flow boundaries.
+   *
+   * @param {object} options
+   * @param {boolean} options.openFromAppMenu
+   *   Whether to open the panel through the application menu.
+   * @returns {Promise<void>}
+   */
+  static async assertCompanionButtonTelemetry({ openFromAppMenu }) {
+    const { cleanup, tab: sourceTab } = await loadTestPage({
+      page: SPANISH_PAGE_URL,
+      languagePairs: LANGUAGE_PAIRS,
+      prefs: [["browser.tabs.splitView.enabled", true]],
+    });
+    let aboutTranslationsTab = null;
+
+    try {
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.companionButton,
+        { expectedEventCount: 0 }
+      );
+
+      for (let opening = 1; opening <= 2; opening++) {
+        await this.openPanel({
+          openFromAppMenu,
+          expectedFromLanguage: "es",
+          expectedToLanguage: "en",
+          onOpenPanel: this.assertPanelViewIntro,
+        });
+        this.assertCompanionButtonVisibility({ visible: true });
+
+        await TestTranslationsTelemetry.assertEvent(
+          Glean.translationsPanel.open,
+          {
+            expectedEventCount: opening,
+            expectNewFlowId: true,
+            assertForAllEvents: {
+              auto_show: false,
+              view_name: "defaultView",
+              opened_from: openFromAppMenu ? "appMenu" : "translationsButton",
+              document_language: "es",
+              flow_id: value =>
+                typeof value === "string" && Boolean(value.length),
+            },
+          }
+        );
+
+        if (opening === 1) {
+          info("Cancelling the panel does not record companion activation");
+          await this.clickCancelButton();
+          await TestTranslationsTelemetry.assertEvent(
+            Glean.translationsPanel.companionButton,
+            { expectedEventCount: 0 }
+          );
+          await TestTranslationsTelemetry.assertEvent(
+            Glean.translationsPanel.close,
+            { expectedEventCount: 1, expectNewFlowId: false }
+          );
+        }
+      }
+
+      await TestTranslationsTelemetry.assertEvent(Glean.splitview.start, {
+        expectedEventCount: 0,
+      });
+
+      info(
+        "Opening a companion records one activation in the current panel flow"
+      );
+      const tabOpened = BrowserTestUtils.waitForNewTab(
+        gBrowser,
+        url => url.startsWith("about:translations"),
+        true
+      );
+      const splitViewCreated = BrowserTestUtils.waitForEvent(
+        gBrowser.tabContainer,
+        "SplitViewCreated"
+      );
+      await this.clickCompanionButton();
+      aboutTranslationsTab = await tabOpened;
+      await splitViewCreated;
+
+      await TestTranslationsTelemetry.assertEvent(Glean.splitview.start, {
+        expectedEventCount: 1,
+        assertForAllEvents: { trigger: "translations_companion" },
+      });
+
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.companionButton,
+        { expectedEventCount: 1, expectNewFlowId: false }
+      );
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.close,
+        {
+          expectedEventCount: 2,
+          expectNewFlowId: false,
+        }
+      );
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.cancelButton,
+        { expectedEventCount: 1 }
+      );
+
+      await AboutTranslationsTestUtils.assertSplitViewCloseButton(
+        aboutTranslationsTab.linkedBrowser,
+        { visible: true }
+      );
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsAboutTranslationsPage.open,
+        {
+          expectedEventCount: 1,
+          assertForAllEvents: { open_location: "split" },
+        }
+      );
+
+      info(
+        "Reopening while split starts a new flow without another activation"
+      );
+      await BrowserTestUtils.switchTab(gBrowser, sourceTab);
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: () =>
+          this.assertCompanionButtonVisibility({ visible: false }),
+      });
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.open,
+        {
+          expectedEventCount: 3,
+          expectNewFlowId: true,
+          assertForMostRecentEvent: {
+            opened_from: openFromAppMenu ? "appMenu" : "translationsButton",
+          },
+        }
+      );
+      await this.clickCancelButton();
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.close,
+        {
+          expectedEventCount: 3,
+          expectNewFlowId: false,
+        }
+      );
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.companionButton,
+        { expectedEventCount: 1 }
+      );
+      await TestTranslationsTelemetry.assertEvent(Glean.splitview.start, {
+        expectedEventCount: 1,
+      });
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsPanel.translateButton,
+        { expectedEventCount: 0 }
+      );
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translations.translationRequest,
+        { expectedEventCount: 0 }
+      );
+    } finally {
+      sourceTab.splitview?.unsplitTabs();
+      if (aboutTranslationsTab?.isConnected) {
+        await BrowserTestUtils.removeTab(aboutTranslationsTab);
+      }
+      await cleanup();
+    }
+  }
+
+  /**
+   * Asserts whether the panel's companion button is visible.
+   *
+   * @param {object} options
+   * @param {boolean} options.visible
+   */
+  static assertCompanionButtonVisibility({ visible }) {
+    const { companionButton } = FullPageTranslationsPanel.elements;
+    assertVisibility(
+      visible
+        ? { visible: { companionButton } }
+        : { hidden: { companionButton } }
+    );
+  }
+
+  /**
+   * Verifies that any Split View hides the companion button until its tabs separate.
+   *
+   * @param {object} options
+   * @param {boolean} options.openFromAppMenu
+   *   Whether to open the panel through the application menu.
+   * @returns {Promise<void>}
+   */
+  static async assertCompanionButtonVisibilityWithRegularPartner({
+    openFromAppMenu,
+  }) {
+    const { cleanup, tab: sourceTab } = await loadTestPage({
+      page: SPANISH_PAGE_URL,
+      languagePairs: LANGUAGE_PAIRS,
+      prefs: [
+        ["browser.tabs.splitView.enabled", true],
+        ["browser.tabs.splitview.hasUsed", true],
+      ],
+    });
+    let siblingTab = null;
+
+    try {
+      info("The companion button is visible for a standalone source page");
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: () =>
+          this.assertCompanionButtonVisibility({ visible: true }),
+      });
+      await this.clickCancelButton();
+
+      info("Pair the source page with a regular page in Split View");
+      siblingTab = await BrowserTestUtils.openNewForegroundTab(
+        gBrowser,
+        ENGLISH_PAGE_URL
+      );
+      await BrowserTestUtils.switchTab(gBrowser, sourceTab);
+      await SplitViewTranslationsTestUtils.openExistingTabsInSplitView(
+        sourceTab,
+        siblingTab
+      );
+      is(
+        sourceTab.splitview,
+        siblingTab.splitview,
+        "The source and regular page share a Split View"
+      );
+
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: () =>
+          this.assertCompanionButtonVisibility({ visible: false }),
+      });
+      await this.clickCancelButton();
+
+      info("Separating the regular partner restores the companion button");
+      await SplitViewTranslationsTestUtils.separateTabs(sourceTab);
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: () =>
+          this.assertCompanionButtonVisibility({ visible: true }),
+      });
+      await this.clickCancelButton();
+    } finally {
+      sourceTab.splitview?.unsplitTabs();
+      if (siblingTab?.isConnected) {
+        await BrowserTestUtils.removeTab(siblingTab);
+      }
+      await cleanup();
+    }
+  }
+
+  /**
+   * Verifies that a standalone page cannot open a companion when Split View is disabled.
+   *
+   * @param {object} options
+   * @param {boolean} options.openFromAppMenu
+   *   Whether to open the panel through the application menu.
+   * @returns {Promise<void>}
+   */
+  static async assertCompanionButtonHiddenWhenSplitViewDisabled({
+    openFromAppMenu,
+  }) {
+    const { cleanup } = await loadTestPage({
+      page: SPANISH_PAGE_URL,
+      languagePairs: LANGUAGE_PAIRS,
+      prefs: [["browser.tabs.splitView.enabled", false]],
+    });
+
+    try {
+      await this.openPanel({
+        openFromAppMenu,
+        onOpenPanel: () =>
+          this.assertCompanionButtonVisibility({ visible: false }),
+      });
+      await this.clickCancelButton();
+    } finally {
+      await cleanup();
+    }
+  }
+
+  /**
+   * Holds completion of the next panel language-list setup.
+   *
+   * @returns {HeldAsyncCall}
+   */
+  static holdNextLanguageListSetup() {
+    return holdNextAsyncResult(
+      window.TranslationsPanelShared,
+      "ensureLangListsBuilt"
+    );
+  }
+
+  /**
+   * Holds the next language-detection result for the tab's current document.
+   *
+   * @param {MozTabbrowserTab} tab
+   * @returns {HeldAsyncCall}
+   */
+  static holdNextLanguageDetectionResult(tab) {
+    const actor = TranslationsParent.getTranslationsActor(tab.linkedBrowser);
+
+    return holdNextAsyncResult(
+      TranslationsParent.prototype,
+      "getLangTags",
+      receiver => receiver === actor
+    );
+  }
+
+  /**
+   * Holds the result of the next preferred target-language lookup with the
+   * given exclusions.
+   *
+   * @param {string[]} excludeLangTags - The expected exclusions in call order.
+   * @returns {HeldAsyncCall}
+   */
+  static holdNextPreferredTargetResult(excludeLangTags) {
+    return holdNextAsyncResult(
+      TranslationsParent,
+      "getTopPreferredSupportedToLang",
+      (_, [options]) =>
+        options?.excludeLangTags?.join(",") === excludeLangTags.join(",")
+    );
+  }
+
+  /**
+   * Waits for the next engine-ready notification for the tab's current
+   * document.
+   *
+   * @param {MozTabbrowserTab} tab
+   * @returns {Promise<void>}
+   */
+  static async waitForTranslationEngineReady(tab) {
+    const { linkedBrowser } = tab;
+    const actor = TranslationsParent.getTranslationsActor(linkedBrowser);
+
+    await BrowserTestUtils.waitForEvent(
+      linkedBrowser,
+      "TranslationsParent:LanguageState",
+      false,
+      ({ detail }) =>
+        detail.actor === actor &&
+        detail.reason === "isEngineReady" &&
+        actor.languageState.isEngineReady
+    );
+  }
+
+  /**
+   * Clicks the translations companion button and waits for the panel to close.
+   *
+   * @returns {Promise<void>}
+   */
+  static async clickCompanionButton() {
+    logAction();
+    const { companionButton } = FullPageTranslationsPanel.elements;
+    assertVisibility({ visible: { companionButton } });
+    await FullPageTranslationsTestUtils.waitForPanelPopupEvent(
+      "popuphidden",
+      () => {
+        click(companionButton, "Clicking the translations companion button");
+      }
+    );
+  }
+
+  /**
+   * Retries loading the panel's language lists and waits for its error to clear.
+   *
+   * @returns {Promise<void>}
+   */
+  static async clickLanguageListRetryButton() {
+    const { error, errorHintAction } = FullPageTranslationsPanel.elements;
+    assertVisibility({ visible: { errorHintAction } });
+    const errorCleared = BrowserTestUtils.waitForMutationCondition(
+      error,
+      { attributes: true, attributeFilter: ["hidden"] },
+      () => error.hidden
+    );
+    click(errorHintAction, "Retry loading the translation languages");
+    await errorCleared;
   }
 
   /**
@@ -3346,12 +4078,16 @@ class FullPageTranslationsTestUtils {
   }) {
     logAction();
     const appMenuButton = getById("PanelUI-menu-button", win.document);
+    const appMenuShown = BrowserTestUtils.waitForEvent(
+      win.PanelUI.mainView,
+      "ViewShown"
+    );
     if (openWithKeyboard) {
       hitEnterKey(appMenuButton, "Opening the app-menu button with keyboard");
     } else {
       click(appMenuButton, "Opening the app-menu button");
     }
-    await BrowserTestUtils.waitForEvent(win.PanelUI.mainView, "ViewShown");
+    await appMenuShown;
 
     const translateSiteButton = getById(
       "appMenu-translate-button",
@@ -4042,7 +4778,9 @@ class SelectTranslationsTestUtils {
       "The textarea should not have the translating class."
     );
     const isFullPageTranslationsRestrictedForPage =
-      TranslationsParent.isFullPageTranslationsRestrictedForPage(gBrowser);
+      TranslationsParent.isFullPageTranslationsRestrictedForPage(
+        gBrowser.selectedBrowser
+      );
     SelectTranslationsTestUtils.#assertPanelElementVisibility({
       copyButton: true,
       doneButtonPrimary: true,
@@ -4132,8 +4870,11 @@ class SelectTranslationsTestUtils {
         : [cancelButton, tryAgainButton]),
     ]);
     SharedTranslationsTestUtils._assertHasFocus(tryAgainButton);
-    const ariaDescribedBy = tryAgainButton.getAttribute("aria-describedby");
-    ok(ariaDescribedBy.includes(initFailureMessageBar.id));
+    Assert.deepEqual(
+      tryAgainButton.buttonEl.ariaDescribedByElements,
+      [initFailureMessageBar],
+      "The try-again button is described by the init failure message bar."
+    );
   }
 
   /**
@@ -4181,8 +4922,11 @@ class SelectTranslationsTestUtils {
         : [cancelButton, tryAgainButton]),
     ]);
     SharedTranslationsTestUtils._assertHasFocus(tryAgainButton);
-    const ariaDescribedBy = tryAgainButton.getAttribute("aria-describedby");
-    ok(ariaDescribedBy.includes(translationFailureMessageBar.id));
+    Assert.deepEqual(
+      tryAgainButton.buttonEl.ariaDescribedByElements,
+      [translationFailureMessageBar],
+      "The try-again button is described by the translation failure message bar."
+    );
   }
 
   static #assertPanelTextAreaDirection(langTag = null) {
@@ -4297,7 +5041,9 @@ class SelectTranslationsTestUtils {
   static async assertPanelViewActivelyTranslating() {
     const { textArea } = SelectTranslationsPanel.elements;
     const isFullPageTranslationsRestrictedForPage =
-      TranslationsParent.isFullPageTranslationsRestrictedForPage(gBrowser);
+      TranslationsParent.isFullPageTranslationsRestrictedForPage(
+        gBrowser.selectedBrowser
+      );
     await SelectTranslationsTestUtils.waitForPanelState("translating");
     ok(
       textArea.classList.contains("translating"),
@@ -4333,7 +5079,9 @@ class SelectTranslationsTestUtils {
       "select-translations-panel-translating-placeholder-text"
     );
     const isFullPageTranslationsRestrictedForPage =
-      TranslationsParent.isFullPageTranslationsRestrictedForPage(gBrowser);
+      TranslationsParent.isFullPageTranslationsRestrictedForPage(
+        gBrowser.selectedBrowser
+      );
     is(
       textArea.value,
       expected,
@@ -4361,7 +5109,9 @@ class SelectTranslationsTestUtils {
     const fromLanguage = fromMenuList.value;
     const toLanguage = toMenuList.value;
     const isFullPageTranslationsRestrictedForPage =
-      TranslationsParent.isFullPageTranslationsRestrictedForPage(gBrowser);
+      TranslationsParent.isFullPageTranslationsRestrictedForPage(
+        gBrowser.selectedBrowser
+      );
 
     SelectTranslationsTestUtils.#assertPanelTextAreaDirection(toLanguage);
     SelectTranslationsTestUtils.#assertConditionalUIEnabled({

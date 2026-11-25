@@ -164,6 +164,8 @@ class EventSourceImpl final : public nsIChannelEventSink,
 
   bool IsTargetThread() const { return NS_GetCurrentThread() == mTargetThread; }
 
+  bool DispatchesToMainThread() const { return mIsMainThread || mIsShutDown; }
+
   uint16_t ReadyState() {
     auto lock = mSharedData.Lock();
     if (lock->mEventSource) {
@@ -485,8 +487,10 @@ void EventSourceImpl::CleanupOnMainThread() {
   AssertIsOnMainThread();
   MOZ_ASSERT(IsClosed());
 
-  // Call ShutDown before cleaning any members.
   MOZ_ASSERT(!mIsShutDown);
+  // Cancel first: once mIsShutDown is set, Dispatch() forwards channel events
+  // to the main thread.
+  ResetConnection();
   mIsShutDown = true;
 
   if (mIsMainThread) {
@@ -498,7 +502,6 @@ void EventSourceImpl::CleanupOnMainThread() {
     mTimer = nullptr;
   }
 
-  ResetConnection();
   mPrincipal = nullptr;
   mSrc = nullptr;
 }
@@ -693,7 +696,7 @@ EventSourceImpl::OnStartRequest(nsIRequest* aRequest) {
   {
     auto lock = mSharedData.Lock();
     lock->mOrigin = origin;
-    lock->mServiceNotifier = MakeUnique<EventSourceServiceNotifier>(
+    lock->mServiceNotifier = std::make_unique<EventSourceServiceNotifier>(
         this, mHttpChannel->ChannelId(), mInnerWindowID);
   }
   rv = Dispatch(NewRunnableMethod("dom::EventSourceImpl::AnnounceConnection",
@@ -936,12 +939,14 @@ EventSourceImpl::GetInterface(const nsIID& aIID, void** aResult) {
 
 NS_IMETHODIMP
 EventSourceImpl::IsOnCurrentThread(bool* aResult) {
-  *aResult = IsTargetThread();
+  *aResult = IsOnCurrentThreadInfallible();
   return NS_OK;
 }
 
 NS_IMETHODIMP_(bool)
-EventSourceImpl::IsOnCurrentThreadInfallible() { return IsTargetThread(); }
+EventSourceImpl::IsOnCurrentThreadInfallible() {
+  return DispatchesToMainThread() ? NS_IsMainThread() : IsTargetThread();
+}
 
 nsresult EventSourceImpl::GetBaseURI(nsIURI** aBaseURI) {
   MOZ_ASSERT(!mIsShutDown);
@@ -1584,7 +1589,7 @@ nsresult EventSourceImpl::SetFieldAndClear() {
     return NS_OK;
   }
   if (!mCurrentMessage) {
-    mCurrentMessage = MakeUnique<Message>();
+    mCurrentMessage = std::make_unique<Message>();
   }
   char16_t first_char;
   first_char = mLastFieldName.CharAt(0);
@@ -1906,23 +1911,16 @@ EventSourceImpl::Dispatch(already_AddRefed<nsIRunnable> aEvent,
   // FIXME: This dispatch implementation has inconsistent leaking behaviour when
   // `NS_DISPATCH_FALLIBLE` is not specified.
   nsCOMPtr<nsIRunnable> event_ref(aEvent);
-  if (mIsMainThread) {
+  if (DispatchesToMainThread()) {
     return NS_DispatchToMainThread(event_ref.forget(), aFlags);
-  }
-
-  if (mIsShutDown) {
-    // We want to avoid clutter about errors in our shutdown logs,
-    // so just report NS_OK (we have no explicit return value
-    // for shutdown).
-    return NS_OK;
   }
 
   // If the target is a worker, we have to use a custom WorkerRunnableDispatcher
   // runnable.
   auto workerRef = mWorkerRef.Lock();
-  // Return NS_OK if the worker has already shutdown
+  // The worker ref is released only after shutdown.
   if (!*workerRef) {
-    return NS_OK;
+    return NS_DispatchToMainThread(event_ref.forget(), aFlags);
   }
   RefPtr<WorkerRunnableDispatcher> event = new WorkerRunnableDispatcher(
       this, (*workerRef)->Private(), event_ref.forget());

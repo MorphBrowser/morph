@@ -11,7 +11,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", () =>
   console.createInstance({
-    prefix: "IPP_SiteRuleProviders",
+    logModule: "IPP_SiteRuleProviders",
     maxLogLevel: Services.prefs.getBoolPref("browser.ipProtection.log", false)
       ? "Debug"
       : "Warn",
@@ -62,10 +62,11 @@ export class SiteRuleProvider extends EventTarget {
    * This provider's opinion for a principal.
    *
    * @param {?nsIPrincipal} _principal
+   * @param {number} [_browserId] - the tab the principal is loaded in.
    * @returns {?string}
    *  The rule, or null for "no opinion, ask the next provider".
    */
-  getRule(_principal) {
+  getRule(_principal, _browserId) {
     return null;
   }
 
@@ -88,6 +89,16 @@ export class SiteRuleProvider extends EventTarget {
    */
   setRule(_principal, _rule) {
     throw new Error("setRule() must be implemented by writable subclasses");
+  }
+
+  /**
+   * How many sites this provider holds with the given rule.
+   *
+   * @param {?string} _rule
+   * @returns {number}
+   */
+  count(_rule) {
+    return 0;
   }
 
   /**
@@ -275,6 +286,10 @@ export class MatchPatternPrefRule extends SiteRuleProvider {
     return null;
   }
 
+  count(rule) {
+    return rule === this.#rule ? this.#patterns.patterns.length : 0;
+  }
+
   #rebuild() {
     try {
       let arr = JSON.parse(Services.prefs.getStringPref(this.#pref, "[]"));
@@ -304,19 +319,36 @@ export class MatchPatternPrefRule extends SiteRuleProvider {
  * This is the only writable provider. Permissions related UI (eg. panels and
  * dialogs) already handles changes to ipp-vpn; this class exists so that
  * non-permissions related UI can update it too.
+ *
+ * While the site inclusions feature is on, every write goes through setRule,
+ * so rules are kept on the https origin without a leading "www." and
+ * "http://www.example.com" and "https://example.com" share one rule. Entries
+ * stored before that are normalized once, the first time the feature is seen
+ * on; turning it off lets exact entries back in, so the pass runs again the
+ * next time it is turned on.
  */
 export class IPPPermissionRuleProvider extends SiteRuleProvider {
   static #PERM_NAME = "ipp-vpn";
+  static #SITE_INCLUSIONS_PREF = "browser.ipProtection.features.siteInclusions";
+  static #NORMALIZED_PREF = "browser.ipProtection.siteRulesNormalized";
 
   #observer = null;
+  #normalizing = false;
 
   init() {
+    this.#maybeNormalizeStore();
+
     // ES6 classes that extend EventTarget cannot be coerced into nsIObserver.
     // Work around this by using a function as the observer.
     this.#observer = (subject, topic, data) => {
       this.observe(subject, topic, data);
     };
     Services.obs.addObserver(this.#observer, "perm-changed");
+    Services.prefs.addObserver(
+      IPPPermissionRuleProvider.#SITE_INCLUSIONS_PREF,
+      this.#observer
+    );
+    this.#recordCounts();
   }
 
   uninit() {
@@ -324,10 +356,19 @@ export class IPPPermissionRuleProvider extends SiteRuleProvider {
       return;
     }
     Services.obs.removeObserver(this.#observer, "perm-changed");
+    Services.prefs.removeObserver(
+      IPPPermissionRuleProvider.#SITE_INCLUSIONS_PREF,
+      this.#observer
+    );
     this.#observer = null;
   }
 
   observe(subject, topic, data) {
+    if (topic === "nsPref:changed") {
+      this.#maybeNormalizeStore();
+      return;
+    }
+
     if (topic !== "perm-changed") {
       return;
     }
@@ -350,6 +391,7 @@ export class IPPPermissionRuleProvider extends SiteRuleProvider {
       Glean.ipprotection.exclusionAdded.add(1);
     }
 
+    this.#recordCounts();
     this.notifyChange();
   }
 
@@ -371,16 +413,17 @@ export class IPPPermissionRuleProvider extends SiteRuleProvider {
       return;
     }
 
+    const normalized = this.#normalize(principal);
     if (rule === IPPPrincipalRules.DEFAULT) {
       Services.perms.removeFromPrincipal(
-        principal,
+        normalized,
         IPPPermissionRuleProvider.#PERM_NAME
       );
       return;
     }
 
     Services.perms.addFromPrincipal(
-      principal,
+      normalized,
       IPPPermissionRuleProvider.#PERM_NAME,
       rule === IPPPrincipalRules.INCLUDED
         ? Ci.nsIPermissionManager.ALLOW_ACTION
@@ -388,12 +431,6 @@ export class IPPPermissionRuleProvider extends SiteRuleProvider {
     );
   }
 
-  /**
-   * How many sites are stored with the given rule.
-   *
-   * @param {?string} rule
-   * @returns {number}
-   */
   count(rule) {
     let count = 0;
     for (let perm of Services.perms.getAllByTypes([
@@ -415,8 +452,8 @@ export class IPPPermissionRuleProvider extends SiteRuleProvider {
    * try to remove a subdomain as an exclusion when the site doesn't exist in ipp-vpn
    * (see Bug 2016676).
    *
-   * Eg. if we enter "example.com" in the dialog, "www.example.com" and
-   * "subdomain.example.com" won't be considered exclusions.
+   * Eg. if we enter "example.com" in the dialog, "subdomain.example.com" won't
+   * be considered an exclusion.
    *
    * @param {nsIPrincipal} principal
    *  The principal that we want to check is saved in ipp-vpn.
@@ -425,12 +462,130 @@ export class IPPPermissionRuleProvider extends SiteRuleProvider {
    *  The permission object for a site exception, or null if unavailable.
    */
   getPermissionObject(principal) {
-    let permissionObject = Services.perms.getPermissionObject(
-      principal,
+    return Services.perms.getPermissionObject(
+      this.#normalize(principal),
       IPPPermissionRuleProvider.#PERM_NAME,
       true /* exactHost */
     );
-    return permissionObject;
+  }
+
+  /**
+   * Follows the site inclusions pref, normalizing the store the first time it
+   * is seen on.
+   */
+  #maybeNormalizeStore() {
+    this.#normalizing = Services.prefs.getBoolPref(
+      IPPPermissionRuleProvider.#SITE_INCLUSIONS_PREF,
+      false
+    );
+    if (!this.#normalizing) {
+      Services.prefs.clearUserPref(IPPPermissionRuleProvider.#NORMALIZED_PREF);
+      return;
+    }
+    if (
+      !Services.prefs.getBoolPref(
+        IPPPermissionRuleProvider.#NORMALIZED_PREF,
+        false
+      )
+    ) {
+      this.#normalizePermissionStore();
+      Services.prefs.setBoolPref(
+        IPPPermissionRuleProvider.#NORMALIZED_PREF,
+        true
+      );
+    }
+  }
+
+  /**
+   * Moves every stored rule onto its normalized principal. When several
+   * collapse onto one, the most recently modified wins.
+   */
+  #normalizePermissionStore() {
+    const winners = new Map();
+    for (const perm of Services.perms.getAllByTypes([
+      IPPPermissionRuleProvider.#PERM_NAME,
+    ])) {
+      const stored = perm.principal;
+      const principal = this.#normalize(stored);
+      if (principal !== stored) {
+        Services.perms.removePermission(perm);
+      }
+      const winner = winners.get(principal.origin);
+      if (!winner || winner.perm.modificationTime < perm.modificationTime) {
+        winners.set(principal.origin, { principal, stored, perm });
+      }
+    }
+
+    for (const { principal, stored, perm } of winners.values()) {
+      if (principal !== stored) {
+        Services.perms.addFromPrincipal(
+          principal,
+          IPPPermissionRuleProvider.#PERM_NAME,
+          perm.capability,
+          perm.expireType,
+          perm.expireTime
+        );
+      }
+    }
+  }
+
+  /**
+   * The principal a rule for this one is stored on: while normalizing, https
+   * with its host passed through #stripWww. Other principals, and every
+   * principal while not normalizing, are returned as they are.
+   *
+   * @param {nsIPrincipal} principal
+   * @returns {nsIPrincipal}
+   */
+  #normalize(principal) {
+    if (
+      !this.#normalizing ||
+      !principal?.isContentPrincipal ||
+      !(principal.schemeIs("http") || principal.schemeIs("https"))
+    ) {
+      return principal;
+    }
+    const host = IPPPermissionRuleProvider.#stripWww(principal.host);
+    if (principal.schemeIs("https") && host === principal.host) {
+      return principal;
+    }
+    const uri = principal.URI.mutate()
+      .setScheme("https")
+      .setHost(host)
+      .finalize();
+    return Services.scriptSecurityManager.createContentPrincipal(
+      uri,
+      principal.originAttributes
+    );
+  }
+
+  /**
+   * The host without a leading "www.", unless nothing or only a public suffix
+   * would remain (e.g. "www.co.uk").
+   *
+   * @param {string} host
+   * @returns {string}
+   */
+  static #stripWww(host) {
+    if (!host.startsWith("www.")) {
+      return host;
+    }
+    const bareHost = host.slice("www.".length);
+    if (!bareHost) {
+      return host;
+    }
+    const isPublicSuffix =
+      Services.eTLD.getPublicSuffixFromHost(bareHost) === bareHost;
+    return isPublicSuffix ? host : bareHost;
+  }
+
+  #recordCounts() {
+    Glean.ipprotectionInclusions.count.set(
+      this.count(IPPPrincipalRules.INCLUDED)
+    );
+    Glean.ipprotectionExclusions.count.set(
+      this.count(IPPPrincipalRules.EXCLUDED)
+    );
   }
 
   #ruleForCapability(capability) {
@@ -442,5 +597,162 @@ export class IPPPermissionRuleProvider extends SiteRuleProvider {
       default:
         return IPPPrincipalRules.DEFAULT;
     }
+  }
+}
+
+/**
+ * @param {nsIPrincipal} principal
+ * @returns {string|null} The site a tab rule is pinned to for the principal.
+ */
+function tabRuleSite(principal) {
+  return principal?.isContentPrincipal ? principal.siteOriginNoSuffix : null;
+}
+
+/**
+ * Rules that cover a single tab for as long as it is open, or only one site
+ * in it until the tab leaves that site.
+ */
+export class IPPTabRuleProvider extends SiteRuleProvider {
+  /**
+   * @type {Map<number, {rule: string, site: string|null, stopWatching: Function|null}>}
+   *  browserId -> the tab's rule, the site it is pinned to, and how to stop
+   *  watching the tab leave that site.
+   */
+  #rules = new Map();
+  #observer = null;
+
+  init() {
+    // ES6 classes that extend EventTarget cannot be coerced into nsIObserver.
+    this.#observer = (subject, topic, data) => {
+      this.observe(subject, topic, data);
+    };
+    Services.obs.addObserver(this.#observer, "browsing-context-discarded");
+  }
+
+  observe(browsingContext, topic, why) {
+    // A replaced context hands its browserId to the next one: same tab.
+    if (
+      topic !== "browsing-context-discarded" ||
+      browsingContext.parent ||
+      why === "replace"
+    ) {
+      return;
+    }
+    if (this.#deleteRule(browsingContext.browserId)) {
+      this.notifyChange();
+    }
+  }
+
+  uninit() {
+    if (!this.#observer) {
+      return;
+    }
+    Services.obs.removeObserver(this.#observer, "browsing-context-discarded");
+    this.#observer = null;
+    for (const browserId of [...this.#rules.keys()]) {
+      this.#deleteRule(browserId);
+    }
+  }
+
+  getRule(principal, browserId) {
+    const entry = this.#rules.get(browserId);
+    if (!entry || (entry.site && entry.site !== tabRuleSite(principal))) {
+      return null;
+    }
+    return entry.rule;
+  }
+
+  /**
+   * Sets the rule for one tab until it closes.
+   *
+   * @param {string} rule
+   *  An IPPPrincipalRules value; DEFAULT removes the rule.
+   * @param {number} browserId
+   *  The tab.
+   * @param {object} [options]
+   * @param {nsIPrincipal} [options.principal]
+   *  The site to pin the rule to, required with removeOnLeave.
+   * @param {boolean} [options.removeOnLeave]
+   *  Only cover the principal's site, and remove the rule once a top-level
+   *  navigation in the tab goes to another site.
+   */
+  setTabRule(rule, browserId, { principal, removeOnLeave = false } = {}) {
+    const site = removeOnLeave ? tabRuleSite(principal) : null;
+    if (!browserId || (removeOnLeave && !site)) {
+      return;
+    }
+    const entry = this.#rules.get(browserId);
+    if ((entry?.rule ?? null) === rule && (entry?.site ?? null) === site) {
+      return;
+    }
+    this.#deleteRule(browserId);
+    if (rule) {
+      this.#rules.set(browserId, {
+        rule,
+        site,
+        stopWatching: site ? this.#watchLeave(browserId, site) : null,
+      });
+    }
+    this.notifyChange();
+  }
+
+  /**
+   * @param {number} browserId
+   * @returns {boolean} Whether the tab had a rule.
+   */
+  #deleteRule(browserId) {
+    const entry = this.#rules.get(browserId);
+    entry?.stopWatching?.();
+    return this.#rules.delete(browserId);
+  }
+
+  /**
+   * Removes the tab's rule on the first top-level navigation off site.
+   *
+   * @param {number} browserId
+   * @param {string} site
+   * @returns {Function|null} Stops watching, null if the tab is not found.
+   */
+  #watchLeave(browserId, site) {
+    const webProgress =
+      BrowsingContext.getCurrentTopByBrowserId(browserId)?.webProgress;
+    if (!webProgress) {
+      return null;
+    }
+    const listener = {
+      QueryInterface: ChromeUtils.generateQI([
+        "nsIWebProgressListener",
+        "nsISupportsWeakReference",
+      ]),
+      onLocationChange: (progress, _request, location, flags) => {
+        if (
+          !progress.isTopLevel ||
+          flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_SAME_DOCUMENT
+        ) {
+          return;
+        }
+        const principal = Services.scriptSecurityManager.createContentPrincipal(
+          location,
+          {}
+        );
+        if (tabRuleSite(principal) !== site && this.#deleteRule(browserId)) {
+          this.notifyChange();
+        }
+      },
+    };
+    // The web progress moves to a replacing context, so this covers the tab.
+    webProgress.addProgressListener(
+      listener,
+      Ci.nsIWebProgress.NOTIFY_LOCATION
+    );
+    return () => webProgress.removeProgressListener(listener);
+  }
+
+  count(rule) {
+    let count = 0;
+    for (const entry of this.#rules.values()) {
+      count += entry.rule === rule ? 1 : 0;
+    }
+    return count;
   }
 }

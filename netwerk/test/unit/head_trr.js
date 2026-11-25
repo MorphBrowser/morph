@@ -10,6 +10,7 @@
 /* globals require, __dirname, global, Buffer, process, setTimeout */
 
 var {
+  ADB: TRRADB,
   NodeHTTP2Server: TRRNodeHttp2Server,
   NodeServer: TRRNodeServer,
   NodeHTTPServer: TRRNodeHttpServer,
@@ -24,11 +25,6 @@ const { AppConstants: TRRAppConstants } = ChromeUtils.importESModule(
 function trr_test_setup() {
   dump("start!\n");
 
-  let h2Port = Services.env.get("MOZHTTP2_PORT");
-  Assert.notEqual(h2Port, null);
-  Assert.notEqual(h2Port, "");
-
-  // Set to allow the cert presented by our H2 server
   do_get_profile();
 
   Services.prefs.setBoolPref("network.http.http2.enabled", true);
@@ -60,8 +56,6 @@ function trr_test_setup() {
 
   // We intentionally don't set the TRR mode. Each test should set it
   // after setup in the first test.
-
-  return h2Port;
 }
 
 /// Clears the prefs that we're likely to set while testing TRR code
@@ -1172,10 +1166,7 @@ class TRRProxyCode {
     this.setupProxy();
     global.endServerPort = endServerPort;
 
-    await global.proxy.listen(0);
-
-    let serverPort = global.proxy.address().port;
-    return serverPort;
+    return ADB.listenAndForwardPort(global.proxy, 0); // eslint-disable-line no-undef
   }
 
   static closeProxy() {
@@ -1248,6 +1239,7 @@ class TRRProxy {
     info("TRRProxy start!");
     this.processId = await TRRNodeServer.fork();
     info("processid=" + this.processId);
+    await this.execute(TRRADB);
     await this.execute(TRRProxyCode);
     this.port = await this.execute(`TRRProxyCode.startServer(${port})`);
     Assert.notEqual(this.port, null);

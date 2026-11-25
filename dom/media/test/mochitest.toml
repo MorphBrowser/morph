@@ -705,6 +705,7 @@ support-files = [
   "very-short.mp3",
   "video-overhang.ogg",
   "video-overhang.ogg^headers^",
+  "vp8_alpha_decode.webm",
   "vp9-superframes.webm",
   "vp9-superframes.webm^headers^",
   "vp9.webm",
@@ -804,10 +805,6 @@ tags = "cloneelementvisually"
 tags = "cloneelementvisually"
 
 ["test_cloneElementVisually_resource_change.html"]
-skip-if = [
-  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11' && ccov", # Bug 1559308 - lower frequency intermittent
-  "os == 'mac' && os_version == '15.30' && arch == 'aarch64'", # Bug 1909908
-]
 tags = "cloneelementvisually os_integration"
 
 ["test_clone_media_element.html"]
@@ -829,6 +826,9 @@ run-if = [
   # The graphics sanity test only exists on Windows.
   "os == 'win' && mda_gpu",
 ]
+skip-if = [
+  "os == 'win' && arch == 'x86_64' && opt && mda_gpu", # Bug 2071042 - 272 failures
+]
 
 ["test_hls_player_independency.html"]
 # There's a limit for creating decoder when API lever < 18(Bug 1278574)
@@ -837,6 +837,12 @@ run-if = [
   "os == 'android'",
 ]
 tags = "hls"
+
+["test_android_gpu_process_decoding.html"]
+run-if = [
+  "os == 'android'",
+]
+scheme = "https"
 
 ["test_hw_video_decoding.html"]
 run-if = [
@@ -989,8 +995,6 @@ skip-if = [
 ]
 
 
-["test_unsupported_mkv.html"]
-
 ["test_videoPlaybackQuality_totalFrames.html"]
 skip-if = [
   "os == 'win'", # bug 1374189
@@ -1004,9 +1008,22 @@ skip-if = [
   "true", # Bug 1970241
 ]
 
+["test_video_pixel_crop_picture_rect.html"]
+scheme = "https"
+support-files = ["vp8-pixel-crop-rows.webm"]
+skip-if = [
+  "os == 'android'", # WebCodecs isn't enabled yet on Android
+  "os == 'win'", # in-content decoding cannot initialize gfx devices under win32k lockdown
+]
+
 ["test_video_to_canvas.html"]
 skip-if = [
   "os == 'android'", # android(bug 1232305), bugs 1320418,1347953,1347954,1348140,1348386
+]
+
+["test_vp8_alpha_decode.html"]
+skip-if = [
+  "os == 'android'", # drawImage(video) can yield black frames (see test_seamless_looping_video.html).
 ]
 
 ["test_vp9_buffer_overread.html"]

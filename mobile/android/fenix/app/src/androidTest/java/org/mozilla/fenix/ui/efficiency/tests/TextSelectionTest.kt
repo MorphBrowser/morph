@@ -5,9 +5,12 @@
 package org.mozilla.fenix.ui.efficiency.tests
 
 import org.junit.Test
+import org.mozilla.fenix.customannotations.Critical
 import org.mozilla.fenix.customannotations.SmokeTest
 import org.mozilla.fenix.helpers.TestAssetHelper.getGenericAsset
+import org.mozilla.fenix.helpers.TestAssetHelper.waitingTime
 import org.mozilla.fenix.ui.efficiency.helpers.BaseTest
+import org.mozilla.fenix.ui.efficiency.selectors.ToolbarSelectors
 
 class TextSelectionTest : BaseTest() {
 
@@ -24,7 +27,7 @@ class TextSelectionTest : BaseTest() {
             .clickContextMenuItem("Select all")
             .clickContextMenuItem("Copy")
             .longClickToolbar()
-            .clickDisplayModeToolbarContextMenuItem("Paste")
+            .mozClick(ToolbarSelectors.DISPLAY_MODE_TOOLBAR_PASTE)
 
         // With Select all, white spaces are copied.
         // Potential bug https://bugzilla.mozilla.org/show_bug.cgi?id=1821310
@@ -63,7 +66,9 @@ class TextSelectionTest : BaseTest() {
             .navigateToPage(genericURL.url.toString())
             .clickPageContent("PDF form file")
             .clickStayInAppPromptButtonIfPresent()
-            .longClickWebContentText("Crossing")
+            // Exact-match the caption run so the long-press can't resolve to the painting (a Wikipedia link whose
+            // accessible name also contains "Crossing"); its centre glyph is still "Crossing".
+            .longClickWebContentText(PDF_CAPTION, exact = true)
             .clickContextMenuItem("Copy")
 
         on.searchBar
@@ -85,7 +90,7 @@ class TextSelectionTest : BaseTest() {
             .navigateToPage(genericURL.url.toString())
             .clickPageContent("PDF form file")
             .clickStayInAppPromptButtonIfPresent()
-            .longClickWebContentText("Crossing")
+            .longClickWebContentText(PDF_CAPTION, exact = true)
             .clickContextMenuItem("Copy")
 
         on.searchBar
@@ -94,6 +99,28 @@ class TextSelectionTest : BaseTest() {
             .longClickToolbar()
             .clickContextMenuItem("Paste")
             .verifyTypedToolbarText("Crossing", exists = true)
+    }
+
+    // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/414316
+    @Critical
+    @Test
+    fun urlBarQuickActionsTest() {
+        val firstWebsite = mockWebServer.getGenericAsset(1)
+        val secondWebsite = mockWebServer.getGenericAsset(2)
+
+        on.home.navigateToPage()
+        on.browserPage.navigateToPage(firstWebsite.url.toString()).longClickToolbar()
+        on.browserPage.mozClick(ToolbarSelectors.DISPLAY_MODE_TOOLBAR_COPY)
+        on.browserPage.loadUrlFromToolbar(secondWebsite.url.toString()).longClickToolbar()
+        on.browserPage.mozClick(ToolbarSelectors.DISPLAY_MODE_TOOLBAR_PASTE)
+
+        on.searchBar.verifyTypedToolbarText(firstWebsite.url.toString(), exists = true)
+        on.searchBar.mozPressBack()
+
+        on.browserPage.verifyUrl(secondWebsite.url.toString()).longClickToolbar()
+        on.browserPage.mozClick(ToolbarSelectors.DISPLAY_MODE_TOOLBAR_PASTE_AND_GO)
+        // Paste & Go navigates, so wait the full navigation time, not the verifyUrl 3s default.
+        on.browserPage.verifyUrl(firstWebsite.url.toString(), timeout = waitingTime)
     }
 
     // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/2326836
@@ -107,9 +134,14 @@ class TextSelectionTest : BaseTest() {
             .navigateToPage(genericURL.url.toString())
             .clickPageContent("PDF form file")
             .clickStayInAppPromptButtonIfPresent()
-            .longClickWebContentText("Crossing")
+            .longClickWebContentText(PDF_CAPTION, exact = true)
             .clickContextMenuItem("Search")
             .verifyUrl("Crossing")
             .verifyTabCounter("2")
+    }
+
+    private companion object {
+        // The caption under pdfForm.pdf's painting; long-pressing its centre selects "Crossing".
+        const val PDF_CAPTION = "Washington Crossing the Delaware"
     }
 }

@@ -50,14 +50,58 @@
 
 .monitor-card-state-title {
   font-size: var(--font-size-large);
-  margin-top: 0;
-  margin-bottom: 0;
+  margin-block: 0;
 }
 
 .title-container {
   display: flex;
   align-items: center;
   gap: var(--space-small);
+}
+
+.create-top {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The button drops under the title when the two don't fit on one row */
+.create-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-small);
+}
+
+.suggest-button {
+  margin-inline-start: auto;
+  max-width: 100%;
+}
+
+.suggest-status {
+  text-align: end;
+
+  > .error-message {
+    margin-block-start: var(--space-xsmall);
+    margin-inline-start: 0;
+    text-align: start;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .suggest-button.suggesting {
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+}
+
+/* For screen readers only: what the status line says while generating */
+.sr-only {
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
 }
 
 .monitor-card-title {
@@ -99,22 +143,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.favicon-sq {
-  width: var(--size-item-medium);
-  height: var(--size-item-medium);
-  border-radius: var(--border-radius-small);
-  flex: none;
-}
-
-.favicon-fallback {
-  display: grid;
-  place-items: center;
-  background-color: var(--color-accent-primary);
-  color: white;
-  font-weight: var(--font-weight-bold);
-  font-size: var(--font-size-small);
 }
 
 .field {
@@ -262,12 +290,6 @@ moz-input-text::part(label),
   }
 }
 
-@keyframes pulse {
-  50% {
-    opacity: var(--opacity-deemphasized-strong);
-  }
-}
-
 .chatcard {
   cursor: pointer;
 
@@ -307,6 +329,12 @@ moz-input-text::part(label),
   gap: var(--space-small);
 }
 
+.check-limit-reason {
+  margin: 0;
+  color: var(--text-color-deemphasized);
+  font-size: var(--font-size-small);
+}
+
 .mono-dim {
   color: var(--text-color-deemphasized);
   font-size: var(--font-size-small);
@@ -314,7 +342,7 @@ moz-input-text::part(label),
 
 hr.rule {
   border: 0;
-  border-top: 1px solid var(--border-color-deemphasized);
+  border-block-start: 1px solid var(--border-color-deemphasized);
   margin: var(--space-xsmall) 0;
   width: 100%;
 }
@@ -336,7 +364,7 @@ hr.rule {
 .history-note {
   font-size: var(--font-size-small);
   color: var(--text-color-deemphasized);
-  border-top: 1px solid var(--border-color-deemphasized);
+  border-block-start: 1px solid var(--border-color-deemphasized);
 }
 
 .history-item {
@@ -345,7 +373,7 @@ hr.rule {
   align-items: baseline;
   gap: var(--space-medium);
   padding: var(--space-small) 0;
-  border-top: 1px solid var(--border-color-deemphasized);
+  border-block-start: 1px solid var(--border-color-deemphasized);
   font-size: var(--font-size-small);
 
   @media (max-width: 600px) {
@@ -354,7 +382,7 @@ hr.rule {
 
     & > span:last-child {
       grid-column: 1 / -1;
-      margin-top: var(--space-xsmall);
+      margin-block-start: var(--space-xsmall);
     }
   }
 
@@ -365,6 +393,8 @@ hr.rule {
 
 .delete-button {
   &::part(button) {
+    width: auto;
+    padding: 0 var(--space-large);
     --button-icon-fill: var(--button-background-color-destructive);
 
     &:hover {
@@ -395,7 +425,7 @@ hr.rule {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-color-deemphasized);
-  margin-bottom: var(--space-small);
+  margin-block-end: var(--space-small);
 }
 
 .task-content {
@@ -411,7 +441,7 @@ hr.rule {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-small);
-  margin-top: var(--space-small);
+  margin-block-start: var(--space-small);
 }
 
 .condition-badge {

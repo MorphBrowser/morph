@@ -17,6 +17,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -75,6 +76,7 @@
 #include "test/run_loop.h"
 
 using ::testing::_;
+using ::testing::ElementsAre;
 using ::testing::Return;
 using EncoderInfo = webrtc::VideoEncoder::EncoderInfo;
 using FramerateFractions =
@@ -89,8 +91,7 @@ namespace {
 constexpr int kDefaultWidth = 1280;
 constexpr int kDefaultHeight = 720;
 
-const VideoEncoder::Capabilities kCapabilities(false);
-const VideoEncoder::Settings kSettings(kCapabilities, 1, 1200);
+constexpr VideoEncoder::Settings kSettings(1, 1200);
 
 std::unique_ptr<SimulcastTestFixture> CreateSpecificSimulcastTestFixture(
     VideoEncoderFactory* internal_encoder_factory) {
@@ -307,6 +308,13 @@ class MockVideoEncoder : public VideoEncoder {
     last_set_rates_ = parameters;
   }
 
+  MOCK_METHOD(
+      void,
+      SetComplexity,
+      (std::span<const VideoCodecComplexity> complexity_by_spatial_layer,
+       ComplexityControlMode complexity_control_mode),
+      (override));
+
   EncoderInfo GetEncoderInfo() const override {
     EncoderInfo info;
     info.supports_native_handle = supports_native_handle_;
@@ -322,6 +330,7 @@ class MockVideoEncoder : public VideoEncoder {
     info.fps_allocation[0] = fps_allocation_;
     info.supports_simulcast = supports_simulcast_;
     info.is_qp_trusted = is_qp_trusted_;
+    info.min_qp = min_qp_;
     info.resolution_bitrate_limits = resolution_bitrate_limits;
     return info;
   }
@@ -429,6 +438,8 @@ class MockVideoEncoder : public VideoEncoder {
     is_qp_trusted_ = is_qp_trusted;
   }
 
+  void set_min_qp(std::optional<int> min_qp) { min_qp_ = min_qp; }
+
   void set_resolution_bitrate_limits(
       std::vector<VideoEncoder::ResolutionBitrateLimits> limits) {
     resolution_bitrate_limits = limits;
@@ -462,6 +473,7 @@ class MockVideoEncoder : public VideoEncoder {
   FramerateFractions fps_allocation_;
   bool supports_simulcast_ = false;
   std::optional<bool> is_qp_trusted_;
+  std::optional<int> min_qp_;
   SdpVideoFormat video_format_;
   std::vector<VideoEncoder::ResolutionBitrateLimits> resolution_bitrate_limits;
   bool is_async_ = false;
@@ -2446,6 +2458,50 @@ TEST_F(TestSimulcastEncoderAdapterFake, ReportsIsQpTrusted) {
   EXPECT_FALSE(adapter_->GetEncoderInfo().is_qp_trusted.value_or(true));
 }
 
+TEST_F(TestSimulcastEncoderAdapterFake, ReportsMinQpWhenAllEncodersAgree) {
+  SimulcastTestFixtureImpl::DefaultSettings(
+      &codec_, static_cast<const int*>(kTestTemporalLayerProfile),
+      kVideoCodecVP8);
+  codec_.numberOfSimulcastStreams = 3;
+  EXPECT_EQ(0, adapter_->InitEncode(&codec_, kSettings));
+  ASSERT_EQ(3u, helper_->factory()->encoders().size());
+
+  for (MockVideoEncoder* encoder : helper_->factory()->encoders()) {
+    encoder->set_min_qp(12);
+  }
+  EXPECT_EQ(adapter_->GetEncoderInfo().min_qp, 12);
+}
+
+TEST_F(TestSimulcastEncoderAdapterFake,
+       DoesNotReportMinQpWhenEncodersDisagree) {
+  SimulcastTestFixtureImpl::DefaultSettings(
+      &codec_, static_cast<const int*>(kTestTemporalLayerProfile),
+      kVideoCodecVP8);
+  codec_.numberOfSimulcastStreams = 3;
+  EXPECT_EQ(0, adapter_->InitEncode(&codec_, kSettings));
+  ASSERT_EQ(3u, helper_->factory()->encoders().size());
+
+  helper_->factory()->encoders()[0]->set_min_qp(12);
+  helper_->factory()->encoders()[1]->set_min_qp(12);
+  helper_->factory()->encoders()[2]->set_min_qp(15);
+  EXPECT_EQ(adapter_->GetEncoderInfo().min_qp, std::nullopt);
+}
+
+TEST_F(TestSimulcastEncoderAdapterFake,
+       DoesNotReportMinQpWhenOneEncoderDoesNotReportIt) {
+  SimulcastTestFixtureImpl::DefaultSettings(
+      &codec_, static_cast<const int*>(kTestTemporalLayerProfile),
+      kVideoCodecVP8);
+  codec_.numberOfSimulcastStreams = 3;
+  EXPECT_EQ(0, adapter_->InitEncode(&codec_, kSettings));
+  ASSERT_EQ(3u, helper_->factory()->encoders().size());
+
+  helper_->factory()->encoders()[0]->set_min_qp(12);
+  helper_->factory()->encoders()[1]->set_min_qp(12);
+  helper_->factory()->encoders()[2]->set_min_qp(std::nullopt);
+  EXPECT_EQ(adapter_->GetEncoderInfo().min_qp, std::nullopt);
+}
+
 TEST_F(TestSimulcastEncoderAdapterFake, ReportsFpsAllocation) {
   SimulcastTestFixtureImpl::DefaultSettings(
       &codec_, static_cast<const int*>(kTestTemporalLayerProfile),
@@ -3192,6 +3248,129 @@ TEST_F(TestSimulcastEncoderAdapterFake,
   // Release, which will indirectly call Release on the encoders, flushing
   // their queues.
   EXPECT_EQ(0, adapter_->Release());
+}
+
+TEST_F(TestSimulcastEncoderAdapterFake, SetComplexityForwardsPerStream) {
+  SimulcastTestFixtureImpl::DefaultSettings(
+      &codec_, static_cast<const int*>(kTestTemporalLayerProfile),
+      kVideoCodecVP8);
+  codec_.numberOfSimulcastStreams = 3;
+  codec_.startBitrate = 3000;
+  EXPECT_EQ(0, adapter_->InitEncode(&codec_, kSettings));
+
+  const std::vector<MockVideoEncoder*>& encoders =
+      helper_->factory()->encoders();
+  ASSERT_EQ(3u, encoders.size());
+
+  const VideoCodecComplexity complexities[] = {
+      VideoCodecComplexity::kComplexityLow,
+      VideoCodecComplexity::kComplexityNormal,
+      VideoCodecComplexity::kComplexityHigh,
+      VideoCodecComplexity::kComplexityMax,  // Out of bounds, ignored.
+  };
+
+  EXPECT_CALL(*encoders[0],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityLow),
+                            VideoEncoder::ComplexityControlMode::kVariable));
+  EXPECT_CALL(
+      *encoders[1],
+      SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityNormal),
+                    VideoEncoder::ComplexityControlMode::kVariable));
+  EXPECT_CALL(*encoders[2],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityHigh),
+                            VideoEncoder::ComplexityControlMode::kVariable));
+  adapter_->SetComplexity(complexities,
+                          VideoEncoder::ComplexityControlMode::kVariable);
+
+  // Fewer elements than streams: remaining streams use the highest provided
+  // layer's complexity.
+  const VideoCodecComplexity short_complexities[] = {
+      VideoCodecComplexity::kComplexityLow,
+      VideoCodecComplexity::kComplexityMax,
+  };
+  EXPECT_CALL(*encoders[0],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityLow),
+                            VideoEncoder::ComplexityControlMode::kConstant));
+  EXPECT_CALL(*encoders[1],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityMax),
+                            VideoEncoder::ComplexityControlMode::kConstant));
+  EXPECT_CALL(*encoders[2],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityMax),
+                            VideoEncoder::ComplexityControlMode::kConstant));
+  adapter_->SetComplexity(short_complexities,
+                          VideoEncoder::ComplexityControlMode::kConstant);
+}
+
+TEST_F(TestSimulcastEncoderAdapterFake,
+       SetComplexityBypassModeForwardsFullSpan) {
+  SimulcastTestFixtureImpl::DefaultSettings(
+      &codec_, static_cast<const int*>(kTestTemporalLayerProfile),
+      kVideoCodecVP8);
+  codec_.numberOfSimulcastStreams = 3;
+  helper_->factory()->set_supports_simulcast(true);
+  EXPECT_EQ(0, adapter_->InitEncode(&codec_, kSettings));
+
+  const std::vector<MockVideoEncoder*>& encoders =
+      helper_->factory()->encoders();
+  ASSERT_EQ(1u, encoders.size());
+
+  const VideoCodecComplexity complexities[] = {
+      VideoCodecComplexity::kComplexityLow,
+      VideoCodecComplexity::kComplexityNormal,
+      VideoCodecComplexity::kComplexityHigh,
+  };
+
+  EXPECT_CALL(*encoders[0],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityLow,
+                                        VideoCodecComplexity::kComplexityNormal,
+                                        VideoCodecComplexity::kComplexityHigh),
+                            VideoEncoder::ComplexityControlMode::kConstant));
+  adapter_->SetComplexity(complexities,
+                          VideoEncoder::ComplexityControlMode::kConstant);
+}
+
+TEST_F(TestSimulcastEncoderAdapterFake,
+       ReinitWithFallbackFactoryClearsComplexity) {
+  use_fallback_factory_ = true;
+  SetUp();
+
+  SimulcastTestFixtureImpl::DefaultSettings(
+      &codec_, static_cast<const int*>(kTestTemporalLayerProfile),
+      kVideoCodecVP8);
+  codec_.numberOfSimulcastStreams = 2;
+  codec_.startBitrate = 3000;
+  EXPECT_EQ(0, adapter_->InitEncode(&codec_, kSettings));
+
+  const std::vector<MockVideoEncoder*>& primary_encoders =
+      helper_->factory()->encoders();
+  const std::vector<MockVideoEncoder*>& fallback_encoders =
+      helper_->fallback_factory()->encoders();
+  ASSERT_EQ(2u, primary_encoders.size());
+  ASSERT_EQ(2u, fallback_encoders.size());
+
+  const VideoCodecComplexity complexities[] = {
+      VideoCodecComplexity::kComplexityLow,
+      VideoCodecComplexity::kComplexityHigh,
+  };
+  EXPECT_CALL(*primary_encoders[0],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityLow),
+                            VideoEncoder::ComplexityControlMode::kVariable));
+  EXPECT_CALL(*primary_encoders[1],
+              SetComplexity(ElementsAre(VideoCodecComplexity::kComplexityHigh),
+                            VideoEncoder::ComplexityControlMode::kVariable));
+  adapter_->SetComplexity(complexities,
+                          VideoEncoder::ComplexityControlMode::kVariable);
+
+  // Release caches the wrapped encoders; re-initializing must not replay stale
+  // complexity onto either primary or fallback encoders.
+  EXPECT_EQ(0, adapter_->Release());
+  for (MockVideoEncoder* encoder : primary_encoders) {
+    EXPECT_CALL(*encoder, SetComplexity).Times(0);
+  }
+  for (MockVideoEncoder* encoder : fallback_encoders) {
+    EXPECT_CALL(*encoder, SetComplexity).Times(0);
+  }
+  EXPECT_EQ(0, adapter_->InitEncode(&codec_, kSettings));
 }
 
 }  // namespace test

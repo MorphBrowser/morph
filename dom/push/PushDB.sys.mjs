@@ -9,7 +9,7 @@ const lazy = {};
 ChromeUtils.defineLazyGetter(lazy, "console", () => {
   return console.createInstance({
     maxLogLevelPref: "dom.push.loglevel",
-    prefix: "PushDB",
+    logModule: "PushDB",
   });
 });
 
@@ -76,6 +76,11 @@ PushDB.prototype = {
 
       // index to fetch active and expired registrations.
       objectStore.createIndex("quota", "quota", { unique: false });
+    }
+
+    if (aOldVersion < 6) {
+      let objectStore = aTransaction.objectStore(this._dbStoreName);
+      objectStore.createIndex("scope", "scope", { unique: false });
     }
   },
 
@@ -231,27 +236,37 @@ PushDB.prototype = {
    *  `cursor` is an `IDBCursor`.
    * @returns {Promise} Resolves once all records have been processed.
    */
-  forEachOrigin(origin, originAttributes, callback) {
+  async forEachOrigin(origin, originAttributes, callback) {
     lazy.console.debug("forEachOrigin()");
-
-    return new Promise((resolve, reject) =>
+    let error;
+    await new Promise((resolve, reject) =>
       this.newTxn(
         "readwrite",
         this._dbStoreName,
         (aTxn, aStore) => {
           aTxn.result = undefined;
 
-          let index = aStore.index("identifiers");
-          let range = IDBKeyRange.bound(
-            [origin, originAttributes],
-            [origin + "\x7f", originAttributes]
-          );
+          let index = aStore.index("scope");
+          // For the scope to belong to origin, it must start with origin/
+          let range = IDBKeyRange.bound(origin + "/", origin + "/\x7f");
           index.openCursor(range).onsuccess = event => {
             let cursor = event.target.result;
             if (!cursor) {
               return;
             }
-            callback(this.toPushRecord(cursor.value), cursor);
+            if (cursor.value.originAttributes !== originAttributes) {
+              cursor.continue();
+              return;
+            }
+            try {
+              callback(this.toPushRecord(cursor.value), cursor);
+            } catch (e) {
+              // If the callback throws, still continue with other records.
+              lazy.console.error(`forEachOrigin() callback: ${e}`);
+              if (!error) {
+                error = e;
+              }
+            }
             cursor.continue();
           };
         },
@@ -259,6 +274,9 @@ PushDB.prototype = {
         reject
       )
     );
+    if (error) {
+      throw error;
+    }
   },
 
   // Perform a unique match against { scope, originAttributes }

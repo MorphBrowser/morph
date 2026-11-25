@@ -17,10 +17,10 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentSender;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -51,6 +51,10 @@ import android.widget.RelativeLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.IntentSenderRequest;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.OptIn;
@@ -61,6 +65,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.IntentCompat;
 import androidx.preference.PreferenceManager;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -99,6 +104,7 @@ import org.mozilla.geckoview.GeckoWebExecutor;
 import org.mozilla.geckoview.Image;
 import org.mozilla.geckoview.MediaSession;
 import org.mozilla.geckoview.OrientationController;
+import org.mozilla.geckoview.PictureInPictureController;
 import org.mozilla.geckoview.ProfilerController;
 import org.mozilla.geckoview.SlowScriptResponse;
 import org.mozilla.geckoview.TranslationsController;
@@ -458,10 +464,15 @@ public class GeckoViewActivity extends AppCompatActivity
   private static final String FULL_ACCESSIBILITY_TREE_EXTRA = "full_accessibility_tree";
   private static final String SEARCH_URI_BASE = "https://www.google.com/search?q=";
   private static final String ACTION_SHUTDOWN = "org.mozilla.geckoview_example.SHUTDOWN";
+  /* package */ static final String ACTION_RETURN_TO_PIP_SOURCE =
+      "org.mozilla.geckoview_example.RETURN_TO_PIP_SOURCE";
+  private static final String ACTION_REQUEST_PIP = "org.mozilla.geckoview_example.REQUEST_PIP";
+  private static final int MEDIA_NOTIFICATION_ID = 1;
   private static final String CHANNEL_ID = "GeckoViewExample";
   private static final int REQUEST_FILE_PICKER = 1;
   private static final int REQUEST_PERMISSIONS = 2;
   private static final int REQUEST_WRITE_EXTERNAL_STORAGE = 3;
+  private static final int REQUEST_NOTIFICATIONS = 4;
 
   private static GeckoRuntime sGeckoRuntime;
 
@@ -474,6 +485,7 @@ public class GeckoViewActivity extends AppCompatActivity
   private boolean mCollapsed;
   private boolean mKillProcessOnDestroy;
   private boolean mDesktopMode;
+  private boolean mStarted;
 
   private TabSession mPopupSession;
   private View mPopupView;
@@ -493,6 +505,9 @@ public class GeckoViewActivity extends AppCompatActivity
   private boolean mPipFullscreenMedia = false;
   private boolean mPipIsPlaying = false;
 
+  /** The session the media notification acts on, which is the one that last started playing. */
+  private @Nullable GeckoSession mMediaPlayingSession;
+
   private String mDetectedLanguage = null;
 
   private HashMap<String, Integer> mNotificationIDMap = new HashMap<>();
@@ -502,8 +517,46 @@ public class GeckoViewActivity extends AppCompatActivity
 
   private LinkedList<WebResponse> mPendingDownloads = new LinkedList<>();
 
-  private int mNextActivityResultCode = 10;
-  private HashMap<Integer, GeckoResult<Intent>> mPendingActivityResult = new HashMap<>();
+  private GeckoResult<Intent> mPendingIntentSenderResult;
+  private ActivityResultLauncher<IntentSenderRequest> mIntentSenderLauncher;
+  private final OnBackPressedCallback mBackPressedCallback =
+      new OnBackPressedCallback(true) {
+        @Override
+        public void handleOnBackPressed() {
+          final GeckoSession session = mTabSessionManager.getCurrentSession();
+          if (session == null) {
+            defaultBackPressed();
+            return;
+          }
+
+          if (mFullScreen) {
+            session.exitFullScreen();
+            return;
+          }
+
+          session
+              .processBackPressed()
+              .accept(
+                  handled -> {
+                    if (handled) {
+                      return;
+                    }
+
+                    if (mCanGoBack) {
+                      session.goBack();
+                      return;
+                    }
+
+                    defaultBackPressed();
+                  });
+        }
+
+        private void defaultBackPressed() {
+          setEnabled(false);
+          getOnBackPressedDispatcher().onBackPressed();
+          setEnabled(true);
+        }
+      };
 
   private boolean supportsPip() {
     return getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
@@ -516,6 +569,7 @@ public class GeckoViewActivity extends AppCompatActivity
       enterPictureInPictureMode(new PictureInPictureParams.Builder().build());
       return true;
     } catch (IllegalStateException e) {
+      Log.w(LOGTAG, "Could not enter picture-in-picture", e);
       return false;
     }
   }
@@ -527,9 +581,71 @@ public class GeckoViewActivity extends AppCompatActivity
     }
   }
 
+  /**
+   * Posts a notification for the playing media, carrying an action that asks Gecko for a
+   * picture-in-picture window. A real embedder would use a {@code MediaStyle} notification backed
+   * by a platform media session so that the action also shows up in the lock screen controls.
+   */
+  private void showMediaNotification() {
+    if (!supportsPip()) {
+      return;
+    }
+
+    final PendingIntent pipIntent =
+        PendingIntent.getActivity(
+            getApplicationContext(),
+            MEDIA_NOTIFICATION_ID,
+            new Intent(this, GeckoViewActivity.class)
+                .setAction(ACTION_REQUEST_PIP)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+    final NotificationCompat.Builder builder =
+        new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_status_logo)
+            .setContentTitle(getResources().getString(R.string.app_name))
+            .setContentText(getResources().getString(R.string.media_playing))
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .addAction(
+                R.drawable.ic_status_logo,
+                getResources().getString(R.string.media_enter_pip),
+                pipIntent);
+
+    NotificationManagerCompat.from(this).notify(MEDIA_NOTIFICATION_ID, builder.build());
+  }
+
+  /** Without this the media notification, and its picture-in-picture action, is never shown. */
+  private void requestNotificationPermission() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+      Log.d(LOGTAG, "Notifications are on by default on API " + Build.VERSION.SDK_INT);
+      return;
+    }
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+        != PackageManager.PERMISSION_GRANTED) {
+      ActivityCompat.requestPermissions(
+          this, new String[] {Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
+    }
+  }
+
+  private void hideMediaNotification() {
+    NotificationManagerCompat.from(this).cancel(MEDIA_NOTIFICATION_ID);
+  }
+
+  @OptIn(markerClass = ExperimentalGeckoViewApi.class)
+  private void requestPipForCurrentMedia() {
+    if (mMediaPlayingSession == null) {
+      Log.d(LOGTAG, "No media playing, ignoring picture-in-picture request");
+      return;
+    }
+    mMediaPlayingSession.getSessionPictureInPicture().request();
+  }
+
   @Override
-  public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode) {
-    super.onPictureInPictureModeChanged(isInPictureInPictureMode);
+  public void onPictureInPictureModeChanged(
+      boolean isInPictureInPictureMode, Configuration newConfig) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
     GeckoSession s = (mGeckoView != null) ? mGeckoView.getSession() : null;
     if (s != null) {
       s.getCompositorController().onPipModeChanged(isInPictureInPictureMode);
@@ -848,9 +964,36 @@ public class GeckoViewActivity extends AppCompatActivity
   @Override
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
+    getOnBackPressedDispatcher().addCallback(this, mBackPressedCallback);
+    mIntentSenderLauncher =
+        registerForActivityResult(
+            new ActivityResultContracts.StartIntentSenderForResult(),
+            activityResult -> {
+              final GeckoResult<Intent> result = mPendingIntentSenderResult;
+              mPendingIntentSenderResult = null;
+              if (result == null) {
+                return;
+              }
+              final Intent data = activityResult.getData();
+              if (activityResult.getResultCode() == Activity.RESULT_OK) {
+                result.complete(data);
+                return;
+              }
+              final Throwable error =
+                  data == null
+                      ? null
+                      : IntentCompat.getSerializableExtra(
+                          data,
+                          ActivityResultContracts.StartIntentSenderForResult
+                              .EXTRA_SEND_INTENT_EXCEPTION,
+                          Throwable.class);
+              result.completeExceptionally(
+                  error != null ? error : new RuntimeException("Unknown error"));
+            });
 
     // We might have been started because the user clicked on a notification
-    WebNotification notification = getIntent().getParcelableExtra("onClick");
+    WebNotification notification =
+        IntentCompat.getParcelableExtra(getIntent(), "onClick", WebNotification.class);
     if (notification != null) {
       getIntent().removeExtra("onClick");
       notification.click();
@@ -858,6 +1001,7 @@ public class GeckoViewActivity extends AppCompatActivity
 
     Log.i(LOGTAG, "zerdatime " + SystemClock.elapsedRealtime() + " - application start");
     createNotificationChannel();
+    requestNotificationPermission();
     setContentView(R.layout.geckoview_activity);
     mGeckoView = findViewById(R.id.gecko_view);
     mGeckoView.setActivityContextDelegate(new ExampleActivityDelegate());
@@ -997,45 +1141,32 @@ public class GeckoViewActivity extends AppCompatActivity
             mKillProcessOnDestroy = true;
             finish();
           });
-
-      sGeckoRuntime.setActivityDelegate(
-          pendingIntent -> {
-            final GeckoResult<Intent> result = new GeckoResult<>();
-            try {
-              final int code = mNextActivityResultCode++;
-              mPendingActivityResult.put(code, result);
-              GeckoViewActivity.this.startIntentSenderForResult(
-                  pendingIntent.getIntentSender(), code, null, 0, 0, 0);
-            } catch (IntentSender.SendIntentException e) {
-              result.completeExceptionally(e);
-            }
-            return result;
-          });
     }
+
+    sGeckoRuntime.setActivityDelegate(
+        pendingIntent -> {
+          if (mPendingIntentSenderResult != null) {
+            return GeckoResult.fromException(
+                new IllegalStateException("An activity result is already pending"));
+          }
+          try {
+            mIntentSenderLauncher.launch(
+                new IntentSenderRequest.Builder(pendingIntent.getIntentSender()).build());
+          } catch (final IllegalStateException e) {
+            return GeckoResult.fromException(e);
+          }
+          mPendingIntentSenderResult = new GeckoResult<>();
+          return mPendingIntentSenderResult;
+        });
 
     sExtensionManager.setExtensionDelegate(this);
 
     if (savedInstanceState == null) {
-      TabSession session = getIntent().getParcelableExtra("session");
-      if (session != null) {
-        connectSession(session);
-
-        if (!session.isOpen()) {
-          session.open(sGeckoRuntime);
-        }
-
-        mFullAccessibilityTree = session.getSettings().getFullAccessibilityTree();
-
-        mTabSessionManager.addSession(session);
-        session.open(sGeckoRuntime);
-        setGeckoViewSession(session);
-      } else {
-        session = createSession();
-        session.open(sGeckoRuntime);
-        mTabSessionManager.setCurrentSession(session);
-        mGeckoView.setSession(session);
-        sGeckoRuntime.getWebExtensionController().setTabActive(session, true);
-      }
+      final TabSession session = createSession();
+      session.open(sGeckoRuntime);
+      mTabSessionManager.setCurrentSession(session);
+      mGeckoView.setSession(session);
+      sGeckoRuntime.getWebExtensionController().setTabActive(session, true);
       loadFromIntent(getIntent());
     }
 
@@ -1197,6 +1328,42 @@ public class GeckoViewActivity extends AppCompatActivity
   private final GeckoSession.NavigationDelegate mNavigationDelegate =
       new ExampleNavigationDelegate();
 
+  @OptIn(markerClass = ExperimentalGeckoViewApi.class)
+  private class ExamplePictureInPictureDelegate
+      implements PictureInPictureController.SessionPictureInPicture.Delegate {
+    @Override
+    public void onEnterPictureInPicture(
+        final @NonNull GeckoSession session, final @NonNull String placementToken) {
+      final PictureInPictureActivity window = PipSessionHolder.getActiveActivity();
+      final boolean windowIsUp = window != null && !window.isFinishing();
+
+      final GeckoSession pipSession =
+          new GeckoSession(
+              new GeckoSessionSettings.Builder().pictureInPictureToken(placementToken).build());
+      pipSession.open(sGeckoRuntime);
+      PipSessionHolder.sSourceSession = session;
+
+      if (windowIsUp) {
+        window.adoptSession(pipSession);
+      } else {
+        PipSessionHolder.sSession = pipSession;
+        startActivity(
+            new Intent(GeckoViewActivity.this, PictureInPictureActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+      }
+    }
+
+    @Override
+    public void onExitPictureInPicture(final @NonNull GeckoSession session) {
+      final PictureInPictureActivity window = PipSessionHolder.getActiveActivity();
+      if (window != null && window.isShowingSource(session)) {
+        window.closeForGecko();
+        PipSessionHolder.releaseSource(session);
+      }
+    }
+  }
+
+  @OptIn(markerClass = ExperimentalGeckoViewApi.class)
   private void connectSession(GeckoSession session) {
     session.setContentDelegate(new ExampleContentDelegate());
     session.setHistoryDelegate(new ExampleHistoryDelegate());
@@ -1218,6 +1385,8 @@ public class GeckoViewActivity extends AppCompatActivity
     session.setMediaSessionDelegate(new ExampleMediaSessionDelegate(this));
 
     session.setTranslationsSessionDelegate(new ExampleTranslationsSessionDelegate());
+
+    session.setPictureInPictureDelegate(new ExamplePictureInPictureDelegate());
 
     session.setSelectionActionDelegate(new BasicSelectionActionDelegate(this));
     if (sExtensionManager.extension != null) {
@@ -1272,31 +1441,6 @@ public class GeckoViewActivity extends AppCompatActivity
             mDesktopMode
                 ? GeckoSessionSettings.USER_AGENT_MODE_DESKTOP
                 : GeckoSessionSettings.USER_AGENT_MODE_MOBILE);
-  }
-
-  @Override
-  public void onBackPressed() {
-    GeckoSession session = mTabSessionManager.getCurrentSession();
-    if (mFullScreen && session != null) {
-      session.exitFullScreen();
-      return;
-    }
-
-    session
-        .processBackPressed()
-        .accept(
-            handled -> {
-              if (handled) {
-                return;
-              }
-
-              if (mCanGoBack && session != null) {
-                session.goBack();
-                return;
-              }
-
-              super.onBackPressed();
-            });
   }
 
   @Override
@@ -1813,6 +1957,22 @@ public class GeckoViewActivity extends AppCompatActivity
     sExtensionManager.onClicked(mTabSessionManager.getCurrentSession());
   }
 
+  /**
+   * Selects the tab whose video was playing in an expanded picture-in-picture window, if it is
+   * still around.
+   */
+  private void returnToPipSource() {
+    final GeckoSession source = PipSessionHolder.sReturnToSession;
+    PipSessionHolder.sReturnToSession = null;
+    if (source == null) {
+      return;
+    }
+    final TabSession tabSession = mTabSessionManager.getSession(source);
+    if (tabSession != null) {
+      switchToSession(tabSession, true);
+    }
+  }
+
   public void switchToSession(TabSession session, boolean activateTab) {
     TabSession currentSession = mTabSessionManager.getCurrentSession();
     if (session != currentSession) {
@@ -1848,6 +2008,10 @@ public class GeckoViewActivity extends AppCompatActivity
     // No point having the URL bar enabled if there's no session to navigate to
     view.setEnabled(hasSession);
 
+    if (mStarted) {
+      PipSessionHolder.sVisibleSession = session;
+    }
+
     if (hasSession) {
       mGeckoView.setSession(session);
       if (activateTab) {
@@ -1858,6 +2022,20 @@ public class GeckoViewActivity extends AppCompatActivity
       mGeckoView.coverUntilFirstPaint(Color.WHITE);
       view.setText("");
     }
+  }
+
+  @Override
+  protected void onStart() {
+    super.onStart();
+    mStarted = true;
+    PipSessionHolder.sVisibleSession = mGeckoView.getSession();
+  }
+
+  @Override
+  protected void onStop() {
+    super.onStop();
+    mStarted = false;
+    PipSessionHolder.sVisibleSession = null;
   }
 
   @Override
@@ -1882,8 +2060,19 @@ public class GeckoViewActivity extends AppCompatActivity
       return;
     }
 
+    if (ACTION_RETURN_TO_PIP_SOURCE.equals(intent.getAction())) {
+      returnToPipSource();
+      return;
+    }
+
+    if (ACTION_REQUEST_PIP.equals(intent.getAction())) {
+      requestPipForCurrentMedia();
+      return;
+    }
+
     if (intent.hasExtra("onClick")) {
-      WebNotification notification = intent.getExtras().getParcelable("onClick");
+      WebNotification notification =
+          IntentCompat.getParcelableExtra(intent, "onClick", WebNotification.class);
       if (notification != null) {
         intent.removeExtra("onClick");
         notification.click();
@@ -1915,14 +2104,6 @@ public class GeckoViewActivity extends AppCompatActivity
       final BasicGeckoViewPrompt prompt =
           (BasicGeckoViewPrompt) mTabSessionManager.getCurrentSession().getPromptDelegate();
       prompt.onFileCallbackResult(resultCode, data);
-    } else if (mPendingActivityResult.containsKey(requestCode)) {
-      final GeckoResult<Intent> result = mPendingActivityResult.remove(requestCode);
-
-      if (resultCode == Activity.RESULT_OK) {
-        result.complete(data);
-      } else {
-        result.completeExceptionally(new RuntimeException("Unknown error"));
-      }
     } else {
       super.onActivityResult(requestCode, resultCode, data);
     }
@@ -2213,12 +2394,14 @@ public class GeckoViewActivity extends AppCompatActivity
 
     @Override
     public void onCrash(GeckoSession session) {
+      PipSessionHolder.closeWindowFor(session);
       Log.e(LOGTAG, "Crashed, reopening session");
       session.open(sGeckoRuntime);
     }
 
     @Override
     public void onKill(GeckoSession session) {
+      PipSessionHolder.closeWindowFor(session);
       TabSession tabSession = mTabSessionManager.getSession(session);
       if (tabSession == null) {
         return;
@@ -2969,16 +3152,21 @@ public class GeckoViewActivity extends AppCompatActivity
     @Override
     public void onPlay(@NonNull GeckoSession session, @NonNull MediaSession mediaSession) {
       mPipIsPlaying = true;
+      mMediaPlayingSession = session;
+      showMediaNotification();
     }
 
     @Override
     public void onPause(@NonNull GeckoSession session, @NonNull MediaSession mediaSession) {
       mPipIsPlaying = false;
+      hideMediaNotification();
     }
 
     @Override
     public void onStop(@NonNull GeckoSession session, @NonNull MediaSession mediaSession) {
       mPipIsPlaying = false;
+      mMediaPlayingSession = null;
+      hideMediaNotification();
     }
 
     @Override

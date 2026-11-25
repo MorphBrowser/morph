@@ -14,8 +14,8 @@ const { MockEngineManager } = ChromeUtils.importESModule(
 add_setup(async function () {
   const mockEngineManager = new MockEngineManager();
 
-  registerCleanupFunction(() => {
-    mockEngineManager.rejectAllRequests();
+  registerCleanupFunction(async () => {
+    await mockEngineManager.rejectAllRequests();
     mockEngineManager.cleanupMocks();
   });
 });
@@ -39,7 +39,7 @@ async function assertSmartbarHasPlaceholderAnimation(
         "#ai-window-smartbar moz-multiline-editor"
       );
       Assert.equal(
-        smartbarEditor.hasAttribute("show-placeholder-animation"),
+        smartbarEditor.showPlaceholderAnimation,
         shouldAnimate,
         `Smartbar placeholder should ${shouldAnimate ? "" : "not"} animate`
       );

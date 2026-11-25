@@ -3,8 +3,6 @@ subsuite = "mozlint"
 
 ["test_agent_skills_sync.py"]
 
-["test_android_expired_strings.py"]
-
 ["test_android_format.py"]
 
 ["test_android_ktfmt_ac.py"]
@@ -12,6 +10,8 @@ subsuite = "mozlint"
 ["test_android_ktfmt_fenix.py"]
 
 ["test_android_ktfmt_focus.py"]
+
+["test_android_lint_report.py"]
 
 ["test_cargo-audit.py"]
 # testing it on linux is enough
@@ -32,6 +32,8 @@ skip-if = [
 skip-if = ["os == 'win'"]  # busts the tree for subsequent tasks on the same worker (bug 1708591)
 # Setup conflicts with stylelint setup so this should run sequentially.
 sequential = true
+
+["test_extra_js_modules.py"]
 
 ["test_file_license.py"]
 
@@ -58,6 +60,8 @@ skip-if = ["os == 'win'"]
 
 ["test_license_declarations.py"]
 
+["test_ipdl_uriparams.py"]
+
 ["test_lintpref.py"]
 
 ["test_manifest_toml.py"]
@@ -80,6 +84,8 @@ skip-if = ["os == 'win'"]
 
 ["test_shellcheck.py"]
 
+["test_source_headers.py"]
+
 ["test_spidermonkey.py"]
 
 ["test_stylelint.py"]
@@ -92,6 +98,8 @@ sequential = true
 ["test_trojan_source.py"]
 
 ["test_updatebot.py"]
+
+["test_uri_setspec.py"]
 
 ["test_wpt-subsuite-tagging.py"]
 

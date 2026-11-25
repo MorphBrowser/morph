@@ -9,9 +9,11 @@
 #include "gfxPlatform.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/StaticPrefs_layers.h"
+#include "mozilla/StaticPrefs_webgl.h"
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/gfx/GPUChild.h"
 #include "mozilla/gfx/Logging.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/ipc/ProcessUtils.h"
 #include "mozilla/layers/SynchronousTask.h"
 #ifdef MOZ_WIDGET_ANDROID
@@ -39,8 +41,7 @@ GPUProcessHost::GPUProcessHost(Listener* aListener)
       mLaunchPhase(LaunchPhase::Unlaunched),
       mProcessToken(0),
       mShutdownRequested(false),
-      mChannelClosed(false),
-      mLiveToken(new media::Refcountable<bool>(true)) {
+      mChannelClosed(false) {
   MOZ_COUNT_CTOR(GPUProcessHost);
 
 #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
@@ -59,7 +60,7 @@ bool GPUProcessHost::Launch(geckoargs::ChildProcessArgs aExtraOpts) {
   MOZ_ASSERT(!gfxPlatform::IsHeadless() ||
              StaticPrefs::layers_gpu_process_allow_headless_AtStartup());
 
-  mPrefSerializer = MakeUnique<ipc::SharedPreferenceSerializer>();
+  mPrefSerializer = std::make_unique<ipc::SharedPreferenceSerializer>();
   if (!mPrefSerializer->SerializeToSharedMemory(GeckoProcessType_GPU,
                                                 /* remoteType */ {})) {
     return false;
@@ -78,6 +79,16 @@ bool GPUProcessHost::Launch(geckoargs::ChildProcessArgs aExtraOpts) {
     mPrefSerializer = nullptr;
     return false;
   }
+
+  WhenProcessHandleReady()->Then(
+      GetMainThreadSerialEventTarget(), __func__,
+      [self = RefPtr{this}](
+          const ProcessHandlePromise::ResolveOrRejectValue& aResult) {
+        if (!self->mShutdownRequested &&
+            self->mLaunchPhase == LaunchPhase::Waiting) {
+          self->InitAfterConnect(aResult.IsResolve());
+        }
+      });
 
   return true;
 }
@@ -104,7 +115,7 @@ bool GPUProcessHost::WaitForLaunch() {
     // so we immediately set up the IPDL actor and fire callbacks. The IO thread
     // will still dispatch a notification to the main thread - we'll just ignore
     // it.
-    bool result = GeckoChildProcessHost::WaitUntilConnected(timeoutMs);
+    bool result = GeckoChildProcessHost::WaitForProcessHandle(timeoutMs);
     InitAfterConnect(result);
     if (!result) {
       return false;
@@ -150,20 +161,6 @@ void GPUProcessHost::OnProcessLaunchError(const base::LaunchError aError) {
   lock.Notify();
 }
 
-void GPUProcessHost::OnChannelConnected(base::ProcessId peer_pid) {
-  MOZ_ASSERT(!NS_IsMainThread());
-
-  GeckoChildProcessHost::OnChannelConnected(peer_pid);
-
-  NS_DispatchToMainThread(NS_NewRunnableFunction(
-      "GPUProcessHost::OnChannelConnected",
-      [self = this, liveToken = mLiveToken]() {
-        if (*liveToken && self->mLaunchPhase == LaunchPhase::Waiting) {
-          self->InitAfterConnect(true);
-        }
-      }));
-}
-
 static uint64_t sProcessTokenCounter = 0;
 
 void GPUProcessHost::InitAfterConnect(bool aSucceeded) {
@@ -195,9 +192,9 @@ void GPUProcessHost::InitAfterConnect(bool aSucceeded) {
                                 true>::CreateAndResolve(csm, __func__);
             })
             ->Map(GetCurrentSerialEventTarget(), __func__,
-                  [self = this, liveToken = mLiveToken](
+                  [self = RefPtr{this}](
                       java::CompositorSurfaceManager::GlobalRef&& aCsm) {
-                    if (*liveToken) {
+                    if (!self->mShutdownRequested) {
                       self->mCompositorSurfaceManager = aCsm;
                     }
                     return Ok{};
@@ -207,11 +204,7 @@ void GPUProcessHost::InitAfterConnect(bool aSucceeded) {
 
     GPUChild::InitPromiseType::All(GetCurrentSerialEventTarget(), initPromises)
         ->Then(GetCurrentSerialEventTarget(), __func__,
-               [self = this, liveToken = mLiveToken]() {
-                 if (*liveToken) {
-                   self->OnAsyncInitComplete();
-                 }
-               });
+               [self = RefPtr{this}]() { self->OnAsyncInitComplete(); });
   } else {
     mLaunchPhase = LaunchPhase::Complete;
     if (mListener) {
@@ -265,12 +258,9 @@ void GPUProcessHost::Shutdown(bool aUnexpectedShutdown) {
   MOZ_ASSERT(!mShutdownRequested);
 
   mListener = nullptr;
+  mShutdownRequested = true;
 
   if (mGPUChild) {
-    // OnChannelClosed uses this to check if the shutdown was expected or
-    // unexpected.
-    mShutdownRequested = true;
-
     if (aUnexpectedShutdown) {
       mGPUChild->OnUnexpectedShutdown();
     }
@@ -289,17 +279,7 @@ void GPUProcessHost::Shutdown(bool aUnexpectedShutdown) {
     // communicate anything back.
     KillHard(/* aGenerateMinidump */ false);
 #endif
-
-    // If we're shutting down unexpectedly, we're in the middle of handling an
-    // ActorDestroy for PGPUChild, which is still on the stack. We'll return
-    // back to OnChannelClosed.
-    //
-    // Otherwise, we'll wait for OnChannelClose to be called whenever PGPUChild
-    // acknowledges shutdown.
-    return;
   }
-
-  DestroyProcess();
 }
 
 void GPUProcessHost::OnChannelClosed() {
@@ -308,8 +288,6 @@ void GPUProcessHost::OnChannelClosed() {
   if (!mShutdownRequested && mListener) {
     // This is an unclean shutdown. Notify our listener that we're going away.
     mListener->OnProcessUnexpectedShutdown(this);
-  } else {
-    DestroyProcess();
   }
 
   // Release the actor.
@@ -341,17 +319,12 @@ void GPUProcessHost::KillProcess(bool aGenerateMinidump) {
   KillHard(aGenerateMinidump);
 }
 
-void GPUProcessHost::CrashProcess() { mGPUChild->SendCrashProcess(); }
-
-void GPUProcessHost::DestroyProcess() {
-  MOZ_ASSERT(NS_IsMainThread());
-
-  // Any pending tasks will be cancelled from now on.
-  *mLiveToken = false;
-
-  NS_DispatchToMainThread(
-      NS_NewRunnableFunction("DestroyProcessRunnable", [this] { Destroy(); }));
+void GPUProcessHost::KillProcessForTesting() {
+  mKilledForTesting = true;
+  KillHard(/* aGenerateMinidump */ false);
 }
+
+void GPUProcessHost::CrashProcess() { mGPUChild->SendCrashProcess(); }
 
 #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
 bool GPUProcessHost::FillMacSandboxInfo(MacSandboxInfo& aInfo) {
@@ -359,6 +332,12 @@ bool GPUProcessHost::FillMacSandboxInfo(MacSandboxInfo& aInfo) {
   if (!aInfo.shouldLog && PR_GetEnv("MOZ_SANDBOX_GPU_LOGGING")) {
     aInfo.shouldLog = true;
   }
+  // CGL needs windowserver access on x86_64. WebRender and WebGL each use CGL
+  // when they can't use Metal ANGLE.
+  aInfo.hasWindowServer =
+      ProcessIsX86_64() &&
+      (!gfxVars::UseWebRenderANGLE() || !gfxVars::AllowMetalAngleWebGL() ||
+       StaticPrefs::webgl_disable_angle_AtStartup());
   aInfo.type = MacSandboxType::MacSandboxType_GPU;
   return true;
 }

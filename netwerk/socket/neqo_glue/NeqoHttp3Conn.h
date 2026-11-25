@@ -21,11 +21,11 @@ class NeqoHttp3Conn final {
       uint32_t aMaxTableSize, uint16_t aMaxBlockedStreams, uint64_t aMaxData,
       uint64_t aMaxStreamData, bool aVersionNegotiation, bool aWebTransport,
       const nsACString& aQlogDir, uint32_t aIdleTimeout, uint32_t aFastPto,
-      NeqoHttp3Conn** aConn) {
+      bool aPacingEnabled, NeqoHttp3Conn** aConn) {
     return neqo_http3conn_new_use_nspr_for_io(
         &aOrigin, &aAlpn, &aLocalAddr, &aRemoteAddr, aMaxTableSize,
         aMaxBlockedStreams, aMaxData, aMaxStreamData, aVersionNegotiation,
-        aWebTransport, &aQlogDir, aIdleTimeout, aFastPto,
+        aWebTransport, &aQlogDir, aIdleTimeout, aFastPto, aPacingEnabled,
         (const mozilla::net::NeqoHttp3Conn**)aConn);
   }
 
@@ -194,12 +194,36 @@ class NeqoHttp3Conn final {
                                                      aStreamType, aStreamId);
   }
 
+  // Sent untracked; see neqo_http3conn_webtransport_send_datagram's own
+  // comment for why there is no tracking id or per-datagram outcome here.
   nsresult WebTransportSendDatagram(uint64_t aSessionId,
                                     nsTArray<uint8_t>& aData,
-                                    uint64_t aTrackingId, uint64_t aSendGroupId,
-                                    int64_t aSendOrder) {
+                                    uint64_t aSendGroupId, int64_t aSendOrder,
+                                    uint64_t aAgeUs) {
     return neqo_http3conn_webtransport_send_datagram(
-        this, aSessionId, &aData, aTrackingId, aSendGroupId, aSendOrder);
+        this, aSessionId, &aData, aSendGroupId, aSendOrder, aAgeUs);
+  }
+
+  // A snapshot of this session's outgoing-datagram queue state, for driving
+  // a content-process credit grant. aRemainingBytes/aMaxQueuedBytes bound
+  // that queue's byte budget; aQueuedDatagrams is informational only (the
+  // queue has no per-datagram count limit).
+  nsresult WebTransportDatagramQueueCapacity(uint64_t aSessionId,
+                                             uintptr_t* aRemainingBytes,
+                                             uintptr_t* aQueuedDatagrams,
+                                             uintptr_t* aMaxQueuedBytes) {
+    return neqo_http3conn_webtransport_datagram_queue_capacity(
+        this, aSessionId, aRemainingBytes, aQueuedDatagrams, aMaxQueuedBytes);
+  }
+
+  // Cumulative sent/expired/dropped outgoing-datagram counts for this
+  // session, cheap enough to poll after every forwarded batch (see
+  // neqo_http3conn_webtransport_datagram_session_stats's own comment).
+  nsresult WebTransportDatagramSessionStats(uint64_t aSessionId,
+                                            uint64_t* aSent, uint64_t* aExpired,
+                                            uint64_t* aDropped) {
+    return neqo_http3conn_webtransport_datagram_session_stats(
+        this, aSessionId, aSent, aExpired, aDropped);
   }
 
   nsresult ConnectUdpSendDatagram(uint64_t aSessionId, nsTArray<uint8_t>& aData,
@@ -212,6 +236,17 @@ class NeqoHttp3Conn final {
   nsresult WebTransportMaxDatagramSize(uint64_t aSessionId, uint64_t* aResult) {
     return neqo_http3conn_webtransport_max_datagram_size(this, aSessionId,
                                                          aResult);
+  }
+
+  nsresult WebTransportSetDatagramMaxBufferedDatagrams(
+      uint64_t aSessionId, uint32_t aMaxBufferedDatagrams) {
+    return neqo_http3conn_webtransport_set_datagram_max_buffered_datagrams(
+        this, aSessionId, aMaxBufferedDatagrams);
+  }
+
+  nsresult WebTransportSetDatagramMaxAge(uint64_t aSessionId, double aMaxAge) {
+    return neqo_http3conn_webtransport_set_datagram_max_age(this, aSessionId,
+                                                            aMaxAge);
   }
 
   bool GetWebTransportSessionStats(
@@ -240,16 +275,27 @@ class NeqoHttp3Conn final {
                                                      &aSendOrder);
   }
 
-  nsresult WebTransportSetSendGroup(uint64_t aSessionId,
+  nsresult WebTransportSetSendGroup(uint64_t aSessionId, uint64_t aStreamId,
                                     uint64_t aSendGroupId) {
     return neqo_http3conn_webtransport_set_sendgroup(this, aSessionId,
-                                                     aSendGroupId);
+                                                     aStreamId, aSendGroupId);
   }
 
   nsresult RegisterWebTransportSendGroup(uint64_t aSessionId,
                                          uint64_t aGroupId) {
     return neqo_http3conn_webtransport_register_send_group(this, aSessionId,
                                                            aGroupId);
+  }
+  nsresult SetWebTransportAnticipatedConcurrentIncomingUnidirectionalStreams(
+      uint64_t aSessionId, uint16_t aValue) {
+    return neqo_http3conn_webtransport_set_anticipated_concurrent_incoming_uni_streams(
+        this, aSessionId, aValue);
+  }
+
+  nsresult SetWebTransportAnticipatedConcurrentIncomingBidirectionalStreams(
+      uint64_t aSessionId, uint16_t aValue) {
+    return neqo_http3conn_webtransport_set_anticipated_concurrent_incoming_bidi_streams(
+        this, aSessionId, aValue);
   }
   nsresult GetWebTransportSessionProtocol(uint64_t aSessionId,
                                           nsACString& aProtocol) {
@@ -259,13 +305,13 @@ class NeqoHttp3Conn final {
 
   nsresult ExportWebTransportKeyingMaterial(
       uint64_t aSessionId, const nsTArray<uint8_t>& aLabel,
-      const nsTArray<uint8_t>& aContext, nsTArray<uint8_t>& aKeyingMaterial) {
-    constexpr uint32_t kKeyingMaterialLength = 32;
-    aKeyingMaterial.SetLength(kKeyingMaterialLength);
+      const nsTArray<uint8_t>& aContext, uint32_t aOutputLength,
+      nsTArray<uint8_t>& aKeyingMaterial) {
+    aKeyingMaterial.SetLength(aOutputLength);
     return neqo_http3conn_export_keying_material(
         this, aSessionId, aLabel.Elements(), aLabel.Length(),
         aContext.Elements(), aContext.Length(), aKeyingMaterial.Elements(),
-        kKeyingMaterialLength);
+        aOutputLength);
   }
 
  private:

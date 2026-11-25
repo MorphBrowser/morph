@@ -3,7 +3,6 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ---
 task-defaults:
-    run-on-repo-type: [hg]
     run-on-projects: ["trunk"]
     platform: linux64/debug
     worker-type: t-linux-docker-amd
@@ -16,7 +15,6 @@ task-defaults:
         kind: other
         tier: 2
     run:
-        clone-with: hg
         using: run-task
         tooltool-downloads: public
     fetches:
@@ -30,19 +28,28 @@ task-defaults:
             - '**/*.cpp'
             - '**/*.cc'
             - '**/*.cxx'
+            - '**/*.h'
             - '**/*.m'
             - '**/*.mm'
             - 'tools/clang-tidy/**'
 
 tidy:
     description: Run static-analysis (clang-tidy) on C/C++ patches
+    # Review bot waits for every lint, and this one is in the long tail that often
+    # finishes last. It parallelizes well, so a 30 core worker shortens the end
+    # to end time.
+    worker-type: b-linux-docker-large-amd
     treeherder:
         symbol: cpp(clang-tidy)
+        tier: 1
+    changed-files-env: CHANGED_FILES
     run:
         cwd: '{checkout}'
         command: >-
             source taskcluster/scripts/misc/source-test-clang-setup.sh &&
-            ./mach --log-no-times static-analysis check --outgoing --output $HOME/clang-tidy.json --format json
+            if [ -n "$CHANGED_FILES" ]; then
+            ./mach --log-no-times static-analysis check $CHANGED_FILES --output $HOME/clang-tidy.json --format json;
+            else echo 'No changed files were passed, skipping clang-tidy' && echo '{"files": {}}' > $HOME/clang-tidy.json; fi
     fetches:
         toolchain:
             - linux64-clang
@@ -55,12 +62,13 @@ tidy:
             - type: file
               name: public/code-review/clang-tidy.json
               path: /builds/worker/clang-tidy.json
-            - type: file
-              name: public/profile_resource-usage.json
-              path: /builds/worker/profile_resource-usage.json
 
 external:
     description: Run static-analysis (clang-tidy) on C/C++ patches with external checks
+    # Review bot waits for every lint, and this one is in the long tail that often
+    # finishes last. It parallelizes well, so a 30 core worker shortens the end
+    # to end time.
+    worker-type: b-linux-docker-large-amd
     treeherder:
         symbol: cpp(clang-tidy-external)
     attributes:
@@ -75,11 +83,14 @@ external:
                     by-level:
                         "1": false
                         default: true
+    changed-files-env: CHANGED_FILES
     run:
         cwd: '{checkout}'
         command: >-
             source taskcluster/scripts/misc/source-test-clang-setup.sh &&
-            ./mach --log-no-times static-analysis check --checks="-*,mozilla-civet-*" --outgoing --output $HOME/clang-tidy.json --format json
+            if [ -n "$CHANGED_FILES" ]; then
+            ./mach --log-no-times static-analysis check --checks="-*,mozilla-civet-*" $CHANGED_FILES --output $HOME/clang-tidy.json --format json;
+            else echo 'No changed files were passed, skipping clang-tidy' && echo '{"files": {}}' > $HOME/clang-tidy.json; fi
     fetches:
         toolchain:
             - linux64-clang
@@ -92,10 +103,6 @@ external:
             - type: file
               name: public/code-review/clang-tidy.json
               path: /builds/worker/clang-tidy.json
-            - type: file
-              name: public/profile_resource-usage.json
-              path: /builds/worker/profile_resource-usage.json
-
 
 unittest:
     description: Ensure static analysis works correctly

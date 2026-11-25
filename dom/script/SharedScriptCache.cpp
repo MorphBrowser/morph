@@ -4,6 +4,8 @@
 
 #include "SharedScriptCache.h"
 
+#include <memory>
+
 #include "ScriptLoadHandler.h"  // ScriptLoadHandler
 #include "ScriptLoader.h"       // ScriptLoader
 #include "ScriptTrace.h"        // TRACE_FOR_TEST
@@ -278,19 +280,7 @@ MOZ_DEFINE_MALLOC_SIZE_OF(SharedScriptCacheMallocSizeOf)
 
 SharedScriptCache::SharedScriptCache() = default;
 
-void SharedScriptCache::Init() {
-  RegisterWeakMemoryReporter(this);
-
-  // URL classification (tracking protection etc) are handled inside
-  // nsHttpChannel.
-  // The cache reflects the policy for whether to block or not, and once
-  // the policy is modified, we should discard the cache, to avoid running
-  // a cached script which is supposed to be blocked.
-  auto ClearCache = [](const char*, void*) { Clear(); };
-  Preferences::RegisterPrefixCallback(ClearCache, "urlclassifier.");
-  Preferences::RegisterCallback(ClearCache,
-                                "privacy.trackingprotection.enabled");
-}
+void SharedScriptCache::Init() { RegisterWeakMemoryReporter(this); }
 
 SharedScriptCache::~SharedScriptCache() {
   UnregisterWeakMemoryReporter(this);
@@ -628,6 +618,14 @@ void SharedScriptCache::SaveToDiskCache() {
       continue;
     }
 
+    if (!item.mLoadedScript->HasDiskCacheReference()) {
+      // The other consumer can drop the disk cache reference while
+      // the ScriptEncodeAndCompressionTask is running off main thread.
+      item.mLoadedScript->DropSRIOrSRIAndSerializedStencil();
+      TRACE_FOR_TEST(item.mLoadedScript, "diskcache:failed");
+      continue;
+    }
+
     if (!ScriptLoader::SaveToDiskCache(item.mLoadedScript, item.mCompressed)) {
       item.mLoadedScript->DropDiskCacheReference();
       item.mLoadedScript->DropSRIOrSRIAndSerializedStencil();
@@ -707,7 +705,7 @@ bool SharedScriptCache::EnsureEverHitMap() {
   os->AddObserver(this, "ipc:content-shutdown", /* ownsWeak= */ false);
   os->AddObserver(this, "profile-before-change", /* ownsWeak= */ false);
 
-  mEverHitMap.reset(new EverHitMapType());
+  mEverHitMap = std::make_unique<EverHitMapType>();
   return !!mEverHitMap;
 }
 

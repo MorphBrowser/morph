@@ -41,8 +41,26 @@ struct ImmShiftedTag : public ImmWord {
   }
 };
 
-struct ImmTag : public Imm32 {
-  explicit ImmTag(JSValueTag mask) : Imm32(int32_t(mask)) {}
+struct ImmTagSignExt : public Imm32 {
+  static constexpr int32_t signExtend(JSValueTag mask) {
+    int64_t tag =
+        static_cast<int64_t>(static_cast<uint64_t>(mask) << JSVAL_TAG_SHIFT) >>
+        JSVAL_TAG_SHIFT;
+    MOZ_ASSERT(is_intN(tag, 12));
+    return static_cast<int32_t>(tag);
+  }
+
+  explicit ImmTagSignExt(JSValueTag mask) : Imm32(signExtend(mask)) {}
+};
+
+// The upper 32 bits of a Value whose payload fits in 32 bits are its tag
+// shifted left by 15. Sign-extended, as LD.W loads them, they are a multiple of
+// |1 << (JSVAL_TAG_SHIFT - 32)|, which LU12I.W loads in one instruction.
+struct ImmTagUpperWord : public Imm32 {
+  static_assert(JSVAL_TAG_SHIFT - 32 >= 12, "LU12I.W loads the shifted tag");
+
+  explicit ImmTagUpperWord(JSValueTag tag)
+      : Imm32(static_cast<int32_t>(tag << (JSVAL_TAG_SHIFT - 32))) {}
 };
 
 static const int defaultShift = 3;
@@ -139,6 +157,9 @@ class MacroAssemblerLOONG64 : public Assembler {
   FaultingCodeRange ma_store(Register data, Address address,
                              LoadStoreSize size = SizeWord,
                              LoadStoreExtension extension = SignExtend);
+  FaultingCodeRange ma_store(Imm32 imm, Address address,
+                             LoadStoreSize size = SizeWord,
+                             LoadStoreExtension extension = SignExtend);
 
   // arithmetic based ops
   // add
@@ -223,8 +244,8 @@ class MacroAssemblerLOONG64 : public Assembler {
   FaultingCodeRange ma_fld_d(FloatRegister ft, Address address);
   FaultingCodeRange ma_fst_d(FloatRegister ft, Address address);
   FaultingCodeRange ma_fst_s(FloatRegister ft, Address address);
-  FaultingCodeRange ma_vld(FloatRegister vd, Address address);
-  FaultingCodeRange ma_vst(FloatRegister vd, Address address);
+  FaultingCodeRange ma_vld(VRegister vd, Address address);
+  FaultingCodeRange ma_vst(VRegister vd, Address address);
 
   void ma_pop(FloatRegister f);
   void ma_push(FloatRegister f);
@@ -272,10 +293,13 @@ class MacroAssemblerLOONG64 : public Assembler {
                 Register rk);
 
   void ma_and(Register rd, Register rj, Imm32 imm);
+  void ma_and(Register rd, Register rj, ImmWord imm);
 
   void ma_or(Register rd, Register rj, Imm32 imm);
+  void ma_or(Register rd, Register rj, ImmWord imm);
 
   void ma_xor(Register rd, Register rj, Imm32 imm);
+  void ma_xor(Register rd, Register rj, ImmWord imm);
 
   void ma_nor(Register rd, Register rj, Imm32 imm);
 
@@ -288,8 +312,9 @@ class MacroAssemblerLOONG64 : public Assembler {
   FaultingCodeRange ma_store(Register data, const BaseIndex& dest,
                              LoadStoreSize size = SizeWord,
                              LoadStoreExtension extension = SignExtend);
-  void ma_store(Imm32 imm, const BaseIndex& dest, LoadStoreSize size = SizeWord,
-                LoadStoreExtension extension = SignExtend);
+  FaultingCodeRange ma_store(Imm32 imm, const BaseIndex& dest,
+                             LoadStoreSize size = SizeWord,
+                             LoadStoreExtension extension = SignExtend);
 
   // arithmetic based ops
   // add
@@ -430,6 +455,11 @@ class MacroAssemblerLOONG64 : public Assembler {
     wasmStoreAbsoluteImpl(access, AnyRegister(value.reg), memoryBase, address);
   }
 
+  FaultingCodeRange wasmStoreLane(const wasm::MemoryAccessDesc& access,
+                                  FloatRegister src, Register memoryBase,
+                                  Register ptr, uint32_t laneSize,
+                                  uint32_t laneIndex);
+
  protected:
   void wasmLoadAbsoluteImpl(const wasm::MemoryAccessDesc& access,
                             Register memoryBase, uint64_t address,
@@ -542,6 +572,9 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
 
   Address computeScaledAddress(const BaseIndex& address,
                                UseScratchRegisterScope& temps);
+
+  Address computeAbsoluteAddress(AbsoluteAddress address,
+                                 UseScratchRegisterScope& temps);
 
   void j(Label* dest) { ma_b(dest); }
 
@@ -703,16 +736,18 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
 
   void jump(TrampolinePtr code) { jump(ImmPtr(code.value)); }
 
-  void splitTag(Register src, Register dest) {
-    as_srli_d(dest, src, JSVAL_TAG_SHIFT);
+  // See splitSignExtTag(Register, Register) in MacroAssembler-riscv64.h for
+  // rationale.
+  void splitSignExtTag(Register src, Register dest) {
+    as_srai_d(dest, src, JSVAL_TAG_SHIFT);
   }
 
-  void splitTag(const ValueOperand& operand, Register dest) {
-    splitTag(operand.valueReg(), dest);
+  void splitSignExtTag(const ValueOperand& operand, Register dest) {
+    splitSignExtTag(operand.valueReg(), dest);
   }
 
   void splitTagForTest(const ValueOperand& value, ScratchTagScope& tag) {
-    splitTag(value, tag);
+    splitSignExtTag(value, tag);
   }
 
   // unboxing code
@@ -754,33 +789,22 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
   }
 
   void unboxWasmAnyRefGCThingForGCBarrier(const Address& src, Register dest) {
-    UseScratchRegisterScope temps(*this);
-    Register scratch = temps.Acquire();
-    MOZ_ASSERT(scratch != dest);
-    movePtr(ImmWord(wasm::AnyRef::GCThingMask), scratch);
     loadPtr(src, dest);
-    as_and(dest, dest, scratch);
+    ma_and(dest, dest, ImmWord(wasm::AnyRef::GCThingMask));
   }
 
   // Like unboxGCThingForGCBarrier, but loads the GC thing's chunk base.
   void getGCThingValueChunk(const Address& src, Register dest) {
-    UseScratchRegisterScope temps(*this);
-    Register scratch = temps.Acquire();
-    MOZ_ASSERT(scratch != dest);
     loadPtr(src, dest);
-    movePtr(ImmWord(JS::detail::ValueGCThingPayloadChunkMask), scratch);
-    as_and(dest, dest, scratch);
+    ma_and(dest, dest, ImmWord(JS::detail::ValueGCThingPayloadChunkMask));
   }
   void getGCThingValueChunk(const ValueOperand& src, Register dest) {
-    MOZ_ASSERT(src.valueReg() != dest);
-    movePtr(ImmWord(JS::detail::ValueGCThingPayloadChunkMask), dest);
-    as_and(dest, dest, src.valueReg());
+    ma_and(dest, src.valueReg(),
+           ImmWord(JS::detail::ValueGCThingPayloadChunkMask));
   }
 
   void getWasmAnyRefGCThingChunk(Register src, Register dest) {
-    MOZ_ASSERT(src != dest);
-    movePtr(ImmWord(wasm::AnyRef::GCThingChunkMask), dest);
-    as_and(dest, dest, src);
+    ma_and(dest, src, ImmWord(wasm::AnyRef::GCThingChunkMask));
   }
 
   void unboxInt32(const ValueOperand& operand, Register dest);
@@ -859,8 +883,22 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
   [[nodiscard]] Register extractTag(const BaseIndex& address, Register scratch);
   [[nodiscard]] Register extractTag(const ValueOperand& value,
                                     Register scratch) {
-    splitTag(value, scratch);
+    splitSignExtTag(value, scratch);
     return scratch;
+  }
+
+  // Branch on the tag of a Value in memory by comparing its upper word with
+  // ImmTagUpperWord(tag), which takes one instruction fewer than loading the
+  // Value and extracting the sign-extended tag.
+  template <typename T>
+  void branchTestTagUpperWord(Condition cond, const T& address, JSValueTag tag,
+                              Label* label) {
+    T upperWord = address;
+    upperWord.offset += static_cast<int32_t>(sizeof(uint32_t));
+    UseScratchRegisterScope temps(*this);
+    const Register scratch = temps.Acquire();
+    load32(upperWord, scratch);
+    ma_b(scratch, ImmTagUpperWord(tag), label, cond);
   }
 
   void loadInt32OrDouble(const Address& src, FloatRegister dest);
@@ -1012,12 +1050,12 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
 
   FaultingCodeRange store8(Register src, const Address& address);
   FaultingCodeRange store8(Register src, const BaseIndex& address);
-  void store8(Imm32 imm, const Address& address);
+  FaultingCodeRange store8(Imm32 imm, const Address& address);
   void store8(Imm32 imm, const BaseIndex& address);
 
   FaultingCodeRange store16(Register src, const Address& address);
   FaultingCodeRange store16(Register src, const BaseIndex& address);
-  void store16(Imm32 imm, const Address& address);
+  FaultingCodeRange store16(Imm32 imm, const Address& address);
   void store16(Imm32 imm, const BaseIndex& address);
 
   template <typename T>
@@ -1028,7 +1066,7 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
   FaultingCodeRange store32(Register src, const Address& address);
   FaultingCodeRange store32(Register src, const BaseIndex& address);
   void store32(Register src, AbsoluteAddress address);
-  void store32(Imm32 src, const Address& address);
+  FaultingCodeRange store32(Imm32 src, const Address& address);
   void store32(Imm32 src, const BaseIndex& address);
 
   template <typename T>
@@ -1036,8 +1074,8 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
     store32(src, dest);
   }
 
-  void store64(Imm64 imm, Address address) {
-    storePtr(ImmWord(imm.value), address);
+  FaultingCodeRange store64(Imm64 imm, Address address) {
+    return storePtr(ImmWord(imm.value), address);
   }
   void store64(Imm64 imm, const BaseIndex& address) {
     storePtr(ImmWord(imm.value), address);
@@ -1075,6 +1113,7 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
   void convertUInt64ToDouble(Register src, FloatRegister dest);
 
   void breakpoint(uint32_t value = 0);
+  void crash();
 
   void checkStackAlignment() {
 #ifdef DEBUG
@@ -1082,7 +1121,7 @@ class MacroAssemblerLOONG64Compat : public MacroAssemblerLOONG64 {
     UseScratchRegisterScope temps(*this);
     Register scratch = temps.Acquire();
     as_andi(scratch, sp, ABIStackAlignment - 1);
-    ma_b(scratch, zero, &aligned, Equal, ShortJump);
+    ma_b(scratch, scratch, &aligned, Zero, ShortJump);
     breakpoint();
     bind(&aligned);
 #endif

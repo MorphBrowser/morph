@@ -191,8 +191,8 @@ nsresult nsStreamConverterService::FindConverter(
   BFSHashTable lBFSTable;
   for (const auto& entry : mAdjacencyList) {
     const nsACString& key = entry.GetKey();
-    MOZ_ASSERT(entry.GetWeak(), "no data in the table iteration");
-    lBFSTable.InsertOrUpdate(key, mozilla::MakeUnique<BFSTableData>(key));
+    MOZ_ASSERT(entry.GetRawPtr(), "no data in the table iteration");
+    lBFSTable.InsertOrUpdate(key, std::make_unique<BFSTableData>(key));
   }
 
   NS_ASSERTION(lBFSTable.Count() == vertexCount,
@@ -242,8 +242,7 @@ nsresult nsStreamConverterService::FindConverter(
       if (white == curVertexState->color) {
         curVertexState->color = gray;
         curVertexState->distance = headVertexState->distance + 1;
-        curVertexState->predecessor =
-            mozilla::MakeUnique<nsCString>(*currentHead);
+        curVertexState->predecessor = std::make_unique<nsCString>(*currentHead);
         grayQ.Push(curVertex);
       } else {
         delete curVertex;  // if this vertex has already been discovered, we

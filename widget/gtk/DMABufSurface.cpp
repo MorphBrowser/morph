@@ -53,7 +53,6 @@
 #include "ImageContainer.h"
 #include "ScopedGLHelpers.h"
 #include "mozilla/ScopeExit.h"
-#include "mozilla/UniquePtr.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
 #include "mozilla/gfx/gfxVars.h"
@@ -98,6 +97,8 @@ static LazyLogModule gDmabufRefLog("DmabufRef");
             ("%s: " str, GetDebugTag().get(), ##__VA_ARGS__))
 #else
 #  define LOGDMABUF(str, ...)
+#  define LOGDMAVERBOSES(str, ...)
+#  define LOGDMABUFS(str, ...)
 #  define LOGDMABUFREF(str, ...)
 #endif /* MOZ_LOGGING */
 
@@ -152,9 +153,8 @@ void LogMemoryAddRGBA(int aUID, size_t aUsedMem) {
   gDMABufSurfaceMemoryRGBAUsed += aUsedMem;
   LOGDMAVERBOSES("UID %d Memory RGBA surfaces %zu total mem %" PRId64
                  " KB (+ %zu KB)",
-                 aUID, static_cast<size_t>(gDMABufSurfaceRGBAUsed),
-                 static_cast<int64_t>(gDMABufSurfaceMemoryRGBAUsed) / 1000,
-                 aUsedMem / 1000);
+                 aUID, gDMABufSurfaceRGBAUsed.load(),
+                 gDMABufSurfaceMemoryRGBAUsed.load() / 1000, aUsedMem / 1000);
 }
 
 void LogMemorySubRGBA(int aUID, size_t aUsedMem) {
@@ -162,9 +162,8 @@ void LogMemorySubRGBA(int aUID, size_t aUsedMem) {
   gDMABufSurfaceRGBAUsed--;
   LOGDMAVERBOSES("UID %d Memory RGBA surfaces %zu total mem %" PRId64
                  " KB (- %zu KB)",
-                 aUID, static_cast<size_t>(gDMABufSurfaceRGBAUsed),
-                 static_cast<int64_t>(gDMABufSurfaceMemoryRGBAUsed) / 1000,
-                 aUsedMem / 1000);
+                 aUID, gDMABufSurfaceRGBAUsed.load(),
+                 gDMABufSurfaceMemoryRGBAUsed.load() / 1000, aUsedMem / 1000);
 }
 
 void LogMemoryAddYUV(int aUID, size_t aUsedMem) {
@@ -172,9 +171,8 @@ void LogMemoryAddYUV(int aUID, size_t aUsedMem) {
   gDMABufSurfaceMemoryYUVUsed += aUsedMem;
   LOGDMAVERBOSES("UID %d Memory YUV surfaces %zu total mem %" PRId64
                  " KB (+ %zu KB)",
-                 aUID, static_cast<size_t>(gDMABufSurfaceYUVUsed),
-                 static_cast<int64_t>(gDMABufSurfaceMemoryYUVUsed) / 1000,
-                 aUsedMem / 1000);
+                 aUID, gDMABufSurfaceYUVUsed.load(),
+                 gDMABufSurfaceMemoryYUVUsed.load() / 1000, aUsedMem / 1000);
 }
 
 void LogMemorySubYUV(int aUID, size_t aUsedMem) {
@@ -182,9 +180,8 @@ void LogMemorySubYUV(int aUID, size_t aUsedMem) {
   gDMABufSurfaceYUVUsed--;
   LOGDMAVERBOSES("UID %d Memory YUV surfaces %zu total mem %" PRId64
                  " KB (- %zu KB)",
-                 aUID, static_cast<size_t>(gDMABufSurfaceYUVUsed),
-                 static_cast<int64_t>(gDMABufSurfaceMemoryYUVUsed) / 1000,
-                 aUsedMem / 1000);
+                 aUID, gDMABufSurfaceYUVUsed.load(),
+                 gDMABufSurfaceMemoryYUVUsed.load() / 1000, aUsedMem / 1000);
 }
 
 class DMABufSurfaceReporter final : public nsIMemoryReporter {
@@ -469,11 +466,9 @@ void DMABufSurface::GlobalRefCountDelete() {
 
 bool DMABufSurface::ReleaseDMABuf() {
   LOGDMABUF("DMABufSurface::ReleaseDMABuf() UID %d", mUID);
-#ifdef MOZ_LOGGING
   for (int i = 0; i < mBufferPlaneCount; i++) {
     Unmap(i);
   }
-#endif
 
   bool released = CloseFileDescriptors();
 
@@ -553,6 +548,20 @@ void DMABufSurface::FenceSet() {
   mGL->fFinish();
 }
 
+// Waits for the sync_file fd to become readable, which happens when the
+// fence signals.
+static void PollSyncFd(int aRawFd) {
+  if (aRawFd < 0) {
+    return;
+  }
+  constexpr int kSyncPollTimeoutMs = 100;
+  struct pollfd pfd = {aRawFd, POLLIN, 0};
+  int ret = poll(&pfd, 1, kSyncPollTimeoutMs);
+  if (!(ret == 1 && (pfd.revents & POLLIN))) {
+    gfxCriticalNoteOnce << "poll failed: " << ret;
+  }
+}
+
 /* static */
 void DMABufSurface::FenceWaitFd(RefPtr<gl::GLContext> aGL,
                                 RefPtr<gfx::FileHandleWrapper> aSyncFd) {
@@ -566,17 +575,8 @@ void DMABufSurface::FenceWaitFd(RefPtr<gl::GLContext> aGL,
       egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
   if (!sync) {
     gfxCriticalNoteOnce << "CreateSync failed";
-    int rawFd = syncFd.get();
-    if (rawFd >= 0) {
-      // CreateSync failed, so we cannot use eglClientWaitSync; poll(POLLIN)
-      // waits for the sync_file fd to become readable when the fence signals.
-      constexpr int kSyncPollTimeoutMs = 100;
-      struct pollfd pfd = {rawFd, POLLIN, 0};
-      int ret = poll(&pfd, 1, kSyncPollTimeoutMs);
-      if (!(ret == 1 && (pfd.revents & POLLIN))) {
-        gfxCriticalNoteOnce << "poll failed: " << ret;
-      }
-    }
+    // CreateSync failed, so we cannot use eglClientWaitSync.
+    PollSyncFd(syncFd.get());
     return;
   }
 
@@ -600,15 +600,16 @@ void DMABufSurface::FenceWait(mozilla::gl::GLContext* aGLContext) {
     if (!gl) {
       gl = aGLContext;
     }
-    if (!gl) {
-      gfxCriticalNoteOnce
-          << "DMABufSurface::FenceWait() failed: missing GL context";
-      return;
-    }
     syncFd = mSyncFd.forget();
   }
 
   LOGDMABUF("DMABufSurface::FenceWait() UID %d", mUID);
+  if (!gl) {
+    // Without a GL context, e.g. in the parent process when rendering happens
+    // in the GPU process, wait for the fence on the CPU.
+    PollSyncFd(syncFd->GetHandle());
+    return;
+  }
   FenceWaitFd(std::move(gl), std::move(syncFd));
 }
 
@@ -858,6 +859,10 @@ bool DMABufSurfaceRGBA::Create(mozilla::gl::GLContext* aGLContext, int aWidth,
     }
   } else {
     mFOURCCFormat = aFormat->GetFormat();
+  }
+
+  if (aDMABufSurfaceFlags & DMABUF_CPU_ACCESS) {
+    return CreateGBM(aWidth, aHeight, aDMABufSurfaceFlags, aFormat);
   }
 
   bool useGLSnapshot = gfx::gfxVars::UseDMABufSurfaceExport() && !aGLContext;
@@ -1156,6 +1161,9 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
   mUID = desc.uid();
   mPID = desc.pid();
   mHDRMetadata = mozilla::gfx::HDRMetadata();
+  mColorRange = desc.colorRange();
+  mColorPrimaries = desc.colorPrimaries();
+  mTransferFunction = desc.transferFunction();
 
   LOGDMABUF(
       "DMABufSurfaceRGBA::ImportSurfaceDescriptor() UID %d size %d x %d\n",
@@ -1228,8 +1236,7 @@ bool DMABufSurfaceRGBA::Serialize(
   aOutDescriptor = SurfaceDescriptorDMABuf(
       GetSurfaceType(), mFOURCCFormat, modifiers, mGbmBufferFlags, fds, width,
       height, width, height, tmp, strides, offsets, GetYUVColorSpace(),
-      mColorRange, mozilla::gfx::ColorSpace2::UNKNOWN,
-      mozilla::gfx::TransferFunction::Default, 0, fenceFDs, mUID,
+      mColorRange, mColorPrimaries, mTransferFunction, 0, fenceFDs, mUID,
       mCanRecycle ? getpid() : 0, refCountFDs,
       /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata);
   return true;
@@ -1366,20 +1373,19 @@ wl_buffer* DMABufSurfaceRGBA::CreateWlBuffer() {
 }
 #endif
 
-#ifdef MOZ_LOGGING
 // We should synchronize DMA Buffer object access from CPU to avoid potential
 // cache incoherency and data loss.
 // See
-// https://01.org/linuxgraphics/gfx-docs/drm/driver-api/dma-buf.html#cpu-access-to-dma-buffer-objects
+// https://docs.kernel.org/driver-api/dma-buf.html#cpu-access-to-dma-buffer-objects
 struct dma_buf_sync {
   uint64_t flags;
 };
-#  define DMA_BUF_SYNC_READ (1 << 0)
-#  define DMA_BUF_SYNC_WRITE (2 << 0)
-#  define DMA_BUF_SYNC_START (0 << 2)
-#  define DMA_BUF_SYNC_END (1 << 2)
-#  define DMA_BUF_BASE 'b'
-#  define DMA_BUF_IOCTL_SYNC _IOW(DMA_BUF_BASE, 0, struct dma_buf_sync)
+#define DMA_BUF_SYNC_READ (1 << 0)
+#define DMA_BUF_SYNC_WRITE (2 << 0)
+#define DMA_BUF_SYNC_START (0 << 2)
+#define DMA_BUF_SYNC_END (1 << 2)
+#define DMA_BUF_BASE 'b'
+#define DMA_BUF_IOCTL_SYNC _IOW(DMA_BUF_BASE, 0, struct dma_buf_sync)
 
 static void SyncDmaBuf(int aFd, uint64_t aFlags) {
   struct dma_buf_sync sync = {0};
@@ -1430,6 +1436,7 @@ void* DMABufSurface::MapInternal(uint32_t aX, uint32_t aY, uint32_t aWidth,
   return mMappedRegion[aPlane];
 }
 
+#ifdef MOZ_LOGGING
 void* DMABufSurfaceRGBA::MapReadOnly(uint32_t aX, uint32_t aY, uint32_t aWidth,
                                      uint32_t aHeight, uint32_t* aStride) {
   return MapInternal(aX, aY, aWidth, aHeight, aStride, GBM_BO_TRANSFER_READ);
@@ -1439,6 +1446,7 @@ void* DMABufSurfaceRGBA::MapReadOnly(uint32_t* aStride) {
   return MapInternal(0, 0, mWidth[0], mHeight[0], aStride,
                      GBM_BO_TRANSFER_READ);
 }
+#endif
 
 void* DMABufSurfaceRGBA::Map(uint32_t aX, uint32_t aY, uint32_t aWidth,
                              uint32_t aHeight, uint32_t* aStride) {
@@ -1451,6 +1459,29 @@ void* DMABufSurfaceRGBA::Map(uint32_t* aStride) {
                      GBM_BO_TRANSFER_READ_WRITE);
 }
 
+already_AddRefed<gfx::DrawTarget> DMABufSurfaceRGBA::Lock() {
+  LOGDMABUF("DMABufSurfaceRGBA::Lock() UID %d", mUID);
+  uint32_t stride = 0;
+  void* data = Map(&stride);
+  if (!data) {
+    return nullptr;
+  }
+  RefPtr<gfx::DrawTarget> dt = gfx::Factory::CreateDrawTargetForData(
+      gfx::BackendType::SKIA, static_cast<unsigned char*>(data), GetSize(),
+      stride, GetFormat());
+  if (!dt) {
+    Unmap();
+    return nullptr;
+  }
+  static gfx::UserDataKey sUnmapKey;
+  dt->AddUserData(&sUnmapKey, do_AddRef(this).take(), [](void* aSurface) {
+    RefPtr<DMABufSurfaceRGBA> surface =
+        dont_AddRef(static_cast<DMABufSurfaceRGBA*>(aSurface));
+    surface->Unmap();
+  });
+  return dt.forget();
+}
+
 void DMABufSurface::Unmap(int aPlane) {
   if (mMappedRegion[aPlane]) {
     LOGDMABUF("DMABufSurface::Unmap() UID %d plane %d\n", mUID, aPlane);
@@ -1461,7 +1492,6 @@ void DMABufSurface::Unmap(int aPlane) {
     mMappedRegionStride[aPlane] = 0;
   }
 }
-#endif  // MOZ_LOGGING
 
 nsresult DMABufSurface::BuildSurfaceDescriptorBuffer(
     SurfaceDescriptorBuffer& aSdBuffer, Image::BuildSdbFlags aFlags,
@@ -1903,6 +1933,13 @@ bool DMABufSurfaceYUV::UpdateYUVData(mozilla::gl::GLContext* aGLContext,
     return false;
   }
 
+  if (!aSourceSurface->CreateTextures(aGLContext)) {
+    LOGDMABUF(
+        "DMABufSurfaceYUV::UpdateYUVData() failed to create BufferSurface "
+        "textures!");
+    return false;
+  }
+
   gfx::IntSize size = aSourceSurface->GetSize();
 
   mWidthAligned[0] = mWidth[0] = size.width;
@@ -1954,92 +1991,6 @@ bool DMABufSurfaceYUV::UpdateYUVData(mozilla::gl::GLContext* aGLContext,
   // TODO: Move to upper level? Add an argument?
   ReleaseTextures();
   return ret;
-}
-
-// Copy a single YCbCr plane, preserving its source stride. aSkip is the
-// number of extra samples between consecutive pixels (0 for tightly packed
-// planes, as produced by software decoders).
-static void CopyYCbCrPlane(uint8_t* aDst, const uint8_t* aSrc,
-                           const gfx::IntSize& aSize, int32_t aStride,
-                           int32_t aSkip) {
-  if (!aSkip) {
-    memcpy(aDst, aSrc, size_t(aSize.height) * aStride);
-    return;
-  }
-  for (int32_t y = 0; y < aSize.height; y++) {
-    const uint8_t* src = aSrc + y * aStride;
-    uint8_t* dst = aDst + y * aStride;
-    for (int32_t x = 0; x < aSize.width; x++) {
-      *dst++ = *src;
-      src += 1 + aSkip;
-    }
-  }
-}
-
-// TODO: Remove when we remove DMABuf direct upload from ffmpeg
-// and transfer SMM surfaces instead.
-bool DMABufSurfaceYUV::UpdateYUVData(
-    const mozilla::layers::PlanarYCbCrData& aData,
-    gfx::SurfaceFormat aImageFormat) {
-  LOGDMABUF("DMABufSurfaceYUV::UpdateYUVData() PlanarYCbCrData.");
-
-  if (GetHWFormat(aImageFormat) == gfx::SurfaceFormat::UNKNOWN) {
-    LOGDMABUF("DMABufSurfaceYUV::UpdateYUVData() wrong format!");
-    return false;
-  }
-
-  // Wrap aData into a SHM surface first, so we can reuse the same
-  // texture-to-DMABuf blit path used for other BufferSurface sources
-  // (see UpdateYUVData(GLContext*, BufferSurface*)) instead of uploading
-  // the YCbCr planes to a DMABuf-backed texture directly.
-  gfx::IntSize ySize = aData.YDataSize();
-  gfx::IntSize cbCrSize = aData.CbCrDataSize();
-  uint32_t yOffset, cbOffset, crOffset;
-  ImageDataSerializer::ComputeYCbCrOffsets(aData.mYStride, ySize.height,
-                                           aData.mCbCrStride, cbCrSize.height,
-                                           yOffset, cbOffset, crOffset);
-
-  Maybe<uint32_t> bufferSize = ImageDataSerializer::ComputeYCbCrBufferSize(
-      aData.mPictureRect, ySize, aData.mYStride, cbCrSize, aData.mCbCrStride,
-      yOffset, cbOffset, crOffset, aData.mColorDepth, aData.mChromaSubsampling);
-  if (bufferSize.isNothing()) {
-    LOGDMABUF("  failed to compute YCbCr buffer size!");
-    return false;
-  }
-
-  auto buffer = MakeUnique<uint8_t[]>(*bufferSize);
-  CopyYCbCrPlane(buffer.get() + yOffset, aData.mYChannel, ySize, aData.mYStride,
-                 aData.mYSkip);
-  CopyYCbCrPlane(buffer.get() + cbOffset, aData.mCbChannel, cbCrSize,
-                 aData.mCbCrStride, aData.mCbSkip);
-  CopyYCbCrPlane(buffer.get() + crOffset, aData.mCrChannel, cbCrSize,
-                 aData.mCbCrStride, aData.mCrSkip);
-
-  YCbCrDescriptor desc(
-      aData.mPictureRect, ySize, aData.mYStride, cbCrSize, aData.mCbCrStride,
-      yOffset, cbOffset, crOffset, aData.mStereoMode, aData.mColorDepth,
-      aData.mYUVColorSpace, aData.mColorRange, aData.mTransferFunction,
-      aData.mChromaSubsampling, aData.mHDRMetadata);
-  RefPtr<SHMBufSurfaceYUV> shmSurface =
-      SHMBufSurfaceYUV::Create(buffer.get(), BufferDescriptor(desc));
-  if (!shmSurface) {
-    LOGDMABUF("  failed to wrap YCbCr data into a SHM surface!");
-    return false;
-  }
-
-  StaticMutexAutoLock lock(sSnapshotContextMutex);
-  RefPtr<GLContext> context = ClaimSnapshotGLContext();
-  auto releaseContext =
-      MakeScopeExit([&] { ReturnSnapshotGLContext(context); });
-
-  if (!shmSurface->CreateTextures(context)) {
-    LOGDMABUF("  failed to upload YCbCr data to textures!");
-    return false;
-  }
-  auto releaseShmTextures =
-      MakeScopeExit([&] { shmSurface->ReleaseTextures(); });
-
-  return UpdateYUVData(context, shmSurface);
 }
 
 bool DMABufSurfaceYUV::Create(const SurfaceDescriptor& aDesc) {
@@ -2756,7 +2707,6 @@ already_AddRefed<DMABufSurfaceRGBA> DMABufSurfaceYUV::ConvertHLGToPQ(
 
   target->SetTransferFunction(gfx::TransferFunction::PQ);
   target->SetYUVColorSpace(gfx::YUVColorSpace::BT2020);
-  target->SetColorRange(gfx::ColorRange::FULL);
   target->SetColorPrimaries(gfx::ColorSpace2::BT2020);
   target->SetHDRMetadata(GetHDRMetadata());
 

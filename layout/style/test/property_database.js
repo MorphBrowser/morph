@@ -5470,10 +5470,6 @@ var gCSSProperties = {
       "counters(bar, '.', none)",
       "counters(foo)",
       'counter(foo, ".")',
-      'attr("title")',
-      "attr('title')",
-      "attr(2)",
-      "attr(-2)",
       "counter(2)",
       "counters(-2, '.')",
       "-moz-alt-content",
@@ -7860,13 +7856,21 @@ var gCSSProperties = {
     domProp: "positionVisibility",
     inherited: false,
     type: CSS_TYPE_LONGHAND,
-    initial_values: ["anchors-visible"],
-    other_values: ["anchors-valid", "always", "no-overflow"],
+    initial_values: ["anchor-visible", "anchors-visible"],
+    other_values: [
+      "always",
+      "anchor-valid",
+      "anchors-valid",
+      "no-overflow",
+      "anchor-visible no-overflow",
+      "anchor-visible anchors-valid no-overflow",
+    ],
     invalid_values: [
       "none",
       "auto",
-      "always anchors-valid",
-      "anchors-visible always",
+      "always anchor-valid",
+      "anchor-visible always",
+      "anchor-valid anchors-valid",
     ],
   },
   quotes: {
@@ -8896,7 +8900,6 @@ var gCSSProperties = {
     type: CSS_TYPE_TRUE_SHORTHAND,
     subproperties: ["text-wrap-mode", "text-wrap-style"],
     applies_to_placeholder: true,
-    applies_to_cue: true,
     applies_to_marker: true,
     initial_values: ["wrap"],
     other_values: [
@@ -12478,6 +12481,11 @@ var gCSSProperties = {
 }; // end of gCSSProperties
 
 if (IsCSSPropertyPrefEnabled("layout.css.line-clamp.enabled")) {
+  gCSSProperties["-webkit-line-clamp"].alias_for = "line-clamp";
+  gCSSProperties["-webkit-line-clamp"].legacy_mapping = {
+    1: "1 -webkit-legacy",
+    2: "2 -webkit-legacy",
+  };
   gCSSProperties["line-clamp"] = {
     domProp: "lineClamp",
     inherited: false,
@@ -12486,12 +12494,14 @@ if (IsCSSPropertyPrefEnabled("layout.css.line-clamp.enabled")) {
     other_values: [
       "1",
       "2",
+      "auto",
+      "no-ellipsis",
       "auto 3",
       "3 auto",
       "3 no-ellipsis",
       "3 -webkit-legacy",
     ],
-    invalid_values: ["0", "-1", "auto", "no-ellipsis", "-webkit-legacy"],
+    invalid_values: ["0", "-1", "-webkit-legacy"],
   };
 } else {
   gCSSProperties["-webkit-line-clamp"].subproperties = [];
@@ -12815,6 +12825,21 @@ if (isDisplayGridLanesEnabled) {
     "grid-lanes",
     "inline-grid-lanes"
   );
+  gCSSProperties["fit-tolerance"] = {
+    domProp: "fitTolerance",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["normal"],
+    other_values: ["infinite", "0", "1em", "4%", "calc(2px + 10%)"],
+    invalid_values: ["none", "-1px", "-1%", "1", "normal 1px", "1px infinite"],
+  };
+  gCSSProperties["flow-tolerance"] = {
+    domProp: "flowTolerance",
+    inherited: false,
+    type: CSS_TYPE_SHORTHAND_AND_LONGHAND,
+    alias_for: "fit-tolerance",
+    subproperties: ["fit-tolerance"],
+  };
 }
 
 gCSSProperties["display"].other_values.push("grid", "inline-grid");
@@ -14398,7 +14423,6 @@ gCSSProperties["text-wrap-style"] = {
   inherited: true,
   type: CSS_TYPE_LONGHAND,
   applies_to_placeholder: true,
-  applies_to_cue: true,
   applies_to_marker: true,
   initial_values: ["auto"],
   other_values: ["stable", "balance"],
@@ -14494,6 +14518,22 @@ if (IsCSSPropertyPrefEnabled("layout.css.text-autospace.enabled")) {
         "-10%",
         "calc(10% + 1cm)",
       ],
+    },
+  });
+}
+
+if (IsCSSPropertyPrefEnabled("layout.css.text-autospace-size.enabled")) {
+  Object.assign(gCSSProperties, {
+    "text-autospace-size": {
+      domProp: "textAutospaceSize",
+      inherited: true,
+      type: CSS_TYPE_LONGHAND,
+      applies_to_first_letter: true,
+      applies_to_first_line: true,
+      applies_to_placeholder: true,
+      initial_values: ["0.125"],
+      other_values: ["0", "0.5", "-0.25", "calc(1 / 3)"],
+      invalid_values: ["normal", "auto", "10%", "2px", "calc(1em / 4)"],
     },
   });
 }
@@ -14609,6 +14649,39 @@ if (IsCSSPropertyPrefEnabled("layout.css.prefixes.transitions")) {
   });
 }
 
+if (IsCSSPropertyPrefEnabled("layout.css.margin-trim.enabled")) {
+  gCSSProperties["margin-trim"] = {
+    domProp: "marginTrim",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["none"],
+    other_values: [
+      "block",
+      "block-start",
+      "block-end",
+      "block-start block-end",
+      "block-end block-start",
+    ],
+    invalid_values: [
+      "block block",
+      "block block-start block-end",
+      "block-start block-end block",
+      "block-start block-start",
+      "block 10px",
+      "auto",
+      "left",
+      "none block",
+      "none block-start",
+      "inline",
+      "inline-start",
+      "inline-end",
+      "block inline",
+      "inline-start inline-end",
+      "block-start inline-start",
+    ],
+  };
+}
+
 if (IsCSSPropertyPrefEnabled("layout.css.field-sizing.enabled")) {
   Object.assign(gCSSProperties, {
     "field-sizing": {
@@ -14687,6 +14760,40 @@ if (IsCSSPropertyPrefEnabled("layout.css.text-decoration-inset.enabled")) {
       "calc(10% + 10em) calc(20%)"
     );
   }
+}
+
+if (IsCSSPropertyPrefEnabled("layout.css.border-shape.enabled")) {
+  gCSSProperties["border-shape"] = {
+    domProp: "borderShape",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["none"],
+    other_values: [
+      "circle()",
+      "circle(closest-side at 25% 25%)",
+      "circle(closest-corner at 20px 50px)",
+      "ellipse(50px 60px)",
+      "polygon(10px 10px, 100px 10px, 10px 100px)",
+      "inset(10px round 5px)",
+      "circle() circle()",
+      "circle() polygon(10px 10px, 100px 10px, 10px 100px)",
+      "circle() border-box",
+      "circle() half-border-box",
+      "circle() margin-box circle() view-box",
+      "circle() border-box circle() content-box",
+    ],
+    invalid_values: [
+      "circle() none",
+      "none circle()",
+      "polygon(bla 10px 10px, 100px 10px, 10px 100px)",
+      "nonsense",
+      "1px",
+      "border-box",
+      "border-box circle()",
+      "circle() padding-box margin-box",
+      "circle() padding-box circle() margin-box circle()",
+    ],
+  };
 }
 
 if (IsCSSPropertyPrefEnabled("layout.css.corner-shape.enabled")) {

@@ -64,6 +64,12 @@ NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_BEGIN(BaseContentList)
       }
       Element::MarkNodeChildren(c);
     }
+    if (nsINode* root = tmp->GetParentObject()) {
+      if (root->IsContent() && root->AsContent()->IsPurple()) {
+        root->AsContent()->RemovePurple();
+      }
+      Element::MarkNodeChildren(root);
+    }
     return true;
   }
 NS_IMPL_CYCLE_COLLECTION_CAN_SKIP_END
@@ -320,7 +326,23 @@ JSObject* ContentList::WrapObject(JSContext* cx,
   return HTMLCollection_Binding::Wrap(cx, this, aGivenProto);
 }
 
-NS_IMPL_ISUPPORTS_INHERITED(ContentList, HTMLCollection, nsIMutationObserver)
+NS_IMPL_CYCLE_COLLECTION_CLASS(ContentList)
+
+NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(ContentList, HTMLCollection)
+  tmp->DisconnectFromRoot();
+  tmp->SetDirty();
+NS_IMPL_CYCLE_COLLECTION_UNLINK_END
+
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(ContentList, HTMLCollection)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mRootNode)
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
+
+NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(ContentList)
+  NS_INTERFACE_MAP_ENTRY(nsIMutationObserver)
+NS_INTERFACE_MAP_END_INHERITING(HTMLCollection)
+
+NS_IMPL_ADDREF_INHERITED(ContentList, HTMLCollection)
+NS_IMPL_RELEASE_INHERITED(ContentList, HTMLCollection)
 
 uint32_t ContentList::Length() {
   BringSelfUpToDate();
@@ -329,8 +351,12 @@ uint32_t ContentList::Length() {
 }
 
 Element* ContentList::Item(uint32_t aIndex) {
-  if (mState != State::UpToDate) {
-    PopulateSelf(std::min(aIndex, UINT32_MAX - 1) + 1);
+  uint32_t count = mElements.Length();
+  MOZ_ASSERT_IF(mState == State::Dirty, !count);
+  if (aIndex >= count && mState != State::UpToDate) {
+    // Prefetch progressively more elements if access is sequential
+    uint32_t prefetch = aIndex == count ? std::min(count, 64u) : 0;
+    PopulateSelf(std::min(aIndex, UINT32_MAX - 1 - prefetch) + prefetch + 1);
   }
 
   ASSERT_IN_SYNC;
@@ -362,7 +388,7 @@ inline void ContentList::InsertElementInNamedItemsCache(nsIContent& aContent) {
     }
 
     if (!mNamedItemsCache) {
-      mNamedItemsCache = MakeUnique<NamedItemsCache>();
+      mNamedItemsCache = std::make_unique<NamedItemsCache>();
     }
 
     nsAtom* name = info.mValue->GetAtomValue();
@@ -502,23 +528,16 @@ int32_t ContentList::IndexOf(nsIContent* aContent) {
   return mElements.IndexOf(aContent);
 }
 
-void ContentList::NodeWillBeDestroyed(nsINode* aNode) {
-  // We shouldn't do anything useful from now on
-
-  RemoveFromCaches();
+void ContentList::DisconnectFromRoot() {
+  if (mIsLiveList && mRootNode) {
+    mRootNode->RemoveMutationObserver(this);
+  }
   mRootNode = nullptr;
-
-  // We will get no more updates, so we can never know we're up to
-  // date
-  SetDirty();
 }
 
 void ContentList::LastRelease() {
   RemoveFromCaches();
-  if (mIsLiveList && mRootNode) {
-    mRootNode->RemoveMutationObserver(this);
-    mRootNode = nullptr;
-  }
+  DisconnectFromRoot();
   SetDirty();
 }
 
@@ -673,7 +692,8 @@ void ContentList::ContentInserted(nsIContent* aChild,
 
 void ContentList::ContentWillBeRemoved(nsIContent* aChild,
                                        const ContentRemoveInfo&) {
-  if (mState != State::Dirty &&
+  MOZ_ASSERT_IF(mState == State::Dirty, mElements.IsEmpty());
+  if (!mElements.IsEmpty() &&
       MayContainRelevantNodes(aChild->GetParentNode()) &&
       nsContentUtils::IsInSameAnonymousTree(mRootNode, aChild) &&
       MatchSelf<MatchSelfMode::Removal>(aChild)) {
@@ -756,8 +776,7 @@ nsINode* ContentList::GetNextNode(nsINode* aCurrent) {
   return aCurrent->GetNextNode(mRootNode);
 }
 
-void ContentList::PopulateSelf(uint32_t aNeededLength,
-                               uint32_t aExpectedElementsIfDirty) {
+void ContentList::PopulateSelf(uint32_t aNeededLength) {
   if (!mRootNode) {
     return;
   }
@@ -765,11 +784,13 @@ void ContentList::PopulateSelf(uint32_t aNeededLength,
   ASSERT_IN_SYNC;
 
   uint32_t count = mElements.Length();
-  NS_ASSERTION(mState != State::Dirty || count == aExpectedElementsIfDirty,
+  NS_ASSERTION(mState != State::Dirty || count == 0,
                "Reset() not called when setting state to State::Dirty?");
 
-  if (count >= aNeededLength)  // We're all set
+  if (count >= aNeededLength) {
+    // An override may already have appended elements.
     return;
+  }
 
   uint32_t elementsToAppend = aNeededLength - count;
 #ifdef DEBUG
@@ -779,7 +800,7 @@ void ContentList::PopulateSelf(uint32_t aNeededLength,
   if (mDeep) {
     // If we already have nodes start searching at the last one, otherwise
     // start searching at the root.
-    nsINode* cur = count ? mElements[count - 1].get() : mRootNode;
+    nsINode* cur = count ? mElements[count - 1].get() : mRootNode.get();
     do {
       cur = GetNextNode(cur);
       if (!cur) {
@@ -1058,10 +1079,10 @@ void LabelsNodeList::ContentWillBeRemoved(nsIContent* aChild,
 }
 
 void LabelsNodeList::NodeWillBeDestroyed(nsINode* aNode) {
-  ContentList::NodeWillBeDestroyed(aNode);
-
+  RemoveFromCaches();
+  DisconnectFromRoot();
+  SetDirty();
   mData = nullptr;
-  mRoots.Clear();
 }
 
 // static
@@ -1097,8 +1118,8 @@ void LabelsNodeList::ResetRoots() {
   // If the outermost labeled element or host is in a shadow tree, its
   // containing shadow root is already in newRoots.
   if (!labeledElementOrHostIsInShadowTree) {
-    // `labeledHost` is either `labeledElement`, or the shadow host which has
-    // `labeledElement` as its resolved reference target.
+    // `labeledElementOrHost` is either `labeledElement`, or the shadow host
+    // which has `labeledElement` as its resolved reference target.
     if (Document* doc = labeledElementOrHost->GetUncomposedDoc()) {
       newRoots.AppendElement(doc);
     } else if (newRoots.IsEmpty()) {
@@ -1145,7 +1166,7 @@ void LabelsNodeList::ResetRoots() {
 }
 
 nsINode* LabelsNodeList::GetNextNode(nsINode* aCurrent) {
-  auto* labeledElement = (nsGenericHTMLElement*)mData;
+  auto* labeledElement = static_cast<nsGenericHTMLElement*>(mData);
   MOZ_ASSERT(labeledElement, "Must have labeled element");
   MOZ_ASSERT(mRootNode, "Must have root node");
 
@@ -1172,22 +1193,23 @@ nsINode* LabelsNodeList::GetNextNode(nsINode* aCurrent) {
   }
 
   // If we descended into a shadow tree, back out of it until we find an
-  // adjacent node, or hit a shadow root which doesn't have the current element
-  // as its reference target.
-  nsINode* cur = aCurrent;
-  while (!next) {
-    ShadowRoot* shadow = cur->GetContainingShadow();
-    if (!shadow || shadow->GetReferenceTargetElement() == cur) {
+  // adjacent node, or hit a shadow root which doesn't have labeledElement as
+  // its resolved reference target.
+  for (ShadowRoot* shadow = aCurrent->GetContainingShadow(); shadow;
+       shadow = shadow->Host()->GetContainingShadow()) {
+    Element* curElement = shadow->Host();
+    if (curElement->ResolveReferenceTarget() != labeledElement) {
       break;
     }
-    cur = shadow->Host();
-    next = cur->GetNextNode();
+    next = curElement->GetNextNode();
+    if (next) {
+      return next;
+    }
   }
-  return next;
+  return nullptr;
 }
 
-void LabelsNodeList::PopulateSelf(uint32_t aNeededLength,
-                                  uint32_t aExpectedElementsIfDirty) {
+void LabelsNodeList::PopulateSelf(uint32_t aNeededLength) {
   if (!mRootNode) {
     return;
   }
@@ -1196,13 +1218,14 @@ void LabelsNodeList::PopulateSelf(uint32_t aNeededLength,
   nsINode* cur = mRootNode;
   if (mElements.IsEmpty() && cur->IsElement() && Match(cur->AsElement())) {
     mElements.AppendElement(cur->AsElement());
-    ++aExpectedElementsIfDirty;
+    mState = State::Lazy;
+    SetEnabledCallbacks(nsIMutationObserver::kAll);
   }
 
-  ContentList::PopulateSelf(aNeededLength, aExpectedElementsIfDirty);
+  ContentList::PopulateSelf(aNeededLength);
 }
 
-void LabelsNodeList::LastRelease() {
+void LabelsNodeList::DisconnectFromRoot() {
   for (nsINode* root : mRoots) {
     root->RemoveMutationObserver(this);
     if (auto* shadow = ShadowRoot::FromNodeOrNull(root)) {
@@ -1213,7 +1236,7 @@ void LabelsNodeList::LastRelease() {
   }
   mRoots.Clear();
 
-  ContentList::LastRelease();
+  ContentList::DisconnectFromRoot();
 }
 
 }  // namespace mozilla::dom

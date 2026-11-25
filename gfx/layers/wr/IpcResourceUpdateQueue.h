@@ -129,8 +129,12 @@ class IpcResourceUpdateQueue {
   bool AddImage(wr::ImageKey aKey, const ImageDescriptor& aDescriptor,
                 mozilla::Range<uint8_t> aBytes);
 
+  /**
+   * aTileSize overrides the default blob tile size when it is not zero.
+   */
   bool AddBlobImage(wr::BlobImageKey aKey, const ImageDescriptor& aDescriptor,
-                    mozilla::Range<uint8_t> aBytes, ImageIntRect aVisibleRect);
+                    mozilla::Range<uint8_t> aBytes, ImageIntRect aVisibleRect,
+                    uint16_t aTileSize = 0);
 
   void AddSnapshotImage(wr::SnapshotImageKey aKey);
 
@@ -156,6 +160,10 @@ class IpcResourceUpdateQueue {
   void DeleteBlobImage(wr::BlobImageKey aKey);
 
   void DeleteSnapshotImage(wr::SnapshotImageKey aKey);
+
+  // Moves a snapshot image created by another bridge of this process to aKey.
+  void AdoptSnapshotImage(wr::SnapshotImageKey aFrom,
+                          wr::SnapshotImageKey aKey);
 
   bool AddRawFont(wr::FontKey aKey, mozilla::Range<uint8_t> aBytes,
                   uint32_t aIndex);

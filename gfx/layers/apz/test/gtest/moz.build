@@ -6,6 +6,8 @@ UNIFIED_SOURCES += [
     "APZTestAccess.cpp",
     "APZTestCommon.cpp",
     "MockHitTester.cpp",
+    "TestAPZBridge.cpp",
+    "TestAPZEventState.cpp",
     "TestAxisLock.cpp",
     "TestBasic.cpp",
     "TestDisplayPort.cpp",
@@ -38,6 +40,7 @@ LOCAL_INCLUDES += [
     "/gfx/cairo/cairo/src",
     "/gfx/layers",
     "/gfx/layers/apz/src",
+    "/gfx/tests/gtest",
 ]
 
 FINAL_LIBRARY = "xul-gtest"

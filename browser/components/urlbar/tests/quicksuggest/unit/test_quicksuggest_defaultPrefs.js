@@ -27,6 +27,7 @@ const EXPECTED_PREFS_SUGGEST_DISABLED = {
   "amp.featureGate": false,
   "importantDates.featureGate": false,
   "mdn.featureGate": false,
+  "temporal.featureGate": false,
   "weather.featureGate": false,
   "wikipedia.featureGate": false,
   "yelp.featureGate": false,
@@ -71,6 +72,14 @@ const EXPECTED_PREFS_EU_157 = {
   "suggest.quicksuggest.sponsored": true,
   "amp.featureGate": true,
   "wikipedia.featureGate": true,
+};
+
+// Expected prefs for the CA expansion in 162 (bug 2090434)
+const EXPECTED_PREFS_CA_162_EN = { ...EXPECTED_PREFS_EU_157 };
+const EXPECTED_PREFS_CA_162 = {
+  ...EXPECTED_PREFS_CA_162_EN,
+  "suggest.quicksuggest.sponsored": false,
+  "amp.featureGate": false,
 };
 
 add_setup(async () => {
@@ -267,6 +276,23 @@ add_task(async function primary() {
       region: "AT",
       locale: "xx",
       expectedPrefs: EXPECTED_PREFS_EU_157,
+    },
+
+    // CA expansion in 162 (bug 2090434): sponsored only for `en` locales
+    {
+      region: "CA",
+      locale: "en-CA",
+      expectedPrefs: EXPECTED_PREFS_CA_162_EN,
+    },
+    {
+      region: "CA",
+      locale: "fr",
+      expectedPrefs: EXPECTED_PREFS_CA_162,
+    },
+    {
+      region: "CA",
+      locale: "xx",
+      expectedPrefs: EXPECTED_PREFS_CA_162,
     },
 
     // regions where Suggest should be completely disabled

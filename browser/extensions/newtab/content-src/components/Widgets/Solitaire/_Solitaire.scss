@@ -1,0 +1,124 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+.solitaire {
+  @include widget-base-style;
+
+  &.medium-widget {
+    grid-row: span 2;
+  }
+
+  &.large-widget {
+    grid-row: span 4;
+  }
+}
+
+.solitaire-title-wrapper {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-block-end: var(--space-xsmall);
+
+  &[hidden] {
+    display: none;
+  }
+}
+
+.solitaire-badge-title-wrapper {
+  align-items: center;
+  display: flex;
+  gap: var(--space-small);
+  min-inline-size: 0;
+}
+
+// Keep this at the top level so the High Contrast Mode override below applies.
+.solitaire-new-badge {
+  flex: none;
+  background-color: var(--badge-background-color-filled);
+  border-radius: var(--badge-border-radius);
+  text-transform: uppercase;
+
+  --badge-padding-block: 1px;
+  --badge-padding-inline: var(--space-small);
+  --badge-background-color-filled: var(--color-green-40);
+  --badge-text-color: var(--badge-text-color-filled);
+  --badge-border-color: transparent;
+}
+
+// Keep the badge readable in High Contrast Mode by using the system accent.
+@media (forced-colors: active) {
+  .solitaire-new-badge {
+    --badge-background-color-filled: AccentColor;
+  }
+}
+
+.solitaire-context-menu-wrapper {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.solitaire:hover,
+.solitaire:focus-within {
+  .solitaire-context-menu-wrapper {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.solitaire-dialog {
+  position: relative;
+  inset: auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  inline-size: 100%;
+  max-inline-size: none;
+  max-block-size: none;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-small);
+  min-block-size: 0;
+  overflow: hidden;
+
+  &:modal {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    flex: none;
+    inline-size: fit-content;
+    block-size: fit-content;
+    padding: var(--space-large);
+    background: var(--newtab-background-color-secondary);
+    border: var(--border-width) solid var(--dialog-border-color);
+    border-radius: var(--border-radius-large);
+    box-shadow: var(--box-shadow-level-4);
+
+    .solitaire-frame {
+      flex: none;
+      /* stylelint-disable stylelint-plugin-mozilla/use-design-tokens */
+      inline-size: min(950px, 90vw);
+      block-size: min(600px, calc(90vh - 5rem));
+      /* stylelint-enable stylelint-plugin-mozilla/use-design-tokens */
+    }
+  }
+
+  &::backdrop {
+    background: var(--newtab-overlay-color);
+  }
+}
+
+.solitaire-dialog-close {
+  align-self: flex-end;
+}
+
+.solitaire-frame {
+  flex: 1;
+  min-block-size: 0;
+  width: 100%;
+  border: none;
+  border-radius: var(--border-radius-medium);
+}

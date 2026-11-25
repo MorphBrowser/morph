@@ -4,15 +4,24 @@
 
 import { SettingGroupManager } from "chrome://browser/content/preferences/config/SettingGroupManager.mjs";
 import { Preferences } from "chrome://global/content/preferences/Preferences.mjs";
+import {
+  getNotificationPermissions,
+  isNotificationChange,
+} from "chrome://browser/content/preferences/config/notification-permissions.mjs";
 
 const XPCOMUtils = ChromeUtils.importESModule(
   "resource://gre/modules/XPCOMUtils.sys.mjs"
 ).XPCOMUtils;
 
 const lazy = XPCOMUtils.declareLazy({
+  notificationsSectionEnabled: {
+    pref: "browser.preferences.notifications-section.enabled",
+    default: false,
+  },
   AppConstants: "resource://gre/modules/AppConstants.sys.mjs",
   SelectableProfileService:
     "resource:///modules/profiles/SelectableProfileService.sys.mjs",
+  SitePermissions: "resource:///modules/SitePermissions.sys.mjs",
   AlertsServiceDND: () => {
     try {
       let alertsService = Cc["@mozilla.org/alerts-service;1"]
@@ -33,7 +42,6 @@ const BACKUP_ENABLED_ON_PROFILES_PREF_NAME =
   "browser.backup.enabled_on.profiles";
 const PREF_UPLOAD_ENABLED = "datareporting.healthreport.uploadEnabled";
 const PREF_ADDON_RECOMMENDATIONS_ENABLED = "browser.discovery.enabled";
-const PREF_NORMANDY_ENABLED = "app.normandy.enabled";
 const PREF_OPT_OUT_STUDIES_ENABLED = "app.shield.optoutstudies.enabled";
 
 Preferences.addAll([
@@ -42,6 +50,8 @@ Preferences.addAll([
 
   // Permissions
   { id: "media.setsinkid.enabled", type: "bool" },
+
+  { id: "permissions.default.register-protocol-handler", type: "int" },
 
   // Popups
   { id: "dom.disable_open_during_load", type: "bool" },
@@ -55,7 +65,6 @@ Preferences.addAll([
   // Data Choices tab
   { id: "browser.crashReports.unsubmittedCheck.autoSubmit2", type: "bool" },
 
-  { id: PREF_NORMANDY_ENABLED, type: "bool" },
   { id: "nimbus.rollouts.enabled", type: "bool" },
 
   // Preference instances for prefs that we need to monitor while the page is open.
@@ -195,6 +204,22 @@ Preferences.addSetting({
 Preferences.addSetting({
   id: "xrSettingsButton",
   onUserClick: () => showPermissionExceptions({ permissionType: "xr" }),
+});
+Preferences.addSetting({
+  id: "allowAppLinkRequests",
+  pref: "permissions.default.register-protocol-handler",
+  get: prefVal => prefVal != lazy.SitePermissions.BLOCK,
+  set: checked =>
+    checked ? lazy.SitePermissions.UNKNOWN : lazy.SitePermissions.BLOCK,
+});
+/**
+ * Displays the dialog listing sites blocked from asking to register a
+ * protocol handler.
+ */
+Preferences.addSetting({
+  id: "registerProtocolHandlerSettingsButton",
+  onUserClick: () =>
+    showPermissionExceptions({ permissionType: "register-protocol-handler" }),
 });
 Preferences.addSetting({
   id: "popupPolicy",
@@ -367,34 +392,23 @@ Preferences.addSetting({
   },
 });
 Preferences.addSetting({
-  id: "normandyEnabled",
-  pref: PREF_NORMANDY_ENABLED,
-});
-
-Preferences.addSetting({
   id: "optOutStudiesEnabled",
-  visible: () => lazy.AppConstants.MOZ_NORMANDY,
   pref: PREF_OPT_OUT_STUDIES_ENABLED,
-  deps: ["submitHealthReportBox", "normandyEnabled"],
-  disabled: ({ submitHealthReportBox, normandyEnabled }) => {
+  deps: ["submitHealthReportBox"],
+  disabled: ({ submitHealthReportBox }) => {
     /**
-    *  The checkbox should be disabled if any of the below are true. This
-    prevents the user from changing the value in the box.
-    * 2. telemetry upload is disabled
-    * 3. Normandy is disabled
-    */
+     * Disable the checkbox if studies are blocked by enterprise policy
+     * or telemetry upload is disabled.
+     */
     const allowedByPolicy = Services.policies.isAllowed("Shield");
-    return (
-      !allowedByPolicy || !submitHealthReportBox.value || !normandyEnabled.value
-    );
+    return !allowedByPolicy || !submitHealthReportBox.value;
   },
-  get: (value, { submitHealthReportBox, normandyEnabled }) => {
+  get: (value, { submitHealthReportBox }) => {
     /**
      * The checkbox should match the value of the preference only if all the below are true:
      *
      * 1. the policy allows Shield
      * 2. telemetry upload is enabled
-     * 3. Normandy is enabled
      *
      * Otherwise, the checkbox should remain unchecked. This
      * is because in these situations, Shield studies are always disabled, and
@@ -402,11 +416,7 @@ Preferences.addSetting({
      */
     const allowedByPolicy = Services.policies.isAllowed("Shield");
 
-    if (
-      !allowedByPolicy ||
-      !submitHealthReportBox.value ||
-      !normandyEnabled.value
-    ) {
+    if (!allowedByPolicy || !submitHealthReportBox.value) {
       return false;
     }
     return value;
@@ -418,8 +428,6 @@ Preferences.addSetting({
 Preferences.addSetting({
   id: "enableNimbusRollouts",
   pref: "nimbus.rollouts.enabled",
-  visible: () =>
-    lazy.AppConstants.MOZ_DATA_REPORTING && lazy.AppConstants.MOZ_NORMANDY,
   disabled: () => !Services.policies.isAllowed("NimbusRollouts"),
   get: value => {
     if (!Services.policies.isAllowed("NimbusRollouts")) {
@@ -498,7 +506,72 @@ Preferences.addSetting(
   })
 );
 
+Preferences.addSetting(
+  class extends Preferences.AsyncSetting {
+    static id = "notificationSettingsEntry";
+
+    count = 0;
+
+    // The section is off in shipped builds, so start hidden rather than let
+    // the card show until the first refresh resolves.
+    defaultVisible = false;
+
+    beforeRefresh() {
+      this.count = lazy.notificationsSectionEnabled
+        ? getNotificationPermissions().length
+        : 0;
+    }
+
+    async visible() {
+      return lazy.notificationsSectionEnabled;
+    }
+
+    async getControlConfig() {
+      // Both branches set l10nId, since setting-control merges each config
+      // into the last one and would otherwise keep the previous message.
+      return {
+        l10nId: this.count
+          ? "notifications-entry-manage-button"
+          : "notifications-entry-manage-button-empty",
+        l10nArgs: { count: this.count },
+      };
+    }
+
+    onUserClick(event) {
+      event.preventDefault();
+      window.gotoPref("paneNotifications");
+    }
+
+    setup() {
+      Services.obs.addObserver(this.#onPermissionChanged, "perm-changed");
+      return () => {
+        Services.obs.removeObserver(this.#onPermissionChanged, "perm-changed");
+      };
+    }
+
+    #onPermissionChanged = subject => {
+      if (isNotificationChange(subject)) {
+        this.emitChange();
+      }
+    };
+  }
+);
+
 SettingGroupManager.registerGroups({
+  notificationsEntry: {
+    l10nId: "notifications-entry-card-header",
+    iconSrc:
+      "chrome://browser/skin/notification-icons/desktop-notification.svg",
+    headingLevel: 2,
+    items: [
+      {
+        id: "notificationSettingsEntry",
+        control: "moz-box-button",
+        l10nId: "notifications-entry-manage-button-empty",
+        loadPane: "notifications",
+      },
+    ],
+  },
   permissions: {
     id: "permissions",
     subcategory: "permissions",
@@ -636,6 +709,22 @@ SettingGroupManager.registerGroups({
             controlAttrs: {
               "search-l10n-ids":
                 "permissions-address,permissions-allow.label,permissions-remove.label,permissions-remove-all.label,permissions-exceptions-addons-window2.title,permissions-exceptions-addons-desc",
+            },
+          },
+        ],
+      },
+      {
+        id: "allowAppLinkRequests",
+        l10nId: "permissions-allow-app-links",
+        supportPage: "change-program-used-open-email-links",
+        items: [
+          {
+            id: "registerProtocolHandlerSettingsButton",
+            l10nId: "permissions-app-links-manage-button",
+            control: "moz-box-button",
+            controlAttrs: {
+              "search-l10n-ids":
+                "permissions-remove.label,permissions-remove-all.label,permissions-site-app-links-window.title,permissions-site-app-links-desc",
             },
           },
         ],

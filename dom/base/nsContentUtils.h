@@ -49,6 +49,7 @@
 #include "nsINode.h"
 #include "nsIScriptError.h"
 #include "nsIThread.h"
+#include "nsIWeakReferenceUtils.h"
 #include "nsLiteralString.h"
 #include "nsMargin.h"
 #include "nsPIDOMWindow.h"
@@ -774,6 +775,11 @@ class nsContentUtils {
    *  Pass a cache object as aIndexCache if you expect to repeatedly call this
    * function with the same value as aBoundary1 or aBoundary2.
    *
+   *  If aAncestorLimiter is non-null, it must be an inclusive ancestor of both
+   * containers in aKind.  Ancestor walks stop there.  Same-container
+   * comparisons only assert containment in debug builds.  Differing-container
+   * comparisons return Nothing if a chain misses the limiter.
+   *
    *  @return -1 if point1 < point2,
    *          1 if point1 > point2,
    *          0 if point1 == point2.
@@ -784,7 +790,8 @@ class nsContentUtils {
   static mozilla::Maybe<int32_t> ComparePoints(
       const mozilla::RangeBoundaryBase<PT1, RT1>& aBoundary1,
       const mozilla::RangeBoundaryBase<PT2, RT2>& aBoundary2,
-      NodeIndexCache* aIndexCache = nullptr);
+      NodeIndexCache* aIndexCache = nullptr,
+      const nsINode* aAncestorLimiter = nullptr);
 
   /**
    * DO NOT USE this method for comparing the points in new code.  this method
@@ -1419,11 +1426,14 @@ class nsContentUtils {
    *   @param aOperation The deprecated operation being reported.
    *   @param aLocation Source location of the operation. Pass the empty
    *          location to omit line and column information.
+   *   @param aParams Parameters for the warning message, as passed to
+   *          Document::WarnOnceAbout.
    */
-  static void ReportDeprecation(nsIGlobalObject* aGlobal, const Document* aDoc,
-                                nsIURI* aURI,
-                                mozilla::dom::DeprecatedOperations aOperation,
-                                const mozilla::JSCallingLocation& aLocation);
+  static void ReportDeprecation(
+      nsIGlobalObject* aGlobal, const Document* aDoc, nsIURI* aURI,
+      mozilla::dom::DeprecatedOperations aOperation,
+      const mozilla::JSCallingLocation& aLocation,
+      const nsTArray<nsString>& aParams = nsTArray<nsString>());
 
   static void ReportEmptyGetElementByIdArg(const Document* aDoc);
 
@@ -1921,19 +1931,6 @@ class nsContentUtils {
                                         mozilla::EventClassID aEventClassID,
                                         EventMessage* aEventMessage);
 
-  /**
-   * Adds aManager to the list of the managers nodes own, which is used for
-   * unmarking gray JS listeners during cycle collection.
-   */
-  static void AddNodeListenerManager(mozilla::EventListenerManager* aManager);
-
-  /**
-   * Removes aManager from that list, if it's in it.  Only for
-   * ~EventListenerManager.
-   */
-  static void RemoveNodeListenerManager(
-      mozilla::EventListenerManager* aManager);
-
   static void AddEntryToDOMArenaTable(nsINode* aNode,
                                       mozilla::dom::DOMArena* aDOMArena);
 
@@ -1942,8 +1939,6 @@ class nsContentUtils {
 
   static already_AddRefed<mozilla::dom::DOMArena> TakeEntryFromDOMArenaTable(
       const nsINode* aNode);
-
-  static void UnmarkGrayJSListenersInCCGenerationDocuments();
 
   static bool IsInitialized() { return sInitialized; }
 
@@ -2004,9 +1999,26 @@ class nsContentUtils {
   // automatically do default sanitization using the nsTreeSantizer when called
   // from system privileged or about: code.
   static const int32_t kParseFragmentPrivilegedDefaultSanitization = -1;
-  // Warning: Only use this for safe callers that do their own sanitization like
-  // setHTML().
+  // Warning: Only use this for callers that do their own sanitization like
+  // setHTML(), or that deliberately do none like setHTMLUnsafe() without a
+  // sanitizer.
   static const int32_t kParseFragmentNoSanitization = -2;
+
+  /**
+   * Whether ParseFragmentHTML() and ParseFragmentXML() sanitize a fragment
+   * parsed for a node with aPrincipal, given their aFlags.
+   */
+  static bool ShouldSanitizeFragment(nsIPrincipal* aPrincipal, int32_t aFlags);
+
+  /**
+   * Whether ParseFragmentHTML(), ParseDocumentHTML() or ParseFragmentXML() is
+   * running, which they don't allow to be reentered.
+   */
+  static bool IsFragmentParsingActive() { return sFragmentParsingActive; }
+
+  enum class SanitizerMode { Safe, Unsafe };
+
+  enum class DeclarativeShadowRoots { Allow, Disallow };
 
   /**
    * Invoke the fragment parsing algorithm (innerHTML) using the HTML parser.
@@ -2035,8 +2047,12 @@ class nsContentUtils {
    * @param aSanitizer the Sanitizer API configuration to apply while parsing
    * (the spec's "parser sanitizer configuration"), or nullptr not to sanitize
    * while parsing.
-   * @param aSanitizerSafe safely sanitize, i.e.
+   * @param aSanitizerMode whether to safely sanitize, i.e.
    * "remove javascript navigation URLs".
+   * @param aDeclarativeShadowRoots the fragment parsing algorithm's
+   * allowDeclarativeShadowRoots; DeclarativeShadowRoots::Allow only for
+   * setHTML() and setHTMLUnsafe(). Defaults to
+   * DeclarativeShadowRoots::Disallow.
    * @return NS_ERROR_DOM_INVALID_STATE_ERR if a re-entrant attempt to parse
    *         fragments is made, NS_ERROR_OUT_OF_MEMORY if aSourceBuffer is too
    *         long and NS_OK otherwise.
@@ -2048,7 +2064,9 @@ class nsContentUtils {
       mozilla::Maybe<RefPtr<mozilla::dom::CustomElementRegistry>>
           aCustomElementRegistry,
       mozilla::dom::Sanitizer* aSanitizer = nullptr,
-      bool aSanitizerSafe = false);
+      SanitizerMode aSanitizerMode = SanitizerMode::Unsafe,
+      DeclarativeShadowRoots aDeclarativeShadowRoots =
+          DeclarativeShadowRoots::Disallow);
 
   /**
    * Invoke the fragment parsing algorithm (innerHTML) using the XML parser.
@@ -2089,7 +2107,7 @@ class nsContentUtils {
    * @param aSanitizer the Sanitizer API configuration to apply while parsing
    * (the spec's "parser sanitizer configuration"), or nullptr not to sanitize
    * while parsing.
-   * @param aSanitizerSafe safely sanitize, i.e.
+   * @param aSanitizerMode whether to safely sanitize, i.e.
    * "remove javascript navigation URLs".
    * @return NS_ERROR_DOM_INVALID_STATE_ERR if a re-entrant attempt to parse
    *         fragments is made, NS_ERROR_OUT_OF_MEMORY if aSourceBuffer is too
@@ -2099,7 +2117,7 @@ class nsContentUtils {
       const nsAString& aSourceBuffer, Document* aTargetDocument,
       bool aScriptingEnabledForNoscriptParsing,
       mozilla::dom::Sanitizer* aSanitizer = nullptr,
-      bool aSanitizerSafe = false);
+      SanitizerMode aSanitizerMode = SanitizerMode::Unsafe);
 
   /**
    * Converts HTML source to plain text by parsing the source and using the
@@ -2299,10 +2317,8 @@ class nsContentUtils {
    *
    * @param aContent the node on which a link was triggered.
    * @param aLinkURI the URI of the link, must be non-null.
-   * @param aTargetSpec the target (like target=, may be empty).
    */
-  static void TriggerLinkMouseOver(nsIContent* aContent, nsIURI* aLinkURI,
-                                   const nsString& aTargetSpec);
+  static void TriggerLinkMouseOver(nsIContent* aContent, nsIURI* aLinkURI);
 
   /**
    * Get the link location.
@@ -3167,6 +3183,8 @@ class nsContentUtils {
       const mozilla::CSSPoint& aPoint, const nsPoint& aOffset,
       nsPresContext* aPresContext);
 
+  static EventMessage ContentCommandFromString(const nsAString& aType);
+
   /**
    * Synthesize a mouse event to the given widget
    * (See synthesizeMouseEvent in Window.webidl).
@@ -3877,7 +3895,8 @@ class nsContentUtils {
   template <TreeKind aKind>
   static mozilla::Maybe<int32_t> ComparePointsWithIndices(
       const nsINode* aParent1, uint32_t aOffset1, const nsINode* aParent2,
-      uint32_t aOffset2, NodeIndexCache* aIndexCache = nullptr);
+      uint32_t aOffset2, NodeIndexCache* aIndexCache = nullptr,
+      const nsINode* aAncestorLimiter = nullptr);
 
   /**
    * Helper method for ComparePoints() and ComparePointsWithIndices(). This
@@ -4012,6 +4031,7 @@ nsContentUtils::InternalContentPolicyTypeToExternal(nsContentPolicyType aType) {
       return ExtContentPolicy::TYPE_FETCH;
 
     case nsIContentPolicy::TYPE_INTERNAL_EXTERNAL_RESOURCE:
+    case nsIContentPolicy::TYPE_INTERNAL_SPECULATION_RULES:
       return ExtContentPolicy::TYPE_OTHER;
 
     case nsIContentPolicy::TYPE_INTERNAL_JSON_PRELOAD:
@@ -4108,14 +4128,23 @@ class TreeOrderComparator {
 #define NS_INTERFACE_MAP_ENTRY_TEAROFF(_interface, _allocator) \
   NS_INTERFACE_MAP_ENTRY_TEAROFF_AMBIGUOUS(_interface, _interface, _allocator)
 
-#define NS_INTERFACE_MAP_ENTRY_TEAROFF_AMBIGUOUS(_interface, _implClass, \
-                                                 _allocator)             \
-  if (aIID.Equals(NS_GET_IID(_interface))) {                             \
-    foundInterface = static_cast<_implClass*>(_allocator);               \
-    if (!foundInterface) {                                               \
-      *aInstancePtr = nullptr;                                           \
-      return NS_ERROR_OUT_OF_MEMORY;                                     \
-    }                                                                    \
+#define NS_INTERFACE_MAP_ENTRY_TEAROFF_AMBIGUOUS(_interface, _implClass,      \
+                                                 _allocator)                  \
+  if (aIID.Equals(NS_GET_IID(_interface))) {                                  \
+    static_assert(                                                          \
+        /* Check the interface correctly defines HasWeakReferenceTearoff */ \
+        /* This is needed for do_GetWeakReference static checks          */ \
+        /* (see do_GetWeakReference and GetCheckedWeakReference)         */ \
+        !std::is_same_v<_interface, nsISupportsWeakReference> ||            \
+            mozilla::detail::ProvidesWeakReferenceTearoff<                  \
+                std::remove_pointer_t<decltype(this)>>,                     \
+        "declare `static constexpr bool kHasWeakReferenceTearoff = true;` " \
+        "in the class that tears off nsISupportsWeakReference"); \
+    foundInterface = static_cast<_implClass*>(_allocator);                    \
+    if (!foundInterface) {                                                    \
+      *aInstancePtr = nullptr;                                                \
+      return NS_ERROR_OUT_OF_MEMORY;                                          \
+    }                                                                         \
   } else
 
 /*

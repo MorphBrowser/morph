@@ -12,6 +12,8 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/MemoryReporting.h"
 
+#include <type_traits>
+
 #include "jstypes.h"  // JS_PUBLIC_API
 
 #include "builtin/AtomicsObject.h"
@@ -50,6 +52,7 @@ class AutoAllocInAtomsZone;
 class AutoMaybeLeaveAtomsZone;
 class AutoRealm;
 struct PortableBaselineStack;
+struct TestingFunctionData;
 
 #ifdef MOZ_EXECUTION_TRACING
 class ExecutionTracer;
@@ -154,14 +157,25 @@ class MicroTaskQueueElement {
     Embedder = JS::MicroTask::Kind::Embedder,
 
     // A PromiseReactionRecord, run by PromiseReactionJob.
-    PromiseReaction = JS::MicroTask::Kind::FirstJSKind,
+    PromiseReactionObject = JS::MicroTask::Kind::FirstJSKind,
+    // A settled, same-realm promise reaction held inline in the task's payload
+    // rather than allocated as a PromiseReactionRecord.
+    InlinePromiseReaction,
+    // A same-realm thenable job held inline in the task's payload rather than
+    // allocated as a ThenableJobObject. jsBits_ holds one of the thenable job
+    // kinds below.
+    InlineThenable,
 
-    // A ThenableJob; the kind selects which resolution routine it runs.
+    // A ThenableJobObject; the kind selects which resolution routine it runs.
+    //
+    // Start ThenableJobKinds
     ResolveThenable,
     ResolveBuiltinThenable,
     // Used by JS::SafeResolve: runs PerformPromiseResolution on the job's
     // promise with the resolution value stored in the Thenable slot.
     DeferredResolve,
+    // End ThenableJobKinds -- must be contiguous for the range check in
+    // IsThenableJobKind.
 
     // New task kinds go here.
 
@@ -184,6 +198,27 @@ class MicroTaskQueueElement {
 
   explicit MicroTaskQueueElement(const JS::MicroTask& microTask)
       : microTask_(microTask) {}
+
+  // Build a JS::MicroTask of a JS kind, for engine code which can't reach the
+  // private JS::MicroTask constructors.
+  template <typename... Args>
+  static JS::MicroTask MakeMicroTask(Kind kind, Args&&... args) {
+    return JS::MicroTask(static_cast<JS::MicroTask::Kind>(kind),
+                         std::forward<Args>(args)...);
+  }
+
+  // Accessors for the private fields of a JS::MicroTask of a JS kind.
+  static constexpr size_t ExtraCount =
+      std::extent_v<decltype(JS::MicroTask::extra_)>;
+  static uint8_t kind(const JS::MicroTask& task) { return task.kind_; }
+  static uint32_t jsBits(const JS::MicroTask& task) { return task.jsBits_; }
+  static const JS::Value& value(const JS::MicroTask& task) {
+    return task.value_;
+  }
+  static const JS::Value& extra(const JS::MicroTask& task, size_t index) {
+    MOZ_ASSERT(index < ExtraCount);
+    return task.extra_[index];
+  }
 
   const JS::MicroTask& toMicroTask() const { return microTask_; }
 
@@ -232,9 +267,11 @@ struct MicroTaskQueueSet {
 
   bool prependRegularMicroTask(JSContext* cx, const JS::MicroTask&);
 
-  mozilla::Maybe<JS::MicroTask> popFront();
-  mozilla::Maybe<JS::MicroTask> popDebugFront();
-  mozilla::Maybe<JS::MicroTask> peekFront();
+  // Each of these writes the task, or Nothing if there isn't one, into |out|.
+  void popFront(JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out);
+  void popDebugFront(JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out);
+  void popRegularFront(JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out);
+  void peekFront(JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out);
 
   bool empty() { return microTaskQueue.empty() && debugMicroTaskQueue.empty(); }
 
@@ -250,6 +287,12 @@ struct MicroTaskQueueSet {
 
   MicroTaskQueue microTaskQueue;
   MicroTaskQueue debugMicroTaskQueue;
+
+ private:
+  // The queue the next task comes from: debugger tasks run first.
+  MicroTaskQueue& nextQueue() {
+    return debugMicroTaskQueue.empty() ? microTaskQueue : debugMicroTaskQueue;
+  }
 };
 
 } /* namespace js */
@@ -912,12 +955,10 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
    */
   js::SavedFrame* getPendingExceptionStack();
 
-#ifdef DEBUG
   /**
    * Return the pending exception (without wrapping).
    */
   const JS::Value& getPendingExceptionUnwrapped();
-#endif
 
   bool isThrowingDebuggeeWouldRun();
 
@@ -930,6 +971,17 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
     status = JS::ExceptionStatus::None;
     unwrappedException().setUndefined();
     unwrappedExceptionStack() = nullptr;
+  }
+
+  JS::ExceptionStatus exceptionStatus() const { return status; }
+
+  // Set the pending exception state to values saved earlier.
+  void restorePendingExceptionState(JS::ExceptionStatus newStatus,
+                                    const JS::Value& exception,
+                                    js::SavedFrame* stack) {
+    status = newStatus;
+    unwrappedException() = exception;
+    unwrappedExceptionStack() = stack;
   }
 
   bool isThrowingOutOfMemory() const {
@@ -1015,7 +1067,7 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
   // that's fine.
   void requestInterrupt(js::InterruptReason reason);
   bool handleInterrupt();
-  bool handleInterruptNoCallbacks();
+  void handleOOMStackTraceInterrupt();
 
   MOZ_ALWAYS_INLINE bool hasAnyPendingInterrupt() const {
     static_assert(sizeof(interruptBits_) == sizeof(uint32_t),
@@ -1190,6 +1242,21 @@ struct JS_PUBLIC_API JSContext : public JS::RootingContext,
 #endif
 
   JS::PersistentRooted<js::UniquePtr<js::MicroTaskQueueSet>> microTaskQueues;
+
+ private:
+  js::ContextData<js::UniquePtr<js::TestingFunctionData>> testingFunctionData_;
+
+ public:
+  js::TestingFunctionData* getOrCreateTestingFunctionData();
+
+  js::TestingFunctionData* maybeTestingFunctionData() {
+    return testingFunctionData_.ref().get();
+  }
+
+  js::TestingFunctionData& testingFunctionData() {
+    MOZ_ASSERT(testingFunctionData_.ref());
+    return *testingFunctionData_.ref();
+  }
 }; /* struct JSContext */
 
 inline JSContext* JSRuntime::mainContextFromOwnThread() {

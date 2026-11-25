@@ -180,10 +180,8 @@ devtools-verify-bundle:
               path: /builds/worker/issues.json
     run:
         command: >
-            cd devtools/client/debugger &&
-            yarn &&
-            $MOZ_FETCHES_DIR/node/bin/node bin/bundle.js &&
-            cd ../../.. &&
+            ./mach npm ci --prefix devtools/client/debugger &&
+            ./mach node devtools/client/debugger/bin/bundle.js &&
             ./mach python taskcluster/scripts/misc/verify-devtools-bundle.py --output /builds/worker/issues.json
     fetches:
         toolchain:
@@ -228,6 +226,8 @@ stylelint-plugin-mozilla:
         files-changed:
             - 'tools/lint/stylelint/stylelint-plugin-mozilla/**'
             - toolkit/themes/shared/design-system/dist/tokens-table.mjs
+            - toolkit/themes/shared/design-system/dist/semantic-categories.mjs
+            - docs/code-quality/lint/linters/stylelint-plugin-mozilla/rules/use-design-tokens/checked-properties.md
     fetches:
         toolchain:
             - linux64-node

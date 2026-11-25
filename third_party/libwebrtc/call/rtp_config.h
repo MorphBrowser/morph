@@ -20,6 +20,7 @@
 
 #include "api/rtp_headers.h"
 #include "api/rtp_parameters.h"
+#include "call/sframe_options.h"
 
 namespace webrtc {
 // Currently only VP8/VP9 specific.
@@ -28,13 +29,6 @@ struct RtpPayloadState {
   uint8_t tl0_pic_idx = 0;
   int64_t shared_frame_id = 0;
   int64_t frame_id = 0;
-};
-
-// Settings for LNTF (LossNotification). Still highly experimental.
-struct LntfConfig {
-  std::string ToString() const;
-
-  bool enabled{false};
 };
 
 // Settings for NACK, see RFC 4585 for details.
@@ -108,6 +102,10 @@ struct RtpConfig {
   // included in the list of extensions.
   std::string mid;
 
+  // The list of CSRCs to be included in the RTP header. Only the first
+  // kRtpCsrcSize CSRCs are used.
+  std::vector<uint32_t> csrcs;
+
   // See RtcpMode for description.
   RtcpMode rtcp_mode = RtcpMode::kCompound;
 
@@ -134,11 +132,11 @@ struct RtpConfig {
   // frame descriptor RTP header extension).
   bool raw_payload = false;
 
+  // Sframe end-to-end encryption settings for this send stream.
+  SframeSendOptions sframe_options;
+
   // Configurations for each RTP stream
   std::vector<RtpStreamConfig> stream_configs;
-
-  // See LntfConfig for description.
-  LntfConfig lntf;
 
   // See NackConfig for description.
   NackConfig nack;

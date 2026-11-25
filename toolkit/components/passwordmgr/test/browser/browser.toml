@@ -134,8 +134,9 @@ support-files = [
   "form_password_change.html",
 ]
 skip-if = [
-  "os == 'win' && os_version == '11.26200' && arch == 'x86' && opt", # Bug 1729196
+  "os == 'win' && os_version == '11.26200' && arch == 'x86'", # Bug 1729196
   "os == 'win' && os_version == '11.26200' && arch == 'x86_64'", # Bug 1729196
+  "os == 'mac' && os_version == '15.30' && arch == 'aarch64' && opt", # Bug 1729196
 ]
 
 ["browser_doorhanger_httpsUpgrade.js"]
@@ -203,6 +204,9 @@ support-files = [
 ]
 
 ["browser_formless_submit_chrome.js"]
+skip-if = [
+  "macos_vm", # Bug 2088997 - fails only on the macOS tart VMs
+]
 
 ["browser_glean_pwmgr_form_autofill_result.js"]
 
@@ -225,7 +229,6 @@ skip-if = [
 
 ["browser_preselect_login.js"]
 skip-if = [
-  "asan",
   "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11' && debug", # Bug 1840479
   "os == 'win' && os_version == '10.2009' && arch == 'x86_64' && debug", # Bug 1840479
 ]
@@ -239,10 +242,7 @@ support-files = [
 ]
 
 ["browser_proxyAuth_prompt.js"]
-skip-if = [
-  "os == 'android'",
-  "os == 'win' && os_version == '11.26200' && verify-standalone",
-]
+skip-if = ["os == 'android'"]
 
 ["browser_relay_signup_flow.js"]
 support-files = ["browser_relay_utils.js"]

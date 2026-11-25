@@ -9,6 +9,7 @@
 
 #include "mozilla/EventDispatcher.h"
 #include "mozilla/MouseEvents.h"
+#include "mozilla/ScopeExit.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/ScriptSettings.h"
 
@@ -64,6 +65,7 @@ static bool gMenuMethodsSwizzled = false;
 static const size_t kMaxMenuNestingDepth = 20;
 
 int32_t nsMenuX::sIndexingMenuLevel = 0;
+int32_t nsMenuX::sSimulatedOpeningLevel = 0;
 
 // TODO: It is unclear whether this is still needed.
 static void SwizzleDynamicIndexingMethods() {
@@ -86,6 +88,11 @@ static void SwizzleDynamicIndexingMethods() {
   nsToolkit::SwizzleMethods(
       SCTGRLIndexClass, @selector(indexMenuBarDynamically),
       @selector(nsMenuX_SCTGRLIndex_indexMenuBarDynamically));
+
+  if ([NSMenu instancesRespondToSelector:@selector(_simulateOpening:)]) {
+    nsToolkit::SwizzleMethods([NSMenu class], @selector(_simulateOpening:),
+                              @selector(nsMenuX_NSMenu_simulateOpening:));
+  }
 
   Class NSServicesMenuUpdaterClass =
       ::NSClassFromString(@"_NSServicesMenuUpdater");
@@ -135,10 +142,14 @@ nsMenuX::nsMenuX(nsMenuParentX* aParent, nsMenuGroupOwnerX* aMenuGroupOwner,
 
   mVisible = !nsMenuUtilsX::NodeIsHiddenOrCollapsed(mContent);
 
-  NSString* newCocoaLabelString = nsMenuUtilsX::GetTruncatedCocoaLabel(mLabel);
+  NSString* newCocoaLabelString =
+      nsMenuUtilsX::GetTruncatedCocoaLabel(mLabel, mContent);
   mNativeMenuItem = [[GeckoNSMenuItem alloc] initWithTitle:newCocoaLabelString
                                                     action:nil
                                              keyEquivalent:@""];
+  if (@available(macOS 27.0, *)) {
+    mNativeMenuItem.preferredImageVisibility = NSMenuItemImageVisibilityVisible;
+  }
   mNativeMenuItem.submenu = mNativeMenu;
 
   if (mNestingDepth > kMaxMenuNestingDepth) {
@@ -163,7 +174,7 @@ nsMenuX::nsMenuX(nsMenuParentX* aParent, nsMenuGroupOwnerX* aMenuGroupOwner,
     NSApp.windowsMenu = mNativeMenu;
   }
 
-  mIcon = MakeUnique<nsMenuItemIconX>(this);
+  mIcon = std::make_unique<nsMenuItemIconX>(this);
 
   if (mVisible) {
     if (!isXULWindowMenu && !IsXULEditMenu(mContent)) {
@@ -284,9 +295,24 @@ void nsMenuX::AddMenuChild(const MenuChild& aChild) {
     RemovePlaceholderIfPresent();
     [mNativeMenu addItem:nativeItem];
     ++mVisibleItemsCount;
+    if (aChild.is<RefPtr<nsMenuItemX>>()) {
+      aChild.as<RefPtr<nsMenuItemX>>()->CopyUserKeyEquivalentToKeyElement();
+    }
   }
 
   NS_OBJC_END_TRY_ABORT_BLOCK;
+}
+
+void nsMenuX::CopyAllUserKeyEquivalentsToKeyElements() {
+  for (const MenuChild& child : mMenuChildren) {
+    child.match(
+        [](const RefPtr<nsMenuX>& aMenu) {
+          aMenu->CopyAllUserKeyEquivalentsToKeyElements();
+        },
+        [](const RefPtr<nsMenuItemX>& aMenuItem) {
+          aMenuItem->CopyUserKeyEquivalentToKeyElement();
+        });
+  }
 }
 
 void nsMenuX::InsertMenuChild(const MenuChild& aChild) {
@@ -482,6 +508,10 @@ void nsMenuX::MenuOpened() {
     RebuildMenu();
   }
 
+  if (sSimulatedOpeningLevel == 0) {
+    LoadDeferredIcons();
+  }
+
   // Fire the popupshown event in MenuOpenedAsync.
   // MenuOpened() is called during menuWillOpen, and if cancelTracking is called
   // now, menuDidClose will not be called. The runnable object must not hold a
@@ -528,7 +558,7 @@ void nsMenuX::MenuOpenedAsync() {
   // Open the node.
   if (mContent->IsElement()) {
     mContent->AsElement()->SetAttr(kNameSpaceID_None, nsGkAtoms::open,
-                                   u"true"_ns, true);
+                                   u"true"_ns, true, IsKnownNewAttr::No);
   }
 
   RefPtr<nsIContent> popupContent = GetMenuPopupContent();
@@ -916,7 +946,8 @@ void nsMenuX::SetTitle() {
   NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
 
   mContent->AsElement()->GetAttr(nsGkAtoms::label, mLabel);
-  NSString* newCocoaLabelString = nsMenuUtilsX::GetTruncatedCocoaLabel(mLabel);
+  NSString* newCocoaLabelString =
+      nsMenuUtilsX::GetTruncatedCocoaLabel(mLabel, mContent);
   mNativeMenu.title = newCocoaLabelString;
   mNativeMenuItem.title = newCocoaLabelString;
 
@@ -1238,6 +1269,22 @@ void nsMenuX::ObserveContentInserted(dom::Document* aDocument,
   }
 }
 
+void nsMenuX::LoadDeferredIcons() {
+  for (auto& child : mMenuChildren) {
+    child.match(
+        [](const RefPtr<nsMenuX>& aMenu) {
+          if (aMenu->HasDeferredIconLoad()) {
+            aMenu->SetupIcon();
+          }
+        },
+        [](const RefPtr<nsMenuItemX>& aMenuItem) {
+          if (aMenuItem->HasDeferredIconLoad()) {
+            aMenuItem->SetupIcon();
+          }
+        });
+  }
+}
+
 void nsMenuX::SetupIcon() {
   mIcon->SetupIcon(mContent);
   mNativeMenuItem.image = mIcon->GetIconImage();
@@ -1267,6 +1314,9 @@ void nsMenuX::MenuChildChangedVisibility(const MenuChild& aChild,
     NSInteger insertionPoint = CalculateNativeInsertionPoint(aChild);
     [mNativeMenu insertItem:nativeItem atIndex:insertionPoint];
     mVisibleItemsCount++;
+    if (aChild.is<RefPtr<nsMenuItemX>>()) {
+      aChild.as<RefPtr<nsMenuItemX>>()->CopyUserKeyEquivalentToKeyElement();
+    }
   } else {
     MOZ_RELEASE_ASSERT(
         [mNativeMenu indexOfItem:nativeItem] != -1,
@@ -1519,6 +1569,11 @@ static NSMutableDictionary* gShadowKeyEquivDB = nil;
 + (void)nsMenuX_NSMenu_addItem:(NSMenuItem*)aItem toTable:(NSMapTable*)aTable;
 + (void)nsMenuX_NSMenu_removeItem:(NSMenuItem*)aItem
                         fromTable:(NSMapTable*)aTable;
+- (void)nsMenuX_NSMenu_simulateOpening:(NSUInteger)aOptions;
+@end
+
+@interface NSMenu (SimulatedOpening)
+- (void)_simulateOpening:(NSUInteger)aOptions;
 @end
 
 @implementation NSMenu (MethodSwizzling)
@@ -1539,6 +1594,13 @@ static NSMutableDictionary* gShadowKeyEquivDB = nil;
   }
 
   [self nsMenuX_NSMenu_addItem:aItem toTable:aTable];
+}
+
+- (void)nsMenuX_NSMenu_simulateOpening:(NSUInteger)aOptions {
+  ++nsMenuX::sSimulatedOpeningLevel;
+  auto decrement =
+      mozilla::MakeScopeExit([] { --nsMenuX::sSimulatedOpeningLevel; });
+  [self nsMenuX_NSMenu_simulateOpening:aOptions];
 }
 
 + (void)nsMenuX_NSMenu_removeItem:(NSMenuItem*)aItem

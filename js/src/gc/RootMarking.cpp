@@ -357,6 +357,10 @@ void js::gc::GCRuntime::traceRuntimeCommon(JSTracer* trc,
     // Trace the self-hosting stencil. The contents of this are always tenured.
     rt->traceSelfHostingStencil(trc);
 
+    // Trace JitCode kept alive by BaselineFrames with pending returns into
+    // BaselineScripts recompiled by BaselineDebugModeOSR.
+    jit::JitRuntime::TraceDebugModeOSRReturnSites(trc);
+
     for (ZonesIter zone(this, ZoneSelector::SkipAtoms); !zone.done();
          zone.next()) {
       zone->traceRootsInMajorGC(trc);
@@ -436,14 +440,14 @@ class AssertNoRootsTracer final : public JS::CallbackTracer {
 void js::gc::GCRuntime::finishRoots() {
   AutoNoteSingleThreadedRegion anstr;
 
+  rt->finishSelfHosting();
+
   rt->finishAtoms();
   restoreSharedAtomsZone();
 
   rootsHash.ref().clear();
 
   finishPersistentRoots();
-
-  rt->finishSelfHosting();
 
   for (ZonesIter zone(rt, WithAtoms); !zone.done(); zone.next()) {
     zone->finishRoots();

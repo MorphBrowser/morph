@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include <memory>
+
 #include "ErrorList.h"
 #include "nsError.h"
 #include "nsHtml5AttributeName.h"
@@ -14,8 +16,8 @@
 #include "mozilla/CheckedInt.h"
 #include "mozilla/Likely.h"
 #include "mozilla/StaticPrefs_dom.h"
+#include "mozilla/StaticPrefs_media.h"
 #include "mozilla/StaticPrefs_network.h"
-#include "mozilla/UniquePtr.h"
 #include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/dom/Sanitizer.h"
 #include "nsTHashMap.h"
@@ -303,7 +305,7 @@ void nsHtml5TreeBuilder::SetSanitizer(mozilla::dom::Sanitizer* aSanitizer,
              "Sanitizing while parsing needs the op-less builder.");
   if (aSanitizer) {
     aSanitizer->RecordSanitizeUse();
-    mSanitizerState = mozilla::MakeUnique<SanitizerState>(aSanitizer, aSafe);
+    mSanitizerState = std::make_unique<SanitizerState>(aSanitizer, aSafe);
   } else {
     mSanitizerState = nullptr;
   }
@@ -838,17 +840,24 @@ nsIContentHandle* nsHtml5TreeBuilder::createElement(
             }
           }
         } else if (nsGkAtoms::video == aName) {
-          nsHtml5String url =
-              aAttributes->getValue(nsHtml5AttributeName::ATTR_POSTER);
-          if (url) {
-            // Fetch priority is not supported for video. Nullptr will map to
-            // the auto state
-            // (https://html.spec.whatwg.org/#fetch-priority-attribute).
-            auto fetchPriority = nullptr;
+          // Lazy video defers the poster fetch as well as media loading.
+          bool isLazyLoading =
+              mozilla::StaticPrefs::media_lazy_loading_enabled() &&
+              aAttributes->getValue(nsHtml5AttributeName::ATTR_LOADING)
+                  .LowerCaseEqualsASCII("lazy");
+          if (!isLazyLoading) {
+            nsHtml5String url =
+                aAttributes->getValue(nsHtml5AttributeName::ATTR_POSTER);
+            if (url) {
+              // Fetch priority is not supported for video. Nullptr will map to
+              // the auto state
+              // (https://html.spec.whatwg.org/#fetch-priority-attribute).
+              auto fetchPriority = nullptr;
 
-            mSpeculativeLoadQueue.AppendElement()->InitImage(
-                url, nullptr, nullptr, nullptr, nullptr, nullptr, false,
-                fetchPriority, nullptr);
+              mSpeculativeLoadQueue.AppendElement()->InitImage(
+                  url, nullptr, nullptr, nullptr, nullptr, nullptr, false,
+                  fetchPriority, nullptr);
+            }
           }
         } else if (nsGkAtoms::style == aName) {
           mImportScanner.Start();
@@ -1552,6 +1561,107 @@ void nsHtml5TreeBuilder::appendCommentToDocument(char16_t* aBuffer,
   treeOp->Init(mozilla::AsVariant(data));
 }
 
+// Copies the target followed by the data into a single buffer, as expected
+// by the processing instruction tree ops.
+static mozilla::UniquePtr<char16_t[]> CopyProcessingInstruction(
+    nsHtml5String aTarget, const char16_t* aBuffer, int32_t aLength) {
+  int32_t targetLength = aTarget.Length();
+  auto bufferCopy =
+      mozilla::MakeUniqueFallible<char16_t[]>(targetLength + aLength);
+  if (bufferCopy) {
+    aTarget.CopyToBuffer(bufferCopy.get());
+    memcpy(bufferCopy.get() + targetLength, aBuffer,
+           aLength * sizeof(char16_t));
+  }
+  return bufferCopy;
+}
+
+void nsHtml5TreeBuilder::appendProcessingInstruction(nsIContentHandle* aParent,
+                                                     nsHtml5String aTarget,
+                                                     char16_t* aBuffer,
+                                                     int32_t aStart,
+                                                     int32_t aLength) {
+  MOZ_ASSERT(aBuffer, "Null buffer");
+  MOZ_ASSERT(aParent, "Null parent");
+  MOZ_ASSERT(!aStart, "aStart must always be zero.");
+
+  if (mBuilder) {
+    nsAutoString target;
+    aTarget.ToString(target);
+    nsDependentSubstring data(aBuffer, aLength);
+    nsresult rv;
+    if (MOZ_UNLIKELY(mSanitizerState)) {
+      if (!mSanitizerState->CommentsAllowed()) {
+        return;
+      }
+      SanitizerState::Location location =
+          mSanitizerState->LocationFor(static_cast<nsIContent*>(aParent));
+      rv = nsHtml5TreeOperation::InsertProcessingInstructionBefore(
+          location.mParent, target, data, location.mBefore, mBuilder);
+    } else {
+      rv = nsHtml5TreeOperation::AppendProcessingInstruction(
+          static_cast<nsIContent*>(aParent), target, data, mBuilder);
+    }
+    if (NS_FAILED(rv)) {
+      MarkAsBrokenAndRequestSuspensionWithBuilder(rv);
+    }
+    return;
+  }
+
+  auto bufferCopy = CopyProcessingInstruction(aTarget, aBuffer, aLength);
+  if (!bufferCopy) {
+    mBroken = NS_ERROR_OUT_OF_MEMORY;
+    requestSuspension();
+    return;
+  }
+
+  nsHtml5TreeOperation* treeOp = mOpQueue.AppendElement(mozilla::fallible);
+  if (MOZ_UNLIKELY(!treeOp)) {
+    MarkAsBrokenAndRequestSuspensionWithoutBuilder(NS_ERROR_OUT_OF_MEMORY);
+    return;
+  }
+  opAppendProcessingInstruction operation(aParent, bufferCopy.release(),
+                                          aTarget.Length(), aLength);
+  treeOp->Init(mozilla::AsVariant(operation));
+}
+
+void nsHtml5TreeBuilder::appendProcessingInstructionToDocument(
+    nsHtml5String aTarget, char16_t* aBuffer, int32_t aStart, int32_t aLength) {
+  MOZ_ASSERT(aBuffer, "Null buffer");
+  MOZ_ASSERT(!aStart, "aStart must always be zero.");
+
+  if (mBuilder) {
+    if (MOZ_UNLIKELY(mSanitizerState) && !mSanitizerState->CommentsAllowed()) {
+      return;
+    }
+    nsAutoString target;
+    aTarget.ToString(target);
+    nsDependentSubstring data(aBuffer, aLength);
+    nsresult rv = nsHtml5TreeOperation::AppendProcessingInstructionToDocument(
+        target, data, mBuilder);
+    if (NS_FAILED(rv)) {
+      MarkAsBrokenAndRequestSuspensionWithBuilder(rv);
+    }
+    return;
+  }
+
+  auto bufferCopy = CopyProcessingInstruction(aTarget, aBuffer, aLength);
+  if (!bufferCopy) {
+    mBroken = NS_ERROR_OUT_OF_MEMORY;
+    requestSuspension();
+    return;
+  }
+
+  nsHtml5TreeOperation* treeOp = mOpQueue.AppendElement(mozilla::fallible);
+  if (MOZ_UNLIKELY(!treeOp)) {
+    MarkAsBrokenAndRequestSuspensionWithoutBuilder(NS_ERROR_OUT_OF_MEMORY);
+    return;
+  }
+  opAppendProcessingInstructionToDocument data16(bufferCopy.release(),
+                                                 aTarget.Length(), aLength);
+  treeOp->Init(mozilla::AsVariant(data16));
+}
+
 void nsHtml5TreeBuilder::addAttributesToElement(
     nsIContentHandle* aElement, nsHtml5HtmlAttributes* aAttributes) {
   MOZ_ASSERT(aElement, "Null element");
@@ -1722,6 +1832,29 @@ void nsHtml5TreeBuilder::elementPopped(int32_t aNamespace, nsAtom* aName,
                "Element isn't HTML, SVG or MathML!");
   NS_ASSERTION(aName, "Element doesn't have local name!");
   NS_ASSERTION(aElement, "No element!");
+
+  // https://html.spec.whatwg.org/#the-stack-of-open-elements
+  // When an element is popped, the spec processes internal resource links
+  // (rel=expect). nsHtml5TreeOperation::DoneAddingChildren does this, and also
+  // clears ELEMENT_ON_PARSER_STACK. The code below queues opDoneAddingChildren
+  // only for some elements, so queue it here for all other elements. The
+  // fragment parser (mBuilder) does not need this, because Element::BindToTree
+  // handles its elements when they are inserted.
+  // TODO: removeFromStack() does not call elementPopped() for an element that
+  // is not the current node, for example <form> in <form><div></form>. Such an
+  // element keeps ELEMENT_ON_PARSER_STACK, so a rel=expect link to it blocks
+  // until loading ends or the timeout. Bug 2075826 has the same cause.
+  if (!mBuilder && mozilla::StaticPrefs::dom_element_blocking_enabled() &&
+      !nsIContent::RequiresDoneAddingChildren(aNamespace, aName)) {
+    nsHtml5TreeOperation* treeOp = mOpQueue.AppendElement(mozilla::fallible);
+    if (MOZ_UNLIKELY(!treeOp)) {
+      MarkAsBrokenAndRequestSuspensionWithoutBuilder(NS_ERROR_OUT_OF_MEMORY);
+      return;
+    }
+    opDoneAddingChildren operation(aElement);
+    treeOp->Init(mozilla::AsVariant(operation));
+  }
+
   if (aNamespace == kNameSpaceID_MathML) {
     return;
   }
@@ -1908,7 +2041,7 @@ nsIContentHandle* nsHtml5TreeBuilder::AllocateContentHandle() {
   }
   if (mHandlesUsed == NS_HTML5_TREE_BUILDER_HANDLE_ARRAY_LENGTH) {
     mOldHandles.AppendElement(std::move(mHandles));
-    mHandles = mozilla::MakeUnique<nsIContent*[]>(
+    mHandles = std::make_unique<nsIContent*[]>(
         NS_HTML5_TREE_BUILDER_HANDLE_ARRAY_LENGTH);
     mHandlesUsed = 0;
   }
@@ -2210,8 +2343,7 @@ nsIContentHandle* nsHtml5TreeBuilder::getShadowRootFromHost(
   }
 
   SlotAssignmentMode slotAssignment = SlotAssignmentMode::Named;
-  if (mozilla::StaticPrefs::dom_shadowdom_shadowRootSlotAssignment_enabled() &&
-      aShadowRootSlotAssignment.LowerCaseEqualsASCII("manual")) {
+  if (aShadowRootSlotAssignment.LowerCaseEqualsASCII("manual")) {
     slotAssignment = SlotAssignmentMode::Manual;
   }
 
@@ -2219,6 +2351,12 @@ nsIContentHandle* nsHtml5TreeBuilder::getShadowRootFromHost(
   aShadowRootReferenceTarget.ToString(shadowRootReferenceTarget);
 
   if (mBuilder) {
+    if (MOZ_UNLIKELY(mSanitizerState) &&
+        mSanitizerState->IsReplacedWithChildren(
+            static_cast<nsIContent*>(aHost))) {
+      return nullptr;
+    }
+
     // The template element the shadow root belongs to was already sanitized
     // by sanitizerDropsTemplateToken(), so a configuration that drops the
     // template or its shadowrootmode attribute never gets here. Declarative

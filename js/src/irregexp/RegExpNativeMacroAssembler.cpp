@@ -8,7 +8,6 @@
 
 #include "irregexp/imported/regexp-macro-assembler-arch.h"
 #include "irregexp/imported/regexp-stack.h"
-#include "irregexp/imported/special-case.h"
 #include "jit/JitZone.h"
 #include "jit/Linker.h"
 #include "jit/PerfSpewer.h"
@@ -76,8 +75,13 @@ SMRegExpMacroAssembler::SMRegExpMacroAssembler(JSContext* cx,
     // Not enough registers on x86.
     temp2_ = regs.takeAny();
   }
+  if (!regs.empty()) {
+    // Not enough registers on x86.
+    backtrack_stack_limit_ = regs.takeAny();
+  }
   savedRegisters_ = js::jit::SavedNonVolatileRegisters(regs);
 
+  masm_.indirectTarget(js::jit::TargetKind::Call);
   masm_.jump(&entry_label_);  // We'll generate the entry code later
   masm_.bind(&start_label_);  // and continue from here.
 }
@@ -103,6 +107,13 @@ void SMRegExpMacroAssembler::Backtrack() { masm_.jump(&backtrack_label_); }
 
 void SMRegExpMacroAssembler::Bind(Label* label) {
   masm_.bind(label->inner());
+  if (label->patchOffset_.bound()) {
+    AddLabelPatch(label->patchOffset_, label->pos());
+  }
+}
+
+void SMRegExpMacroAssembler::BindJumpTarget(Label* label) {
+  masm_.bindIndirectTarget(label->inner(), js::jit::TargetKind::Jump);
   if (label->patchOffset_.bound()) {
     AddLabelPatch(label->patchOffset_, label->pos());
   }
@@ -1075,10 +1086,15 @@ void SMRegExpMacroAssembler::JumpOrBacktrack(Label* to) {
 // If the test fails, call an OOL handler to try growing the stack.
 void SMRegExpMacroAssembler::CheckBacktrackStackLimit() {
   js::jit::Label no_stack_overflow;
-  masm_.branchPtr(
-      Assembler::Below,
-      AbsoluteAddress(isolate()->regexp_stack()->limit_address_address()),
-      backtrack_stack_pointer_, &no_stack_overflow);
+  if (backtrack_stack_limit_ != js::jit::InvalidReg) {
+    masm_.branchPtr(Assembler::Below, backtrack_stack_limit_,
+                    backtrack_stack_pointer_, &no_stack_overflow);
+  } else {
+    masm_.branchPtr(
+        Assembler::Below,
+        AbsoluteAddress(ExternalReference::RegexpStackLimit(isolate())),
+        backtrack_stack_pointer_, &no_stack_overflow);
+  }
 
   masm_.call(&stack_overflow_label_);
 
@@ -1195,28 +1211,24 @@ void SMRegExpMacroAssembler::createStackFrame() {
   size_t frameBytes = sizeof(FrameData) + num_registers_ * sizeof(void*);
   frameSize_ = js::jit::StackDecrementForCall(js::jit::ABIStackAlignment,
                                               masm_.framePushed(), frameBytes);
-  masm_.reserveStack(frameSize_);
-  masm_.checkStackAlignment();
 
   // Check if we have space on the stack. Use the *NoInterrupt stack limit to
   // avoid failing repeatedly when the regex code is called from Ion JIT code.
   // (See bug 1208819)
-  js::jit::Label stack_ok;
   AbsoluteAddress limit_addr(cx_->addressOfJitStackLimitNoInterrupt());
-  masm_.branchStackPtrRhs(Assembler::Below, limit_addr, &stack_ok);
-
-  masm_.loadJSContext(temp0_);
-  masm_.store8(Imm32(1),
-               Address(temp0_, JSContext::offsetOfHasDelayedOverRecursed()));
-
-  // There is not enough space on the stack. Exit with an exception.
-  // We haven't initialized our stack frame yet, so we must jump to
-  // a special label that won't try to update the RegExp::Stack.
-  masm_.movePtr(ImmWord(int32_t(js::RegExpRunStatus::Error)),
-                js::jit::ReturnReg);
-  masm_.jump(&exit_overrecursed_label_);
-
-  masm_.bind(&stack_ok);
+  if (!needsUnderflowCheck()) {
+    masm_.reserveStack(frameSize_);
+    overrecursedFramePushed_ = masm_.framePushed();
+    masm_.branchStackPtrRhs(Assembler::AboveOrEqual, limit_addr,
+                            &overrecursed_label_);
+  } else {
+    masm_.loadPtr(limit_addr, temp1_);
+    masm_.addPtr(Imm32(frameSize_), temp1_);
+    overrecursedFramePushed_ = masm_.framePushed();
+    masm_.branchStackPtr(Assembler::BelowOrEqual, temp1_, &overrecursed_label_);
+    masm_.reserveStack(frameSize_);
+  }
+  masm_.checkStackAlignment();
 }
 
 void SMRegExpMacroAssembler::initFrameAndRegs() {
@@ -1322,10 +1334,8 @@ void SMRegExpMacroAssembler::initFrameAndRegs() {
   masm_.storePtr(temp1_, backtrackStackBase());
   // Load the current top of the stack. This will usually be the same as the
   // base, but may be different if we are executing one regexp while another is
-  // interrupted.
-  masm_.loadPtr(
-      AbsoluteAddress(ExternalReference::RegexpStackPointer(isolate())),
-      backtrack_stack_pointer_);
+  // interrupted. Also load the stack limit into a register, if we have enough.
+  LoadBacktrackStackRegsFromMemory();
   // Compute the difference between the two, and store it in the stack frame.
   // This is usually 0.
   masm_.subPtr(backtrack_stack_pointer_, temp1_);
@@ -1409,9 +1419,10 @@ void SMRegExpMacroAssembler::exitHandler() {
       backtrack_stack_pointer_,
       AbsoluteAddress(ExternalReference::RegexpStackPointer(isolate())));
 
-  masm_.bind(&exit_overrecursed_label_);
-
   masm_.freeStack(frameSize_);
+
+  js::jit::Label exit_overrecursed;
+  masm_.bind(&exit_overrecursed);
 
   // Restore registers which were saved on entry
   for (GeneralRegisterBackwardIterator iter(savedRegisters_); iter.more();
@@ -1445,6 +1456,23 @@ void SMRegExpMacroAssembler::exitHandler() {
     // Exit with an error result to signal thrown exception
     masm_.movePtr(ImmWord(int32_t(js::RegExpRunStatus::Error)), temp0_);
     masm_.jump(&exit_label_);
+  }
+
+  if (overrecursed_label_.used()) {
+    masm_.bind(&overrecursed_label_);
+    masm_.setFramePushed(overrecursedFramePushed_);
+    // If we don't need an underflow check, we allocate the stack
+    // frame before checking, so we have to free it here.
+    if (!needsUnderflowCheck()) {
+      masm_.freeStack(frameSize_);
+    }
+    // There isn't enough space on the stack. Exit with an exception.
+    masm_.loadJSContext(temp0_);
+    masm_.store8(Imm32(1),
+                 Address(temp0_, JSContext::offsetOfHasDelayedOverRecursed()));
+    masm_.movePtr(ImmWord(int32_t(js::RegExpRunStatus::Error)),
+                  js::jit::ReturnReg);
+    masm_.jump(&exit_overrecursed);
   }
 }
 
@@ -1584,9 +1612,18 @@ void SMRegExpMacroAssembler::LoadBacktrackStackFromMemory(
   masm_.loadPtr(AbsoluteAddress(ExternalReference::TopOfRegexpStack(isolate())),
                 backtrack_stack_pointer_);
   masm_.storePtr(backtrack_stack_pointer_, backtrackStackBaseAddr);
+  LoadBacktrackStackRegsFromMemory();
+}
+
+void SMRegExpMacroAssembler::LoadBacktrackStackRegsFromMemory() {
   masm_.loadPtr(
       AbsoluteAddress(ExternalReference::RegexpStackPointer(isolate())),
       backtrack_stack_pointer_);
+  if (backtrack_stack_limit_ != js::jit::InvalidReg) {
+    masm_.loadPtr(
+        AbsoluteAddress(ExternalReference::RegexpStackLimit(isolate())),
+        backtrack_stack_limit_);
+  }
 }
 
 // This is only used by tracing code.
@@ -1603,29 +1640,16 @@ uint32_t SMRegExpMacroAssembler::CaseInsensitiveCompareNonUnicode(
   js::AutoUnsafeCallWithABI unsafe;
 
   MOZ_ASSERT(byteLength % sizeof(char16_t) == 0);
-  size_t length = byteLength / sizeof(char16_t);
-
-  for (size_t i = 0; i < length; i++) {
-    char16_t c1 = substring1[i];
-    char16_t c2 = substring2[i];
-    if (c1 != c2) {
+  // V8's implementation only needs the isolate for the non-ICU implementation.
 #ifdef JS_HAS_INTL_API
-      // Non-unicode regexps have weird case-folding rules.
-      c1 = CaseFolding::Canonicalize(c1);
-      c2 = CaseFolding::Canonicalize(c2);
+  Isolate* isolate = nullptr;
 #else
-      // If we aren't building with ICU, fall back to `/iu` mode. The only
-      // differences are in corner cases.
-      c1 = js::unicode::FoldCase(c1);
-      c2 = js::unicode::FoldCase(c2);
+  Isolate* isolate = js::TlsContext.get()->isolate;
 #endif
-      if (c1 != c2) {
-        return 0;
-      }
-    }
-  }
-
-  return 1;
+  v8::Address lhs = reinterpret_cast<uintptr_t>(substring1);
+  v8::Address rhs = reinterpret_cast<uintptr_t>(substring2);
+  return RegExpMacroAssembler::CaseInsensitiveCompareNonUnicode(
+      lhs, rhs, byteLength, isolate);
 }
 
 // Compare two strings in `/iu` mode (ignoreCase and unicode).
@@ -1635,23 +1659,16 @@ uint32_t SMRegExpMacroAssembler::CaseInsensitiveCompareUnicode(
   js::AutoUnsafeCallWithABI unsafe;
 
   MOZ_ASSERT(byteLength % sizeof(char16_t) == 0);
-  size_t length = byteLength / sizeof(char16_t);
-
-  for (size_t i = 0; i < length; i++) {
-    char16_t c1 = substring1[i];
-    char16_t c2 = substring2[i];
-    if (c1 != c2) {
-      // Unicode regexps use the common and simple case-folding
-      // mappings of the Unicode Character Database.
-      c1 = js::unicode::FoldCase(c1);
-      c2 = js::unicode::FoldCase(c2);
-      if (c1 != c2) {
-        return 0;
-      }
-    }
-  }
-
-  return 1;
+  // V8's implementation only needs the isolate for the non-ICU implementation.
+#ifdef JS_HAS_INTL_API
+  Isolate* isolate = nullptr;
+#else
+  Isolate* isolate = js::TlsContext.get()->isolate;
+#endif
+  v8::Address lhs = reinterpret_cast<uintptr_t>(substring1);
+  v8::Address rhs = reinterpret_cast<uintptr_t>(substring2);
+  return RegExpMacroAssembler::CaseInsensitiveCompareUnicode(
+      lhs, rhs, byteLength, isolate);
 }
 
 /* static */

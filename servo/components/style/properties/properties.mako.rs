@@ -6,7 +6,7 @@
 
 <%namespace name="helpers" file="/helpers.mako.rs" />
 <% from itertools import groupby %>
-<% from data import PropertyRestrictions, to_camel_case, RULE_VALUES, SYSTEM_FONT_LONGHANDS, PRIORITARY_PROPERTIES, PRIORITARY_PROPERTY_DEPENDENCIES %>
+<% from data import PropertyRestrictions, to_camel_case, RULE_VALUES, POSITION_TRY_RULE, SYSTEM_FONT_LONGHANDS, PRIORITARY_PROPERTIES, PRIORITARY_PROPERTY_DEPENDENCIES %>
 
 use servo_arc::{Arc, UniqueArc};
 use std::{ops, ptr, fmt, mem};
@@ -400,38 +400,27 @@ impl NonCustomPropertyId {
 
     /// Returns whether a given rule allows a given property.
     #[inline]
-    pub fn allowed_in_rule(self, rule_types: CssRuleTypes) -> bool {
+    pub(super) fn allowed_in_rule(self, rule_types: CssRuleTypes) -> bool {
+        let allowed_types = rule_types.intersection(CssRuleTypes::DECLARATION_ALLOWED_TYPES);
         debug_assert!(
-            rule_types.contains(CssRuleType::Keyframe) ||
-            rule_types.contains(CssRuleType::Page) ||
-            rule_types.contains(CssRuleType::Style) ||
-            rule_types.contains(CssRuleType::Scope) ||
-            rule_types.contains(CssRuleType::PositionTry),
-            "Given rule type does not allow declarations."
+            !allowed_types.is_empty(),
+            "{rule_types:?} doesn't allow declarations (parsing {self:?})"
         );
 
         #[allow(clippy::identity_op)]
-        static MAP: [u32; property_counts::NON_CUSTOM] = [
+        static MAP: [CssRuleTypes; property_counts::NON_CUSTOM] = [
             % for property in data.longhands + data.shorthands + data.all_aliases():
+            CssRuleTypes::from_bits(
             % for name in RULE_VALUES:
             % if property.rule_types_allowed & RULE_VALUES[name] != 0:
             CssRuleType::${to_camel_case(name)}.bit() |
             % endif
             % endfor
-            0,
+            0),
             % endfor
         ];
-        MAP[self.0 as usize] & rule_types.bits() != 0
+        MAP[self.0 as usize].contains_all(allowed_types)
     }
-
-    pub(super) fn allowed_in(self, context: &ParserContext) -> bool {
-        if !self.allowed_in_rule(context.rule_types()) {
-            return false;
-        }
-
-        self.allowed_in_ignoring_rule_type(context)
-    }
-
 
     pub(super) fn allowed_in_ignoring_rule_type(self, context: &ParserContext) -> bool {
         // The semantics of these are kinda hard to reason about, what follows
@@ -728,6 +717,18 @@ impl LonghandIdSet {
     pub(super) fn late_group_only_inherited() -> &'static Self {
         static LATE_GROUP_ONLY_INHERITED: LonghandIdSet = ${longhand_id_set(lambda p: p.style_struct.inherited and not p.is_prioritary())};
         &LATE_GROUP_ONLY_INHERITED
+    }
+
+    #[inline]
+    pub(super) fn late_group_position_try() -> &'static Self {
+        static LATE_GROUP_POSITION_TRY: LonghandIdSet = ${longhand_id_set(lambda p: (p.rule_types_allowed & POSITION_TRY_RULE) and not p.is_prioritary())};
+        &LATE_GROUP_POSITION_TRY
+    }
+
+    #[inline]
+    pub(super) fn late_group_first_line_only_inherited() -> &'static Self {
+        static LATE_GROUP_FIRST_LINE: LonghandIdSet = ${longhand_id_set(lambda p: (p.name in FIRST_LINE_RESTRICTIONS) and p.style_struct.inherited and not p.is_prioritary())};
+        &LATE_GROUP_FIRST_LINE
     }
 
     #[inline]
@@ -1456,6 +1457,11 @@ pub mod style_structs {
                 ${impl_physical_sides("margin", ["margin-top", "margin-right", "margin-bottom", "margin-left"])}
             % elif style_struct.name == "Position":
                 ${impl_physical_sides("inset", ["top", "right", "bottom", "left"])}
+                /// Sets the computed justify-items value without changing the specified value.
+                pub fn set_computed_justify_items(&mut self, v: crate::values::specified::JustifyItems) {
+                    debug_assert_ne!(v, crate::values::specified::JustifyItems::legacy());
+                    self.justify_items.computed = v;
+                }
             % endif
         }
 
@@ -2331,12 +2337,34 @@ impl<'a> StyleBuilder<'a> {
         }
     }
 
-    /// Copy the reset properties from `style`.
-    pub fn copy_reset_from(&mut self, style: &'a ComputedValues) {
+    /// Copy the reset properties from `style`. Note this only applies to non-custom properties.
+    pub fn copy_reset_longhands_from(&mut self, style: &'a ComputedValues) {
         % for style_struct in data.active_style_structs():
         % if not style_struct.inherited:
         self.${style_struct.ident} =
             StyleStructRef::Borrowed(style.get_${style_struct.name_lower}());
+        % endif
+        % endfor
+    }
+
+    /// Copy the inherited properties from `style`. Note this only applies to non-custom properties.
+    pub fn copy_inherited_longhands_from(&mut self, style: &'a ComputedValues) {
+        % for style_struct in data.active_style_structs():
+        % if style_struct.inherited:
+        self.${style_struct.ident} =
+            StyleStructRef::Borrowed(style.get_${style_struct.name_lower}());
+        % endif
+        % endfor
+    }
+
+    /// Resets all properties that apply to @position-try declarations.
+    /// This is necessary so that e.g. `margin: unset` works just fine there.
+    pub fn reset_position_try_properties(&mut self) {
+        % for property in data.longhands:
+        % if not property.logical:
+        % if property.rule_types_allowed & POSITION_TRY_RULE:
+        self.reset_${property.ident}();
+        % endif
         % endif
         % endfor
     }
@@ -2364,7 +2392,7 @@ impl<'a> StyleBuilder<'a> {
         self.${property.style_struct.ident}.mutate()
             .copy_${property.ident}_from(inherited_struct);
     }
-    % else:
+    % endif
     /// Reset `${property.ident}` to the initial value.
     #[allow(non_snake_case)]
     pub fn reset_${property.ident}(&mut self) {
@@ -2378,7 +2406,6 @@ impl<'a> StyleBuilder<'a> {
         self.${property.style_struct.ident}.mutate()
             .reset_${property.ident}(reset_struct);
     }
-    % endif
 
     % if not property.vector or property.vector.simple_bindings or engine == "servo":
     /// Set the `${property.ident}` to the computed value `value`.

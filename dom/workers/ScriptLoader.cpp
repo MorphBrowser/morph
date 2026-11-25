@@ -350,7 +350,7 @@ class ChannelGetterRunnable final : public WorkerMainThreadRunnable {
         mLoadInfo.mReferrerInfo, getter_AddRefs(channel));
     NS_ENSURE_SUCCESS(mResult, true);
 
-    mResult = mLoadInfo.SetPrincipalsAndCSPFromChannel(channel);
+    mResult = mLoadInfo.SetPrincipalsAndPolicyContainerFromChannel(channel);
     NS_ENSURE_SUCCESS(mResult, true);
 
     mLoadInfo.mChannel = std::move(channel);
@@ -1165,6 +1165,14 @@ bool WorkerScriptLoader::EvaluateScript(JSContext* aCx,
                                         ScriptLoadRequest* aRequest) {
   mWorkerRef->Private()->AssertIsOnWorkerThread();
   MOZ_ASSERT(!IsDynamicImport(aRequest));
+
+  // Make sure TryShutdown() bails while evaluation is in progress.
+  // ProcessPendingRequests() calls TryShutdown() once we return.
+  ++mEvaluatingScriptCount;
+  auto decrementEvaluatingScriptCount = MakeScopeExit([&] {
+    MOZ_ASSERT(mEvaluatingScriptCount > 0);
+    --mEvaluatingScriptCount;
+  });
 
   WorkerLoadContext* loadContext = aRequest->GetWorkerLoadContext();
 

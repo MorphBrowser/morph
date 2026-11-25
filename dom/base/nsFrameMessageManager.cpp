@@ -28,6 +28,7 @@
 #include "js/Utility.h"  // JS::FreePolicy
 #include "js/Wrapper.h"
 #include "js/experimental/JSStencil.h"
+#include "js/loader/LoadedScript.h"
 #include "jsapi.h"
 #include "jsfriendapi.h"
 #include "mozilla/AlreadyAddRefed.h"
@@ -822,7 +823,8 @@ void MessageManagerReporter::CountReferents(
     nsFrameMessageManager* aMessageManager,
     MessageManagerReferentCount* aReferentCount) {
   for (const auto& entry : aMessageManager->mListeners) {
-    nsAutoTObserverArray<nsMessageListenerInfo, 1>* listeners = entry.GetWeak();
+    nsAutoTObserverArray<nsMessageListenerInfo, 1>* listeners =
+        entry.GetRawPtr();
     uint32_t listenerCount = listeners->Length();
     if (listenerCount == 0) {
       continue;
@@ -1009,6 +1011,14 @@ void nsMessageManagerScriptExecutor::LoadScriptInternal(
         cx, JS::InstantiateGlobalStencil(cx, instantiateOptions, stencil));
 
     if (script) {
+      // Create a ScriptFetchInfo for this script, this info can be used to get
+      // the baseURL of the script when resolving a module specifier.
+      nsCOMPtr<nsIURI> uri;
+      if (NS_SUCCEEDED(
+              NS_NewURI(getter_AddRefs(uri), NS_ConvertUTF16toUTF8(aURL)))) {
+        ScriptLoader::AssociateFetchInfoWithSystemClassicScript(script, uri);
+      }
+
       if (aRunInUniqueScope) {
         JS::Rooted<JSObject*> scope(cx);
         bool ok = js::ExecuteInFrameScriptEnvironment(cx, aMessageManager,
@@ -1403,7 +1413,8 @@ nsresult NS_NewChildProcessMessageManager(nsISupports** aResult) {
 
 void nsFrameMessageManager::MarkForCC() {
   for (const auto& entry : mListeners) {
-    nsAutoTObserverArray<nsMessageListenerInfo, 1>* listeners = entry.GetWeak();
+    nsAutoTObserverArray<nsMessageListenerInfo, 1>* listeners =
+        entry.GetRawPtr();
     uint32_t count = listeners->Length();
     for (uint32_t i = 0; i < count; i++) {
       listeners->ElementAt(i).mListener->MarkForCC();

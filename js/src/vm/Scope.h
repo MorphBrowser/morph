@@ -479,8 +479,9 @@ struct alignas(alignof(AbstractBindingName<frontend::TaggedParserAtomIndex>))
 //     word of `js::Scope`
 static_assert(alignof(BindingName) <= ScopeDataAlignBytes);
 template <typename SlotInfo>
-struct alignas(ScopeDataAlignBytes) RuntimeScopeData
-    : public AbstractBaseScopeData<JSAtom> {
+struct MOZ_EMPTY_BASES alignas(ScopeDataAlignBytes) RuntimeScopeData
+    : public AbstractBaseScopeData<JSAtom>,
+      public gc::Buffer {
   SlotInfo slotInfo;
 
   explicit RuntimeScopeData(size_t length) { PoisonNames(this, length); }
@@ -569,10 +570,9 @@ inline bool Scope::is<LexicalScope>() const {
          kind_ == ScopeKind::FunctionLexical;
 }
 
-// The body scope of a JS class, containing only synthetic bindings for private
-// class members. (The binding for the class name, `C` in the example below, is
-// in another scope, a `LexicalScope`, that encloses the `ClassBodyScope`.)
-// Example:
+// The body scope of a JS class, containing bindings for private class members.
+// (The binding for the class name, `C` in the example below, is in another
+// scope, a `LexicalScope`, that encloses the `ClassBodyScope`.) Example:
 //
 //     class C {
 //       #f = 0;
@@ -581,11 +581,12 @@ inline bool Scope::is<LexicalScope>() const {
 //       }
 //     }
 //
-// This class has a ClassBodyScope with four synthetic bindings:
-// - `#f` (private name)
-// - `#m` (private name)
-// - `#m.method` (function object)
-// - `.privateBrand` (the class's private brand)
+// This class has a ClassBodyScope with three bindings:
+// - `.privateBrand` (synthetic: the class's private brand, always first)
+// - `#f` (synthetic: private name)
+// - `#m` (private method: the function object)
+//
+// All of these bindings are only written when they're initialized.
 class ClassBodyScope : public Scope {
   friend class Scope;
   friend class AbstractBindingIter<JSAtom>;
@@ -712,8 +713,9 @@ class FunctionScope : public Scope {
     void setHasParameterExprs() { flags |= HasParameterExprsFlag; }
   };
 
-  struct alignas(ScopeDataAlignBytes) RuntimeData
-      : public AbstractBaseScopeData<JSAtom> {
+  struct MOZ_EMPTY_BASES alignas(ScopeDataAlignBytes) RuntimeData
+      : public AbstractBaseScopeData<JSAtom>,
+        public gc::Buffer {
     SlotInfo slotInfo;
     // The canonical function of the scope, as during a scope walk we
     // often query properties of the JSFunction (e.g., is the function an
@@ -1006,8 +1008,9 @@ class ModuleScope : public Scope {
     uint32_t usingStart = 0;
   };
 
-  struct alignas(ScopeDataAlignBytes) RuntimeData
-      : public AbstractBaseScopeData<JSAtom> {
+  struct MOZ_EMPTY_BASES alignas(ScopeDataAlignBytes) RuntimeData
+      : public AbstractBaseScopeData<JSAtom>,
+        public gc::Buffer {
     SlotInfo slotInfo;
     // The module of the scope.
     GCPtr<ModuleObject*> module = {};
@@ -1068,8 +1071,9 @@ class WasmInstanceScope : public Scope {
     uint32_t globalsStart = 0;
   };
 
-  struct alignas(ScopeDataAlignBytes) RuntimeData
-      : public AbstractBaseScopeData<JSAtom> {
+  struct MOZ_EMPTY_BASES alignas(ScopeDataAlignBytes) RuntimeData
+      : public AbstractBaseScopeData<JSAtom>,
+        public gc::Buffer {
     SlotInfo slotInfo;
     // The wasm instance of the scope.
     GCPtr<WasmInstanceObject*> instance = {};
@@ -1784,6 +1788,10 @@ SharedShape* CreateEnvironmentShape(JSContext* cx, BindingIter& bi,
 SharedShape* CreateEnvironmentShapeForSyntheticModule(
     JSContext* cx, const JSClass* cls, uint32_t numSlots,
     Handle<ModuleObject*> module);
+
+SharedShape* CreateEnvironmentShapeForWasmModule(
+    JSContext* cx, const JSClass* cls, uint32_t numSlots,
+    Handle<ExportNameVector> exportNames);
 
 SharedShape* EmptyEnvironmentShape(JSContext* cx, const JSClass* cls,
                                    uint32_t numSlots, ObjectFlags objectFlags);

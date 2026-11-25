@@ -3,9 +3,9 @@ name: perf-regression-triage
 description: >
   Handle a Perfherder performance regression bug end to end: read the alert bug, confirm
   whether the regression is real, find the cause, and iterate to a fix. Use when the user
-  has a Perfherder/browsertime regression bug (the "N% <test> ... regression on <date>"
-  bugs filed in Testing::Performance), needs to establish whether an alert summary is a
-  real regression, is interpreting a PerfCompare baseRev/newRev comparison, or asks what
+  has a Perfherder/browsertime regression bug filed in Testing::Performance, needs to
+  establish whether an alert summary is a real regression, is interpreting a PerfCompare
+  baseRev/newRev comparison, or asks what
   to do about a patch of theirs that regressed a benchmark.
   Not for simply running perf tests or pushing them to try — including running an alert
   summary's tests with `mach try perf --alert` (use perftest) — nor for choosing or
@@ -43,7 +43,9 @@ no data in it.
   data, `--repo autoland` to inspect the culprit push, and `--watch --notify` to wait on a
   running try push instead of polling it.
 - **Before/After profiles** — `profiler-cli`, driven through the **profiler-analysis**
-  skill. If it is not installed: `npm install -g @firefox-devtools/profiler-cli@latest`.
+  skill. If it is not installed, run `./mach bootstrap`, then restart the agent from a new
+  terminal, since the current shell's PATH won't include the directory bootstrap installs
+  it to.
 
 `profiler-analysis` owns the profiler-cli protocol (run `profiler-cli guide` first, stop
 the daemon when done). Hand profiles to that skill instead of reimplementing it here.
@@ -101,8 +103,8 @@ your patch sits on, pushing both sides for you:
 ```
 
 Read `references/confirm.md` before running it — it covers getting the local repo onto the
-right base revision, how many retriggers are actually needed, why `--no-artifact` is in
-that command, the pgo/shippable trap, and how to read the result.
+right base revision, how many retriggers are needed, when to use `--artifact` instead of
+`--no-artifact`, and how to read the result. The example above is for a compiled patch.
 
 **Never push to try without explicit approval from the user.** Show the exact command, say
 roughly what it will cost in CI, and wait.

@@ -2,22 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import React, { useCallback, useEffect, useRef } from "react";
-import { useSelector, batch } from "react-redux";
+import React, { useCallback, useContext, useEffect, useRef } from "react";
+import { useSelector } from "react-redux";
 import { actionCreators as ac, actionTypes as at } from "common/Actions.mjs";
-import { PREF_WEATHER_SIZE, WIDGET_REGISTRY } from "common/WidgetsRegistry.mjs";
+import {
+  PREF_WEATHER_SIZE,
+  WIDGET_REGISTRY,
+  WIDGET_USER_ACTIONS,
+  WIDGET_SOURCES,
+} from "common/WidgetsRegistry.mjs";
 import { LocationSearch } from "content-src/components/Weather/LocationSearch";
 import { SizeSubmenu } from "../SizeSubmenu";
 import { WidgetMenuButton } from "../WidgetMenuButton";
 import { WidgetMenuFooter } from "../WidgetMenuFooter";
 import { useWidgetTelemetry } from "../useWidgetTelemetry";
+import { SpaceActiveContext } from "content-src/lib/SpaceActiveContext";
 
 const USER_ACTION_TYPES = {
+  ...WIDGET_USER_ACTIONS,
   CHANGE_LOCATION: "change_location",
   DETECT_LOCATION: "detect_location",
   CHANGE_TEMP_UNIT: "change_temperature_units",
-  CHANGE_SIZE: "change_size",
-  LEARN_MORE: "learn_more",
   OPT_IN_ACCEPTED: "opt_in_accepted",
   PROVIDER_LINK_CLICK: "provider_link_click",
 };
@@ -65,21 +70,19 @@ function Weather({ dispatch, size, widgetEnabledMap }) {
 
   const handleChangeSize = useCallback(
     newSize => {
-      batch(() => {
-        dispatch(
-          ac.OnlyToMain({
-            type: at.SET_PREF,
-            data: {
-              name: PREF_WEATHER_SIZE,
-              value: newSize,
-            },
-          })
-        );
-        recordUserAction(USER_ACTION_TYPES.CHANGE_SIZE, {
-          source: "context_menu",
-          value: newSize,
-          size: newSize,
-        });
+      dispatch(
+        ac.OnlyToMain({
+          type: at.SET_PREF,
+          data: {
+            name: PREF_WEATHER_SIZE,
+            value: newSize,
+          },
+        })
+      );
+      recordUserAction(USER_ACTION_TYPES.CHANGE_SIZE, {
+        source: WIDGET_SOURCES.CONTEXT_MENU,
+        value: newSize,
+        size: newSize,
       });
     },
     [dispatch, recordUserAction]
@@ -110,8 +113,11 @@ function Weather({ dispatch, size, widgetEnabledMap }) {
     [recordError]
   );
 
+  // Bug 2083119: in the spaces-peek layout a peeked space is visible without
+  // being active, so the error waits until its space is.
+  const spaceActive = useContext(SpaceActiveContext);
   useEffect(() => {
-    if (errorRef.current && !errorTelemetrySent.current) {
+    if (spaceActive && errorRef.current && !errorTelemetrySent.current) {
       const observer = new IntersectionObserver(handleErrorIntersection);
       observer.observe(errorRef.current);
       return () => {
@@ -119,7 +125,7 @@ function Weather({ dispatch, size, widgetEnabledMap }) {
       };
     }
     return undefined;
-  }, [handleErrorIntersection, hasError]);
+  }, [handleErrorIntersection, hasError, spaceActive]);
 
   // Must be declared before the early return to satisfy React's Rules of Hooks.
   const handleOptInLocationSelected = useCallback(() => {
@@ -132,6 +138,7 @@ function Weather({ dispatch, size, widgetEnabledMap }) {
 
   const weatherOptIn = prefs["system.showWeatherOptIn"];
   const nimbusWeatherOptInEnabled =
+    prefs.trainhopConfig?.widgetWeather?.weatherOptInEnabled ??
     prefs.trainhopConfig?.weather?.weatherOptInEnabled;
   const isOptInEnabled = weatherOptIn || nimbusWeatherOptInEnabled;
   const optInUserChoice = prefs["weather.optInAccepted"];
@@ -145,98 +152,90 @@ function Weather({ dispatch, size, widgetEnabledMap }) {
   const { searchActive } = weatherData;
 
   function handleChangeLocation() {
-    batch(() => {
-      dispatch(
-        ac.BroadcastToContent({
-          type: at.WEATHER_SEARCH_ACTIVE,
-          data: true,
-        })
-      );
-      recordUserAction(USER_ACTION_TYPES.CHANGE_LOCATION, {
-        source: "context_menu",
-      });
+    dispatch(
+      ac.BroadcastToContent({
+        type: at.WEATHER_SEARCH_ACTIVE,
+        data: true,
+      })
+    );
+    recordUserAction(USER_ACTION_TYPES.CHANGE_LOCATION, {
+      source: WIDGET_SOURCES.CONTEXT_MENU,
     });
   }
 
   function handleDetectLocation() {
-    batch(() => {
-      dispatch(
-        ac.AlsoToMain({
-          type: at.WEATHER_USER_OPT_IN_LOCATION,
-        })
-      );
-      recordUserAction(USER_ACTION_TYPES.DETECT_LOCATION, {
-        source: "context_menu",
-      });
+    dispatch(
+      ac.AlsoToMain({
+        type: at.WEATHER_USER_OPT_IN_LOCATION,
+      })
+    );
+    recordUserAction(USER_ACTION_TYPES.DETECT_LOCATION, {
+      source: WIDGET_SOURCES.CONTEXT_MENU,
     });
   }
 
   function handleChangeTempUnit(unit) {
-    batch(() => {
-      dispatch(
-        ac.OnlyToMain({
-          type: at.SET_PREF,
-          data: {
-            name: "weather.temperatureUnits",
-            value: unit,
-          },
-        })
-      );
-      recordUserAction(USER_ACTION_TYPES.CHANGE_TEMP_UNIT, {
-        source: "context_menu",
-        value: unit,
-      });
+    dispatch(
+      ac.OnlyToMain({
+        type: at.SET_PREF,
+        data: {
+          name: "weather.temperatureUnits",
+          value: unit,
+        },
+      })
+    );
+    recordUserAction(USER_ACTION_TYPES.CHANGE_TEMP_UNIT, {
+      source: WIDGET_SOURCES.CONTEXT_MENU,
+      value: unit,
     });
   }
 
   function handleLearnMore() {
-    recordUserAction(USER_ACTION_TYPES.LEARN_MORE, { source: "context_menu" });
+    recordUserAction(USER_ACTION_TYPES.LEARN_MORE, {
+      source: WIDGET_SOURCES.CONTEXT_MENU,
+    });
   }
 
   function handleProviderLinkClick() {
     recordUserAction(USER_ACTION_TYPES.PROVIDER_LINK_CLICK, {
-      source: "widget",
+      source: WIDGET_SOURCES.WIDGET,
     });
   }
 
   function handleOptInChooseLocation() {
-    batch(() => {
-      dispatch(
-        ac.AlsoToMain({
-          type: at.WEATHER_OPT_IN_PROMPT_SELECTION,
-          data: "choose_location",
-        })
-      );
-      dispatch(
-        ac.BroadcastToContent({
-          type: at.WEATHER_SEARCH_ACTIVE,
-          data: true,
-        })
-      );
-      recordUserAction(USER_ACTION_TYPES.OPT_IN_ACCEPTED, {
-        source: "widget",
-        value: "choose_location",
-      });
+    dispatch(
+      ac.AlsoToMain({
+        type: at.WEATHER_OPT_IN_PROMPT_SELECTION,
+        data: "choose_location",
+      })
+    );
+    dispatch(
+      ac.BroadcastToContent({
+        type: at.WEATHER_SEARCH_ACTIVE,
+        data: true,
+      })
+    );
+    recordUserAction(USER_ACTION_TYPES.OPT_IN_ACCEPTED, {
+      source: WIDGET_SOURCES.WIDGET,
+      value: "choose_location",
     });
   }
 
   function handleAcceptOptIn() {
-    batch(() => {
-      dispatch(
-        ac.AlsoToMain({
-          type: at.WEATHER_USER_OPT_IN_LOCATION,
-        })
-      );
-      dispatch(
-        ac.AlsoToMain({
-          type: at.WEATHER_OPT_IN_PROMPT_SELECTION,
-          data: "use_location",
-        })
-      );
-      recordUserAction(USER_ACTION_TYPES.OPT_IN_ACCEPTED, {
-        source: "widget",
-        value: "use_location",
-      });
+    dispatch(
+      ac.AlsoToMain({
+        type: at.WEATHER_USER_OPT_IN_LOCATION,
+      })
+    );
+    dispatch(
+      ac.AlsoToMain({
+        type: at.WEATHER_OPT_IN_PROMPT_SELECTION,
+        data: "use_location",
+      })
+    );
+    recordUserAction(USER_ACTION_TYPES.OPT_IN_ACCEPTED, {
+      source: WIDGET_SOURCES.WIDGET,
+      value: "use_location",
     });
   }
 

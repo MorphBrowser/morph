@@ -94,8 +94,21 @@ void MacroAssemblerCompat::tagValue(JSValueType type, Register payload,
   }
 #endif
 
-  Orr(ARMRegister(dest.valueReg(), 64), ARMRegister(payload, 64),
-      Operand(ImmShiftedTag(type).value));
+  ARMRegister dest64(dest.valueReg(), 64);
+  uint64_t shiftedTag = ImmShiftedTag(type).value;
+
+  constexpr int HighHalfwordShift = 48;
+  constexpr uint64_t LowHalfwordsMask = (uint64_t(1) << HighHalfwordShift) - 1;
+
+  if (payload == dest.valueReg() && (shiftedTag & LowHalfwordsMask) == 0 &&
+      !IsImmLogical(shiftedTag, 64)) {
+    // The payload's upper bits are zero, so when orr can't encode the tag,
+    // writing its halfword over them boxes in place without materializing it.
+    Movk(dest64, shiftedTag >> HighHalfwordShift, HighHalfwordShift);
+    return;
+  }
+
+  Orr(dest64, ARMRegister(payload, 64), Operand(shiftedTag));
 }
 
 void MacroAssemblerCompat::boxValue(JSValueType type, Register src,
@@ -248,7 +261,8 @@ void MacroAssemblerCompat::mov(CodeLabel* label, Register dest) {
   label->setLinkMode(CodeLabel::MoveImmediate);
 }
 
-BufferOffset MacroAssemblerCompat::movePatchablePtr(ImmPtr ptr, Register dest) {
+BufferOffset MacroAssemblerCompat::movePatchableGCPtr(ImmPtr ptr,
+                                                      Register dest) {
   const size_t numInst = 1;           // Inserting one load instruction.
   const unsigned numPoolEntries = 2;  // Every pool entry is 4 bytes.
   uint8_t* literalAddr = (uint8_t*)(&ptr.value);  // TODO: Should be const.
@@ -268,9 +282,12 @@ BufferOffset MacroAssemblerCompat::movePatchablePtr(ImmPtr ptr, Register dest) {
                        0);
 
   // Add the entry to the pool, fix up the LDR imm19 offset,
-  // and add the completed instruction to the buffer.
+  // and add the completed instruction to the buffer. The pointer is a GC thing
+  // or boxed Value that TraceDataRelocations updates in place, so equal
+  // pointers can share one entry.
   return allocLiteralLoadEntry(numInst, numPoolEntries,
-                               (uint8_t*)&instructionScratch, literalAddr);
+                               (uint8_t*)&instructionScratch, literalAddr,
+                               PoolEntryKind::GCThing);
 }
 
 BufferOffset MacroAssemblerCompat::movePatchablePtr(ImmWord ptr,
@@ -294,9 +311,12 @@ BufferOffset MacroAssemblerCompat::movePatchablePtr(ImmWord ptr,
                        0);
 
   // Add the entry to the pool, fix up the LDR imm19 offset,
-  // and add the completed instruction to the buffer.
+  // and add the completed instruction to the buffer. The ImmWord is a
+  // placeholder patched later (CodeLabel, wasm::SymbolicAddress), so it must
+  // not share an entry.
   return allocLiteralLoadEntry(numInst, numPoolEntries,
-                               (uint8_t*)&instructionScratch, literalAddr);
+                               (uint8_t*)&instructionScratch, literalAddr,
+                               PoolEntryKind::Unshared);
 }
 
 void MacroAssemblerCompat::loadPrivate(const Address& src, Register dest) {
@@ -324,7 +344,7 @@ void MacroAssemblerCompat::handleFailureWithHandlerTail(
   asMasm().callWithABI<Fn, HandleException>(
       ABIType::General, CheckUnsafeCallWithABI::DontCheckHasExitFrame);
 
-  *returnValueCheckOffset = asMasm().currentOffset();
+  *returnValueCheckOffset = asMasm().indirectTarget(TargetKind::Jump).offset();
 
   Label entryFrame;
   Label catch_;
@@ -358,7 +378,7 @@ void MacroAssemblerCompat::handleFailureWithHandlerTail(
   asMasm().branch32(Assembler::Equal, r0, Imm32(ExceptionResumeKind::WasmCatch),
                     &wasmCatch);
 
-  breakpoint();  // Invalid kind.
+  crash();  // Invalid kind.
 
   // No exception handler. Load the error value, restore state and return from
   // the entry frame.
@@ -522,38 +542,17 @@ void MacroAssemblerCompat::profilerExitFrame() {
   jump(asMasm().runtime()->jitRuntime()->getProfilerExitFrameTail());
 }
 
-Assembler::Condition MacroAssemblerCompat::testStringTruthy(
-    bool truthy, const ValueOperand& value) {
-  vixl::UseScratchRegisterScope temps(this);
-  const Register scratch = temps.AcquireX().asUnsized();
-  const ARMRegister scratch32(scratch, 32);
-  const ARMRegister scratch64(scratch, 64);
-
-  MOZ_ASSERT(value.valueReg() != scratch);
-
-  unboxString(value, scratch);
-  Ldr(scratch32, MemOperand(scratch64, JSString::offsetOfLength()));
-  Cmp(scratch32, Operand(0));
-  return truthy ? Condition::NonZero : Condition::Zero;
-}
-
-Assembler::Condition MacroAssemblerCompat::testBigIntTruthy(
-    bool truthy, const ValueOperand& value) {
-  vixl::UseScratchRegisterScope temps(this);
-  const Register scratch = temps.AcquireX().asUnsized();
-
-  MOZ_ASSERT(value.valueReg() != scratch);
-
-  unboxBigInt(value, scratch);
-  load32(Address(scratch, BigInt::offsetOfDigitLength()), scratch);
-  cmp32(scratch, Imm32(0));
-  return truthy ? Condition::NonZero : Condition::Zero;
-}
-
 void MacroAssemblerCompat::breakpoint() {
   // Note, other payloads are possible, but GDB is known to misinterpret them
   // sometimes and iloop on the breakpoint instead of stopping properly.
   Brk(0xf000);
+}
+
+void MacroAssemblerCompat::crash() {
+#ifdef DEBUG
+  breakpoint();
+#endif
+  Unreachable();
 }
 
 void MacroAssemblerCompat::minMax32(Register lhs, Register rhs, Register dest,
@@ -902,6 +901,19 @@ static bool IsLSImmediateOffset(uint64_t address, size_t accessByteSize) {
           MacroAssemblerCompat::IsImmLSScaled(int64_t(address), logAccessSize));
 }
 
+// If `address` is not an immediate offset but becomes one after adding its
+// high bits to the base with a single ADD, return those high bits.
+static mozilla::Maybe<uint64_t> LSImmediateOffsetHighBits(
+    uint64_t address, size_t accessByteSize) {
+  uint64_t high = address & ~uint64_t(0xfff);
+  if (address > INT64_MAX ||
+      !MacroAssemblerCompat::IsImmAddSub(int64_t(high)) ||
+      !IsLSImmediateOffset(address - high, accessByteSize)) {
+    return mozilla::Nothing();
+  }
+  return mozilla::Some(high);
+}
+
 void MacroAssemblerCompat::wasmLoadAbsolute(
     const wasm::MemoryAccessDesc& access, Register memoryBase, uint64_t address,
     AnyRegister output, Register64 out64) {
@@ -909,14 +921,17 @@ void MacroAssemblerCompat::wasmLoadAbsolute(
     // The access will require the constant to be loaded into a temp register.
     // Do so here, to keep the logic in wasmLoadImpl() tractable wrt emitting
     // trap information.
-    //
-    // Almost all constant addresses will in practice be handled by a single MOV
-    // so do not worry about additional optimizations here.
     vixl::UseScratchRegisterScope temps(this);
     ARMRegister scratch = temps.AcquireX();
-    Mov(scratch, address);
-    MemOperand srcAddr(X(memoryBase), scratch);
-    wasmLoadImpl(access, srcAddr, output, out64);
+    if (auto high = LSImmediateOffsetHighBits(address, access.byteSize())) {
+      Add(scratch, X(memoryBase), Operand(*high));
+      MemOperand srcAddr(scratch, address - *high);
+      wasmLoadImpl(access, srcAddr, output, out64);
+    } else {
+      Mov(scratch, address);
+      MemOperand srcAddr(X(memoryBase), scratch);
+      wasmLoadImpl(access, srcAddr, output, out64);
+    }
   } else {
     MemOperand srcAddr(X(memoryBase), address);
     wasmLoadImpl(access, srcAddr, output, out64);
@@ -1002,9 +1017,15 @@ void MacroAssemblerCompat::wasmStoreAbsolute(
                                IsImmLSUnscaled(int64_t(address)))) {
     vixl::UseScratchRegisterScope temps(this);
     ARMRegister scratch = temps.AcquireX();
-    Mov(scratch, address);
-    MemOperand destAddr(X(memoryBase), scratch);
-    wasmStoreImpl(access, destAddr, value, value64);
+    if (auto high = LSImmediateOffsetHighBits(address, access.byteSize())) {
+      Add(scratch, X(memoryBase), Operand(*high));
+      MemOperand destAddr(scratch, address - *high);
+      wasmStoreImpl(access, destAddr, value, value64);
+    } else {
+      Mov(scratch, address);
+      MemOperand destAddr(X(memoryBase), scratch);
+      wasmStoreImpl(access, destAddr, value, value64);
+    }
   } else {
     MemOperand destAddr(X(memoryBase), address);
     wasmStoreImpl(access, destAddr, value, value64);
@@ -1727,7 +1748,8 @@ void MacroAssembler::call(JitCode* c) {
   // This sync has been observed (and is expected) to be necessary.
   // eg testcase: arrays/new-array-undefined-undefined-more-args-2.js
   syncStackPtr();
-  BufferOffset off = immPool64(scratch64, uint64_t(c->raw()));
+  BufferOffset off =
+      immPool64(scratch64, uint64_t(c->raw()), PoolEntryKind::Constant);
   addPendingJump(off, ImmPtr(c->raw()), RelocationKind::JITCODE);
   blr(scratch64);
 }
@@ -1755,10 +1777,54 @@ void MacroAssembler::patchCall(uint32_t callerOffset, uint32_t calleeOffset) {
   bl(inst, relTarget00);
 }
 
+// ===============================================================
+// Tail jumps.
+
+void MacroAssembler::tailJump(Register reg) {
+#ifdef JS_HW_INDIRECT_TARGETS
+  // With BTI, an indirect branch to a call landing pad (BTI c) must use x16 or
+  // x17, which are the only registers in the scratch register pool. Move the
+  // target into one of them if needed.
+  if (reg != ScratchReg && reg != ScratchReg2) {
+    vixl::UseScratchRegisterScope temps(this);
+    const Register scratch = temps.AcquireX().asUnsized();
+    MOZ_ASSERT(scratch == ScratchReg || scratch == ScratchReg2);
+    movePtr(reg, scratch);
+    jump(scratch);
+    return;
+  }
+#endif
+  jump(reg);
+}
+
+void MacroAssembler::tailJump(const Address& addr) {
+  // Load the target into x16 or x17 (see comment in the above overload),
+  // avoiding the base register.
+  vixl::UseScratchRegisterScope temps(this);
+  temps.Exclude(toARMRegister(addr.base, 64));
+  const Register scratch = temps.AcquireX().asUnsized();
+  MOZ_ASSERT(scratch == ScratchReg || scratch == ScratchReg2);
+  loadPtr(addr, scratch);
+  jump(scratch);
+}
+
+// These use direct branches (which aren't subject to BTI) where possible.
+// Extended jump table entries for out-of-range targets already use x16.
+void MacroAssembler::tailJump(TrampolinePtr code) { jump(code); }
+
+void MacroAssembler::tailJump(JitCode* code) { jump(code); }
+
+// ===============================================================
+// Patchable near/far jumps.
+
 CodeOffset MacroAssembler::farJumpWithPatch() {
+  // Far jumps may go to call targets, so to be compatible with BTI they must
+  // branch through x16 or x17, which are the only scratch registers.
   vixl::UseScratchRegisterScope temps(this);
   const ARMRegister scratch = temps.AcquireX();
   const ARMRegister scratch2 = temps.AcquireX();
+  MOZ_ASSERT(scratch2.asUnsized() == ScratchReg ||
+             scratch2.asUnsized() == ScratchReg2);
 
   AutoForbidPoolsAndNops afp(this,
                              /* max number of instructions in scope = */ 7);
@@ -2042,7 +2108,7 @@ void MacroAssembler::moveValue(const Value& src, const ValueOperand& dest) {
   }
 
   BufferOffset load =
-      movePatchablePtr(ImmPtr(src.bitsAsPunboxPointer()), dest.valueReg());
+      movePatchableGCPtr(ImmPtr(src.bitsAsPunboxPointer()), dest.valueReg());
   writeDataRelocation(src, load);
 }
 

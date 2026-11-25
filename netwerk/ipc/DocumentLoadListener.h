@@ -9,6 +9,7 @@
 #include "mozilla/MozPromise.h"
 #include "mozilla/Variant.h"
 #include "mozilla/WeakPtr.h"
+#include "mozilla/dom/PrefetchMatchWaiter.h"
 #include "mozilla/dom/RemoteType.h"
 #include "mozilla/dom/SessionHistoryEntry.h"
 #include "mozilla/ipc/Endpoint.h"
@@ -180,6 +181,10 @@ class DocumentLoadListener : public nsIInterfaceRequestor,
                            nsDocShellLoadState* aLoadState,
                            bool aSetNavigating);
 
+  static uint32_t SecurityFlagsForLoadInfo(nsDocShellLoadState*);
+  static uint32_t EffectiveSandboxFlags(uint32_t aBaseSandboxFlags,
+                                        nsSecurityFlags);
+
   // Creates a DocumentLoadListener directly in the parent process and opens it,
   // without needing an existing DocumentChannel.
   // If successful, aLoadState will be given a SpeculativeListener, which will
@@ -193,9 +198,9 @@ class DocumentLoadListener : public nsIInterfaceRequestor,
   // nsDocShellLoadState was destroyed without the load being claimed.
   void CleanupParentLoadAttempt();
 
-  // Called to associate a document channel with the DocumentLoadListener when
-  // creation has succeeded.
-  RefPtr<OpenPromise> ClaimParentLoad(Maybe<uint64_t> aChannelId);
+  // Called when the content process's DocumentChannel has connected to this
+  // speculative load. Returns the promise for the load's result.
+  RefPtr<OpenPromise> ClaimParentLoad();
 
   NS_DECL_ISUPPORTS
   NS_DECL_NSIREQUESTOBSERVER
@@ -224,6 +229,10 @@ class DocumentLoadListener : public nsIInterfaceRequestor,
   nsIChannel* GetChannel() const { return mChannel; }
 
   uint32_t GetRedirectChannelId() const { return mRedirectChannelId; }
+
+  const Maybe<uint64_t>& GetDocumentChannelId() const {
+    return mDocumentChannelId;
+  }
 
   nsresult ReportSecurityMessage(const nsAString& aMessageTag,
                                  const nsAString& aMessageCategory) override {
@@ -263,10 +272,6 @@ class DocumentLoadListener : public nsIInterfaceRequestor,
   // The content process corresponding to this DocumentLoadListener, or nullptr
   // if connected to the parent process.
   dom::ContentParent* GetContentParent() const { return mContentParent; }
-
-  // The process id of the content process that we are being called from
-  // or 0 initiated from a parent process load.
-  base::ProcessId OtherPid() const;
 
   [[nodiscard]] RefPtr<ChildEndpointPromise> AttachStreamFilter();
 
@@ -367,6 +372,18 @@ class DocumentLoadListener : public nsIInterfaceRequestor,
   MOZ_CAN_RUN_SCRIPT
   bool MaybeTriggerProcessSwitch(bool* aWillSwitchToRemote);
 
+  // The commit part of DoOnStartRequest. MaybeBeginOutboundViewTransition can
+  // delay it.
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY
+  nsresult ContinueDoOnStartRequestCommit(bool aSilentErrorLoad);
+
+  // Lets the old document fire pageswap before the commit. If the navigation
+  // can have a view transition, the old document also captures its state. This
+  // then returns true and commits after the capture. Otherwise it returns
+  // false, and the caller commits right away.
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY
+  bool MaybeBeginOutboundViewTransition();
+
   // Called when the process switch is going to happen, potentially
   // asynchronously, from `MaybeTriggerProcessSwitch`.
   //
@@ -411,13 +428,21 @@ class DocumentLoadListener : public nsIInterfaceRequestor,
   // is being performed in. For toplevel loads, this will return `nullptr`.
   dom::WindowGlobalParent* GetParentWindowContext() const;
 
-  // Checks for a completed speculation rules prefetch record matching aURI.
-  // If found, copies the prefetch's cookies into the destination partition
-  // and marks the navigation timing as activated from a prefetch.
-  // Only called for document (navigational) loads.
+  // Looks for a speculation rules prefetch of aURI issued by the document
+  // currently in the browsing context. Activates synchronously if a
+  // completed prefetch matches. If one is still in flight, returns a promise
+  // for AsyncOpenAfterPrefetchWait; otherwise null.
   // Spec:
   // https://wicg.github.io/nav-speculation/prefetch.html#create-navigation-params-from-a-prefetch-record
-  void TryActivateFromPrefetch(nsIURI* aURI);
+  RefPtr<dom::PrefetchMatchPromise> TryActivateFromPrefetch(nsIURI* aURI);
+  // Copies the prefetch's cookies into the destination partition and marks
+  // the navigation timing as activated from a prefetch.
+  void ActivateFromPrefetch(dom::PrefetchRecordParent* aRec);
+  // Waits on aPromise (from TryActivateFromPrefetch), activates from the
+  // resolved record if any, then calls AsyncOpen on mChannel. Does nothing if
+  // the load was cancelled while waiting.
+  void AsyncOpenAfterPrefetchWait(dom::PrefetchMatchPromise* aPromise,
+                                  nsIStreamListener* aListener);
 
   void AddURIVisit(nsIChannel* aChannel, uint32_t aLoadFlags);
   bool HasCrossOriginOpenerPolicyMismatch() const;
@@ -562,6 +587,9 @@ class DocumentLoadListener : public nsIInterfaceRequestor,
   uint32_t mLoadStateExternalLoadFlags = 0;
   uint32_t mLoadStateInternalLoadFlags = 0;
   uint32_t mLoadStateLoadType = 0;
+
+  // See nsDocShellLoadState::PageSwapFired.
+  bool mLoadStatePageSwapFired = false;
 
   // Indicates if this load is a download.
   bool mIsDownload = false;

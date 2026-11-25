@@ -12,6 +12,7 @@
 
 #include "PlatformEncoderModule.h"
 #include "apple/AppleUtils.h"
+#include "gtest/MozGtestFriend.h"
 
 namespace mozilla {
 
@@ -58,6 +59,9 @@ class AppleVTEncoder final : public MediaDataEncoder {
                    CMSampleBufferRef aBuffer, void* aSourceFrameRefcon);
 
  private:
+  FRIEND_TEST(AppleVTEncoderTest, CopiesPackedInputBeforeUnmap);
+  FRIEND_TEST(AppleVTEncoderTest, ReadsBackIOSurfaceWithoutPixelFormat);
+
   enum class EncodeResult { Success, EncodeError, FrameDropped, EmptyBuffer };
 
   virtual ~AppleVTEncoder() { MOZ_ASSERT(!mSession); }

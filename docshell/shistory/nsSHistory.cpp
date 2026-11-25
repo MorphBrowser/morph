@@ -31,12 +31,14 @@
 #include "prsystem.h"
 
 #include "mozilla/Attributes.h"
+#include "mozilla/BounceTrackingState.h"
 #include "mozilla/dom/BrowsingContextGroup.h"
 #include "mozilla/dom/BrowserParent.h"
 #include "mozilla/dom/CanonicalBrowsingContext.h"
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/Navigation.h"
+#include "mozilla/dom/NavigationUtils.h"
 #include "mozilla/dom/RemoteWebProgressRequest.h"
 #include "mozilla/dom/WindowGlobalParent.h"
 #include "mozilla/glean/DocshellMetrics.h"
@@ -45,9 +47,11 @@
 #include "mozilla/Preferences.h"
 #include "mozilla/ProcessPriorityManager.h"
 #include "mozilla/Services.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_fission.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/dom/CanonicalBrowsingContext.h"
+#include "nsIScriptSecurityManager.h"
 #include "nsIWebNavigation.h"
 #include "nsDocShellLoadTypes.h"
 #include "base/process.h"
@@ -69,7 +73,7 @@ using namespace mozilla::dom;
 
 static constexpr const char* kObservedPrefs[] = {
     PREF_SHISTORY_SIZE, PREF_SHISTORY_MAX_TOTAL_VIEWERS,
-    PREF_FISSION_BFCACHEINPARENT, nullptr};
+    PREF_FISSION_BFCACHEINPARENT};
 
 static int32_t gHistoryMaxSize = 50;
 
@@ -200,14 +204,14 @@ void nsSHistoryObserver::PrefChanged(const char* aPref, void* aSelf) {
   static_cast<nsSHistoryObserver*>(aSelf)->PrefChanged(aPref);
 }
 
-void nsSHistoryObserver::PrefChanged(const char* aPref) {
+void nsSHistoryObserver::PrefChanged(const char* /*aPref*/) {
   nsSHistory::UpdatePrefs();
   nsSHistory::GloballyEvictDocumentViewers();
 }
 
 NS_IMETHODIMP
-nsSHistoryObserver::Observe(nsISupports* aSubject, const char* aTopic,
-                            const char16_t* aData) {
+nsSHistoryObserver::Observe(nsISupports* /*aSubject*/, const char* aTopic,
+                            const char16_t* /*aData*/) {
   if (!strcmp(aTopic, "cacheservice:empty-cache") ||
       !strcmp(aTopic, "memory-pressure")) {
     nsSHistory::GloballyEvictAllDocumentViewers();
@@ -261,7 +265,7 @@ nsSHistory::nsSHistory(BrowsingContext* aRootBC)
 
   // Init mHistoryTracker on setting mRootBC so we can bind its event
   // target to the tabGroup.
-  mHistoryTracker = mozilla::MakeUnique<HistoryTracker>(
+  mHistoryTracker = std::make_unique<HistoryTracker>(
       this,
       mozilla::Preferences::GetUint(CONTENT_VIEWER_TIMEOUT_SECONDS,
                                     CONTENT_VIEWER_TIMEOUT_SECONDS_DEFAULT),
@@ -611,16 +615,18 @@ void nsSHistory::WalkContiguousEntriesInOrder(
     return;
   }
 
-  nsCOMPtr<nsIURI> targetURI = entry->GetURIOrInheritedForAboutBlank();
+  nsCOMPtr<nsIURI> targetURI = entry->GetURIOrInheritedForAboutBlankOrSrcdoc();
   AutoTArray<SessionHistoryEntry*, 16> previousEntries;
 
   // Walk backward to find the entries that have the same origin as the
   // input entry.
   RefPtr<SessionHistoryEntry> current = entry;
+  int32_t rootIndex = shistory->GetRootIndexOfEntry(current);
   while (RefPtr previousEntry =
              shistory->FindLeftmostAdjacentContiguousEntryFor(
-                 current, SearchDirection::Left)) {
-    nsCOMPtr<nsIURI> uri = previousEntry->GetURIOrInheritedForAboutBlank();
+                 current, SearchDirection::Left, &rootIndex)) {
+    nsCOMPtr<nsIURI> uri =
+        previousEntry->GetURIOrInheritedForAboutBlankOrSrcdoc();
     if (NS_FAILED(nsContentUtils::GetSecurityManager()->CheckSameOriginURI(
             targetURI, uri, false, false))) {
       break;
@@ -641,9 +647,10 @@ void nsSHistory::WalkContiguousEntriesInOrder(
 
   // Walk forward to find the entries that have the same origin as the
   // input entry.
+  rootIndex = shistory->GetRootIndexOfEntry(entry);
   while ((entry = shistory->FindLeftmostAdjacentContiguousEntryFor(
-              entry, SearchDirection::Right))) {
-    nsCOMPtr<nsIURI> uri = entry->GetURIOrInheritedForAboutBlank();
+              entry, SearchDirection::Right, &rootIndex))) {
+    nsCOMPtr<nsIURI> uri = entry->GetURIOrInheritedForAboutBlankOrSrcdoc();
     if (NS_FAILED(nsContentUtils::GetSecurityManager()->CheckSameOriginURI(
             targetURI, uri, false, false))) {
       break;
@@ -673,16 +680,17 @@ void nsSHistory::WalkClosestContiguousEntriesFrom(
     return;
   }
 
-  nsCOMPtr<nsIURI> targetURI = entry->GetURIOrInheritedForAboutBlank();
+  nsCOMPtr<nsIURI> targetURI = entry->GetURIOrInheritedForAboutBlankOrSrcdoc();
 
   // Walk backward to find the entries that have the same origin as the
   // input entry.
+  int32_t rootIndex = shistory->GetRootIndexOfEntry(entry);
   for (nsCOMPtr<SessionHistoryEntry> current =
            shistory->FindClosestAdjacentContiguousEntryFor(
-               entry, SearchDirection::Left);
+               entry, SearchDirection::Left, &rootIndex);
        current; current = shistory->FindClosestAdjacentContiguousEntryFor(
-                    current, SearchDirection::Left)) {
-    nsCOMPtr<nsIURI> uri = current->GetURIOrInheritedForAboutBlank();
+                    current, SearchDirection::Left, &rootIndex)) {
+    nsCOMPtr<nsIURI> uri = current->GetURIOrInheritedForAboutBlankOrSrcdoc();
     if (NS_FAILED(nsContentUtils::GetSecurityManager()->CheckSameOriginURI(
             targetURI, uri, false, false))) {
       break;
@@ -694,12 +702,13 @@ void nsSHistory::WalkClosestContiguousEntriesFrom(
 
   // Walk forward to find the entries that have the same origin as the
   // input entry.
+  rootIndex = shistory->GetRootIndexOfEntry(entry);
   for (nsCOMPtr<SessionHistoryEntry> current =
            shistory->FindClosestAdjacentContiguousEntryFor(
-               entry, SearchDirection::Right);
+               entry, SearchDirection::Right, &rootIndex);
        current; current = shistory->FindClosestAdjacentContiguousEntryFor(
-                    current, SearchDirection::Right)) {
-    nsCOMPtr<nsIURI> uri = current->GetURIOrInheritedForAboutBlank();
+                    current, SearchDirection::Right, &rootIndex)) {
+    nsCOMPtr<nsIURI> uri = current->GetURIOrInheritedForAboutBlankOrSrcdoc();
     if (NS_FAILED(nsContentUtils::GetSecurityManager()->CheckSameOriginURI(
             targetURI, uri, false, false))) {
       break;
@@ -1309,11 +1318,48 @@ nsSHistory::EvictAllDocumentViewers() {
   return NS_OK;
 }
 
+// Returns the target entry for the old document's pageswap activation, or null
+// for a cross-origin traversal. For a traversal to a document in BFCache, the
+// origin check is the only relevant step of
+// https://drafts.csswg.org/css-view-transitions-2/#navigation-can-trigger-a-cross-document-view-transition
+static const mozilla::dom::SessionHistoryInfo* TraversalViewTransitionTarget(
+    SessionHistoryEntry* aCurrent, SessionHistoryEntry* aTarget) {
+  if (!StaticPrefs::dom_viewTransitions_cross_document_enabled() || !aCurrent ||
+      !aTarget) {
+    return nullptr;
+  }
+  nsCOMPtr<nsIURI> fromURI = aCurrent->Info().GetResultPrincipalURI();
+  if (!fromURI) {
+    fromURI = aCurrent->Info().GetURI();
+  }
+  nsCOMPtr<nsIURI> toURI = aTarget->Info().GetResultPrincipalURI();
+  if (!toURI) {
+    toURI = aTarget->Info().GetURI();
+  }
+  nsIScriptSecurityManager* ssm = nsContentUtils::GetSecurityManager();
+  if (ssm && fromURI && toURI &&
+      NS_SUCCEEDED(ssm->CheckSameOriginURI(fromURI, toURI, false, false))) {
+    return &aTarget->Info();
+  }
+  return nullptr;
+}
+
+static bool CanRestoreFrameLoader(nsFrameLoader* aFrameLoader) {
+  if (!aFrameLoader->IsRemoteFrame()) {
+    return true;
+  }
+  BrowserParent* browserParent = aFrameLoader->GetBrowserParent();
+  return browserParent && browserParent->CanSend() &&
+         !browserParent->IsDestroyed();
+}
+
 MOZ_CAN_RUN_SCRIPT
 static void FinishRestore(CanonicalBrowsingContext* aBrowsingContext,
                           nsDocShellLoadState* aLoadState,
                           SessionHistoryEntry* aEntry,
-                          nsFrameLoader* aFrameLoader, bool aCanSave) {
+                          nsFrameLoader* aFrameLoader, bool aCanSave,
+                          bool aPageSwapFired = false,
+                          bool aViewTransitionCaptured = false) {
   MOZ_ASSERT(aEntry);
   MOZ_ASSERT(aFrameLoader);
 
@@ -1327,7 +1373,12 @@ static void FinishRestore(CanonicalBrowsingContext* aBrowsingContext,
   nsCOMPtr<nsFrameLoaderOwner> frameLoaderOwner =
       do_QueryInterface(aBrowsingContext->GetEmbedderElement());
   if (frameLoaderOwner && aFrameLoader->GetMaybePendingBrowsingContext() &&
-      indexOfHistoryLoad >= 0) {
+      CanRestoreFrameLoader(aFrameLoader) && indexOfHistoryLoad >= 0) {
+    WindowGlobalParent* previousWindowGlobal =
+        aBrowsingContext->GetCurrentWindowGlobal();
+    nsCOMPtr<nsIPrincipal> previousDocumentPrincipal =
+        previousWindowGlobal ? previousWindowGlobal->DocumentPrincipal()
+                             : nullptr;
     RefPtr<BrowsingContextWebProgress> webProgress =
         aBrowsingContext->GetWebProgress();
     if (webProgress) {
@@ -1354,6 +1405,23 @@ static void FinishRestore(CanonicalBrowsingContext* aBrowsingContext,
         aFrameLoader->GetMaybePendingBrowsingContext()->Canonical();
     RefPtr<nsFrameLoader> currentFrameLoader =
         frameLoaderOwner->GetFrameLoader();
+
+    // Top level navigations otherwise reach bounce tracking protection from
+    // DocumentLoadListener, which a restore does not create. This has to run
+    // before the swap, while the page being left is still current.
+    RefPtr<BounceTrackingState> bounceTrackingState =
+        aBrowsingContext->IsTopContent()
+            ? aBrowsingContext->GetBounceTrackingState()
+            : nullptr;
+    if (bounceTrackingState) {
+      DebugOnly<nsresult> rv = bounceTrackingState->OnStartNavigation(
+          aLoadState->TriggeringPrincipal(),
+          aLoadState->HasValidUserGestureActivation(),
+          aLoadState->GetLoadIdentifier());
+      NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                           "BounceTrackingState::OnStartNavigation failed");
+    }
+
     // The current page can be bfcached, store the
     // nsFrameLoader in the current SessionHistoryEntry.
     RefPtr<SessionHistoryEntry> currentSHEntry =
@@ -1363,9 +1431,17 @@ static void FinishRestore(CanonicalBrowsingContext* aBrowsingContext,
       // and the active session history entry.
       aBrowsingContext->SynchronizeLayoutHistoryState();
 
+      const SessionHistoryInfo* targetInfo =
+          TraversalViewTransitionTarget(currentSHEntry, aEntry);
       if (aCanSave) {
         currentSHEntry->SetFrameLoader(currentFrameLoader);
-        aBrowsingContext->DeactivateDocuments();
+        aBrowsingContext->DeactivateDocuments(targetInfo,
+                                              NavigationType::Traverse);
+      } else {
+        // The old document can't enter BFCache, so it only fires pageswap.
+        aBrowsingContext->DeactivateDocuments(targetInfo,
+                                              NavigationType::Traverse,
+                                              /* aForUnload = */ true);
       }
     }
 
@@ -1398,8 +1474,8 @@ static void FinishRestore(CanonicalBrowsingContext* aBrowsingContext,
     // browser.navigation.requireUserInteraction is still
     // disabled everywhere.
 
-    bool layersChanged =
-        frameLoaderOwner->RestoreFrameLoaderFromBFCache(aFrameLoader);
+    bool layersChanged = frameLoaderOwner->RestoreFrameLoaderFromBFCache(
+        aFrameLoader, aViewTransitionCaptured);
     // EvictOutOfRangeDocumentViewers is called here explicitly to
     // possibly evict the now in the bfcache document.
     // HistoryCommitIndexAndLength might not have evicted that before the
@@ -1412,7 +1488,14 @@ static void FinishRestore(CanonicalBrowsingContext* aBrowsingContext,
       currentFrameLoader->Destroy();
     }
 
-    loadingBC->ReactivateDocuments(aEntry, currentSHEntry);
+    loadingBC->ReactivateDocuments(aEntry, currentSHEntry,
+                                   previousDocumentPrincipal);
+
+    if (bounceTrackingState) {
+      DebugOnly<nsresult> rv = bounceTrackingState->OnBFCacheRestored();
+      NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                           "BounceTrackingState::OnBFCacheRestored failed");
+    }
 
     if (layersChanged) {
       frameLoaderOwner->DispatchLayerTreeEvent();
@@ -1432,12 +1515,70 @@ static void FinishRestore(CanonicalBrowsingContext* aBrowsingContext,
 
   aFrameLoader->Destroy();
 
-  // Fall back to do a normal load.
+  // Fall back to do a normal load. The old document can have fired pageswap
+  // for this traversal already.
+  aLoadState->SetPageSwapFired(aPageSwapFired);
   aBrowsingContext->LoadURI(aLoadState, false);
 
   glean::bfcache::page_restored
       .EnumGet(glean::bfcache::PageRestoredLabel::eFalse)
       .Add();
+}
+
+// For a same-origin traversal from a document that opted in with
+// @view-transition, lets the old document fire pageswap and capture its
+// outbound view transition before FinishRestore deactivates it. Other
+// traversals run FinishRestore right away.
+MOZ_CAN_RUN_SCRIPT
+static void FinishRestoreMaybeDeferred(
+    CanonicalBrowsingContext* aBrowsingContext, nsDocShellLoadState* aLoadState,
+    SessionHistoryEntry* aEntry, nsFrameLoader* aFrameLoader, bool aCanSave) {
+  RefPtr<SessionHistoryEntry> currentSHEntry =
+      aBrowsingContext->GetActiveSessionHistoryEntry();
+  const SessionHistoryInfo* targetInfo =
+      TraversalViewTransitionTarget(currentSHEntry, aEntry);
+  WindowGlobalParent* wgp = aBrowsingContext->GetCurrentWindowGlobal();
+  RefPtr<ContentParent> contentParent =
+      targetInfo && wgp && wgp->MayHaveViewTransitionOptIn()
+          ? aBrowsingContext->GetContentParent()
+          : nullptr;
+  if (!contentParent) {
+    FinishRestore(aBrowsingContext, aLoadState, aEntry, aFrameLoader, aCanSave);
+    return;
+  }
+
+  RefPtr<CanonicalBrowsingContext> bc = aBrowsingContext;
+  RefPtr<nsDocShellLoadState> loadState = aLoadState;
+  RefPtr<SessionHistoryEntry> entry = aEntry;
+  RefPtr<nsFrameLoader> frameLoader = aFrameLoader;
+  // The restored document adopts the captured snapshots, so tell the
+  // capturing process which tab it lives in.
+  BrowserParent* targetBrowser = aFrameLoader->GetBrowserParent();
+  const TabId snapshotTargetTab =
+      targetBrowser ? targetBrowser->GetTabId() : TabId(0);
+  contentParent
+      ->SendBeginOutboundCrossDocumentViewTransition(
+          aBrowsingContext, Some(*targetInfo), NavigationType::Traverse,
+          snapshotTargetTab)
+      ->Then(GetMainThreadSerialEventTarget(), __func__,
+             [bc, loadState, entry, frameLoader,
+              aCanSave](const ContentParent::
+                            BeginOutboundCrossDocumentViewTransitionPromise::
+                                ResolveOrRejectValue& aValue)
+                 MOZ_CAN_RUN_SCRIPT_BOUNDARY_LAMBDA {
+                   // Script ran during the round trip and can have replaced
+                   // or discarded bc.
+                   if (bc->IsReplaced() || bc->IsDiscarded()) {
+                     return;
+                   }
+                   // The pageswap handler ran in between and can have made
+                   // the page ineligible for BFCache.
+                   FinishRestore(
+                       bc, loadState, entry, frameLoader,
+                       aCanSave && bc->AllowedInBFCache(Nothing(), nullptr),
+                       /* aPageSwapFired = */ true,
+                       aValue.IsResolve() && aValue.ResolveValue());
+                 });
 }
 
 MOZ_CAN_RUN_SCRIPT
@@ -1479,9 +1620,10 @@ static bool MaybeLoadBFCache(const nsSHistory::LoadEntryResult& aLoadEntry) {
                   MOZ_CAN_RUN_SCRIPT_BOUNDARY_LAMBDA {
                     bool allow = aResult == nsIDocumentViewer::eContinue;
                     if (allow && !canonicalBC->IsReplaced()) {
-                      FinishRestore(canonicalBC, loadState, she, frameLoader,
-                                    canSave && canonicalBC->AllowedInBFCache(
-                                                   Nothing(), nullptr));
+                      FinishRestoreMaybeDeferred(
+                          canonicalBC, loadState, she, frameLoader,
+                          canSave && canonicalBC->AllowedInBFCache(Nothing(),
+                                                                   nullptr));
                     } else if (currentFrameLoader
                                    ->GetMaybePendingBrowsingContext()) {
                       nsISHistory* shistory =
@@ -1499,7 +1641,8 @@ static bool MaybeLoadBFCache(const nsSHistory::LoadEntryResult& aLoadEntry) {
     }
 
     if (!canonicalBC->IsReplaced()) {
-      FinishRestore(canonicalBC, loadState, she, frameLoader, canSave);
+      FinishRestoreMaybeDeferred(canonicalBC, loadState, she, frameLoader,
+                                 canSave);
     }
     return true;
   }
@@ -1715,10 +1858,13 @@ void nsSHistory::LoadURIs(const nsTArray<LoadEntryResult>& aLoadResults,
                   //      reject the finished promise for apiMethodTracker with
                   //      a new "AbortError" DOMException created in
                   //      navigation's relevant realm.
-                  if (aResult == nsIDocumentViewer::eCanceledByBeforeUnload) {
+                  if (aResult == nsIDocumentViewer::eCanceledByBeforeUnload ||
+                      aResult == nsIDocumentViewer::eCanceledByNavigate) {
                     return aResolver(nsresult::NS_ERROR_DOM_ABORT_ERR);
                   }
 
+                  // The traverse navigate event of the traversable was
+                  // intercepted. Its traversal resumes once it commits.
                   aResolver(NS_OK);
 
                   return;
@@ -2420,6 +2566,11 @@ nsresult nsSHistory::LoadEntry(BrowsingContext* aSourceBrowsingContext,
 
   // This is a normal local history navigation.
 
+  MOZ_ASSERT(mIndex < Length(),
+             "Previous entry index outside of entries array");
+  if (mIndex < 0 || mIndex >= Length()) {
+    return NS_ERROR_FAILURE;
+  }
   RefPtr<SessionHistoryEntry> prevEntry = mEntries[mIndex];
   RefPtr<SessionHistoryEntry> nextEntry = mEntries[aIndex];
   if (!nextEntry || !prevEntry) {
@@ -2537,9 +2688,16 @@ class SessionHistoryEntryIDComparator {
 
 }  // namespace
 
+int32_t nsSHistory::GetRootIndexOfEntry(
+    mozilla::dom::SessionHistoryEntry* aEntry) {
+  RefPtr<SessionHistoryEntry> root = GetRootSHEntry(aEntry);
+  return GetIndexOfEntry(root);
+}
+
 mozilla::dom::SessionHistoryEntry* nsSHistory::FindAdjacentEntryFor(
-    mozilla::dom::SessionHistoryEntry* aEntry,
-    SearchDirection aSearchDirection) {
+    mozilla::dom::SessionHistoryEntry* aEntry, SearchDirection aSearchDirection,
+    int32_t* aRootIndex) {
+  MOZ_DIAGNOSTIC_ASSERT(aRootIndex);
   MOZ_ASSERT(static_cast<int8_t>(aSearchDirection) == 1 ||
              static_cast<int8_t>(aSearchDirection) == -1);
 
@@ -2557,34 +2715,25 @@ mozilla::dom::SessionHistoryEntry* nsSHistory::FindAdjacentEntryFor(
   }
   ancestors.Reverse();
 
-  nsCOMPtr<nsISHEntry> rootEntry = ancestors.IsEmpty() ? aEntry : ancestors[0];
   nsCOMPtr<nsISHEntry> nextEntry;
   SessionHistoryEntry* foundParent = nullptr;
-  int32_t i =
-      GetIndexOfEntry(rootEntry) + static_cast<int8_t>(aSearchDirection);
+  int32_t i = *aRootIndex + static_cast<int8_t>(aSearchDirection);
   if (i < 0 || i >= Length()) {
     return nullptr;
   }
 
   nextEntry = mEntries[i];
   if (ancestors.IsEmpty()) {
-    // This can happen if we somehow have duplicates in mEntries. This should
-    // ideally never happen, but since it does we need to protect against it.
-    // See bug 2042897.
-    return nextEntry != aEntry
-               ? static_cast<SessionHistoryEntry*>(nextEntry.get())
-               : nullptr;
+    *aRootIndex = i;
+    return static_cast<SessionHistoryEntry*>(nextEntry.get());
   }
 
   foundParent =
       FindParent(ancestors, static_cast<SessionHistoryEntry*>(nextEntry.get()));
   if (foundParent) {
     for (const auto& child : foundParent->Children()) {
-      // As in the ancestors-empty case above, if mEntries has duplicates
-      // (see bug 2042897) the adjacent entry can resolve back to aEntry itself;
-      // returning it would make callers loop forever, so skip it.
-      if (child && child != aEntry &&
-          child->DocshellID() == aEntry->DocshellID()) {
+      if (child && child->DocshellID() == aEntry->DocshellID()) {
+        *aRootIndex = i;
         return child;
       }
     }
@@ -2595,11 +2744,12 @@ mozilla::dom::SessionHistoryEntry* nsSHistory::FindAdjacentEntryFor(
 
 mozilla::dom::SessionHistoryEntry*
 nsSHistory::FindClosestAdjacentContiguousEntryFor(
-    mozilla::dom::SessionHistoryEntry* aEntry,
-    SearchDirection aSearchDirection) {
+    mozilla::dom::SessionHistoryEntry* aEntry, SearchDirection aSearchDirection,
+    int32_t* aRootIndex) {
   for (SessionHistoryEntry* current =
-           FindAdjacentEntryFor(aEntry, aSearchDirection);
-       current; current = FindAdjacentEntryFor(current, aSearchDirection)) {
+           FindAdjacentEntryFor(aEntry, aSearchDirection, aRootIndex);
+       current;
+       current = FindAdjacentEntryFor(current, aSearchDirection, aRootIndex)) {
     if (aEntry->GetID() != current->GetID()) {
       return current;
     }
@@ -2610,11 +2760,12 @@ nsSHistory::FindClosestAdjacentContiguousEntryFor(
 
 mozilla::dom::SessionHistoryEntry*
 nsSHistory::FindLeftmostAdjacentContiguousEntryFor(
-    mozilla::dom::SessionHistoryEntry* aEntry,
-    SearchDirection aSearchDirection) {
+    mozilla::dom::SessionHistoryEntry* aEntry, SearchDirection aSearchDirection,
+    int32_t* aRootIndex) {
   SessionHistoryEntry* current = nullptr;
-  for (current = FindAdjacentEntryFor(aEntry, aSearchDirection); current;
-       current = FindAdjacentEntryFor(current, aSearchDirection)) {
+  for (current = FindAdjacentEntryFor(aEntry, aSearchDirection, aRootIndex);
+       current;
+       current = FindAdjacentEntryFor(current, aSearchDirection, aRootIndex)) {
     if (aEntry->GetID() != current->GetID()) {
       break;
     }
@@ -2624,13 +2775,15 @@ nsSHistory::FindLeftmostAdjacentContiguousEntryFor(
     return current;
   }
 
+  int32_t leftIndex = *aRootIndex;
   while (SessionHistoryEntry* left =
-             FindAdjacentEntryFor(current, aSearchDirection)) {
+             FindAdjacentEntryFor(current, aSearchDirection, &leftIndex)) {
     if (left->GetID() != current->GetID()) {
       break;
     }
 
     current = left;
+    *aRootIndex = leftIndex;
   }
 
   return current;

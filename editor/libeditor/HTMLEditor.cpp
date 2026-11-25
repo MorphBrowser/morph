@@ -214,7 +214,7 @@ MOZ_RUNINIT HTMLEditor::AttributeFilter
               (&aAttrName == nsGkAtoms::id || &aAttrName == nsGkAtoms::dir));
         };
 
-HTMLEditor::HTMLEditor(const Document& aDocument)
+HTMLEditor::HTMLEditor(const Document& /*aDocument*/)
     : EditorBase(EditorBase::EditorType::HTML),
       mCRInParagraphCreatesParagraph(false),
       mIsObjectResizingEnabled(
@@ -538,9 +538,9 @@ NS_IMETHODIMP HTMLEditor::SetDocumentCharacterSet(
           [&aCharacterSet](HTMLEditor&, Element& aMetaElement,
                            const EditorDOMPoint&) {
             MOZ_ASSERT(!aMetaElement.IsInComposedDoc());
-            DebugOnly<nsresult> rvIgnored =
-                aMetaElement.SetAttr(kNameSpaceID_None, nsGkAtoms::httpEquiv,
-                                     u"Content-Type"_ns, false);
+            DebugOnly<nsresult> rvIgnored = aMetaElement.SetAttr(
+                kNameSpaceID_None, nsGkAtoms::httpEquiv, u"Content-Type"_ns,
+                false, IsKnownNewAttr::Yes);
             NS_WARNING_ASSERTION(
                 NS_SUCCEEDED(rvIgnored),
                 "Element::SetAttr(nsGkAtoms::httpEquiv, \"Content-Type\", "
@@ -549,7 +549,7 @@ NS_IMETHODIMP HTMLEditor::SetDocumentCharacterSet(
                 aMetaElement.SetAttr(kNameSpaceID_None, nsGkAtoms::content,
                                      u"text/html;charset="_ns +
                                          NS_ConvertASCIItoUTF16(aCharacterSet),
-                                     false);
+                                     false, IsKnownNewAttr::Yes);
             NS_WARNING_ASSERTION(
                 NS_SUCCEEDED(rvIgnored),
                 nsPrintfCString(
@@ -1815,12 +1815,22 @@ Result<EditActionResult, nsresult> HTMLEditor::HandleTabKeyPressInTable(
     return Err(NS_ERROR_FAILURE);
   }
   // ...so that we can ask for first cell in that row...
-  cell = GetTableCellElementAt(*tblElement, row, 0);
+  const RefPtr<Element> firstEditableRow = [&]() -> Element* {
+    uint32_t colIndex = 0;
+    while (Element* cellInTheRow = GetMaybeGeneratedTableCellElementAt(
+               *tblElement, row, colIndex++)) {
+      if (HTMLEditUtils::IsSimplyEditableNode(*cellInTheRow)) {
+        MOZ_ASSERT(!cellInTheRow->IsInNativeAnonymousSubtree());
+        return cellInTheRow;
+      }
+    }
+    return nullptr;
+  }();
   // ...and then set selection there.  (Note that normally you should use
   // CollapseSelectionToDeepestNonTableFirstChild(), but we know cell is an
   // empty new cell, so this works fine)
-  if (cell) {
-    nsresult rv = CollapseSelectionToStartOf(*cell);
+  if (firstEditableRow) {
+    nsresult rv = CollapseSelectionToStartOf(*firstEditableRow);
     if (NS_FAILED(rv)) {
       NS_WARNING("EditorBase::CollapseSelectionToStartOf() failed");
       return Err(NS_ERROR_EDITOR_DESTROYED);
@@ -4138,7 +4148,7 @@ HTMLEditor::InsertOrReplaceTextWithTransaction(
   MOZ_ASSERT_IF(aData.ReplaceLength(), aPointToInsert.IsInTextNode());
 
   Result<InsertTextResult, nsresult> insertTextResultOrError =
-      !aData.ReplaceLength()
+      !aData.ReplaceLength() || NS_WARN_IF(!aPointToInsert.IsInTextNode())
           ? InsertTextWithTransaction(aData.mNormalizedString, aPointToInsert,
                                       InsertTextTo::SpecifiedPoint, aPurpose)
           : ReplaceTextWithTransaction(
@@ -4447,7 +4457,11 @@ nsresult HTMLEditor::EnsureNoFollowingUnnecessaryLineBreak(
 
   const WSScanResult nextThing =
       HTMLEditUtils::ScanInclusiveNextThingWithIgnoringUnnecessaryLineBreak(
-          aNextOrAfterModifiedPoint, aPaddingForEmptyBlock, aEditingHost);
+          aNextOrAfterModifiedPoint,
+          aPaddingForEmptyBlock == PaddingForEmptyBlock::Unnecessary
+              ? TreatAsUnnecessaryLineBreak{LineBreakFor::PaddingForEmptyBlock}
+              : TreatAsUnnecessaryLineBreak{},
+          aEditingHost);
   const Maybe<EditorLineBreak>& unnecessaryLineBreak =
       nextThing.MaybeIgnoredLineBreak();
   if (unnecessaryLineBreak.isNothing() ||
@@ -4474,7 +4488,12 @@ nsresult HTMLEditor::EnsureNoFollowingUnnecessaryLineBreak(
                          "to delete unnecessary <br>");
     return rv;
   }
-  MOZ_ASSERT(isNewLinePreformatted);
+
+  // FYI: unnecessaryLineBreak is a preformatted linefeed, but
+  // isNewLinePreformatted may be false because aNextOrAfterModifiedPoint may be
+  // before the container element of the text which specifies `white-space` to
+  // `pre-*`.
+
   if (aPreservePreformattedLineBreak == PreservePreformattedLineBreak::Yes) {
     // Do not preserve preformatted linefeed if it's a padding for empty block
     // even if the caller wants to preserve unnecessary preformatted linefeed
@@ -4663,9 +4682,9 @@ HTMLEditor::ReplaceContainerWithTransactionInternal(
     MOZ_ASSERT(&aAttribute == nsGkAtoms::_empty);
     CloneAttributesWithTransaction(*newContainer, aOldContainer);
   } else if (&aAttribute != nsGkAtoms::_empty) {
-    nsresult rv = newContainer->SetAttr(kNameSpaceID_None,
-                                        const_cast<nsAtom*>(&aAttribute),
-                                        aAttributeValue, true);
+    nsresult rv = newContainer->SetAttr(
+        kNameSpaceID_None, const_cast<nsAtom*>(&aAttribute), aAttributeValue,
+        true, IsKnownNewAttr::Yes);
     if (NS_FAILED(rv)) {
       NS_WARNING("Element::SetAttr() failed");
       return Err(NS_ERROR_FAILURE);
@@ -5231,6 +5250,13 @@ Result<SplitNodeResult, nsresult> HTMLEditor::SplitNodeDeepWithTransaction(
       EditorUtils::IsDescendantOf(*aDeepestStartOfRightNode.GetContainer(),
                                   aMostAncestorToSplit));
 
+  // The caller must specify a splittable content.
+  // FIXME: Make this an assertion and make all callers check this.
+  if (NS_WARN_IF(!HTMLEditUtils::IsSplittableNode(aMostAncestorToSplit)))
+      [[unlikely]] {
+    return Err(NS_ERROR_FAILURE);
+  }
+
   if (NS_WARN_IF(!aDeepestStartOfRightNode.IsInComposedDoc())) {
     return Err(NS_ERROR_INVALID_ARG);
   }
@@ -5260,11 +5286,13 @@ Result<SplitNodeResult, nsresult> HTMLEditor::SplitNodeDeepWithTransaction(
       lastResult.IgnoreCaretPointSuggestion();
       return Err(NS_ERROR_FAILURE);
     }
-    // If the container is not splitable node such as comment node, atomic
+    // If the container is not splittable node such as comment node, atomic
     // element, etc, we should keep it as-is, and try to split its parents.
-    if (!HTMLEditUtils::IsSplittableNode(*splittingContent)) {
-      if (splittingContent == &aMostAncestorToSplit) {
-        return lastResult;
+    if (!HTMLEditUtils::IsSplittableNode(*splittingContent)) [[unlikely]] {
+      if (splittingContent == &aMostAncestorToSplit) [[unlikely]] {
+        NS_WARNING("aMostAncestorToSplit is changed to non-splittable");
+        lastResult.IgnoreCaretPointSuggestion();
+        return Err(NS_ERROR_EDITOR_UNEXPECTED_DOM_TREE);
       }
       atStartOfRightNode.Set(splittingContent);
       continue;
@@ -5351,7 +5379,7 @@ Result<SplitNodeResult, nsresult> HTMLEditor::DoSplitNode(
   AutoTArray<SavedRange, 10> savedRanges;
   for (SelectionType selectionType : kPresentSelectionTypes) {
     SavedRange savingRange;
-    savingRange.mSelection = GetSelection(selectionType);
+    savingRange.mSelection = GetExistingSelection(selectionType);
     if (NS_WARN_IF(!savingRange.mSelection &&
                    selectionType == SelectionType::eNormal)) {
       return Err(NS_ERROR_FAILURE);
@@ -5705,7 +5733,7 @@ nsresult HTMLEditor::DoJoinNodes(nsIContent& aContentToKeep,
     EditorRawDOMPoint atNodeToKeep(&aContentToKeep);
     for (SelectionType selectionType : kPresentSelectionTypes) {
       SavedRange savingRange;
-      savingRange.mSelection = GetSelection(selectionType);
+      savingRange.mSelection = GetExistingSelection(selectionType);
       if (selectionType == SelectionType::eNormal) {
         if (NS_WARN_IF(!savingRange.mSelection)) {
           return NS_ERROR_FAILURE;
@@ -7311,7 +7339,7 @@ Element* HTMLEditor::ComputeEditingHostInternal(
     return body && body->IsEditable() ? body : nullptr;
   }
 
-  if (NS_WARN_IF(!content)) {
+  if (!content) {
     return nullptr;
   }
 

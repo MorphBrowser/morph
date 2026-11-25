@@ -33,12 +33,15 @@ import org.junit.Before
 import org.junit.Test
 import org.mozilla.fenix.R
 import org.mozilla.fenix.components.FindInPageIntegration
+import org.mozilla.fenix.components.appstate.AppState
 import org.mozilla.fenix.components.toolbar.BottomToolbarContainerView
 import org.mozilla.fenix.components.toolbar.BrowserNavigationBar
 import org.mozilla.fenix.components.toolbar.BrowserToolbarComposable
 import org.mozilla.fenix.components.toolbar.ToolbarContainerView
 import org.mozilla.fenix.components.toolbar.ToolbarPosition
 import org.mozilla.fenix.ext.components
+import org.mozilla.fenix.microsurvey.MicrosurveyState
+import org.mozilla.fenix.microsurvey.ui.ext.MicrosurveyUIData
 import org.mozilla.fenix.utils.Settings
 
 class BaseBrowserFragmentTest {
@@ -133,7 +136,6 @@ class BaseBrowserFragmentTest {
     fun `initializeEngineView should set EngineViewClippingBehavior when dynamic toolbar is enabled`() {
         every { settings.shouldUseFixedTopToolbar } returns false
         every { settings.isDynamicToolbarEnabled } returns true
-        every { settings.shouldShowMicrosurveyPrompt } returns true
         val params: CoordinatorLayout.LayoutParams = mockk(relaxed = true)
         every { params.behavior } returns mockk(relaxed = true)
         every { swipeRefreshLayout.layoutParams } returns params
@@ -542,7 +544,22 @@ class BaseBrowserFragmentTest {
             }
         every { settings.getBrowserToolbarHeight(testContext) } returns 11
         every { settings.toolbarPosition } returns ToolbarPosition.TOP
-        every { settings.shouldShowMicrosurveyPrompt } returns true
+        every { settings.microsurveyFeatureEnabled } returns true
+        every { testContext.components.appStore.state } returns
+            AppState(
+                microsurvey =
+                    MicrosurveyState(
+                        current =
+                            MicrosurveyUIData(
+                                id = "microsurvey-id",
+                                promptTitle = "Prompt title",
+                                icon = 0,
+                                question = "Question?",
+                                answers = listOf("Yes", "No"),
+                                maxNumberLines = 3,
+                            )
+                    )
+            )
         every { settings.isDynamicToolbarEnabled } returns true
         every { settings.shouldUseFixedTopToolbar } returns false
         every { testContext.resources.getDimensionPixelSize(R.dimen.browser_microsurvey_height) } returns 131
@@ -818,6 +835,17 @@ class BaseBrowserFragmentTest {
 
         verify { container.removeView(any()) }
         assertNull(fragment.blackScreenOverlay)
+    }
+
+    @Test
+    fun `setAlwaysOpenInAppPreferences sets both app links and YouTube preferences to always`() {
+        every { testContext.getString(R.string.pref_key_open_links_in_apps_always) } returns "apps_always"
+        every { testContext.getString(R.string.pref_key_open_links_in_youtube_always) } returns "youtube_always"
+
+        fragment.setAlwaysOpenInAppPreferences()
+
+        verify { settings.openLinksInExternalApp = "apps_always" }
+        verify { settings.openLinksInYoutube = "youtube_always" }
     }
 }
 

@@ -4,8 +4,10 @@
 
 import { actionCreators as ac, actionTypes as at } from "common/Actions.mjs";
 import {
+  FRAMED_STAGE_MERINO_ORIGIN,
   WIDGET_REGISTRY,
   hasContentAreaWidgets,
+  isFramedStageAllowed,
   isWidgetsContainerVisible,
 } from "common/WidgetsRegistry.mjs";
 import {
@@ -40,22 +42,14 @@ const PREF_CONTEXTUAL_BANNER_COUNTS =
   "discoverystream.placements.contextualBanners.counts";
 const PREF_UNIFIED_ADS_ENABLED = "unifiedAds.spocs.enabled";
 const PREF_UNIFIED_ADS_ENDPOINT = "unifiedAds.endpoint";
-const PREF_ALLOWED_ENDPOINTS = "discoverystream.endpoints";
-const PREF_OHTTP_CONFIG = "discoverystream.ohttp.configURL";
-const PREF_OHTTP_RELAY = "discoverystream.ohttp.relayURL";
 const PREF_WIDGETS_SYSTEM_ENABLED = "widgets.system.enabled";
+const PREF_FRAMED_WIDGETS_ENVIRONMENT = "widgets.framed.environment";
 
 // Internal, pref-gated widget features that default off but we want to test in
 // devtools. Hand-maintained (outside the automatic registry-driven toggles).
 // Each `pref` is the full activity-stream-relative pref; toggles reuse
 // handleWidgetToggle, which sets the pref named by the toggle's id.
 const WIDGET_EXTRA_FEATURES = {
-  pictureOfTheDay: [
-    {
-      pref: "widgets.pictureOfTheDay.setAsWallpaper.enabled",
-      label: "Set as wallpaper",
-    },
-  ],
   privacy: [{ pref: "widgets.privacy.showVpnMessages", label: "VPN messages" }],
 };
 
@@ -175,6 +169,28 @@ const PAGE_LAYOUTS_INFO = {
       "edge leading to the space beyond it instead of a segmented control. " +
       "pageLayouts.spacesOrder sets the order.",
   },
+  [PAGE_LAYOUT_VARIANTS.SPACES_PREVIEW_KIT]: {
+    label: "Spaces (Preview with Kit)",
+    description:
+      "Buttons at the bottom, where each tab previews its space with an " +
+      "illustration of Kit moving through it.",
+  },
+  [PAGE_LAYOUT_VARIANTS.SPACES_PREVIEW_ILLUSTRATED]: {
+    label: "Spaces (Preview without Kit)",
+    description: "Same as above, with the illustrations alone.",
+  },
+  [PAGE_LAYOUT_VARIANTS.SPACES_PREVIEW_CARDS]: {
+    label: "Spaces (Preview with cards)",
+    description:
+      "Buttons at the bottom, where each tab previews its space's first " +
+      "medium story card, else its first widget or Recent activity card.",
+  },
+  [PAGE_LAYOUT_VARIANTS.SPACES_PEEK]: {
+    label: "Spaces (Peek)",
+    description:
+      "Buttons at the bottom, plus a preview of the spaces on either side in " +
+      "the page margins. Clicking one navigates there.",
+  },
   // @experiment(remove) { bug 2069496 }
   [PAGE_LAYOUT_VARIANTS.WIDGETS_AD_LARGE]: {
     label: "Widgets row ad (large)",
@@ -288,6 +304,8 @@ export class DiscoveryStreamAdminUI extends React.PureComponent {
     this.handleSectionsToggle = this.handleSectionsToggle.bind(this);
     this.handleWidgetsSystemToggle = this.handleWidgetsSystemToggle.bind(this);
     this.handleWidgetToggle = this.handleWidgetToggle.bind(this);
+    this.handleFramedWidgetsEnvironmentToggle =
+      this.handleFramedWidgetsEnvironmentToggle.bind(this);
     this.handleWidgetsToggleAll = this.handleWidgetsToggleAll.bind(this);
     this.handleResetWidgetInteractions =
       this.handleResetWidgetInteractions.bind(this);
@@ -584,6 +602,15 @@ export class DiscoveryStreamAdminUI extends React.PureComponent {
   handleWidgetToggle(e) {
     // e.target.id is the widget's systemEnabledPref (widgets.system.<name>.enabled)
     this.props.dispatch(ac.SetPref(e.target.id, e.target.pressed));
+  }
+
+  handleFramedWidgetsEnvironmentToggle(e) {
+    this.props.dispatch(
+      ac.SetPref(
+        PREF_FRAMED_WIDGETS_ENVIRONMENT,
+        e.target.pressed ? "stage" : "prod"
+      )
+    );
   }
 
   handleWidgetsToggleAll() {
@@ -1163,47 +1190,15 @@ export class DiscoveryStreamAdminUI extends React.PureComponent {
   }
 
   handleAllizomToggle(e) {
-    const prefs = this.props.otherPrefs;
-    const unifiedAdsSpocsEnabled = prefs[PREF_UNIFIED_ADS_ENABLED];
-    if (!unifiedAdsSpocsEnabled) {
+    if (!this.props.otherPrefs[PREF_UNIFIED_ADS_ENABLED]) {
       return;
     }
-    const { pressed } = e.target;
-    const { dispatch } = this.props;
-    const allowedEndpoints = prefs[PREF_ALLOWED_ENDPOINTS];
-    const setPref = (pref = "", value = "") => {
-      dispatch(ac.SetPref(pref, value));
-    };
-    const clearPref = (pref = "") => {
-      dispatch(
-        ac.OnlyToMain({
-          type: at.CLEAR_PREF,
-          data: {
-            name: pref,
-          },
-        })
-      );
-    };
-    if (pressed) {
-      setPref(PREF_UNIFIED_ADS_ENDPOINT, "https://ads.allizom.org/");
-      setPref(
-        PREF_ALLOWED_ENDPOINTS,
-        `${allowedEndpoints},https://ads.allizom.org/`
-      );
-      setPref(
-        PREF_OHTTP_CONFIG,
-        "https://stage.ohttp-gateway.nonprod.webservices.mozgcp.net/ohttp-configs"
-      );
-      setPref(
-        PREF_OHTTP_RELAY,
-        "https://mozilla-ohttp-relay-test.edgecompute.app/"
-      );
-    } else {
-      clearPref(PREF_UNIFIED_ADS_ENDPOINT);
-      clearPref(PREF_ALLOWED_ENDPOINTS);
-      clearPref(PREF_OHTTP_CONFIG);
-      clearPref(PREF_OHTTP_RELAY);
-    }
+    this.props.dispatch(
+      ac.OnlyToMain({
+        type: at.DISCOVERY_STREAM_DEV_STAGING_ADS,
+        data: { enabled: e.target.pressed },
+      })
+    );
   }
 
   renderSpocs() {
@@ -1216,6 +1211,10 @@ export class DiscoveryStreamAdminUI extends React.PureComponent {
     const PREF_UNIFIED_ADS_ADSFEED_ENABLED = "unifiedAds.adsFeed.enabled";
     const adsFeedEnabled =
       this.props.otherPrefs[PREF_UNIFIED_ADS_ADSFEED_ENABLED];
+
+    const PREF_UNIFIED_ADS_ADSCLIENT_ENABLED = "unifiedAds.adsClient.enabled";
+    const adsClientEnabled =
+      this.props.otherPrefs[PREF_UNIFIED_ADS_ADSCLIENT_ENABLED];
 
     const unifiedAdsEndpoint = this.props.otherPrefs[PREF_UNIFIED_ADS_ENDPOINT];
     const spocsEndpoint = unifiedAdsSpocsEnabled
@@ -1247,6 +1246,10 @@ export class DiscoveryStreamAdminUI extends React.PureComponent {
                   label="Toggle allizom"
                 />
               </td>
+            </Row>
+            <Row>
+              <td className="min">MAC enabled</td>
+              <td>{adsClientEnabled ? "true" : "false"}</td>
             </Row>
             <Row>
               <td className="min">adsfeed enabled</td>
@@ -1351,6 +1354,13 @@ export class DiscoveryStreamAdminUI extends React.PureComponent {
 
     const widgetsSystemEnabled =
       this.props.otherPrefs[PREF_WIDGETS_SYSTEM_ENABLED];
+    const stageMerinoAllowed = isFramedStageAllowed(
+      this.props.otherPrefs,
+      this.props.otherPrefs.isNightlyBuild
+    );
+    const framedWidgetsStage =
+      stageMerinoAllowed &&
+      this.props.otherPrefs[PREF_FRAMED_WIDGETS_ENVIRONMENT] === "stage";
 
     return (
       <div>
@@ -1419,6 +1429,22 @@ export class DiscoveryStreamAdminUI extends React.PureComponent {
               pressed={widgetsSystemEnabled || null}
               ontoggle={this.handleWidgetsSystemToggle}
               label="Enable widget system"
+            />
+          </div>
+          <div
+            className="toggle-wrapper"
+            title={
+              stageMerinoAllowed
+                ? null
+                : `Add ${FRAMED_STAGE_MERINO_ORIGIN} to discoverystream.endpoints to use stage`
+            }
+          >
+            <moz-toggle
+              id="widgets-framed-environment"
+              pressed={framedWidgetsStage || null}
+              disabled={!stageMerinoAllowed || null}
+              ontoggle={this.handleFramedWidgetsEnvironmentToggle}
+              label={`Framed widgets source: ${framedWidgetsStage ? "Stage" : "Prod (Default)"}`}
             />
           </div>
           <div className="admin-button-row">

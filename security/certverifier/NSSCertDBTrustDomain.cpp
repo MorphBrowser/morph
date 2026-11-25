@@ -100,14 +100,13 @@ NSSCertDBTrustDomain::NSSCertDBTrustDomain(
       mBuiltInRootsModule(SECMOD_FindModule(kRootModuleName.get())),
       mOCSPFetchStatus(OCSPFetchStatus::NotFetched) {}
 
-static void FindRootsWithSubject(UniqueSECMODModule& rootsModule,
-                                 SECItem subject,
-                                 /*out*/ nsTArray<nsTArray<uint8_t>>& roots) {
-  MOZ_ASSERT(rootsModule);
+static void FindCertsWithSubject(SECMODModule* module, SECItem subject,
+                                 /*out*/ nsTArray<nsTArray<uint8_t>>& certs) {
+  MOZ_ASSERT(module);
   AutoSECMODListReadLock lock;
-  for (int slotIndex = 0; slotIndex < rootsModule->slotCount; slotIndex++) {
+  for (int slotIndex = 0; slotIndex < module->slotCount; slotIndex++) {
     CERTCertificateList* rawResults = nullptr;
-    if (PK11_FindRawCertsWithSubject(rootsModule->slots[slotIndex], &subject,
+    if (PK11_FindRawCertsWithSubject(module->slots[slotIndex], &subject,
                                      &rawResults) != SECSuccess) {
       continue;
     }
@@ -117,10 +116,10 @@ static void FindRootsWithSubject(UniqueSECMODModule& rootsModule,
     }
     UniqueCERTCertificateList results(rawResults);
     for (int certIndex = 0; certIndex < results->len; certIndex++) {
-      nsTArray<uint8_t> root;
-      root.AppendElements(results->certs[certIndex].data,
+      nsTArray<uint8_t> cert;
+      cert.AppendElements(results->certs[certIndex].data,
                           results->certs[certIndex].len);
-      roots.AppendElement(std::move(root));
+      certs.AppendElement(std::move(cert));
     }
   }
 }
@@ -218,7 +217,7 @@ Result NSSCertDBTrustDomain::FindIssuer(Input encodedIssuerName,
   // does something unexpected.
   nsTArray<nsTArray<uint8_t>> builtInRoots;
   if (mBuiltInRootsModule) {
-    FindRootsWithSubject(mBuiltInRootsModule, encodedIssuerNameItem,
+    FindCertsWithSubject(mBuiltInRootsModule.get(), encodedIssuerNameItem,
                          builtInRoots);
     for (const auto& root : builtInRoots) {
       Input rootInput;
@@ -328,71 +327,64 @@ Result NSSCertDBTrustDomain::FindIssuer(Input encodedIssuerName,
     return Success;
   }
 
-  // Synchronously dispatch a task to the socket thread to find
-  // CERTCertificates with the given subject. This involves querying NSS
-  // structures and databases, so it should be done on the socket thread.
-  nsTArray<nsTArray<uint8_t>> nssRootCandidates;
-  nsTArray<nsTArray<uint8_t>> nssIntermediateCandidates;
-  RefPtr<Runnable> getCandidatesTask =
-      NS_NewRunnableFunction("NSSCertDBTrustDomain::FindIssuer", [&]() {
-        if (AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
-          return;
-        }
-        AutoSearchingForCertificates _;
-        // NSS seems not to differentiate between "no potential issuers found"
-        // and "there was an error trying to retrieve the potential issuers." We
-        // assume there was no error if CERT_CreateSubjectCertList returns
-        // nullptr.
-        UniqueCERTCertList candidates(
-            CERT_CreateSubjectCertList(nullptr, CERT_GetDefaultCertDB(),
-                                       &encodedIssuerNameItem, 0, false));
-        if (candidates) {
-          for (CERTCertListNode* n = CERT_LIST_HEAD(candidates);
-               !CERT_LIST_END(n, candidates); n = CERT_LIST_NEXT(n)) {
-            nsTArray<uint8_t> candidate;
-            candidate.AppendElements(n->cert->derCert.data,
-                                     n->cert->derCert.len);
-            if (n->cert->isRoot) {
-              nssRootCandidates.AppendElement(std::move(candidate));
-            } else {
-              nssIntermediateCandidates.AppendElement(std::move(candidate));
-            }
-          }
-        }
-      });
-  nsCOMPtr<nsIEventTarget> socketThread(
-      do_GetService(NS_SOCKETTRANSPORTSERVICE_CONTRACTID));
-  if (!socketThread) {
-    return Result::FATAL_ERROR_LIBRARY_FAILURE;
-  }
-  rv = SyncRunnable::DispatchToThread(socketThread, getCandidatesTask);
-  if (NS_FAILED(rv)) {
-    return Result::FATAL_ERROR_LIBRARY_FAILURE;
-  }
-
-  nsTArray<IssuerCandidateWithSource> nssCandidates;
-  for (const auto& rootCandidate : nssRootCandidates) {
+  // Find potential issuers stored in the internal module, commonly referred to
+  // as the NSS certDB.
+  SECMODModule* internalModule(SECMOD_GetInternalModule());
+  nsTArray<nsTArray<uint8_t>> nssCertDBCandidates;
+  FindCertsWithSubject(internalModule, encodedIssuerNameItem,
+                       nssCertDBCandidates);
+  nsTArray<IssuerCandidateWithSource> nssCertDBCandidatesWithSource;
+  for (const auto& candidate : nssCertDBCandidates) {
     Input certDER;
-    Result rv = certDER.Init(rootCandidate.Elements(), rootCandidate.Length());
+    Result rv = certDER.Init(candidate.Elements(), candidate.Length());
     if (rv != Success) {
       continue;  // probably too big
     }
-    nssCandidates.AppendElement(
+    nssCertDBCandidatesWithSource.AppendElement(
         IssuerCandidateWithSource{std::move(certDER), IssuerSource::NSSCertDB});
   }
-  for (const auto& intermediateCandidate : nssIntermediateCandidates) {
+  result = CheckCandidates(checker, nssCertDBCandidatesWithSource,
+                           nameConstraintsInputPtr, keepGoing);
+  if (result != Success) {
+    return result;
+  }
+  if (!keepGoing) {
+    return Success;
+  }
+
+  // Finally, look for potential issuers among any third-party PKCS#11 modules.
+  nsTArray<UniqueSECMODModule> modules;
+  {
+    AutoSECMODListReadLock lock;
+    for (SECMODModuleList* list = SECMOD_GetDefaultModuleList(); list;
+         list = list->next) {
+      if (list->module != SECMOD_GetInternalModule() &&
+          list->module != mBuiltInRootsModule.get() &&
+          !kOSClientCertsModuleName.Equals(list->module->commonName)) {
+        modules.AppendElement(SECMOD_ReferenceModule(list->module));
+      }
+    }
+  }
+  nsTArray<nsTArray<uint8_t>> pkcs11Candidates;
+  {
+    AutoSearchingForCertificates _;
+    for (const auto& module : modules) {
+      FindCertsWithSubject(module.get(), encodedIssuerNameItem,
+                           pkcs11Candidates);
+    }
+  }
+  nsTArray<IssuerCandidateWithSource> pkcs11CandidatesWithSource;
+  for (const auto& candidate : pkcs11Candidates) {
     Input certDER;
-    Result rv = certDER.Init(intermediateCandidate.Elements(),
-                             intermediateCandidate.Length());
+    Result rv = certDER.Init(candidate.Elements(), candidate.Length());
     if (rv != Success) {
       continue;  // probably too big
     }
-    nssCandidates.AppendElement(
-        IssuerCandidateWithSource{std::move(certDER), IssuerSource::NSSCertDB});
+    pkcs11CandidatesWithSource.AppendElement(IssuerCandidateWithSource{
+        std::move(certDER), IssuerSource::PKCS11Module});
   }
-
-  return CheckCandidates(checker, nssCandidates, nameConstraintsInputPtr,
-                         keepGoing);
+  return CheckCandidates(checker, pkcs11CandidatesWithSource,
+                         nameConstraintsInputPtr, keepGoing);
 }
 
 void HashTrustParams(EndEntityOrCA endEntityOrCA, const CertPolicyId& policy,
@@ -427,6 +419,51 @@ void HashTrustParams(EndEntityOrCA endEntityOrCA, const CertPolicyId& policy,
     return;
   }
   sha512Hash.emplace(std::move(result));
+}
+
+void GetCertTrustFromNSS(EndEntityOrCA endEntityOrCA,
+                         const CertPolicyId& policy, SECTrustType trustType,
+                         Input cert, /*out*/ TrustLevel& trustLevel) {
+  trustLevel = TrustLevel::InheritsTrust;
+
+  // NB: CERT_GetDERCertTrust returns SECFailure if no trust records were
+  // found, in which case the assumption is that the certificate inherits its
+  // trust.
+  SECItem certItem = UnsafeMapInputToSECItem(cert);
+  CERTCertTrust trust = {0, 0, 0};
+  if (CERT_GetDERCertTrust(&certItem, &trust) != SECSuccess) {
+    return;
+  }
+
+  uint32_t flags = SEC_GET_TRUST_FLAGS(&trust, trustType);
+
+  // For DISTRUST, we use the CERTDB_TRUSTED or CERTDB_TRUSTED_CA bit,
+  // because we can have active distrust for either type of cert. Note
+  // that CERTDB_TERMINAL_RECORD means "stop trying to inherit trust" so
+  // if the relevant trust bit isn't set then that means the cert must
+  // be considered distrusted.
+  uint32_t relevantTrustBit = endEntityOrCA == EndEntityOrCA::MustBeCA
+                                  ? CERTDB_TRUSTED_CA
+                                  : CERTDB_TRUSTED;
+  if (((flags & (relevantTrustBit | CERTDB_TERMINAL_RECORD))) ==
+      CERTDB_TERMINAL_RECORD) {
+    trustLevel = TrustLevel::ActivelyDistrusted;
+    return;
+  }
+
+  // For TRUST, we use the CERTDB_TRUSTED_CA bit.
+  if (flags & CERTDB_TRUSTED_CA) {
+    if (policy.IsAnyPolicy()) {
+      trustLevel = TrustLevel::TrustAnchor;
+      return;
+    }
+
+    nsTArray<uint8_t> certBytes(cert.UnsafeGetData(), cert.GetLength());
+    if (CertIsAuthoritativeForEVPolicy(certBytes, policy)) {
+      trustLevel = TrustLevel::TrustAnchor;
+      return;
+    }
+  }
 }
 
 Result NSSCertDBTrustDomain::GetCertTrust(EndEntityOrCA endEntityOrCA,
@@ -499,95 +536,14 @@ Result NSSCertDBTrustDomain::GetCertTrust(EndEntityOrCA endEntityOrCA,
     return Success;
   }
 
-  // Synchronously dispatch a task to the socket thread to construct a
-  // CERTCertificate and get its trust from NSS. This involves querying NSS
-  // structures and databases, so it should be done on the socket thread.
-  Result result = Result::FATAL_ERROR_LIBRARY_FAILURE;
-  RefPtr<Runnable> getTrustTask =
-      NS_NewRunnableFunction("NSSCertDBTrustDomain::GetCertTrust", [&]() {
-        if (AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
-          result = Result::FATAL_ERROR_LIBRARY_FAILURE;
-          return;
-        }
-        // This would be cleaner and more efficient if we could get the trust
-        // information without constructing a CERTCertificate here, but NSS
-        // doesn't expose it in any other easy-to-use fashion. The use of
-        // CERT_NewTempCertificate to get a CERTCertificate shouldn't be a
-        // performance problem for certificates already known to NSS because NSS
-        // will just find the existing CERTCertificate in its in-memory cache
-        // and return it. For certificates not already in NSS (namely
-        // third-party roots and intermediates), we want to avoid calling
-        // CERT_NewTempCertificate repeatedly, so we've already checked if the
-        // candidate certificate is a third-party certificate, above.
-        SECItem candidateCertDERSECItem =
-            UnsafeMapInputToSECItem(candidateCertDER);
+  GetCertTrustFromNSS(endEntityOrCA, policy, mCertDBTrustType, candidateCertDER,
+                      trustLevel);
 
-        UniqueCERTCertificate candidateCert(CERT_NewTempCertificate(
-            CERT_GetDefaultCertDB(), &candidateCertDERSECItem, nullptr, false,
-            true));
-        if (!candidateCert) {
-          result = MapPRErrorCodeToResult(PR_GetError());
-          return;
-        }
-        // NB: CERT_GetCertTrust seems to be abusing SECStatus as a boolean,
-        // where SECSuccess means that there is a trust record and SECFailure
-        // means there is not a trust record. I looked at NSS's internal uses of
-        // CERT_GetCertTrust, and all that code uses the result as a boolean
-        // meaning "We have a trust record."
-
-        CERTCertTrust trust;
-        if (CERT_GetCertTrust(candidateCert.get(), &trust) == SECSuccess) {
-          uint32_t flags = SEC_GET_TRUST_FLAGS(&trust, mCertDBTrustType);
-
-          // For DISTRUST, we use the CERTDB_TRUSTED or CERTDB_TRUSTED_CA bit,
-          // because we can have active distrust for either type of cert. Note
-          // that CERTDB_TERMINAL_RECORD means "stop trying to inherit trust" so
-          // if the relevant trust bit isn't set then that means the cert must
-          // be considered distrusted.
-          uint32_t relevantTrustBit = endEntityOrCA == EndEntityOrCA::MustBeCA
-                                          ? CERTDB_TRUSTED_CA
-                                          : CERTDB_TRUSTED;
-          if (((flags & (relevantTrustBit | CERTDB_TERMINAL_RECORD))) ==
-              CERTDB_TERMINAL_RECORD) {
-            trustLevel = TrustLevel::ActivelyDistrusted;
-            result = Success;
-            return;
-          }
-
-          // For TRUST, we use the CERTDB_TRUSTED_CA bit.
-          if (flags & CERTDB_TRUSTED_CA) {
-            if (policy.IsAnyPolicy()) {
-              trustLevel = TrustLevel::TrustAnchor;
-              result = Success;
-              return;
-            }
-
-            nsTArray<uint8_t> certBytes(candidateCert->derCert.data,
-                                        candidateCert->derCert.len);
-            if (CertIsAuthoritativeForEVPolicy(certBytes, policy)) {
-              trustLevel = TrustLevel::TrustAnchor;
-              result = Success;
-              return;
-            }
-          }
-        }
-        trustLevel = TrustLevel::InheritsTrust;
-        result = Success;
-      });
-  nsCOMPtr<nsIEventTarget> socketThread(
-      do_GetService(NS_SOCKETTRANSPORTSERVICE_CONTRACTID));
-  if (!socketThread) {
-    return Result::FATAL_ERROR_LIBRARY_FAILURE;
-  }
-  nsresult rv = SyncRunnable::DispatchToThread(socketThread, getTrustTask);
-  if (NS_FAILED(rv)) {
-    return Result::FATAL_ERROR_LIBRARY_FAILURE;
-  }
-  if (result == Success && sha512Hash.isSome()) {
+  if (sha512Hash.isSome()) {
     uint8_t trust = static_cast<uint8_t>(trustLevel);
     trust_cache_insert(mTrustCache, sha512Hash.ref().Elements(), trust);
   }
-  return result;
+  return Success;
 }
 
 Result NSSCertDBTrustDomain::DigestBuf(Input item, DigestAlgorithm digestAlg,
@@ -700,8 +656,8 @@ static void RecordCRLiteNotCoveredCertAge(
     return;
   }
   mozilla::glean::cert_verifier::crlite_not_covered_cert_age
-      .AccumulateRawDuration(TimeDuration::FromMilliseconds(
-          static_cast<double>(timeMs - mostRecentMs)));
+      .AccumulateRawDuration(
+          TimeDuration::FromMilliseconds(timeMs - mostRecentMs));
 }
 
 Result NSSCertDBTrustDomain::CheckCRLite(
@@ -839,7 +795,7 @@ Result NSSCertDBTrustDomain::CheckRevocationByCRLite(
   // disabled we will pass unverified timestamps from embedded SCTs to CRLite.
   if (GetCertificateTransparencyMode() ==
       CertVerifier::CertificateTransparencyMode::Disabled) {
-    size_t decodingErrors;
+    size_t decodingErrors = 0;
     std::vector<SignedCertificateTimestamp> decodedSCTsFromExtension;
     DecodeSCTs(GetSCTListFromCertificate(), decodedSCTsFromExtension,
                decodingErrors);
@@ -1439,7 +1395,7 @@ Result NSSCertDBTrustDomain::VerifyRSAPKCS1SignedData(
   return VerifySignedDataWithCache(
       der::PublicKeyAlgorithm::RSA_PKCS1,
       mozilla::glean::cert_signature_cache::total,
-      mozilla::glean::cert_signature_cache::hits, data, digestAlgorithm,
+      mozilla::glean::cert_signature_cache::hits, data, Some(digestAlgorithm),
       signature, subjectPublicKeyInfo, mSignatureCache, mPinArg);
 }
 
@@ -1449,7 +1405,7 @@ Result NSSCertDBTrustDomain::VerifyRSAPSSSignedData(
   return VerifySignedDataWithCache(
       der::PublicKeyAlgorithm::RSA_PSS,
       mozilla::glean::cert_signature_cache::total,
-      mozilla::glean::cert_signature_cache::hits, data, digestAlgorithm,
+      mozilla::glean::cert_signature_cache::hits, data, Some(digestAlgorithm),
       signature, subjectPublicKeyInfo, mSignatureCache, mPinArg);
 }
 
@@ -1471,8 +1427,36 @@ Result NSSCertDBTrustDomain::VerifyECDSASignedData(
   return VerifySignedDataWithCache(
       der::PublicKeyAlgorithm::ECDSA,
       mozilla::glean::cert_signature_cache::total,
-      mozilla::glean::cert_signature_cache::hits, data, digestAlgorithm,
+      mozilla::glean::cert_signature_cache::hits, data, Some(digestAlgorithm),
       signature, subjectPublicKeyInfo, mSignatureCache, mPinArg);
+}
+
+Result NSSCertDBTrustDomain::CheckMLDSAParameterSetIsAcceptable(
+    EndEntityOrCA /*endEntityOrCA*/, MLDSAParameterSet parameterSet) {
+  return CheckMLDSAParameterSetIsEnabled(parameterSet);
+}
+
+Result NSSCertDBTrustDomain::VerifyMLDSASignedData(
+    Input data, MLDSAParameterSet parameterSet, Input signature,
+    Input subjectPublicKeyInfo) {
+  der::PublicKeyAlgorithm publicKeyAlg;
+  switch (parameterSet) {
+    case MLDSAParameterSet::ml_dsa_44:
+      publicKeyAlg = der::PublicKeyAlgorithm::MLDSA_44;
+      break;
+    case MLDSAParameterSet::ml_dsa_65:
+      publicKeyAlg = der::PublicKeyAlgorithm::MLDSA_65;
+      break;
+    case MLDSAParameterSet::ml_dsa_87:
+      publicKeyAlg = der::PublicKeyAlgorithm::MLDSA_87;
+      break;
+    default:
+      return Result::FATAL_ERROR_INVALID_ARGS;
+  }
+  return VerifySignedDataWithCache(
+      publicKeyAlg, mozilla::glean::cert_signature_cache::total,
+      mozilla::glean::cert_signature_cache::hits, data, Nothing(), signature,
+      subjectPublicKeyInfo, mSignatureCache, mPinArg);
 }
 
 Result NSSCertDBTrustDomain::CheckValidityIsAcceptable(
@@ -1550,7 +1534,7 @@ SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
   // If this is the utility process, the pref to enable the utility process
   // better be true (or this is a gtest).
   MOZ_ASSERT(!XRE_IsUtilityProcess() ||
-             StaticPrefs::security_utility_pkcs11_module_process_enabled() ||
+             PKCS11ModuleDB::UtilityProcessEnabled() ||
              PR_GetEnv("MOZ_RUN_GTEST"));
 
   // The NSS_INIT_NOROOTINIT flag turns off the loading of the root certs
@@ -1566,8 +1550,7 @@ SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
   // process and the PKCS#11 utility process is enabled, don't load the NSS
   // PKCS#11 module DB.
   bool isParentProcessButLoadingModulesInUtilityProcess =
-      XRE_IsParentProcess() &&
-      StaticPrefs::security_utility_pkcs11_module_process_enabled();
+      XRE_IsParentProcess() && PKCS11ModuleDB::UtilityProcessEnabled();
   if (pkcs11DbConfig == PKCS11DBConfig::DoNotLoadModules ||
       isParentProcessButLoadingModulesInUtilityProcess) {
     flags |= NSS_INIT_NOMODDB;
@@ -1580,8 +1563,8 @@ SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
   nsAutoCString dbTypeAndDirectory("sql:");
   dbTypeAndDirectory.Append(dir);
   MOZ_LOG(gCertVerifierLog, LogLevel::Debug,
-          ("InitializeNSS(%s, %d, %d)", dbTypeAndDirectory.get(),
-           (int)nssDbConfig, (int)pkcs11DbConfig));
+          ("InitializeNSS(%s, %u, %u, 0x%x)", dbTypeAndDirectory.get(),
+           (unsigned int)nssDbConfig, (unsigned int)pkcs11DbConfig, flags));
   SECStatus srv =
       NSS_Initialize(dbTypeAndDirectory.get(), "", "", SECMOD_DB, flags);
   if (srv != SECSuccess) {
@@ -1606,8 +1589,7 @@ SECStatus InitializeNSS(const nsACString& dir, NSSDBConfig nssDbConfig,
   // Collect third party PKCS#11 module telemetry if this is the parent process
   // and the utility process is not enabled or if this is the utility process.
   bool isParentProcessAndNotLoadingModulesInUtilityProcess =
-      XRE_IsParentProcess() &&
-      !StaticPrefs::security_utility_pkcs11_module_process_enabled();
+      XRE_IsParentProcess() && !PKCS11ModuleDB::UtilityProcessEnabled();
   if (isParentProcessAndNotLoadingModulesInUtilityProcess ||
       XRE_IsUtilityProcess()) {
     CollectThirdPartyPKCS11ModuleTelemetry(/*aIsInitialization=*/true);
@@ -1692,34 +1674,6 @@ bool LoadUserModuleFromXul(const char* moduleName,
 }
 
 extern "C" {
-// Extern function to call ipcclientcerts module C_GetFunctionList.
-// NSS calls it to obtain the list of functions comprising this module.
-// ppFunctionList must be a valid pointer.
-CK_RV IPCCC_GetFunctionList(CK_FUNCTION_LIST_PTR_PTR ppFunctionList);
-}  // extern "C"
-
-bool LoadIPCClientCertsModule() {
-  // The IPC client certs module needs to be able to call back into gecko to be
-  // able to communicate with the parent process over IPC. This is achieved by
-  // calling the external to Rust module functions DoSign and DoFindObjects.
-
-  if (!LoadUserModuleFromXul(kIPCClientCertsModuleName.get(),
-                             IPCCC_GetFunctionList)) {
-    return false;
-  }
-  RunOnShutdown(
-      []() {
-        UniqueSECMODModule ipcClientCertsModule(
-            SECMOD_FindModule(kIPCClientCertsModuleName.get()));
-        if (ipcClientCertsModule) {
-          SECMOD_UnloadUserModule(ipcClientCertsModule.get());
-        }
-      },
-      ShutdownPhase::XPCOMWillShutdown);
-  return true;
-}
-
-extern "C" {
 // Extern function to call osclientcerts module C_GetFunctionList.
 // NSS calls it to obtain the list of functions comprising this module.
 // ppFunctionList must be a valid pointer.
@@ -1741,7 +1695,7 @@ bool LoadOSClientCertsModule() {
 #endif
 }
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#if !defined(MOZ_NO_SMART_CARDS)
 extern "C" {
 // Extern declaration of the C_GetFunctionList function in the remotecerts
 // module. NSS calls it to obtain the list of functions comprising this module.
@@ -1753,7 +1707,7 @@ bool LoadRemoteCertsModule() {
   return LoadUserModuleFromXul(kRemoteCertsModuleName.get(),
                                RemoteCerts_C_GetFunctionList);
 }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
 bool LoadLoadableRoots(const nsCString& dir) {
   int unusedModType;

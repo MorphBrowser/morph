@@ -18,7 +18,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 });
 
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
-import { WebVTT } from "resource://gre/modules/vtt.sys.mjs";
+import { WebVTT } from "moz-src:///dom/media/webvtt/vtt.sys.mjs";
 import { setTimeout, clearTimeout } from "resource://gre/modules/Timer.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
@@ -116,7 +116,7 @@ ChromeUtils.defineLazyGetter(lazy, "gSiteOverrides", () => {
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", () => {
   return console.createInstance({
-    prefix: "PictureInPictureChild",
+    logModule: "PictureInPictureChild",
     maxLogLevel: Services.prefs.getBoolPref(
       "media.videocontrols.picture-in-picture.log",
       false
@@ -1715,7 +1715,7 @@ export class PictureInPictureChild extends JSWindowActorChild {
     headStyleElement.setAttribute("rel", "stylesheet");
     headStyleElement.setAttribute(
       "href",
-      "chrome://global/skin/pictureinpicture/texttracks.css"
+      "resource://content-accessible/texttracks.css"
     );
     headStyleElement.setAttribute("type", "text/css");
     return headStyleElement;
@@ -2145,9 +2145,9 @@ export class PictureInPictureChild extends JSWindowActorChild {
           let video = this.getWeakVideo();
           // We may want to keep the pip window open if the video
           // is still in DOM. But if video src is no longer defined,
-          // close Picture-in-Picture.
+          // or the video is no longer rendered, close Picture-in-Picture.
           this.emptiedTimeout = setTimeout(() => {
-            if (!video || !video.src) {
+            if (!video || !video.src || !video.checkVisibility()) {
               this.closePictureInPicture({ reason: "VideoElEmptied" });
             }
           }, lazy.EMPTIED_TIMEOUT_MS);
@@ -2579,15 +2579,20 @@ export class PictureInPictureChild extends JSWindowActorChild {
       }
     }
 
-    let loadPromise = new Promise(resolve => {
-      this.contentWindow.addEventListener("load", resolve, {
-        once: true,
-        mozSystemGroup: true,
-        capture: true,
+    // On Android the embedder has already loaded a document in the player session, so there is
+    // nothing to wait for. Reloading would swap the WindowGlobal and destroy this actor before
+    // it could reply to PictureInPicture:SetupPlayer.
+    if (AppConstants.platform != "android") {
+      let loadPromise = new Promise(resolve => {
+        this.contentWindow.addEventListener("load", resolve, {
+          once: true,
+          mozSystemGroup: true,
+          capture: true,
+        });
       });
-    });
-    this.contentWindow.location.reload();
-    await loadPromise;
+      this.contentWindow.location.reload();
+      await loadPromise;
+    }
 
     // We're committed to adding the video to this window now. Ensure we track
     // the content window before we do so, so that the toggle actor can

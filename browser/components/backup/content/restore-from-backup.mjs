@@ -7,7 +7,7 @@ import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
 import { ERRORS } from "chrome://browser/content/backup/backup-constants.mjs";
 import { getErrorL10nId } from "chrome://browser/content/backup/backup-errors.mjs";
 
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-message-bar.mjs";
 
 /**
@@ -44,6 +44,7 @@ export default class RestoreFromBackup extends MozLitElement {
     _restoreType: { type: String },
     aboutWelcomeEmbedded: { type: Boolean },
     backupServiceState: { type: Object },
+    layout: { type: String },
   };
 
   static get queries() {
@@ -381,7 +382,7 @@ export default class RestoreFromBackup extends MozLitElement {
                 value="replace"
               ></moz-radio>
             </moz-radio-group>`
-          : html` <moz-message-bar type="info">
+          : html` <moz-message-bar class="backup-message-bar" type="info">
               <span
                 slot="message"
                 data-l10n-id="restore-from-backup-profiles-disabled-message"
@@ -398,7 +399,15 @@ export default class RestoreFromBackup extends MozLitElement {
       fieldSizing: "content",
       width: "100%",
     });
-    const backupFileName = this.backupServiceState?.backupFileToRestore || "";
+    let backupFileName = this.backupServiceState?.backupFileToRestore || "";
+    if (
+      backupFileName &&
+      this.aboutWelcomeEmbedded &&
+      this.layout === "center-large"
+    ) {
+      // adds an ellipsis to the file input to truncate long file paths
+      backupFileName = "‎" + backupFileName;
+    }
 
     const { backupFileInfo, recoveryErrorCode } = this.backupServiceState || {};
     const hasInlineFileError =

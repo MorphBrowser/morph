@@ -54,6 +54,29 @@ when starting it, when the toolbox connects to the browser.
 When running this code, Firefox will look for models in the Mozilla model hub located at <https://model-hub.mozilla.org>
 which contains a curated list of models.
 
+## On-device text generation
+
+Options with the `llama.cpp` backend create a `TextGenerationEngine`. It accepts
+the Chat Completions request of the `openai` backend, so a feature runs on device
+by passing different options to `createEngine`:
+
+```javascript
+const engine = await createEngine({
+  ...localOptions,
+  backend: "llama.cpp",
+  taskName: "text-generation",
+});
+const { finalOutput } = await engine.run(
+  { args: messages, inferenceParams: { temperature: 0 } },
+  { signal }
+);
+await engine.terminate();
+```
+
+`runWithGenerator` takes the same request. Each `createEngine` call loads its own
+model, which stays loaded until `terminate()`. Requests carrying `tools` reject,
+and `response_format` is ignored.
+
 ## Available Options
 
 Options passed to the `createEngine` function are verified and converted into a `PipelineOptions` object.
@@ -63,7 +86,7 @@ Below are the options available:
 - **taskName**: The name of the task the pipeline is configured for.
 - **featureId**: The identifier for the feature to be used by the pipeline.
 - **engineId**: The identifier for the engine to be used by the pipeline.
-- **timeoutMS**: The maximum amount of time in milliseconds the worker will run (-1 to never expire).
+- **timeoutMS**: How long in milliseconds an idle engine stays alive before it shuts down (-1 keeps it alive).
 - **modelHub**: The model hub to use, can be `huggingface` or `mozilla`. When used, `modelHubRootUrl` and `modelHubUrlTemplate` are ignored.
 - **modelHubRootUrl**: The root URL of the model hub where models are hosted.
 - **modelHubUrlTemplate**: A template URL for building the full URL for the model.
@@ -76,12 +99,10 @@ Below are the options available:
 - **logLevel**: The log level used in the worker
 - **runtimeFilename**: Name of the runtime wasm file.
 - **dtype**: quantization level, can be `fp32`, `fp16`, `fp8_e5m2`, `fp8_e4m3`, `q8`, `int8`, `uint8`, `q4`, `bnb4`, `q4f16`. Defaults to `q8`
-- **device**: device to use (`wasm`, `gpu`, or `cpu`). Defaults to `wasm`
 - **executionPriority**: priority for the engine, can be `HIGH` (critical to Firefox), `NORMAL` (default), or `LOW` (third-party calls).
+- **device**: where the model loads, an `HWInferencePlacement`: device ids or device kinds, ordered by preference. Applies only to the llama.cpp backend.
 - **kvCacheDtype**: quantization level for the llama.cpp backend. It only applies to the llama.cpp backend when flash attention is enabled. Otherwise, it is always `f32`.
-- **numContext**: Maximum context size. Applies only to the llama.cpp backend.
-- **numBatch**: Number of tokens processed in a single forward pass. Applies only to the llama.cpp backend.
-- **numUbatch**: Token batch size. Applies only to the llama.cpp backend.
+- **numBatch**: Tokens per forward pass, setting both llama.cpp batch sizes. Longer prompts are decoded in chunks of this size. Applies only to the llama.cpp backend.
 - **flashAttn**: Whether to use flash attention. Applies only to the llama.cpp backend.
 - **useMmap**: Whether to use memory mapped for the model. Applies only to the llama.cpp backend.
 - **useMlock**: Whether to lock in memory the full model. Applies only to the llama.cpp backend.

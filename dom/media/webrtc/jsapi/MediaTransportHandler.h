@@ -16,13 +16,13 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/Mutex.h"
 #include "mozilla/RefPtr.h"
-#include "mozilla/dom/PMediaTransportChild.h"
 #include "mozilla/dom/RTCConfigurationBinding.h"
 #include "mozilla/dom/RTCErrorBinding.h"
 #include "mozilla/dom/RTCIceTransportBinding.h"  // RTCIceTransportState
 #include "mozilla/dom/RTCPeerConnectionBinding.h"
 #include "nsISupportsImpl.h"
 #include "nsString.h"
+#include "transport/MediaTransportTypes.h"
 #include "transport/dtlsidentity.h"  // For DtlsDigest
 #include "transport/nr_socket_proxy_config.h"
 #include "transport/nricectx.h"        // Need some enums
@@ -105,8 +105,7 @@ class MediaTransportEvents final {
 
 class MediaTransportHandler {
  public:
-  // Creates either a MediaTransportHandlerLocal or a MediaTransportHandlerIPC,
-  // as appropriate.
+  // Creates a MediaTransportHandlerLocal.
   static already_AddRefed<MediaTransportHandler> Create();
 
   explicit MediaTransportHandler() = default;
@@ -149,6 +148,24 @@ class MediaTransportHandler {
                                  // TODO: It probably makes sense to look
                                  // this up internally.
                                  const nsTArray<NrIceStunAddr>& aStunAddrs) = 0;
+
+  // Make the pool hold aSize pre-gathered sets of candidates. Called when
+  // iceCandidatePoolSize is set on RTCConfiguration before
+  // setLocalDescription. A transport created afterwards takes what it needs
+  // from the pool instead of gathering, and the candidates surface as that
+  // transport's own, so there is nothing to name here: the pool is not
+  // addressable.
+  // Sets already pre-gathered are kept, per RFC 9429 section 4.1.18: growing
+  // gathers only the sets being added, and shrinking releases only the sets
+  // beyond aSize.
+  virtual void SetCandidatePoolSize(
+      uint8_t aSize, bool aDefaultRouteOnly, bool aObfuscateHostAddresses,
+      const nsTArray<NrIceStunAddr>& aStunAddrs) = 0;
+
+  // Release whatever is left in the pool. RFC 9429 section 3.5.4 empties the
+  // candidate pool after the first offer/answer exchange; until then leftovers
+  // keep their sockets (and any TURN allocations) alive.
+  virtual void EmptyCandidatePool() = 0;
 
   virtual void ActivateTransport(
       const std::string& aTransportId, const std::string& aLocalUfrag,

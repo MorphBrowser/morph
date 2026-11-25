@@ -93,7 +93,7 @@ G_DEFINE_TYPE(MozAppLaunchContext, moz_app_launch_context,
 #endif
 
 static char* moz_app_launch_context_get_startup_notify_id(
-    GAppLaunchContext* context, GAppInfo* info, GList* files) {
+    GAppLaunchContext* context, GAppInfo* /*info*/, GList* /*files*/) {
   MozAppLaunchContext* self = MOZ_APP_LAUNCH_CONTEXT(context);
 
   // https://docs.gtk.org/gio/method.AppLaunchContext.get_startup_notify_id.html
@@ -119,17 +119,6 @@ static void moz_app_launch_context_class_init(MozAppLaunchContextClass* klass) {
 static void moz_app_launch_context_init(MozAppLaunchContext* self) {
   GAppLaunchContext* context = G_APP_LAUNCH_CONTEXT(self);
 
-  // GLib does not support xdg-activation before version 2.76,
-  // so set the environment variable manually.
-  // This only works when launching the proces directly, and does
-  // not work when going through the xdg-desktop-portal.
-  // For activation to work when using the portal, you need to use
-  // GLib 2.76 or newer.
-  if (self->activation_token && glib_check_version(2, 76, 0)) {
-    g_app_launch_context_setenv(context, "XDG_ACTIVATION_TOKEN",
-                                self->activation_token);
-  }
-
   // Unset this before launching third-party MIME handlers. Otherwise, if
   // Thunderbird sets this in its startup script (as it does in Debian and
   // Fedora), and Firefox does not set this in its startup script (it doesn't in
@@ -142,6 +131,14 @@ MozAppLaunchContext* moz_app_launch_context_new(const char* activation_token) {
   MozAppLaunchContext* self = MOZ_APP_LAUNCH_CONTEXT(
       g_object_new(MOZ_TYPE_APP_LAUNCH_CONTEXT, nullptr));
   self->activation_token = g_strdup(activation_token);
+
+  // GLib does not support xdg-activation before version 2.76,
+  // so set the environment variable manually.
+  if (self->activation_token && glib_check_version(2, 76, 0)) {
+    g_app_launch_context_setenv(G_APP_LAUNCH_CONTEXT(self),
+                                "XDG_ACTIVATION_TOKEN", self->activation_token);
+  }
+
   return self;
 }
 
@@ -164,30 +161,31 @@ nsFlatpakHandlerApp::GetName(nsAString& aName) {
 }
 
 NS_IMETHODIMP
-nsFlatpakHandlerApp::SetName(const nsAString& aName) {
+nsFlatpakHandlerApp::SetName(const nsAString& /*aName*/) {
   // We don't implement SetName because flatpak system handler name is fixed
   return NS_OK;
 }
 
 NS_IMETHODIMP
-nsFlatpakHandlerApp::GetDetailedDescription(nsAString& aDetailedDescription) {
+nsFlatpakHandlerApp::GetDetailedDescription(
+    nsAString& /*aDetailedDescription*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP
 nsFlatpakHandlerApp::SetDetailedDescription(
-    const nsAString& aDetailedDescription) {
+    const nsAString& /*aDetailedDescription*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP
-nsFlatpakHandlerApp::Equals(nsIHandlerApp* aHandlerApp, bool* _retval) {
+nsFlatpakHandlerApp::Equals(nsIHandlerApp* /*aHandlerApp*/, bool* /*_retval*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP
 nsFlatpakHandlerApp::LaunchWithURI(
-    nsIURI* aUri, mozilla::dom::BrowsingContext* aBrowsingContext) {
+    nsIURI* aUri, mozilla::dom::BrowsingContext* /*aBrowsingContext*/) {
   nsCString spec;
   aUri->GetSpec(spec);
   GUniquePtr<GError> error;
@@ -221,7 +219,8 @@ static nsresult GetCommandFromCommandline(
   if (!g_shell_parse_argv(PromiseFlatCString(aCommandWithArguments).get(),
                           nullptr, &argv, getter_Transfers(error)) ||
       !argv[0]) {
-    g_warning("Cannot parse command with arguments: %s", error->message);
+    g_warning("Cannot parse command with arguments: %s",
+              error ? error->message : "<null error>");
     g_strfreev(argv);
     return NS_ERROR_FAILURE;
   }
@@ -258,19 +257,20 @@ nsGIOHandlerApp::GetName(nsAString& aName) {
 }
 
 NS_IMETHODIMP
-nsGIOHandlerApp::SetName(const nsAString& aName) {
+nsGIOHandlerApp::SetName(const nsAString& /*aName*/) {
   // We don't implement SetName because we're using mGIOMimeApp instance for
   // obtaining application name
   return NS_OK;
 }
 
 NS_IMETHODIMP
-nsGIOHandlerApp::GetDetailedDescription(nsAString& aDetailedDescription) {
+nsGIOHandlerApp::GetDetailedDescription(nsAString& /*aDetailedDescription*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP
-nsGIOHandlerApp::SetDetailedDescription(const nsAString& aDetailedDescription) {
+nsGIOHandlerApp::SetDetailedDescription(
+    const nsAString& /*aDetailedDescription*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
@@ -308,7 +308,7 @@ nsGIOHandlerApp::LaunchFile(const nsACString& aFileName) {
 
 NS_IMETHODIMP
 nsGIOHandlerApp::LaunchWithURI(
-    nsIURI* aUri, mozilla::dom::BrowsingContext* aBrowsingContext) {
+    nsIURI* /*aUri*/, mozilla::dom::BrowsingContext* /*aBrowsingContext*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
@@ -348,7 +348,7 @@ nsGIOMimeApp::GetName(nsAString& aName) {
 }
 
 NS_IMETHODIMP
-nsGIOMimeApp::SetName(const nsAString& aName) {
+nsGIOMimeApp::SetName(const nsAString& /*aName*/) {
   // We don't implement SetName because we're using mGIOMimeApp instance for
   // obtaining application name
   return NS_OK;
@@ -369,12 +369,13 @@ nsGIOMimeApp::GetExpectsURIs(int32_t* aExpects) {
 }
 
 NS_IMETHODIMP
-nsGIOMimeApp::GetDetailedDescription(nsAString& aDetailedDescription) {
+nsGIOMimeApp::GetDetailedDescription(nsAString& /*aDetailedDescription*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP
-nsGIOMimeApp::SetDetailedDescription(const nsAString& aDetailedDescription) {
+nsGIOMimeApp::SetDetailedDescription(
+    const nsAString& /*aDetailedDescription*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
@@ -450,7 +451,7 @@ gboolean g_app_info_launch_uris_openbsd(GAppInfo* mApp, const char* uri,
 
   if (!result) {
     g_warning("Cannot launch application %s with arg %s: %s", bin, path,
-              (*error)->message);
+              *error ? (*error)->message : "<null error>");
     return FALSE;
   }
   return TRUE;
@@ -511,7 +512,8 @@ static NS_IMETHODIMP LaunchWithURIImpl(RefPtr<GAppInfo> aInfo, nsIURI* aUri,
       aInfo, &uris, GetLaunchContext(aXDGToken).get(), getter_Transfers(error));
 #endif
   if (!result) {
-    g_warning("Cannot launch application: %s", error->message);
+    g_warning("Cannot launch application: %s",
+              error ? error->message : "<null error>");
     return NS_ERROR_FAILURE;
   }
 
@@ -519,8 +521,8 @@ static NS_IMETHODIMP LaunchWithURIImpl(RefPtr<GAppInfo> aInfo, nsIURI* aUri,
 }
 
 NS_IMETHODIMP
-nsGIOMimeApp::LaunchWithURI(nsIURI* aUri,
-                            mozilla::dom::BrowsingContext* aBrowsingContext) {
+nsGIOMimeApp::LaunchWithURI(
+    nsIURI* aUri, mozilla::dom::BrowsingContext* /*aBrowsingContext*/) {
   auto promise = mozilla::widget::RequestWaylandFocusPromise();
   if (!promise) {
     return LaunchWithURIImpl(mApp, aUri);
@@ -532,7 +534,7 @@ nsGIOMimeApp::LaunchWithURI(nsIURI* aUri,
         LaunchWithURIImpl(app, uri, token.get());
       },
       /* reject */
-      [app = RefPtr{mApp}, uri = RefPtr{aUri}](bool state) {
+      [app = RefPtr{mApp}, uri = RefPtr{aUri}](bool /*state*/) {
         LaunchWithURIImpl(app, uri);
       });
   return NS_OK;
@@ -931,7 +933,7 @@ static nsresult ShowURIImpl(nsIURI* aURI, const char* aXDGToken = nullptr) {
 #endif
           getter_Transfers(error))) {
     g_warning("Could not launch default application for URI: %s",
-              error->message);
+              error ? error->message : "<null error>");
     return NS_ERROR_FAILURE;
   }
   return NS_OK;
@@ -952,7 +954,7 @@ nsresult nsGIOService::ShowURI(nsIURI* aURI) {
         ShowURIImpl(uri, token.get());
       },
       /* reject */
-      [uri = RefPtr{aURI}](bool state) {
+      [uri = RefPtr{aURI}](bool /*state*/) {
         LOG("nsGIOService::ShowURI() without XDG focus token");
         ShowURIImpl(uri);
       });
@@ -997,7 +999,7 @@ static nsresult LaunchPath(const nsACString& aPath) {
         LaunchPathImpl(path, token.get());
       },
       /* reject */
-      [path = nsCString{aPath}](bool state) {
+      [path = nsCString{aPath}](bool /*state*/) {
         LOG("LaunchPath() without XDG focus token");
         LaunchPathImpl(path);
       });
@@ -1095,7 +1097,7 @@ static nsresult RevealFileViaDBusWithProxy(GDBusProxy* aProxy, nsIFile* aFile,
             },
             [file = RefPtr{aFile}, aMethod](GUniquePtr<GError>&& aError) {
               g_printerr("Failed to query file manager via %s: %s\n", aMethod,
-                         aError->message);
+                         aError ? aError->message : "<null error>");
               RevealDirectory(file, /* aForce = */ true);
             });
   } else {
@@ -1130,7 +1132,7 @@ static nsresult RevealFileViaDBusWithProxy(GDBusProxy* aProxy, nsIFile* aFile,
             },
             [file = RefPtr{aFile}, aMethod](GUniquePtr<GError>&& aError) {
               g_printerr("Failed to query file manager via %s: %s\n", aMethod,
-                         aError->message);
+                         aError ? aError->message : "<null error>");
               RevealDirectory(file, /* aForce = */ true);
             });
   }
@@ -1152,7 +1154,7 @@ static void RevealFileViaDBus(nsIFile* aFile, const char* aName,
           },
           [file = RefPtr{aFile}, aName](GUniquePtr<GError>&& aError) {
             g_printerr("Failed to create DBUS proxy for %s: %s\n", aName,
-                       aError->message);
+                       aError ? aError->message : "<null error>");
             RevealDirectory(file, /* aForce = */ true);
           });
 }
@@ -1290,7 +1292,7 @@ nsGIOService::CreateAppFromCommand(nsACString const& cmd,
       G_APP_INFO_CREATE_SUPPORTS_URIS, getter_Transfers(error)));
   if (!app_info) {
     g_warning("Cannot create application info from command: %s",
-              error->message);
+              error ? error->message : "<null error>");
     return NS_ERROR_FAILURE;
   }
 
@@ -1304,4 +1306,76 @@ nsGIOService::CreateAppFromCommand(nsACString const& cmd,
   RefPtr<nsGIOMimeApp> mozApp = new nsGIOMimeApp(app_info.forget());
   mozApp.forget(appInfo);
   return NS_OK;
+}
+
+/**
+ * Create application info which runs an executable with one argument, the URI
+ * the application is launched with, or the path of the local file it names.
+ * @param aExecutable executable to run
+ * @param aAppName application name
+ * @param aPassURI true to pass the URI unchanged, false to pass the path
+ * @param aAppInfo location where created GAppInfo is stored
+ * @return NS_OK when object is created, NS_ERROR_FILE_NOT_FOUND when
+ * aExecutable is not an executable file or its path contains %, which GLib
+ * does not accept, NS_ERROR_NOT_IMPLEMENTED on OpenBSD, or NS_ERROR_FAILURE
+ * otherwise.
+ */
+NS_IMETHODIMP
+nsGIOService::CreateAppFromExecutable(nsIFile* aExecutable,
+                                      nsACString const& aAppName, bool aPassURI,
+                                      nsIGIOMimeApp** aAppInfo) {
+  NS_ENSURE_ARG(aExecutable);
+  *aAppInfo = nullptr;
+
+#ifdef __OpenBSD__
+  // g_app_info_launch_uris_openbsd() runs g_app_info_get_executable(), the Exec
+  // key up to its first space, with the path of a file URI only.
+  return NS_ERROR_NOT_IMPLEMENTED;
+#else
+  nsAutoCString path;
+  nsresult rv = aExecutable->GetNativePath(path);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  LOG("nsGIOService::CreateAppFromExecutable() %s : %s",
+      PromiseFlatCString(aAppName).get(), path.get());
+
+  GUniquePtr<gchar> quoted(g_shell_quote(path.get()));
+  nsAutoCString exec(quoted.get());
+  // In the Exec key, % starts a field code. GLib checks that the Exec key names
+  // an executable file before it expands field codes, so it refuses a path
+  // with % (https://gitlab.gnome.org/GNOME/glib/-/work_items/4111).
+  exec.ReplaceSubstring("%"_ns, "%%"_ns);
+  // %u passes the URI as it is, as X-GIO-NoFuse below keeps GLib from passing
+  // the path of a file URI instead, and %f passes the path of the local file.
+  exec.Append(aPassURI ? " %u" : " %f");
+
+  RefPtr<GKeyFile> keyFile = dont_AddRef(g_key_file_new());
+  g_key_file_set_string(keyFile, G_KEY_FILE_DESKTOP_GROUP,
+                        G_KEY_FILE_DESKTOP_KEY_TYPE,
+                        G_KEY_FILE_DESKTOP_TYPE_APPLICATION);
+  g_key_file_set_string(keyFile, G_KEY_FILE_DESKTOP_GROUP,
+                        G_KEY_FILE_DESKTOP_KEY_NAME,
+                        PromiseFlatCString(aAppName).get());
+  g_key_file_set_string(keyFile, G_KEY_FILE_DESKTOP_GROUP,
+                        G_KEY_FILE_DESKTOP_KEY_EXEC, exec.get());
+  g_key_file_set_boolean(keyFile, G_KEY_FILE_DESKTOP_GROUP,
+                         G_KEY_FILE_DESKTOP_KEY_NO_DISPLAY, TRUE);
+  // The activation token, which nsGIOMimeApp::LaunchWithURI() requests on
+  // Wayland, is passed only to an application with startup notification.
+  g_key_file_set_boolean(keyFile, G_KEY_FILE_DESKTOP_GROUP,
+                         G_KEY_FILE_DESKTOP_KEY_STARTUP_NOTIFY, TRUE);
+  g_key_file_set_boolean(keyFile, G_KEY_FILE_DESKTOP_GROUP, "X-GIO-NoFuse",
+                         TRUE);
+
+  // GLib refuses an Exec key which does not name an executable file.
+  RefPtr<GAppInfo> app_info =
+      dont_AddRef(G_APP_INFO(g_desktop_app_info_new_from_keyfile(keyFile)));
+  if (!app_info) {
+    LOG("  quit, not an executable file");
+    return NS_ERROR_FILE_NOT_FOUND;
+  }
+  RefPtr<nsGIOMimeApp> mozApp = new nsGIOMimeApp(app_info.forget());
+  mozApp.forget(aAppInfo);
+  return NS_OK;
+#endif
 }

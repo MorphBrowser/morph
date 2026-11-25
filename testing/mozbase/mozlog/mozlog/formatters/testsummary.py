@@ -12,21 +12,26 @@ class TestSummaryFormatter(BaseFormatter):
     """Passthrough formatter that emits only:
       - `group_start`, `group_end`, `suite_start`, `suite_end`, `test_start`
         and `test_end` actions
-      - `test_status` actions where the status differs from the expected
-        status (i.e. the subtest result was unexpected)
-      - `crash` and `ubsan_error` actions
+      - `test_status` actions whose status differs from the expected one
+        (unexpected or known intermittent subtest results), except those of
+        a run the harness will retry
+      - `crash`, `asan_error`, `tsan_error` and `ubsan_error` actions
       - `log` actions of level ERROR or CRITICAL (failures not tied to a
         test, e.g. LeakSanitizer reports or harness errors)
       - `mozleak_total` actions that exceed their threshold or lack a total
         line (the leakcheck failures the TBPL formatter prints as
         TEST-UNEXPECTED-FAIL)
+      - `lsan_summary` actions not marked `allowed` and `lsan_leak` actions
+        without an `allowed_match` (the LeakSanitizer lines the TBPL
+        formatter prints at ERROR or as TEST-UNEXPECTED-FAIL)
 
     All other actions are dropped.
 
-    In addition, the fields `thread`, `pid`, `source`, `extra`, `tests`, `js_source`, `minidump_path`, `crashing_thread_stack`, `stack` and any
-    field whose name starts with `stackwalk_` are stripped from every
-    emitted record, except that `stack` is preserved for `crash` and
-    `ubsan_error` actions
+    In addition, the fields `thread`, `pid`, `source`, `extra`, `tests`,
+    `js_source`, `crashing_thread_stack` and any field whose name starts with
+    `stackwalk_` are stripped from every emitted record, except that
+    `asan_error` and `tsan_error` keep `pid`, which names the crashing or
+    racing process rather than the logging one
     """
 
     _ALLOWED_ACTIONS = frozenset({
@@ -38,42 +43,46 @@ class TestSummaryFormatter(BaseFormatter):
         "test_end",
         "test_status",
         "crash",
+        "asan_error",
+        "tsan_error",
         "ubsan_error",
         "log",
         "mozleak_total",
+        "lsan_summary",
+        "lsan_leak",
     })
     _ALWAYS_STRIP = frozenset({
         "crashing_thread_stack",
         "extra",
         "js_source",
-        "minidump_path",
         "pid",
         "source",
-        "stack",
         "tests",
         "thread",
     })
-    _KEEP_STACK_ACTIONS = frozenset({"crash", "ubsan_error"})
-    _ALWAYS_STRIP_KEEP_STACK = _ALWAYS_STRIP - {"stack"}
 
     def __call__(self, data):
         action = data.get("action")
         if action not in self._ALLOWED_ACTIONS:
             return
         if action == "test_status" and (
-            "expected" not in data or data["expected"] == data.get("status")
+            "expected" not in data
+            or data["expected"] == data.get("status")
+            or data.get("will_retry")
         ):
             return
         if action == "log" and data.get("level") not in ("ERROR", "CRITICAL"):
             return
         if action == "mozleak_total" and not self._mozleak_total_failed(data):
             return
+        if action == "lsan_summary" and data.get("allowed"):
+            return
+        if action == "lsan_leak" and data.get("allowed_match"):
+            return
 
-        if action in self._KEEP_STACK_ACTIONS:
-            strip = self._ALWAYS_STRIP_KEEP_STACK
-        else:
-            strip = self._ALWAYS_STRIP
-
+        strip = self._ALWAYS_STRIP
+        if action in ("asan_error", "tsan_error"):
+            strip = strip - {"pid"}
         data = {
             k: v
             for k, v in data.items()

@@ -6,6 +6,8 @@
 
 #include "js/ForOfIterator.h"  // JS::ForOfIterator
 #include "json/json.h"
+#include "mozilla/ScopeExit.h"
+#include "mozilla/StaticPtr.h"
 #include "mozilla/dom/AutoEntryScript.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Element.h"
@@ -14,6 +16,8 @@
 #include "mozilla/intl/LocaleService.h"
 #include "nsContentUtils.h"
 #include "nsIScriptError.h"
+#include "nsTHashMap.h"
+#include "nsThreadUtils.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -155,7 +159,8 @@ void DOMLocalization::SetAttributes(
     }
     if (!aElement.AttrValueIs(kNameSpaceID_None, nsGkAtoms::datal10nargs, data,
                               eCaseMatters)) {
-      aElement.SetAttr(kNameSpaceID_None, nsGkAtoms::datal10nargs, data, true);
+      aElement.SetAttr(kNameSpaceID_None, nsGkAtoms::datal10nargs, data, true,
+                       IsKnownNewAttr::No);
     }
   } else {
     aElement.UnsetAttr(kNameSpaceID_None, nsGkAtoms::datal10nargs, true);
@@ -163,7 +168,8 @@ void DOMLocalization::SetAttributes(
 
   if (!aElement.AttrValueIs(kNameSpaceID_None, nsGkAtoms::datal10nid, aId,
                             eCaseMatters)) {
-    aElement.SetAttr(kNameSpaceID_None, nsGkAtoms::datal10nid, aId, true);
+    aElement.SetAttr(kNameSpaceID_None, nsGkAtoms::datal10nid, aId, true,
+                     IsKnownNewAttr::No);
   }
 }
 
@@ -195,7 +201,8 @@ void DOMLocalization::SetArgs(JSContext* aCx, Element& aElement,
     }
     if (!aElement.AttrValueIs(kNameSpaceID_None, nsGkAtoms::datal10nargs, data,
                               eCaseMatters)) {
-      aElement.SetAttr(kNameSpaceID_None, nsGkAtoms::datal10nargs, data, true);
+      aElement.SetAttr(kNameSpaceID_None, nsGkAtoms::datal10nargs, data, true,
+                       IsKnownNewAttr::No);
     }
   } else {
     aElement.UnsetAttr(kNameSpaceID_None, nsGkAtoms::datal10nargs, true);
@@ -212,6 +219,29 @@ already_AddRefed<Promise> DOMLocalization::TranslateFragment(nsINode& aNode,
   return TranslateElements(elements, aRv);
 }
 
+namespace {
+
+struct PendingTranslation {
+  uint64_t mLastAppliedRequestId = 0;
+  uint32_t mOutstandingRequests = 0;
+};
+
+// Elements with a translation request in flight, shared by all
+// DOMLocalizations. Keys are kept alive by the ElementTranslationHandler that
+// registered them, and each entry is removed once its last request is done.
+StaticAutoPtr<nsTHashMap<nsPtrHashKey<Element>, PendingTranslation>>
+    sPendingTranslations;
+
+uint64_t sLastRequestId = 0;
+
+PendingTranslation* GetPendingTranslation(Element* aElement) {
+  return sPendingTranslations
+             ? sPendingTranslations->Lookup(aElement).DataPtrOrNull()
+             : nullptr;
+}
+
+}  // namespace
+
 /**
  * A Promise Handler used to apply the result of
  * a call to Localization::FormatMessages onto the list
@@ -219,21 +249,60 @@ already_AddRefed<Promise> DOMLocalization::TranslateFragment(nsINode& aNode,
  */
 class ElementTranslationHandler : public PromiseNativeHandler {
  public:
-  explicit ElementTranslationHandler(DOMLocalization* aDOMLocalization,
-                                     nsXULPrototypeDocument* aProto)
-      : mDOMLocalization(aDOMLocalization), mProto(aProto) {};
+  ElementTranslationHandler(DOMLocalization* aDOMLocalization,
+                            nsXULPrototypeDocument* aProto)
+      : mDOMLocalization(aDOMLocalization),
+        mProto(aProto),
+        mRequestId(++sLastRequestId) {
+    MOZ_ASSERT(NS_IsMainThread());
+  }
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_CYCLE_COLLECTION_CLASS(ElementTranslationHandler)
 
   nsTArray<nsCOMPtr<Element>>& Elements() { return mElements; }
 
+  uint64_t RequestId() const { return mRequestId; }
+
   void SetReturnValuePromise(Promise* aReturnValuePromise) {
     mReturnValuePromise = aReturnValuePromise;
   }
 
-  virtual void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
-                                ErrorResult& aRv) override {
+  void RegisterPending() {
+    MOZ_ASSERT(!mRegisteredAsPending);
+    if (mElements.IsEmpty()) {
+      return;
+    }
+    if (!sPendingTranslations) {
+      sPendingTranslations =
+          new nsTHashMap<nsPtrHashKey<Element>, PendingTranslation>();
+    }
+    for (Element* elem : mElements) {
+      sPendingTranslations->LookupOrInsert(elem).mOutstandingRequests++;
+    }
+    mRegisteredAsPending = true;
+  }
+
+  void UnregisterPending() {
+    if (!mRegisteredAsPending) {
+      return;
+    }
+    mRegisteredAsPending = false;
+    for (Element* elem : mElements) {
+      auto entry = sPendingTranslations->Lookup(elem);
+      MOZ_ASSERT(entry);
+      if (--entry->mOutstandingRequests == 0) {
+        entry.Remove();
+      }
+    }
+    if (sPendingTranslations->IsEmpty()) {
+      sPendingTranslations = nullptr;
+    }
+  }
+
+  void ResolvedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                        ErrorResult& aRv) override {
+    auto unregister = MakeScopeExit([&] { UnregisterPending(); });
     ErrorResult rv;
 
     nsTArray<Nullable<L10nMessage>> l10nData;
@@ -276,8 +345,8 @@ class ElementTranslationHandler : public PromiseNativeHandler {
       }
     }
 
-    bool allTranslated =
-        mDOMLocalization->ApplyTranslations(mElements, l10nData, mProto, rv);
+    bool allTranslated = mDOMLocalization->ApplyTranslations(
+        mElements, l10nData, mProto, mRequestId, rv);
     if (NS_WARN_IF(rv.Failed()) || !allTranslated) {
       mReturnValuePromise->MaybeRejectWithUndefined();
       return;
@@ -286,18 +355,21 @@ class ElementTranslationHandler : public PromiseNativeHandler {
     mReturnValuePromise->MaybeResolveWithUndefined();
   }
 
-  virtual void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
-                                ErrorResult& aRv) override {
+  void RejectedCallback(JSContext* aCx, JS::Handle<JS::Value> aValue,
+                        ErrorResult& aRv) override {
+    UnregisterPending();
     mReturnValuePromise->MaybeRejectWithClone(aCx, aValue);
   }
 
  private:
-  ~ElementTranslationHandler() = default;
+  ~ElementTranslationHandler() { UnregisterPending(); }
 
   nsTArray<nsCOMPtr<Element>> mElements;
   RefPtr<DOMLocalization> mDOMLocalization;
   RefPtr<Promise> mReturnValuePromise;
   RefPtr<nsXULPrototypeDocument> mProto;
+  const uint64_t mRequestId;
+  bool mRegisteredAsPending = false;
 };
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(ElementTranslationHandler)
@@ -310,6 +382,7 @@ NS_IMPL_CYCLE_COLLECTING_ADDREF(ElementTranslationHandler)
 NS_IMPL_CYCLE_COLLECTING_RELEASE(ElementTranslationHandler)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(ElementTranslationHandler)
+  tmp->UnregisterPending();
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mElements)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mDOMLocalization)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mReturnValuePromise)
@@ -331,6 +404,8 @@ already_AddRefed<Promise> DOMLocalization::TranslateElements(
 already_AddRefed<Promise> DOMLocalization::TranslateElements(
     const nsTArray<OwningNonNull<Element>>& aElements,
     nsXULPrototypeDocument* aProto, ErrorResult& aRv) {
+  MOZ_ASSERT(NS_IsMainThread());
+
   Sequence<OwningUTF8StringOrL10nIdArgs> l10nKeys;
   RefPtr<ElementTranslationHandler> nativeHandler =
       new ElementTranslationHandler(this, aProto);
@@ -370,7 +445,16 @@ already_AddRefed<Promise> DOMLocalization::TranslateElements(
     return nullptr;
   }
 
+  if (domElements.IsEmpty()) {
+    promise->MaybeResolveWithUndefined();
+    return promise.forget();
+  }
+
   if (IsSync()) {
+    nativeHandler->RegisterPending();
+    auto unregister =
+        MakeScopeExit([&] { nativeHandler->UnregisterPending(); });
+
     nsTArray<Nullable<L10nMessage>> l10nMessages;
 
     FormatMessagesSync(l10nKeys, l10nMessages, aRv);
@@ -380,8 +464,8 @@ already_AddRefed<Promise> DOMLocalization::TranslateElements(
       return promise.forget();
     }
 
-    bool allTranslated =
-        ApplyTranslations(domElements, l10nMessages, aProto, aRv);
+    bool allTranslated = ApplyTranslations(domElements, l10nMessages, aProto,
+                                           nativeHandler->RequestId(), aRv);
     if (NS_WARN_IF(aRv.Failed()) || !allTranslated) {
       promise->MaybeRejectWithUndefined();
       return promise.forget();
@@ -390,6 +474,8 @@ already_AddRefed<Promise> DOMLocalization::TranslateElements(
     promise->MaybeResolveWithUndefined();
     return promise.forget();
   }
+
+  nativeHandler->RegisterPending();
   RefPtr<Promise> callbackResult = FormatMessages(l10nKeys, aRv);
   if (NS_WARN_IF(aRv.Failed())) {
     return nullptr;
@@ -490,26 +576,25 @@ void DOMLocalization::SetRootInfo(Element* aElement) {
   nsAutoCString primaryLocale;
   LocaleService::GetInstance()->GetAppLocaleAsBCP47(primaryLocale);
   aElement->SetAttr(kNameSpaceID_None, nsGkAtoms::lang,
-                    NS_ConvertUTF8toUTF16(primaryLocale), true);
+                    NS_ConvertUTF8toUTF16(primaryLocale), true,
+                    IsKnownNewAttr::No);
 
-  nsAutoString dir;
-  if (LocaleService::GetInstance()->IsAppLocaleRTL()) {
-    nsGkAtoms::rtl->ToString(dir);
-  } else {
-    nsGkAtoms::ltr->ToString(dir);
-  }
+  const nsAtom* dirValue = LocaleService::GetInstance()->IsAppLocaleRTL()
+                               ? nsGkAtoms::rtl
+                               : nsGkAtoms::ltr;
 
   uint32_t nameSpace = aElement->GetNameSpaceID();
   nsAtom* dirAtom =
       nameSpace == kNameSpaceID_XUL ? nsGkAtoms::localedir : nsGkAtoms::dir;
 
-  aElement->SetAttr(kNameSpaceID_None, dirAtom, dir, true);
+  aElement->SetAttr(kNameSpaceID_None, dirAtom, nsDependentAtomString(dirValue),
+                    true, IsKnownNewAttr::No);
 }
 
 bool DOMLocalization::ApplyTranslations(
     nsTArray<nsCOMPtr<Element>>& aElements,
     nsTArray<Nullable<L10nMessage>>& aTranslations,
-    nsXULPrototypeDocument* aProto, ErrorResult& aRv) {
+    nsXULPrototypeDocument* aProto, uint64_t aRequestId, ErrorResult& aRv) {
   if (aElements.Length() != aTranslations.Length()) {
     aRv.Throw(NS_ERROR_FAILURE);
     return false;
@@ -541,17 +626,29 @@ bool DOMLocalization::ApplyTranslations(
     if (!elem->HasAttr(nsGkAtoms::datal10nid)) {
       continue;
     }
+    // Requests are formatted asynchronously and can resolve out of order, so
+    // don't replace a translation with one from an older request.
+    PendingTranslation* pending = GetPendingTranslation(elem);
+    if (pending && pending->mLastAppliedRequestId > aRequestId) {
+      continue;
+    }
     L10nOverlays::TranslateElement(*elem, aTranslations[i].Value(), errors,
                                    aRv);
     if (NS_WARN_IF(aRv.Failed())) {
       hasMissingTranslation = true;
       continue;
     }
+    // TranslateElement can run script that starts other requests and
+    // rehashes the map, so don't reuse `pending`.
+    if (PendingTranslation* applied = GetPendingTranslation(elem)) {
+      applied->mLastAppliedRequestId =
+          std::max(applied->mLastAppliedRequestId, aRequestId);
+    }
     if (aProto) {
       // We only need to rebuild deep if the translation has a value.
       // Otherwise we'll only rebuild the attributes.
-      aProto->RebuildL10nPrototype(elem,
-                                   !aTranslations[i].Value().mValue.IsVoid());
+      aProto->MaybeRebuildPrototypeAfterTranslation(
+          elem, !aTranslations[i].Value().mValue.IsVoid());
     }
   }
 

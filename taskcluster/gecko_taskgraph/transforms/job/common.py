@@ -245,6 +245,33 @@ def add_tooltool(config, job, taskdesc, internal=False):
         ])
 
 
+def add_gradle(config, job, taskdesc, mode):
+    gradle_user_home = "{workdir}/gradle-user-home".format(**job["run"])
+    flags = ["--daemon"]
+    if mode == "offline":
+        flags.insert(0, "--offline")
+    taskdesc["worker"].setdefault("env", {}).update({
+        "GRADLE_FLAGS": " ".join(flags),
+        "GRADLE_USER_HOME": gradle_user_home,
+    })
+    if job.get("use-gradle-cache"):
+        if mode != "offline":
+            raise Exception("use-gradle-cache requires use-gradle: offline")
+        add_cache(job, taskdesc, "gradle-user-home", gradle_user_home)
+        toolchains = taskdesc.get("fetches", {}).get("toolchain", [])
+        if dependencies := next(
+            (t for t in toolchains if "android-gradle-dependencies" in t), None
+        ):
+            toolchains.append({
+                "name": dependencies,
+                "artifact": "public/build/gradle-user-home-seed.tar.zst",
+                "extract": False,
+            })
+            taskdesc["worker"]["env"]["MOZ_GRADLE_USER_HOME_SEED"] = (
+                f"{job['run']['workdir']}/fetches/gradle-user-home-seed.tar.zst"
+            )
+
+
 def get_expiration(config, policy="default"):
     expires = evaluate_keyed_by(
         config.graph_config["expiration-policy"],

@@ -26,7 +26,6 @@ ChromeUtils.defineESModuleGetters(this, {
   FxAccounts: "resource://gre/modules/FxAccounts.sys.mjs",
   MenuMessage: "resource:///modules/asrouter/MenuMessage.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
-  Referrals: "moz-src:///browser/components/referrals/Referrals.sys.mjs",
   SyncedTabs: "resource://services-sync/SyncedTabs.sys.mjs",
   SyncedTabsManagement: "resource://services-sync/SyncedTabs.sys.mjs",
   Weave: "resource://services-sync/main.sys.mjs",
@@ -1397,6 +1396,15 @@ var gSync = {
       ) {
         this.updateAllUI(state);
       }
+    } else if (
+      this._hasSignedOutOfSync &&
+      document.documentElement.getAttribute("fxastatus") == "not_configured"
+    ) {
+      // UIState only notifies once ready if the status changed from its
+      // not-configured default, so a signed-out user would never get an
+      // update. Start from that default unless startup guessed a signed-in
+      // user, who will be notified.
+      this.updateAllUI(UIState.get());
     }
   },
 
@@ -1454,11 +1462,11 @@ var gSync = {
     // due to a timing error. The fluent label attribute was being applied
     // after we had updated appMenuLabel and thus displayed an incorrect
     // label for signed in users.
-    const novaFxaLabel = PanelMultiView.getViewNode(
+    const fxaSignInButton = PanelMultiView.getViewNode(
       document,
       "appMenu-nova-fxa-label"
     );
-    const [headerDesc, headerText, novaSignIn] =
+    const [headerDesc, headerText, signInLabel] =
       this.fluentStrings.formatValuesSync([
         "appmenu-fxa-signed-in-label",
         "appmenu-fxa-sync-and-save-data2",
@@ -1466,8 +1474,8 @@ var gSync = {
       ]);
     appMenuHeaderDescription.value = headerDesc;
     appMenuHeaderText.textContent = headerText;
-    if (novaFxaLabel) {
-      novaFxaLabel.label = novaSignIn;
+    if (fxaSignInButton) {
+      fxaSignInButton.label = signInLabel;
     }
 
     // The signed-out row's copy comes from sync.ftl, which is only inserted
@@ -1991,9 +1999,6 @@ var gSync = {
         break;
       case "PanelUI-fxa-menu-vpn-button":
         this.openVPNLink(button);
-        break;
-      case "PanelUI-fxa-menu-share-firefox":
-        this.openShareFirefoxLink();
         break;
       case "PanelUI-fxa-menu-sendtab-sign-in-button":
         this.signInToSync(button);
@@ -3483,15 +3488,8 @@ var gSync = {
     );
 
     let hasOnlyMobileTargets = this.hasOnlyMobileSendTabTargets();
-    let sendLinkToDevice = document.getElementById("context-sendlinktodevice");
     let sendPageToDevice = document.getElementById("context-sendpagetodevice");
 
-    sendLinkToDevice.setAttribute(
-      "data-l10n-id",
-      hasOnlyMobileTargets
-        ? "main-context-menu-link-send-to-mobile"
-        : "main-context-menu-link-send-to-device"
-    );
     sendPageToDevice.setAttribute(
       "data-l10n-id",
       hasOnlyMobileTargets
@@ -4081,16 +4079,6 @@ var gSync = {
       descriptionId: "appmenuitem-vpn-description5",
     });
 
-    // Share Firefox checks
-    let shareFirefoxPanelEl = PanelMultiView.getViewNode(
-      document,
-      "PanelUI-fxa-menu-share-firefox"
-    );
-    shareFirefoxPanelEl.hidden = !Services.prefs.getBoolPref(
-      "browser.referrals.enabled",
-      false
-    );
-
     let privacyToolsSeparatorEl = PanelMultiView.getViewNode(
       document,
       "PanelUI-fxa-menu-privacy-tools-separator"
@@ -4156,11 +4144,6 @@ var gSync = {
       this._ctaURL(VPN_NEW_USER_URL, "new-user-global"),
       this._ctaURL(VPN_EXISTING_USER_URL, "existing-user-global")
     );
-  },
-
-  openShareFirefoxLink() {
-    Referrals.openReferralsTab(window, "accounts_menu");
-    PanelUI.hide();
   },
 
   /**

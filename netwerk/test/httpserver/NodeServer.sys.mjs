@@ -25,7 +25,7 @@ class BaseNodeHTTPServerCode {
   }
 }
 
-class ADB {
+export class ADB {
   static async stopForwarding(port) {
     return this.forwardPort(port, true);
   }
@@ -72,14 +72,41 @@ class ADB {
     return true;
   }
 
-  static async listenAndForwardPort(server, port) {
+  // Binds both loopback addresses; a wildcard can share its port on macOS and Windows.
+  static async listenOnLoopback(server, port) {
+    const net = require("net");
     const { once } = require("events");
+    server.listen(port, "127.0.0.1"); // Not awaitable; once() rejects on `error`.
+    await once(server, "listening");
+    const ipv6 = net.createServer(socket => server.emit("connection", socket));
+    ipv6.listen(server.address().port, "::1");
+    try {
+      await once(ipv6, "listening");
+    } catch (e) {
+      if (e.code === "EADDRNOTAVAIL" || e.code === "EAFNOSUPPORT") {
+        return; // No IPv6 loopback.
+      }
+      await new Promise(resolve => server.close(resolve));
+      throw e;
+    }
+    server.once("close", () => ipv6.close());
+  }
+
+  static async listenAndForwardPort(server, port) {
     let retryCount = 0;
     const maxRetries = 10;
 
     while (retryCount < maxRetries) {
-      server.listen(port); // Not awaitable; once() rejects on `error`.
-      await once(server, "listening");
+      try {
+        await ADB.listenOnLoopback(server, port);
+      } catch (e) {
+        if (port || e.code !== "EADDRINUSE") {
+          throw e;
+        }
+        retryCount++;
+        console.log(`Port is taken on ::1 (${e}), retrying`);
+        continue;
+      }
       let serverPort = server.address().port;
       let res = await ADB.forwardPort(serverPort);
 
@@ -330,6 +357,21 @@ class NodeNoResponseUdpCode {
   }
 }
 
+/// Runs start(), then claim() on the port start() got; if claim() fails,
+/// runs stop() and retries, so both end up on one port free for each.
+export async function startOnSharedPort(start, claim, stop, maxRetries = 20) {
+  for (let retry = 0; retry < maxRetries; retry++) {
+    await start();
+    try {
+      return await claim();
+    } catch (e) {
+      console.log(`Port is taken (${e}), retrying`);
+      await stop();
+    }
+  }
+  throw new Error("No port was free for both servers");
+}
+
 export class BaseNodeServer {
   protocol() {
     return this._protocol;
@@ -498,18 +540,15 @@ export class BaseNodeServer {
 
   /// Starts the server on a port free for TCP and UDP alike, holding the UDP
   /// side bound but never answering, so that nothing else can claim it.
-  async startWithNoResponseUdpPort(maxRetries = 10) {
-    for (let retry = 0; retry < maxRetries; retry++) {
-      await this.start();
-      try {
+  async startWithNoResponseUdpPort(start = () => this.start()) {
+    return startOnSharedPort(
+      start,
+      async () => {
         await this.execute(NodeNoResponseUdpCode);
-        return await this.execute(`NodeNoResponseUdpCode.bind(${this.port()})`);
-      } catch (e) {
-        console.log(`UDP port ${this.port()} is taken (${e}), retrying`);
-        await this.stop();
-      }
-    }
-    throw new Error("No port was free for both TCP and UDP");
+        return this.execute(`NodeNoResponseUdpCode.bind(${this.port()})`);
+      },
+      () => this.stop()
+    );
   }
 
   /// Stops the server
@@ -816,11 +855,12 @@ export class NodeHTTPSServer extends BaseNodeServer {
 // HTTP2
 
 class NodeHTTP2ServerCode extends BaseNodeHTTPServerCode {
-  static async startServer(port) {
+  static async startServer(port, allowHTTP1) {
     const fs = require("fs");
     const options = {
       key: global.tlsKey || fs.readFileSync(__dirname + "/http2-cert.key"),
       cert: global.tlsCert || fs.readFileSync(__dirname + "/http2-cert.pem"),
+      allowHTTP1,
     };
     const http2 = require("http2");
     global.server = http2.createSecureServer(
@@ -850,6 +890,8 @@ class NodeHTTP2ServerCode extends BaseNodeHTTPServerCode {
 export class NodeHTTP2Server extends BaseNodeServer {
   _protocol = "https";
   _version = "h2";
+  // When true, also accepts HTTP/1.1 clients. Must be set before start().
+  allowHTTP1 = false;
   /// Starts the server
   /// @port - default 0
   ///    when provided, will attempt to listen on that port.
@@ -863,13 +905,107 @@ export class NodeHTTP2Server extends BaseNodeServer {
     await this.execute(NodeHTTP2ServerCode);
     await this.execute(ADB);
     await this._pushGeneratedTLSMaterial();
-    this._port = await this.execute(`NodeHTTP2ServerCode.startServer(${port})`);
+    this._port = await this.execute(
+      `NodeHTTP2ServerCode.startServer(${port}, ${this.allowHTTP1})`
+    );
     await this.execute(`global.path_handlers = {};`);
   }
 
   async sessionCount() {
     let count = this.execute(`NodeHTTP2ServerCode.sessionCount()`);
     return count;
+  }
+}
+
+// HTTP2 server using the vendored node-http2 library instead of Node's http2
+// module. The library can be patched to produce protocol errors on demand.
+
+class NodeLegacyHTTP2ServerCode extends BaseNodeHTTPServerCode {
+  static async startServer(port) {
+    const fs = require("fs");
+    global.http2Lib = require(`${__dirname}/../node-http2`);
+    const options = {
+      key: global.tlsKey || fs.readFileSync(__dirname + "/http2-cert.key"),
+      cert: global.tlsCert || fs.readFileSync(__dirname + "/http2-cert.pem"),
+    };
+    global.server = global.http2Lib.createServer(
+      options,
+      NodeLegacyHTTP2ServerCode.handleRequest
+    );
+    // Clients tearing down connections cause socket errors; ignore them.
+    global.server.on("connection", socket => socket.on("error", () => {}));
+    // CONNECT is only supported over HTTP/2.
+    global.server.on("connect", (req, clientSocket) => {
+      clientSocket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+      clientSocket.destroy();
+    });
+    // Handlers can throw from timers, which must not take the server down.
+    process.on("uncaughtException", e => {
+      console.log(`NodeLegacyHTTP2Server uncaught exception: ${e.stack}`);
+    });
+    // The library wraps an https.Server, which is what listens and accepts.
+    return ADB.listenAndForwardPort(global.server._server, port);
+  }
+
+  static handleRequest(req, res) {
+    try {
+      if (req.method == "CONNECT") {
+        if (global.connect_handler) {
+          return global.connect_handler(req, res);
+        }
+        res.writeHead(405);
+        res.end();
+        return undefined;
+      }
+      if (global.request_handler) {
+        return global.request_handler(req, res);
+      }
+      return BaseNodeHTTPServerCode.globalHandler(req, res);
+    } catch (e) {
+      console.log(`NodeLegacyHTTP2Server handler exception: ${e.stack}`);
+      try {
+        res.writeHead(500, { "content-type": "text/plain" });
+        res.end(`handler exception: ${e.message}`);
+      } catch (_) {
+        // The response may already be unusable.
+      }
+    }
+    return undefined;
+  }
+}
+
+export class NodeLegacyHTTP2Server extends BaseNodeServer {
+  _protocol = "https";
+  _version = "h2";
+  /// Starts the server
+  /// @port - default 0
+  ///    when provided, will attempt to listen on that port.
+  async start(port = 0, hostnames) {
+    if (!this._skipCert) {
+      await this.installCert(hostnames);
+    }
+    this.processId = this.processId || (await NodeServer.fork());
+
+    await this.execute(BaseNodeHTTPServerCode);
+    await this.execute(NodeLegacyHTTP2ServerCode);
+    await this.execute(ADB);
+    await this._pushGeneratedTLSMaterial();
+    this._port = await this.execute(
+      `NodeLegacyHTTP2ServerCode.startServer(${port})`
+    );
+    await this.execute(`global.path_handlers = {};`);
+  }
+
+  /// Handles every request that isn't a CONNECT, instead of the path handlers.
+  /// @handler : function(req, resp)
+  async setRequestHandler(handler) {
+    return this.execute(`global.request_handler = ${handler.toString()}`);
+  }
+
+  /// Handles CONNECT requests, making the server act as a proxy.
+  /// @handler : function(req, resp)
+  async setConnectHandler(handler) {
+    return this.execute(`global.connect_handler = ${handler.toString()}`);
   }
 }
 

@@ -58,6 +58,31 @@ TEST(VpxImageTest, VpxImgWrapI42xOddWidth) {
   }
 }
 
+TEST(VpxImageTest, VpxImgWrapNV12OddWidth) {
+  vpx_image_t img;
+  unsigned char buf[1];  // Should not be read
+
+  for (const int width : { 1, 711, 4913 }) {
+    const int uv_stride_in_bytes = 2 * ((width + 1) / 2);
+
+    EXPECT_EQ(vpx_img_wrap(&img, VPX_IMG_FMT_NV12, width, 32,
+                           /*stride_align=*/1, buf),
+              &img);
+    EXPECT_EQ(img.stride[VPX_PLANE_Y], width);
+    EXPECT_EQ(img.stride[VPX_PLANE_U], uv_stride_in_bytes);
+    EXPECT_EQ(img.stride[VPX_PLANE_V], uv_stride_in_bytes);
+    EXPECT_EQ(img.planes[VPX_PLANE_V], img.planes[VPX_PLANE_U] + 1);
+
+    const int aligned_stride = (width + 15) & ~15;
+    EXPECT_EQ(vpx_img_wrap(&img, VPX_IMG_FMT_NV12, width, 32,
+                           /*stride_align=*/16, buf),
+              &img);
+    EXPECT_EQ(img.stride[VPX_PLANE_Y], aligned_stride);
+    EXPECT_EQ(img.stride[VPX_PLANE_U], aligned_stride);
+    EXPECT_EQ(img.stride[VPX_PLANE_V], aligned_stride);
+  }
+}
+
 TEST(VpxImageTest, VpxImgWrapOddHeightSeparatesChromaPlanes) {
   static constexpr vpx_img_fmt_t kFormats[] = {
     VPX_IMG_FMT_YV12,   VPX_IMG_FMT_I420,   VPX_IMG_FMT_I440,
@@ -257,6 +282,23 @@ TEST(VpxImageTest, VpxImgFlipOneRow) {
   EXPECT_EQ(img->stride[VPX_PLANE_U], u_stride);
   EXPECT_EQ(img->stride[VPX_PLANE_V], v_stride);
 
+  vpx_img_free(img);
+}
+
+TEST(VpxImageTest, VpxImgFlipEmpty) {
+  vpx_image_t *img = vpx_img_alloc(nullptr, VPX_IMG_FMT_I420, 16, 16, 1);
+  ASSERT_NE(img, nullptr);
+  ASSERT_EQ(vpx_img_set_rect(img, 0, 0, 16, 0), 0);
+  const unsigned char *const planes[] = { img->planes[VPX_PLANE_Y],
+                                          img->planes[VPX_PLANE_U],
+                                          img->planes[VPX_PLANE_V] };
+
+  vpx_img_flip(img);
+
+  for (int plane = VPX_PLANE_Y; plane <= VPX_PLANE_V; ++plane) {
+    EXPECT_EQ(img->planes[plane], planes[plane]);
+    EXPECT_GT(img->stride[plane], 0);
+  }
   vpx_img_free(img);
 }
 

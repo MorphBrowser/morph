@@ -72,7 +72,7 @@ This kind performs a standalone bootstrap of a Firefox build from various system
 
 Hazard builds are similar to "regular' builds, but use a compiler extension to
 extract a bunch of data from the build and then analyze that data looking for
-hazardous behaviors. See <https://firefox-source-docs.mozilla.org/js/HazardAnalysis/index.html>
+hazardous behaviors. See {doc}`/js/HazardAnalysis/index`
 
 ## l10n
 
@@ -83,6 +83,10 @@ to exercise the localized repack logic in CI.
 
 Tests the Firefox Linux installer script (``browser/installer/linux/script/install-firefox.sh``)
 across distros, install methods, channels, locales, and architectures.
+
+## install-script-signing
+
+Signs ``install-firefox.sh`` with autograph GPG, producing a detached ``.asc`` signature.
 
 ## shippable-l10n
 
@@ -113,6 +117,15 @@ endpoint for notarizing apps.
 
 Downstream tasks switch to build-mac-signing in non-shippable builds or level 1
 environments.
+
+## source-artifact
+
+Exposes files from the source tree as artifacts for other tasks. Each task fetches
+its files from GitHub at the revision being built, without a checkout, and publishes
+them under ``public/build`` so downstream tasks can sign, test or publish them.
+
+For example, ``install-firefox.sh`` is fetched here, then signed by
+``install-script-signing`` and published by ``beetmover-install-script``.
 
 ## source-test
 
@@ -165,10 +178,12 @@ Toolchain builds create the compiler toolchains used to build Firefox. These
 will eventually be dependencies of the builds themselves, but for the moment
 are run manually via try pushes and the results uploaded to tooltool.
 
-## toolchain-dxc-upload
+## toolchain-symbols-upload
 
-Upload Windows symbols for `DirectXShaderCompiler` to tecken, based on builds in `toolchain-dxc`.
-Maintained by Firefox's WebGPU team.
+Upload symbols to tecken for the libraries built by `toolchain` tasks, which the
+Gecko build copies into `dist/bin` rather than building itself and so never dumps
+symbols for. Pairs with each toolchain task setting `enable-full-crashsymbols`:
+currently `dxcompiler.dll` and `onnxruntime`.
 
 ## spidermonkey
 
@@ -280,6 +295,12 @@ promotion.
 ## beetmover-source
 
 Beetmover-source publishes release source. This is part of release promotion.
+
+## beetmover-install-script
+
+Publishes the signed ``install-firefox.sh`` (and its detached signature) to the
+bucket backing ``linux.firefox.com``. Runs automatically on mozilla-central; the
+staging variant only runs via an explicit try selection.
 
 ## beetmover-geckoview
 
@@ -469,10 +490,6 @@ Generates attributed versions of releases for partners.
 
 Chunks the partner repacks by locale.
 
-## release-partner-repack-signing
-
-Internal signing of partner repacks.
-
 ## release-partner-repack-mac-signing
 
 Mac signing without notarization.
@@ -513,15 +530,11 @@ Sets up bouncer products for partners.
 
 ## release-early-tagging
 
-Utilises treescript to perform tagging that should happen near the start of a release.
+Utilises landoscript to perform tagging that should happen near the start of a release.
 
 ## release-eme-free-repack
 
 Generates customized versions of releases for eme-free repacks.
-
-## release-eme-free-repack-signing
-
-Internal signing of eme-free repacks
 
 ## release-eme-free-repack-repackage
 
@@ -771,6 +784,13 @@ Tasks that take a build configured for PGO and run the binary against a sample
 set to generate profile data. This is the 2nd stage of the full 3-step PGO
 process.
 
+## pgo-coverage
+
+Tasks that report which source directories the training run of a
+generate-profile task executes code from, as a `pgo-coverage.txt` artifact and
+in Perfherder, to find what the PGO training corpus misses. They run apart from
+the 3-step PGO process so that they don't delay the PGO build.
+
 ## geckodriver-signing
 
 Signing for geckodriver binary.
@@ -947,6 +967,9 @@ Push Focus, Klar and Fenix to the Android app stores: AABs to Google Play,
 Focus and Fenix APKs to the Samsung Galaxy Store, Fenix APKs to the Huawei
 AppGallery, and the Fenix universal APK to the vivo App Store.
 
+During release promotion's push phase at level 3, Samsung, Huawei and vivo
+submissions are scheduled for `release_eta`; without an ETA, they only upload.
+
 ## android-l10n
 
 Update android string resources from android-l10n repo.
@@ -966,6 +989,10 @@ Run baseline profile generation for Android on Firebase TestLab.
 ## dte-test
 
 Send payload for DTE testing Github Actions.
+
+## dte-ui-test
+
+Run DTE Pytest Selenium suite for UI.
 
 ## update-test
 

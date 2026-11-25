@@ -45,6 +45,7 @@
 #include "api/rtp_packet_infos.h"
 #include "api/rtp_parameters.h"
 #include "api/scoped_refptr.h"
+#include "api/sframe/sframe_types.h"
 #include "api/transport/bitrate_settings.h"
 #include "api/units/timestamp.h"
 #include "call/audio_receive_stream.h"
@@ -69,6 +70,8 @@
 #include "modules/rtp_rtcp/include/rtp_header_extension_map.h"
 #include "modules/rtp_rtcp/source/rtp_header_extensions.h"
 #include "modules/rtp_rtcp/source/rtp_packet_received.h"
+#include "modules/sframe/sframe_encryption_config.h"
+#include "modules/sframe/sframe_encryptor.h"
 #include "rtc_base/byte_order.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/copy_on_write_buffer.h"
@@ -400,7 +403,7 @@ class WebRtcVoiceEngineTestFake : public ::testing::TestWithParam<bool> {
                     AudioSource* source,
                     const AudioOptions* options = nullptr) {
     ASSERT_TRUE(send_channel_);
-    if (!use_null_apm_) {
+    if (!use_null_apm_ && GetSendStream(ssrc).muted() == enable) {
       EXPECT_CALL(*apm_, set_output_will_be_muted(!enable));
     }
     EXPECT_TRUE(send_channel_->SetAudioSend(ssrc, enable, options, source));
@@ -942,6 +945,15 @@ TEST_P(WebRtcVoiceEngineTestFake, CreateSendStream) {
   EXPECT_EQ("", config.rtp.c_name);
   EXPECT_EQ(0u, config.rtp.extensions.size());
   EXPECT_EQ(SendImpl()->transport(), config.send_transport);
+}
+
+// Test that a send stream that is added after the MID has been set is created
+// with the MID.
+TEST_P(WebRtcVoiceEngineTestFake, CreateSendStreamWithMid) {
+  EXPECT_TRUE(SetupChannel());
+  send_channel_->SetMid("audio");
+  EXPECT_TRUE(send_channel_->AddSendStream(StreamParams::CreateLegacy(kSsrcX)));
+  EXPECT_EQ(GetSendStreamConfig(kSsrcX).rtp.mid, "audio");
 }
 
 // Test that we can add a receive stream and that it has the correct defaults.
@@ -2381,6 +2393,215 @@ TEST_P(WebRtcVoiceEngineTestFake, SendStateMuteUnmute) {
   EXPECT_FALSE(GetSendStream(kSsrcX).muted());
   SetAudioSend(kSsrcX, false, nullptr);
   EXPECT_TRUE(GetSendStream(kSsrcX).muted());
+  SetAudioSend(kSsrcX, true, nullptr);
+  EXPECT_FALSE(GetSendStream(kSsrcX).muted());
+}
+
+// Test that AudioProcessing::set_output_will_be_muted aggregates mute state
+// across all send channels sharing the WebRtcVoiceEngine (e.g., when tearing
+// down a P2P channel while a Cloud channel remains active and unmuted).
+TEST_P(WebRtcVoiceEngineTestFake, SendStateMuteUnmuteAcrossMultipleChannels) {
+  EXPECT_TRUE(SetupSendStream());
+  SetSenderParameters(send_parameters_);
+  EXPECT_FALSE(GetSendStream(kSsrcX).muted());
+
+  std::unique_ptr<VoiceMediaSendChannelInterface> send_channel2 =
+      engine_->CreateSendChannel(env_, &call_, MediaConfig(), AudioOptions(),
+                                 CryptoOptions());
+  ASSERT_TRUE(send_channel2);
+  EXPECT_TRUE(send_channel2->SetSenderParameters(send_parameters_));
+  EXPECT_TRUE(send_channel2->AddSendStream(StreamParams::CreateLegacy(kSsrcY)));
+  EXPECT_TRUE(
+      send_channel2->SetAudioSend(kSsrcY, true, nullptr, &fake_source_));
+  EXPECT_FALSE(GetSendStream(kSsrcY).muted());
+
+  // Muting and tearing down the first channel while the second channel is still
+  // unmuted must keep AudioProcessing output unmuted.
+  EXPECT_TRUE(send_channel_->SetAudioSend(kSsrcX, false, nullptr, nullptr));
+  EXPECT_TRUE(GetSendStream(kSsrcX).muted());
+  EXPECT_FALSE(GetSendStream(kSsrcY).muted());
+  EXPECT_TRUE(send_channel_->RemoveSendStream(kSsrcX));
+  send_channel_.reset();
+
+  // Muting the remaining channel now mutes AudioProcessing output.
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(true));
+  }
+  EXPECT_TRUE(send_channel2->SetAudioSend(kSsrcY, false, nullptr, nullptr));
+  EXPECT_TRUE(GetSendStream(kSsrcY).muted());
+
+  // Unmuting the remaining channel unmutes AudioProcessing output again.
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(false));
+  }
+  EXPECT_TRUE(
+      send_channel2->SetAudioSend(kSsrcY, true, nullptr, &fake_source_));
+  EXPECT_FALSE(GetSendStream(kSsrcY).muted());
+}
+
+// Test that removing an unmuted send stream without muting it first updates
+// AudioProcessing when all remaining streams on other channels are muted.
+TEST_P(WebRtcVoiceEngineTestFake,
+       RemoveUnmutedStreamWhileOtherChannelMutedUpdatesApm) {
+  EXPECT_TRUE(SetupSendStream());
+  SetSenderParameters(send_parameters_);
+  SetAudioSend(kSsrcX, false, nullptr);
+  EXPECT_TRUE(GetSendStream(kSsrcX).muted());
+
+  std::unique_ptr<VoiceMediaSendChannelInterface> send_channel2 =
+      engine_->CreateSendChannel(env_, &call_, MediaConfig(), AudioOptions(),
+                                 CryptoOptions());
+  ASSERT_TRUE(send_channel2);
+  EXPECT_TRUE(send_channel2->AddSendStream(StreamParams::CreateLegacy(kSsrcY)));
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(false));
+  }
+  EXPECT_TRUE(
+      send_channel2->SetAudioSend(kSsrcY, true, nullptr, &fake_source_));
+  EXPECT_FALSE(GetSendStream(kSsrcY).muted());
+
+  // Removing the unmuted stream on send_channel2 leaves only the muted stream
+  // on send_channel_, so AudioProcessing must be notified that output is muted.
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(true));
+  }
+  EXPECT_TRUE(send_channel2->RemoveSendStream(kSsrcY));
+
+  // Re-adding streams to the now-empty send_channel2 and then removing the
+  // unmuted stream while another stream on the same channel is muted must also
+  // transition AudioProcessing back to muted.
+  EXPECT_TRUE(send_channel2->AddSendStream(StreamParams::CreateLegacy(kSsrcY)));
+  EXPECT_TRUE(send_channel2->AddSendStream(StreamParams::CreateLegacy(kSsrcZ)));
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(false));
+  }
+  EXPECT_TRUE(
+      send_channel2->SetAudioSend(kSsrcY, true, nullptr, &fake_source_));
+  EXPECT_TRUE(send_channel2->SetAudioSend(kSsrcZ, false, nullptr, nullptr));
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(true));
+  }
+  EXPECT_TRUE(send_channel2->RemoveSendStream(kSsrcY));
+
+  // Destroying send_channel2 while multiple streams are unmuted transitions
+  // AudioProcessing back to muted once because send_channel_ is still muted.
+  EXPECT_TRUE(send_channel2->AddSendStream(StreamParams::CreateLegacy(kSsrcY)));
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(false));
+  }
+  EXPECT_TRUE(
+      send_channel2->SetAudioSend(kSsrcY, true, nullptr, &fake_source_));
+  EXPECT_TRUE(
+      send_channel2->SetAudioSend(kSsrcZ, true, nullptr, &fake_source_));
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(true));
+  }
+  send_channel2.reset();
+
+  // Destroying the last remaining (muted) channel leaves no registered
+  // channels, and subsequently creating a new channel with an unmuted stream
+  // transitions AudioProcessing back to unmuted.
+  send_channel_.reset();
+  EXPECT_TRUE(SetupSendStream());
+}
+
+// Test that a send stream added via AddSendStream without SetAudioSend (e.g. a
+// transceiver without an attached track) does not prevent muting APM when
+// active streams are muted, and does not trigger spurious APM mute updates when
+// removed.
+TEST_P(WebRtcVoiceEngineTestFake,
+       UnconfiguredSendStreamDoesNotPreventMuteOrTriggerSpuriousApmUpdate) {
+  EXPECT_TRUE(SetupSendStream());
+  SetSenderParameters(send_parameters_);
+  EXPECT_EQ(SendImpl()->muted(), false);
+
+  std::unique_ptr<VoiceMediaSendChannelInterface> send_channel2 =
+      engine_->CreateSendChannel(env_, &call_, MediaConfig(), AudioOptions(),
+                                 CryptoOptions());
+  ASSERT_TRUE(send_channel2);
+  EXPECT_EQ(SendImplFromPointer(send_channel2.get())->muted(), std::nullopt);
+  // Add a stream on the second channel without calling SetAudioSend.
+  EXPECT_TRUE(send_channel2->AddSendStream(StreamParams::CreateLegacy(kSsrcY)));
+  EXPECT_EQ(SendImplFromPointer(send_channel2.get())->muted(), std::nullopt);
+
+  // Muting the active stream on send_channel_ must mute APM even though
+  // send_channel2 has an unconfigured send stream.
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(true));
+  }
+  EXPECT_TRUE(send_channel_->SetAudioSend(kSsrcX, false, nullptr, nullptr));
+  EXPECT_TRUE(GetSendStream(kSsrcX).muted());
+  EXPECT_EQ(SendImpl()->muted(), true);
+
+  // Removing the unconfigured stream on send_channel2 must not trigger a
+  // redundant set_output_will_be_muted(true) call, and destroying the now-empty
+  // channel must unregister it so subsequent mute updates remain safe.
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(_)).Times(0);
+  }
+  EXPECT_TRUE(send_channel2->RemoveSendStream(kSsrcY));
+  send_channel2.reset();
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(false));
+  }
+  EXPECT_TRUE(
+      send_channel_->SetAudioSend(kSsrcX, true, nullptr, &fake_source_));
+  EXPECT_EQ(SendImpl()->muted(), false);
+}
+
+// Test that destroying a channel that has both an unmuted stream
+// and a muted stream does not trigger a spurious
+// set_output_will_be_muted(true) call during destruction when no other channels
+// exist.
+TEST_P(WebRtcVoiceEngineTestFake,
+       DestroyingChannelWithUnmutedAndMutedStreamsDoesNotTriggerSpuriousMute) {
+  EXPECT_TRUE(SetupChannel());
+  // Add kSsrcY (unmuted) and kSsrcX (muted) on the same channel.
+  EXPECT_TRUE(send_channel_->AddSendStream(StreamParams::CreateLegacy(kSsrcY)));
+  EXPECT_TRUE(send_channel_->AddSendStream(StreamParams::CreateLegacy(kSsrcX)));
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(false));
+  }
+  EXPECT_TRUE(
+      send_channel_->SetAudioSend(kSsrcY, true, nullptr, &fake_source_));
+  EXPECT_TRUE(send_channel_->SetAudioSend(kSsrcX, false, nullptr, nullptr));
+
+  // Destroying send_channel_ removes all streams in the engine; it must not
+  // fire set_output_will_be_muted(true) mid-destruction after removing kSsrcY.
+  send_channel_.reset();
+}
+
+// Test that destroying an unmuted channel directly (without muting or removing
+// its stream first) while another channel remains unmuted does not trigger any
+// AudioProcessing mute state change, and that subsequently muting the remaining
+// channel mutes AudioProcessing.
+TEST_P(WebRtcVoiceEngineTestFake,
+       DestroyUnmutedChannelWhileOtherChannelUnmuted) {
+  EXPECT_TRUE(SetupSendStream());
+  SetSenderParameters(send_parameters_);
+  EXPECT_FALSE(GetSendStream(kSsrcX).muted());
+
+  std::unique_ptr<VoiceMediaSendChannelInterface> send_channel2 =
+      engine_->CreateSendChannel(env_, &call_, MediaConfig(), AudioOptions(),
+                                 CryptoOptions());
+  ASSERT_TRUE(send_channel2);
+  EXPECT_TRUE(send_channel2->SetSenderParameters(send_parameters_));
+  EXPECT_TRUE(send_channel2->AddSendStream(StreamParams::CreateLegacy(kSsrcY)));
+  EXPECT_TRUE(
+      send_channel2->SetAudioSend(kSsrcY, true, nullptr, &fake_source_));
+  EXPECT_FALSE(GetSendStream(kSsrcY).muted());
+
+  // Destroying send_channel_ while it still has an active unmuted stream must
+  // not call set_output_will_be_muted because send_channel2 is still unmuted.
+  send_channel_.reset();
+  EXPECT_FALSE(GetSendStream(kSsrcY).muted());
+
+  // Muting the remaining channel now mutes AudioProcessing output.
+  if (!use_null_apm_) {
+    EXPECT_CALL(*apm_, set_output_will_be_muted(true));
+  }
+  EXPECT_TRUE(send_channel2->SetAudioSend(kSsrcY, false, nullptr, nullptr));
+  EXPECT_TRUE(GetSendStream(kSsrcY).muted());
 }
 
 // Test that SetSenderParameters() does not alter a stream's send state.
@@ -3336,6 +3557,75 @@ TEST_P(WebRtcVoiceEngineTestFake, SetsSyncGroupFromStreamId) {
       << "SyncGroup should be set based on stream id";
 }
 
+// Enabling Sframe before a send stream is added is propagated to the stream
+// config at construction.
+TEST_P(WebRtcVoiceEngineTestFake, EnableSframePropagatesToSendStreamConfig) {
+  ASSERT_TRUE(SetupChannel());
+  send_channel_->EnableSframe();
+
+  ASSERT_TRUE(send_channel_->AddSendStream(StreamParams::CreateLegacy(kSsrcX)));
+
+  EXPECT_TRUE(GetSendStreamConfig(kSsrcX).sframe_options.required);
+}
+
+// Enabling Sframe on an existing send stream reconfigures it in place.
+TEST_P(WebRtcVoiceEngineTestFake, EnableSframeReconfiguresExistingSendStream) {
+  ASSERT_TRUE(SetupSendStream());
+  ASSERT_FALSE(GetSendStreamConfig(kSsrcX).sframe_options.required);
+
+  send_channel_->EnableSframe();
+
+  EXPECT_TRUE(GetSendStreamConfig(kSsrcX).sframe_options.required);
+}
+
+// A send stream added after the Sframe encryption config is set starts with
+// that config.
+TEST_P(WebRtcVoiceEngineTestFake,
+       SframeEncryptionConfigPropagatesToNewSendStream) {
+  ASSERT_TRUE(SetupChannel());
+  scoped_refptr<SframeEncryptor> encryptor =
+      SframeEncryptor::Create(SframeCipherSuite::kAes128GcmSha256_128);
+  send_channel_->SetSframeEncryptionConfig(SframeEncryptionConfig{
+      .mode = SframeMode::kPerFrame, .encryptor = encryptor});
+
+  ASSERT_TRUE(send_channel_->AddSendStream(StreamParams::CreateLegacy(kSsrcX)));
+
+  const std::optional<SframeEncryptionConfig>& config =
+      GetSendStreamConfig(kSsrcX).sframe_options.encryption_config;
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->mode, SframeMode::kPerFrame);
+  EXPECT_EQ(config->encryptor, encryptor);
+}
+
+// Setting the Sframe encryption config reconfigures existing send streams.
+TEST_P(WebRtcVoiceEngineTestFake,
+       SframeEncryptionConfigUpdatesExistingSendStream) {
+  ASSERT_TRUE(SetupSendStream());
+  scoped_refptr<SframeEncryptor> encryptor =
+      SframeEncryptor::Create(SframeCipherSuite::kAes128GcmSha256_128);
+
+  send_channel_->SetSframeEncryptionConfig(SframeEncryptionConfig{
+      .mode = SframeMode::kPerPacket, .encryptor = encryptor});
+
+  const std::optional<SframeEncryptionConfig>& config =
+      GetSendStreamConfig(kSsrcX).sframe_options.encryption_config;
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->mode, SframeMode::kPerPacket);
+  EXPECT_EQ(config->encryptor, encryptor);
+}
+
+// Only negotiation makes Sframe required; an encryption config alone doesn't.
+TEST_P(WebRtcVoiceEngineTestFake, SframeEncryptionConfigDoesNotRequireSframe) {
+  ASSERT_TRUE(SetupSendStream());
+
+  send_channel_->SetSframeEncryptionConfig(SframeEncryptionConfig{
+      .mode = SframeMode::kPerFrame,
+      .encryptor =
+          SframeEncryptor::Create(SframeCipherSuite::kAes128GcmSha256_128)});
+
+  EXPECT_FALSE(GetSendStreamConfig(kSsrcX).sframe_options.required);
+}
+
 // TODO(solenberg): Remove, once recv streams are configured through Call.
 //                  (This is then covered by TestSetRecvRtpHeaderExtensions.)
 TEST_P(WebRtcVoiceEngineTestFake, ConfiguresAudioReceiveStreamRtpExtensions) {
@@ -3391,12 +3681,12 @@ TEST_P(WebRtcVoiceEngineTestFake, ConfiguresAudioReceiveStreamRtpExtensions) {
 TEST_P(WebRtcVoiceEngineTestFake, DeliverAudioPacket_Call) {
   // Test that packets are forwarded to the Call when configured accordingly.
   const uint32_t kAudioSsrc = 1;
-  CopyOnWriteBuffer kPcmuPacket(kPcmuFrame, sizeof(kPcmuFrame));
+  CopyOnWriteBuffer kPcmuPacket(kPcmuFrame);
   static const uint8_t kRtcp[] = {
       0x80, 0xc9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
       0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-  CopyOnWriteBuffer kRtcpPacket(kRtcp, sizeof(kRtcp));
+  CopyOnWriteBuffer kRtcpPacket(kRtcp);
 
   EXPECT_TRUE(SetupSendStream());
   VoiceMediaReceiveChannelInterface* media_channel = ReceiveImpl();

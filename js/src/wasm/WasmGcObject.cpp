@@ -247,7 +247,7 @@ size_t js::WasmArrayObject::sizeOfExcludingThis() const {
     return 0;
   }
   OOLDataHeader* oolHeader = oolDataHeaderFromDataPointer(data_);
-  if (!gc::IsBufferAlloc(oolHeader)) {
+  if (!gc::IsGCPointerBufferAlloc(oolHeader)) {
     return 0;
   }
 
@@ -417,7 +417,7 @@ size_t js::WasmStructObject::sizeOfExcludingThis() const {
     return 0;
   }
   const uint8_t* oolPointer = getOOLPointer();
-  if (!gc::IsBufferAlloc((void*)oolPointer)) {
+  if (!gc::IsGCPointerBufferAlloc((void*)oolPointer)) {
     return 0;
   }
 
@@ -428,7 +428,7 @@ size_t js::WasmStructObject::sizeOfExcludingThis() const {
 bool WasmStructObject::getField(JSContext* cx, uint32_t index,
                                 MutableHandle<Value> val) {
   const StructType& resultType = typeDef().structType();
-  MOZ_ASSERT(index <= resultType.fields_.length());
+  MOZ_ASSERT(index < resultType.fields_.length());
   const FieldType& field = resultType.fields_[index];
   StorageType ty = field.type.storageType();
   return ToJSValue(cx, fieldIndexToAddress(index), ty, val);

@@ -85,7 +85,6 @@ class nsIDOMXULControlElement;
 class nsIDOMXULMenuListElement;
 class nsIDOMXULMultiSelectControlElement;
 class nsIDOMXULRadioGroupElement;
-class nsIDOMXULRelatedElement;
 class nsIDOMXULSelectControlElement;
 class nsIDOMXULSelectControlItemElement;
 class nsIFrame;
@@ -168,54 +167,42 @@ already_AddRefed<mozilla::dom::ContentList> NS_GetContentList(
 
 // Element-specific flags
 enum : uint32_t {
-  // Whether this node has dirty descendants for Servo's style system.
-  ELEMENT_HAS_DIRTY_DESCENDANTS_FOR_SERVO = ELEMENT_FLAG_BIT(0),
-  // Whether this node has dirty descendants for animation-only restyle for
-  // Servo's style system.
-  ELEMENT_HAS_ANIMATION_ONLY_DIRTY_DESCENDANTS_FOR_SERVO = ELEMENT_FLAG_BIT(1),
-
-  // Whether the element has been snapshotted due to attribute or state changes
-  // by the Servo restyle manager.
-  ELEMENT_HAS_SNAPSHOT = ELEMENT_FLAG_BIT(2),
-
-  // Whether the element has already handled its relevant snapshot.
-  //
-  // Used by the servo restyle process in order to accurately track whether the
-  // style of an element is up-to-date, even during the same restyle process.
-  ELEMENT_HANDLED_SNAPSHOT = ELEMENT_FLAG_BIT(3),
-
   // If this flag is set on an element, that means that it is a HTML datalist
   // element or has a HTML datalist element ancestor.
-  ELEMENT_IS_DATALIST_OR_HAS_DATALIST_ANCESTOR = ELEMENT_FLAG_BIT(4),
+  ELEMENT_IS_DATALIST_OR_HAS_DATALIST_ANCESTOR = ELEMENT_FLAG_BIT(0),
 
   // If this flag is set on an element, that means this element
   // has been considered by our LargestContentfulPaint algorithm and
   // it's not going to be considered again.
-  ELEMENT_PROCESSED_BY_LCP_FOR_TEXT = ELEMENT_FLAG_BIT(5),
+  ELEMENT_PROCESSED_BY_LCP_FOR_TEXT = ELEMENT_FLAG_BIT(1),
 
   // If this flag is set on an element, this means the HTML parser encountered
   // a duplicate attribute error:
   // https://html.spec.whatwg.org/multipage/parsing.html#parse-error-duplicate-attribute
   // This flag is used for detecting dangling markup attacks in the CSP
   // algorithm https://w3c.github.io/webappsec-csp/#is-element-nonceable.
-  ELEMENT_PARSER_HAD_DUPLICATE_ATTR_ERROR = ELEMENT_FLAG_BIT(6),
+  ELEMENT_PARSER_HAD_DUPLICATE_ATTR_ERROR = ELEMENT_FLAG_BIT(2),
 
   // If this flag is set, this element is in
   // Document::mContentIdentifiersForLCP.
-  ELEMENT_IN_CONTENT_IDENTIFIER_FOR_LCP = ELEMENT_FLAG_BIT(7),
+  ELEMENT_IN_CONTENT_IDENTIFIER_FOR_LCP = ELEMENT_FLAG_BIT(3),
 
   // 2-bit field encoding the element's custom element registry state.
   // See CustomElementRegistryState for the possible values.
-  ELEMENT_CUSTOM_ELEMENT_REGISTRY_LOW_BIT = ELEMENT_FLAG_BIT(8),
+  ELEMENT_CUSTOM_ELEMENT_REGISTRY_LOW_BIT = ELEMENT_FLAG_BIT(4),
   ELEMENT_CUSTOM_ELEMENT_REGISTRY_MASK =
-      ELEMENT_FLAG_BIT(8) | ELEMENT_FLAG_BIT(9),
+      ELEMENT_FLAG_BIT(4) | ELEMENT_FLAG_BIT(5),
 
   // Whether this element has an associated EditContext
   // https://w3c.github.io/edit-context
-  ELEMENT_HAS_EDIT_CONTEXT = ELEMENT_FLAG_BIT(10),
+  ELEMENT_HAS_EDIT_CONTEXT = ELEMENT_FLAG_BIT(6),
+
+  // Set while this element is on the HTML parser's stack of open elements.
+  // Used for rel=expect.
+  ELEMENT_ON_PARSER_STACK = ELEMENT_FLAG_BIT(7),
 
   // Remaining bits are for subclasses
-  ELEMENT_TYPE_SPECIFIC_BITS_OFFSET = NODE_TYPE_SPECIFIC_BITS_OFFSET + 11
+  ELEMENT_TYPE_SPECIFIC_BITS_OFFSET = NODE_TYPE_SPECIFIC_BITS_OFFSET + 8
 };
 
 #undef ELEMENT_FLAG_BIT
@@ -469,6 +456,15 @@ class Element : public FragmentOrElement {
     return mAttrs.IsPendingMappedAttributeEvaluation();
   }
 
+  void ScheduleForPresAttrEvaluationIfNeeded() {
+    if (IsPendingMappedAttributeEvaluation() ||
+        !mAttrs.MarkAsPendingPresAttributeEvaluation() || !IsInComposedDoc()) {
+      return;
+    }
+    DoScheduleForPresAttrEvaluation();
+  }
+  void DoScheduleForPresAttrEvaluation();
+
   void SetMappedDeclarationBlock(already_AddRefed<StyleLockedDeclarationBlock>);
 
   /**
@@ -595,10 +591,9 @@ class Element : public FragmentOrElement {
 
   Directionality GetComputedDirectionality() const;
 
-  static const uint32_t kAllServoDescendantBits =
-      ELEMENT_HAS_DIRTY_DESCENDANTS_FOR_SERVO |
-      ELEMENT_HAS_ANIMATION_ONLY_DIRTY_DESCENDANTS_FOR_SERVO |
-      NODE_DESCENDANTS_NEED_FRAMES;
+  static constexpr NodeStyleFlags kAllServoDescendantBits =
+      NodeStyleFlags::HasDirtyDescendants |
+      NodeStyleFlags::DescendantsNeedFrames;
 
   /**
    * Notes that something in the given subtree of this element needs dirtying,
@@ -611,31 +606,18 @@ class Element : public FragmentOrElement {
   void NoteDirtySubtreeForServo();
 
   void NoteDirtyForServo();
-  void NoteAnimationOnlyDirtyForServo();
   void NoteDescendantsNeedFramesForServo();
 
   bool HasDirtyDescendantsForServo() const {
-    return HasFlag(ELEMENT_HAS_DIRTY_DESCENDANTS_FOR_SERVO);
+    return HasStyleFlag(NodeStyleFlags::HasDirtyDescendants);
   }
 
   void SetHasDirtyDescendantsForServo() {
-    SetFlags(ELEMENT_HAS_DIRTY_DESCENDANTS_FOR_SERVO);
+    SetStyleFlags(NodeStyleFlags::HasDirtyDescendants);
   }
 
   void UnsetHasDirtyDescendantsForServo() {
-    UnsetFlags(ELEMENT_HAS_DIRTY_DESCENDANTS_FOR_SERVO);
-  }
-
-  bool HasAnimationOnlyDirtyDescendantsForServo() const {
-    return HasFlag(ELEMENT_HAS_ANIMATION_ONLY_DIRTY_DESCENDANTS_FOR_SERVO);
-  }
-
-  void SetHasAnimationOnlyDirtyDescendantsForServo() {
-    SetFlags(ELEMENT_HAS_ANIMATION_ONLY_DIRTY_DESCENDANTS_FOR_SERVO);
-  }
-
-  void UnsetHasAnimationOnlyDirtyDescendantsForServo() {
-    UnsetFlags(ELEMENT_HAS_ANIMATION_ONLY_DIRTY_DESCENDANTS_FOR_SERVO);
+    UnsetStyleFlags(NodeStyleFlags::HasDirtyDescendants);
   }
 
   bool HasServoData() const { return !!mServoData.Get(); }
@@ -1111,19 +1093,21 @@ class Element : public FragmentOrElement {
    *        notified of the attribute change.
    */
   nsresult SetAttr(int32_t aNameSpaceID, nsAtom* aName, const nsAString& aValue,
-                   bool aNotify) {
+                   bool aNotify, IsKnownNewAttr aIsKnownNew) {
     return SetAttr(aNameSpaceID, aName, nullptr, aValue, nullptr, aNotify,
-                   IsKnownNewAttr::No);
+                   aIsKnownNew);
   }
   nsresult SetAttr(int32_t aNameSpaceID, nsAtom* aName, nsAtom* aPrefix,
-                   const nsAString& aValue, bool aNotify) {
+                   const nsAString& aValue, bool aNotify,
+                   IsKnownNewAttr aIsKnownNew) {
     return SetAttr(aNameSpaceID, aName, aPrefix, aValue, nullptr, aNotify,
-                   IsKnownNewAttr::No);
+                   aIsKnownNew);
   }
   nsresult SetAttr(int32_t aNameSpaceID, nsAtom* aName, const nsAString& aValue,
-                   nsIPrincipal* aTriggeringPrincipal, bool aNotify) {
+                   nsIPrincipal* aTriggeringPrincipal, bool aNotify,
+                   IsKnownNewAttr aIsKnownNew) {
     return SetAttr(aNameSpaceID, aName, nullptr, aValue, aTriggeringPrincipal,
-                   aNotify, IsKnownNewAttr::No);
+                   aNotify, aIsKnownNew);
   }
 
   /**
@@ -1149,11 +1133,11 @@ class Element : public FragmentOrElement {
   nsresult SetAttr(int32_t aNameSpaceID, nsAtom* aName, nsAtom* aPrefix,
                    const nsAString& aValue,
                    nsIPrincipal* aMaybeScriptedPrincipal, bool aNotify,
-                   IsKnownNewAttr aIsKnownNew);
+                   IsKnownNewAttr);
 
   nsresult SetAttr(int32_t aNameSpaceID, nsAtom* aName, nsAtom* aPrefix,
                    nsAtom* aValue, nsIPrincipal* aMaybeScriptedPrincipal,
-                   bool aNotify);
+                   bool aNotify, IsKnownNewAttr);
 
   /**
    * Remove an attribute so that it is no longer explicitly specified.
@@ -1162,8 +1146,10 @@ class Element : public FragmentOrElement {
    * @param aName the name of the attribute to unset
    * @param aNotify specifies whether or not the document should be
    * notified of the attribute change
+   * @param aHadValue if non-null, receives whether the attribute was found
    */
-  nsresult UnsetAttr(int32_t aNameSpaceID, nsAtom* aName, bool aNotify);
+  nsresult UnsetAttr(int32_t aNameSpaceID, nsAtom* aName, bool aNotify,
+                     bool* aHadValue = nullptr);
 
   /**
    * Swap an attribute value. This is a public wrapper that ensures bloom
@@ -1176,7 +1162,7 @@ class Element : public FragmentOrElement {
    * @param aHadValue set to true if attribute existed, false otherwise
    */
   nsresult SetAndSwapAttr(nsAtom* aLocalName, nsAttrValue& aValue,
-                          bool* aHadValue, IsKnownNewAttr aIsKnownNew);
+                          bool* aHadValue, IsKnownNewAttr);
 
   /**
    * Swap an attribute value. This is a public wrapper that ensures bloom
@@ -1189,7 +1175,7 @@ class Element : public FragmentOrElement {
    * @param aHadValue set to true if attribute existed, false otherwise
    */
   nsresult SetAndSwapAttr(mozilla::dom::NodeInfo* aName, nsAttrValue& aValue,
-                          bool* aHadValue, IsKnownNewAttr aIsKnownNew);
+                          bool* aHadValue, IsKnownNewAttr);
 
   /**
    * Get the namespace / name / prefix of a given attribute.
@@ -1379,7 +1365,9 @@ class Element : public FragmentOrElement {
   void GetId(nsAString& aId) const { GetAttr(nsGkAtoms::id, aId); }
   void GetId(DOMString& aId) const { GetAttr(nsGkAtoms::id, aId); }
   void SetId(const nsAString& aId) {
-    SetAttr(kNameSpaceID_None, nsGkAtoms::id, aId, true);
+    // NOTE(emilio): We can't use HasID() for IsKnownNewAttr, since we don't set
+    // it for id="".
+    SetAttr(kNameSpaceID_None, nsGkAtoms::id, aId, true, IsKnownNewAttr::No);
   }
   void GetClassName(nsAString& aClassName) {
     GetAttr(nsGkAtoms::_class, aClassName);
@@ -1388,7 +1376,11 @@ class Element : public FragmentOrElement {
     GetAttr(nsGkAtoms::_class, aClassName);
   }
   void SetClassName(const nsAString& aClassName) {
-    SetAttr(kNameSpaceID_None, nsGkAtoms::_class, aClassName, true);
+    // TODO(emilio): IsKnownNewAttr(!MayHaveClass()) might be doable if we
+    // make SetNoNameSpaceAttrOnNewlyCreatedElement set MayHaveClass in the
+    // non-atom cases.
+    SetAttr(kNameSpaceID_None, nsGkAtoms::_class, aClassName, true,
+            IsKnownNewAttr::No);
   }
 
   nsDOMTokenList* ClassList();
@@ -1725,6 +1717,15 @@ class Element : public FragmentOrElement {
   virtual bool IsPotentiallyRenderBlocking() { return false; }
   bool BlockingContainsRender() const;
 
+  // Unblocks rendering on this element if it is no longer potentially
+  // render-blocking, for example after an attribute change.
+  void UnblockRenderingIfNotPotentiallyRenderBlocking();
+
+  // Unblocks rendering when the element becomes browsing-context disconnected,
+  // which an atomic move does not do.
+  // https://html.spec.whatwg.org/#render-blocking-mechanism
+  void RenderBlockingElementUnbindFromTree(UnbindContext&);
+
   // Shadow DOM v1
   enum class ShadowRootDeclarative : bool { No, Yes };
 
@@ -1939,6 +1940,8 @@ class Element : public FragmentOrElement {
   MOZ_CAN_RUN_SCRIPT int32_t ScrollWidth();
   MOZ_CAN_RUN_SCRIPT int32_t ScrollHeight();
   MOZ_CAN_RUN_SCRIPT nsSize GetScrollSize();
+  /** Gets the scroll position as for the scroll{Top,Left} APIs */
+  MOZ_CAN_RUN_SCRIPT nsPoint GetScrollOrigin();
   MOZ_CAN_RUN_SCRIPT void MozScrollSnap();
   MOZ_CAN_RUN_SCRIPT int32_t ClientTop() {
     return CSSPixel::FromAppUnits(GetClientAreaRect().y).Rounded();
@@ -2087,10 +2090,8 @@ class Element : public FragmentOrElement {
    * (like onclick) and with the value as JS
    * @param aEventName the event listener name
    * @param aValue the JS to attach
-   * @param aDefer indicates if deferred execution is allowed
    */
-  void SetEventHandler(nsAtom* aEventName, const nsAString& aValue,
-                       bool aDefer = true);
+  void SetEventHandler(nsAtom* aEventName, const nsAString& aValue);
 
   /**
    * Do whatever needs to be done when the mouse leaves a link
@@ -2132,6 +2133,13 @@ class Element : public FragmentOrElement {
   bool IsDisplayContents() const {
     return HasServoData() && Servo_Element_IsDisplayContents(this);
   }
+
+  /**
+   * A unique value for the element to use in the generation of random base
+   * values for element-scoped CSS `random()` functions.
+   * https://drafts.csswg.org/css-values-5/#random-caching
+   */
+  uintptr_t GetRandomSeed() const;
 
   /*
    * https://html.spec.whatwg.org/#being-rendered
@@ -2276,13 +2284,14 @@ class Element : public FragmentOrElement {
    * Set an attribute in the simplest way possible.
    */
   void SetAttr(nsAtom* aAttr, const nsAString& aValue, ErrorResult& aError) {
-    aError = SetAttr(kNameSpaceID_None, aAttr, aValue, true);
+    aError =
+        SetAttr(kNameSpaceID_None, aAttr, aValue, true, IsKnownNewAttr::No);
   }
 
   void SetAttr(nsAtom* aAttr, const nsAString& aValue,
                nsIPrincipal* aTriggeringPrincipal, ErrorResult& aError) {
-    aError =
-        SetAttr(kNameSpaceID_None, aAttr, aValue, aTriggeringPrincipal, true);
+    aError = SetAttr(kNameSpaceID_None, aAttr, aValue, aTriggeringPrincipal,
+                     true, IsKnownNewAttr::No);
   }
 
   /**
@@ -2350,7 +2359,6 @@ class Element : public FragmentOrElement {
   already_AddRefed<nsIDOMXULMultiSelectControlElement>
   AsXULMultiSelectControl();
   already_AddRefed<nsIDOMXULRadioGroupElement> AsXULRadioGroup();
-  already_AddRefed<nsIDOMXULRelatedElement> AsXULRelated();
   already_AddRefed<nsIDOMXULSelectControlElement> AsXULSelectControl();
   already_AddRefed<nsIDOMXULSelectControlItemElement> AsXULSelectControlItem();
   already_AddRefed<nsIBrowser> AsBrowser();
@@ -2444,7 +2452,6 @@ class Element : public FragmentOrElement {
    * @param aModType      AttrModType::Modification or AttrModType::Addition.
    * @param aNotify       should we notify document-observers?
    * @param aCallAfterSetAttr should we call AfterSetAttr?
-   * @param aComposedDocument The current composed document of the element.
    * @param aGuard        For making sure that this is called with a
    *                      mozAutoDocUpdate instance, this is here.  Specify
    *                      an instance of it which you created for the call.
@@ -2454,7 +2461,7 @@ class Element : public FragmentOrElement {
                             nsAttrValue& aParsedValue,
                             nsIPrincipal* aSubjectPrincipal,
                             AttrModType aModType, bool aNotify,
-                            bool aCallAfterSetAttr, Document* aComposedDocument,
+                            bool aCallAfterSetAttr,
                             const mozAutoDocUpdate& aGuard,
                             IsKnownNewAttr aIsKnownNew);
 
@@ -2555,7 +2562,7 @@ class Element : public FragmentOrElement {
    * needed for attachment of attribute-defined handlers
    */
   virtual EventListenerManager* GetEventListenerManagerForAttr(
-      nsAtom* aAttrName, bool* aDefer);
+      nsAtom* aAttrName);
 
   /**
    * Internal hook for converting an attribute name-string to nsAttrName in
@@ -2714,8 +2721,6 @@ class Element : public FragmentOrElement {
    */
   MOZ_CAN_RUN_SCRIPT nsRect GetClientAreaRect();
 
-  /** Gets the scroll position as for the scroll{Top,Left} APIs */
-  MOZ_CAN_RUN_SCRIPT nsPoint GetScrollOrigin();
   /** Gets the scroll range as for the scroll{Top,Left}{Min,Max} APIs */
   MOZ_CAN_RUN_SCRIPT nsRect GetScrollRange();
 

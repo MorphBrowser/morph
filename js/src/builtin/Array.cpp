@@ -104,12 +104,7 @@ bool js::PrototypeMayHaveIndexedProperties(NativeObject* obj) {
   } while (true);
 }
 
-/*
- * Whether obj may have indexed properties anywhere besides its dense
- * elements. This includes other indexed properties in its shape hierarchy, and
- * indexed properties or elements along its prototype chain.
- */
-bool js::ObjectMayHaveExtraIndexedProperties(JSObject* obj) {
+bool js::ObjectMayHaveExtraIndexedPropertiesSlow(JSObject* obj) {
   MOZ_ASSERT_IF(obj->hasDynamicPrototype(), !obj->is<NativeObject>());
 
   if (ObjectMayHaveExtraIndexedOwnProperties(obj)) {
@@ -562,60 +557,114 @@ static bool DeletePropertiesOrThrow(JSContext* cx, HandleObject obj,
   return true;
 }
 
+// Returns true if TrimDenseElementsForNewLength can be used to remove dense
+// elements instead of the generic delete path. The caller is responsible for
+// handling sparse elements that have to be removed.
+static MOZ_ALWAYS_INLINE bool CanFastTrimDenseElementsForNewLength(
+    ArrayObject* arr) {
+  MOZ_ASSERT(arr->lengthIsWritable());
+
+  // If there might be an active for-in iterator for this array we have to use
+  // the generic code path because it supports suppressing deleted properties.
+  // Keys deleted before being reached during the iteration must not be visited.
+  if (arr->denseElementsMaybeInIteration()) {
+    return false;
+  }
+
+  // Sealed elements are non-configurable and shouldn't be removed.
+  return !arr->denseElementsAreSealed();
+}
+
+static MOZ_ALWAYS_INLINE void TrimDenseElementsForNewLength(JSContext* cx,
+                                                            ArrayObject* arr,
+                                                            uint32_t newLen) {
+  MOZ_ASSERT(CanFastTrimDenseElementsForNewLength(arr));
+  MOZ_ASSERT(newLen < arr->length());
+
+  uint32_t oldCapacity = arr->getDenseCapacity();
+  uint32_t oldInitializedLength = arr->getDenseInitializedLength();
+  MOZ_ASSERT(oldCapacity >= oldInitializedLength);
+  if (oldInitializedLength > newLen) {
+    arr->setDenseInitializedLengthMaybeNonExtensible(cx, newLen);
+  }
+  if (oldCapacity > newLen) {
+    if (arr->isExtensible()) {
+      arr->shrinkElements(cx, newLen);
+    } else {
+      MOZ_ASSERT(arr->getDenseInitializedLength() == arr->getDenseCapacity());
+    }
+  }
+}
+
+// Fast path for setting the length of an array. Returns false if the caller has
+// to use the generic ArraySetLength path.
+static MOZ_ALWAYS_INLINE bool TrySetArrayLengthFast(JSContext* cx,
+                                                    ArrayObject* arr,
+                                                    uint64_t newLen) {
+  if (!arr->lengthIsWritable() || newLen > UINT32_MAX) {
+    return false;
+  }
+  if (newLen < arr->length()) {
+    if (arr->isIndexed() || !CanFastTrimDenseElementsForNewLength(arr)) {
+      return false;
+    }
+    TrimDenseElementsForNewLength(cx, arr, uint32_t(newLen));
+  }
+  arr->setLength(cx, uint32_t(newLen));
+  return true;
+}
+
 static bool SetArrayLengthProperty(JSContext* cx, Handle<ArrayObject*> obj,
                                    HandleValue value) {
-  RootedId id(cx, NameToId(cx->names().length));
   ObjectOpResult result;
   if (obj->lengthIsWritable()) {
     Rooted<PropertyDescriptor> desc(
         cx, PropertyDescriptor::Data(value, JS::PropertyAttribute::Writable));
-    if (!ArraySetLength(cx, obj, id, desc, result)) {
+    if (!ArraySetLength(cx, obj, desc, result)) {
       return false;
     }
   } else {
     MOZ_ALWAYS_TRUE(result.fail(JSMSG_READ_ONLY));
   }
+  RootedId id(cx, NameToId(cx->names().length));
   return result.checkStrict(cx, obj, id);
 }
 
-static bool SetLengthProperty(JSContext* cx, HandleObject obj,
-                              uint64_t length) {
+bool js::SetLengthProperty(JSContext* cx, HandleObject obj, uint64_t length) {
   MOZ_ASSERT(length < uint64_t(DOUBLE_INTEGRAL_PRECISION_LIMIT));
 
-  RootedValue v(cx, NumberValue(length));
   if (obj->is<ArrayObject>()) {
-    return SetArrayLengthProperty(cx, obj.as<ArrayObject>(), v);
+    Handle<ArrayObject*> arr = obj.as<ArrayObject>();
+    if (TrySetArrayLengthFast(cx, arr, length)) {
+      return true;
+    }
+    RootedValue v(cx, NumberValue(length));
+    return SetArrayLengthProperty(cx, arr, v);
   }
+
+  RootedValue v(cx, NumberValue(length));
   return SetProperty(cx, obj, cx->names().length, v);
 }
 
-bool js::SetLengthProperty(JSContext* cx, HandleObject obj, uint32_t length) {
-  RootedValue v(cx, NumberValue(length));
-  if (obj->is<ArrayObject>()) {
-    return SetArrayLengthProperty(cx, obj.as<ArrayObject>(), v);
-  }
-  return SetProperty(cx, obj, cx->names().length, v);
-}
-
-bool js::ArrayLengthGetter(JSContext* cx, HandleObject obj, HandleId id,
+bool js::ArrayLengthGetter(JSContext* cx, Handle<ArrayObject*> arr,
                            MutableHandleValue vp) {
-  MOZ_ASSERT(id == NameToId(cx->names().length));
-
-  vp.setNumber(obj->as<ArrayObject>().length());
+  vp.setNumber(arr->length());
   return true;
 }
 
-bool js::ArrayLengthSetter(JSContext* cx, HandleObject obj, HandleId id,
+bool js::ArrayLengthSetter(JSContext* cx, Handle<ArrayObject*> arr,
                            HandleValue v, ObjectOpResult& result) {
-  MOZ_ASSERT(id == NameToId(cx->names().length));
-
-  Handle<ArrayObject*> arr = obj.as<ArrayObject>();
   MOZ_ASSERT(arr->lengthIsWritable(),
              "setter shouldn't be called if property is non-writable");
 
+  if (v.isInt32() && v.toInt32() >= 0 &&
+      TrySetArrayLengthFast(cx, arr, uint32_t(v.toInt32()))) {
+    return result.succeed();
+  }
+
   Rooted<PropertyDescriptor> desc(
       cx, PropertyDescriptor::Data(v, JS::PropertyAttribute::Writable));
-  return ArraySetLength(cx, arr, id, desc, result);
+  return ArraySetLength(cx, arr, desc, result);
 }
 
 struct ReverseIndexComparator {
@@ -633,16 +682,7 @@ static bool TryFastDeleteElementsForNewLength(JSContext* cx,
                                               uint32_t newLen, bool* success) {
   MOZ_ASSERT(newLen < arr->length());
 
-  // If there might be an active for-in iterator for this array we have to use
-  // the generic code path because it supports suppressing deleted properties.
-  // Keys deleted before being reached during the iteration must not be visited.
-  if (arr->denseElementsMaybeInIteration()) {
-    *success = false;
-    return true;
-  }
-
-  // Sealed elements are non-configurable and shouldn't be removed.
-  if (arr->denseElementsAreSealed()) {
+  if (!CanFastTrimDenseElementsForNewLength(arr)) {
     *success = false;
     return true;
   }
@@ -689,30 +729,15 @@ static bool TryFastDeleteElementsForNewLength(JSContext* cx,
     }
   }
 
-  // Remove dense elements.
-  uint32_t oldCapacity = arr->getDenseCapacity();
-  uint32_t oldInitializedLength = arr->getDenseInitializedLength();
-  MOZ_ASSERT(oldCapacity >= oldInitializedLength);
-  if (oldInitializedLength > newLen) {
-    arr->setDenseInitializedLengthMaybeNonExtensible(cx, newLen);
-  }
-  if (oldCapacity > newLen) {
-    if (arr->isExtensible()) {
-      arr->shrinkElements(cx, newLen);
-    } else {
-      MOZ_ASSERT(arr->getDenseInitializedLength() == arr->getDenseCapacity());
-    }
-  }
-
+  TrimDenseElementsForNewLength(cx, arr, newLen);
   *success = true;
   return true;
 }
 
 /* ES6 draft rev 34 (2015 Feb 20) 9.4.2.4 ArraySetLength */
-bool js::ArraySetLength(JSContext* cx, Handle<ArrayObject*> arr, HandleId id,
+bool js::ArraySetLength(JSContext* cx, Handle<ArrayObject*> arr,
                         Handle<PropertyDescriptor> desc,
                         ObjectOpResult& result) {
-  MOZ_ASSERT(id == NameToId(cx->names().length));
   MOZ_ASSERT(desc.isDataDescriptor() || desc.isGenericDescriptor());
 
   // Step 1.
@@ -751,7 +776,8 @@ bool js::ArraySetLength(JSContext* cx, Handle<ArrayObject*> arr, HandleId id,
   bool lengthIsWritable = arr->lengthIsWritable();
 #ifdef DEBUG
   {
-    mozilla::Maybe<PropertyInfo> lengthProp = arr->lookupPure(id);
+    mozilla::Maybe<PropertyInfo> lengthProp =
+        arr->lookupPure(NameToId(cx->names().length));
     MOZ_ASSERT(lengthProp.isSome());
     MOZ_ASSERT(lengthProp->writable() == lengthIsWritable);
   }
@@ -907,12 +933,19 @@ bool js::ArraySetLength(JSContext* cx, Handle<ArrayObject*> arr, HandleId id,
     }
   } while (false);
 
+  // Trim the initialized length, if needed, to preserve the <= length
+  // invariant. This must happen before the fallible attribute change below.
+  // (Capacity was already reduced during element deletion, if necessary.)
+  arr->setDenseInitializedLengthMaybeNonExtensible(
+      cx, std::min(arr->getDenseInitializedLength(), newLen));
+
   // Update array length. Technically we should have been doing this
   // throughout the loop, in step 19.d.iii.
   arr->setLength(cx, newLen);
 
   // Step 20.
   if (desc.hasWritable() && !desc.writable()) {
+    RootedId id(cx, NameToId(cx->names().length));
     Maybe<PropertyInfo> lengthProp = arr->lookup(cx, id);
     MOZ_ASSERT(lengthProp.isSome());
     MOZ_ASSERT(lengthProp->isCustomDataProperty());
@@ -925,16 +958,6 @@ bool js::ArraySetLength(JSContext* cx, Handle<ArrayObject*> arr, HandleId id,
 
   // All operations past here until the |!succeeded| code must be infallible,
   // so that all element fields remain properly synchronized.
-
-  // Trim the initialized length, if needed, to preserve the <= length
-  // invariant.  (Capacity was already reduced during element deletion, if
-  // necessary.)
-  ObjectElements* header = arr->getElementsHeader();
-  header->initializedLength = std::min(header->initializedLength.get(), newLen);
-
-  if (!arr->isExtensible()) {
-    arr->shrinkCapacityToInitializedLength(cx);
-  }
 
   if (desc.hasWritable() && !desc.writable()) {
     arr->setNonWritableLength(cx);
@@ -2766,7 +2789,7 @@ bool js::array_shift(JSContext* cx, unsigned argc, Value* vp) {
   // Step 3.
   if (len == 0) {
     // Step 3.a.
-    if (!SetLengthProperty(cx, obj, uint32_t(0))) {
+    if (!SetLengthProperty(cx, obj, 0)) {
       return false;
     }
 
@@ -5458,8 +5481,28 @@ static JSObject* CreateArrayConstructor(JSContext* cx, JSProtoKey key) {
 
 static JSObject* CreateArrayPrototype(JSContext* cx, JSProtoKey key) {
   MOZ_ASSERT(key == JSProto_Array);
+
   RootedObject proto(cx, &cx->global()->getObjectPrototype());
-  return NewArrayWithProto<0>(cx, 0, proto, TenuredObject);
+  Rooted<SharedShape*> shape(cx, GetArrayShapeWithProto(cx, proto));
+  if (!shape) {
+    return nullptr;
+  }
+
+  // Use an alloc kind without space for fixed elements so the element capacity
+  // starts at zero. This ensures that adding the first dense element goes
+  // through growElements, where we pop ArrayProtoHasNoIndexedPropsFuse.
+  constexpr gc::AllocKind allocKind = gc::GetGCArrayKind(0);
+  AutoSetNewObjectMetadata metadata(cx);
+  ArrayObject* arr =
+      ArrayObject::create(cx, allocKind, gc::Heap::Tenured, shape,
+                          /* length = */ 0, /* slotSpan = */ 0, metadata);
+  if (!arr) {
+    return nullptr;
+  }
+  MOZ_ASSERT(arr->getDenseCapacity() == 0);
+
+  probes::CreateObject(cx, arr);
+  return arr;
 }
 
 static bool array_proto_finish(JSContext* cx, JS::HandleObject ctor,

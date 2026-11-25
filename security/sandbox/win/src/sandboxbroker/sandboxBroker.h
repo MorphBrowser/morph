@@ -35,10 +35,10 @@ class SandboxBroker {
   static void EnsureLpacPermsissionsOnDir(const nsString& aDir);
 
   /**
-   * Do initialization that depends on parts of the Gecko machinery having been
-   * created first.
+   * Caches directory service paths for use in policy rules. This should be
+   * called once, on the main thread, after the profile has been set.
    */
-  static void GeckoDependentInitialize();
+  static void CacheGeckoDirs();
 
   Result<Ok, mozilla::ipc::LaunchError> LaunchApp(
       const wchar_t* aPath, const wchar_t* aArguments,
@@ -53,7 +53,6 @@ class SandboxBroker {
 
   void SetSecurityLevelForGPUProcess(int32_t aSandboxLevel);
   bool SetSecurityLevelForRDDProcess();
-  bool SetSecurityLevelForSocketProcess();
 
   bool SetSecurityLevelForGMPlugin(GMPSandboxKind aGMPSandboxKind);
   bool SetSecurityLevelForUtilityProcess(mozilla::ipc::SandboxingKind aSandbox);

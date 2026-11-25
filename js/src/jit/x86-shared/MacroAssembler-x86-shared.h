@@ -282,8 +282,11 @@ class MacroAssemblerX86Shared : public Assembler {
     return FaultingCodeRange(before, after);
   }
   template <typename T>
-  void store8(Imm32 src, const T& dest) {
+  FaultingCodeRange store8(Imm32 src, const T& dest) {
+    auto before = currentOffset();
     movb(src, Operand(dest));
+    auto after = currentOffset();
+    return FaultingCodeRange(before, after);
   }
   template <typename T>
   FaultingCodeRange store8(Register src, const T& dest) {
@@ -1123,8 +1126,16 @@ class MacroAssemblerX86Shared : public Assembler {
     return offset;
   }
 
-  template <typename T>
-  void computeEffectiveAddress(const T& address, Register dest) {
+  void computeEffectiveAddress(const Address& address, Register dest) {
+    if (address.offset == 0) {
+      if (address.base != dest) {
+        mov(address.base, dest);
+      }
+      return;
+    }
+    lea(Operand(address), dest);
+  }
+  void computeEffectiveAddress(const BaseIndex& address, Register dest) {
     lea(Operand(address), dest);
   }
 

@@ -20,6 +20,10 @@ const { sanitizeUntrustedContent } = ChromeUtils.importESModule(
   "moz-src:///browser/components/aiwindow/models/ChatUtils.sys.mjs"
 );
 
+const { AuthProvider } = ChromeUtils.importESModule(
+  "moz-src:///browser/components/aiwindow/models/AuthProvider.sys.mjs"
+);
+
 const {
   openAIEngine,
   MODEL_FEATURES,
@@ -48,7 +52,7 @@ const FAKE_RECORDS = [
     model: "test-model",
     is_default: true,
     parameters: {},
-    service_type: "ai",
+    service_type: "convo-starters",
     purpose: "convo-starters-sidebar",
     prompts:
       "Suggest {n} starters.\nCurrent tab:\n{current_tab}\nOpen tabs:\n{open_tabs}\nDate: {date}\nLocale: {locale}\n{assistant_limitations}",
@@ -59,7 +63,7 @@ const FAKE_RECORDS = [
     model: "test-model",
     is_default: true,
     parameters: {},
-    service_type: "ai",
+    service_type: "convo-starters",
     purpose: "convo-starters-sidebar",
     prompts: "You are a helpful assistant.",
   },
@@ -69,7 +73,7 @@ const FAKE_RECORDS = [
     model: "test-model",
     is_default: true,
     parameters: {},
-    service_type: "ai",
+    service_type: "convo-starters",
     purpose: "convo-starters-sidebar",
     prompts: "limitations",
   },
@@ -90,7 +94,7 @@ const FAKE_RECORDS = [
     model: "test-model",
     is_default: true,
     parameters: {},
-    service_type: "ai",
+    service_type: "convo-starters",
     purpose: "convo-starters-sidebar",
     prompts: "User memories:\n{memories}",
   },
@@ -112,7 +116,7 @@ function setupStubs(runResult, existingSb) {
     get: sb.stub().resolves(FAKE_RECORDS),
   });
   sb.stub(openAIEngine, "build").resolves(fakeEngineInstance);
-  sb.stub(openAIEngine, "getFxAccountToken").resolves(null);
+  sb.stub(AuthProvider, "getToken").resolves(null);
 
   return { sb, fakeEngineInstance };
 }
@@ -578,6 +582,11 @@ add_task(async function test_generateConversationStartersSidebar_happy_path() {
       true
     );
     Assert.ok(fakeEngine.run.calledOnce, "Engine run should be called once");
+    Assert.equal(
+      openAIEngine.build.firstCall.args[0].serviceType,
+      "convo-starters",
+      "Sidebar starters engine should use the convo-starters service type"
+    );
     Assert.ok(
       memoriesStub.calledOnce,
       "getMemorySummariesForPrompt should be called once"

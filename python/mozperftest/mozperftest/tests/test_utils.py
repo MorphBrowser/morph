@@ -300,11 +300,9 @@ def test_install_requirements_file():
             "-m",
             "pip",
             "install",
+            "--no-build-isolation",
             "-r",
             "foo",
-            "--no-index",
-            "--find-links",
-            "https://pypi.pub.build.mozilla.org/pub/",
         ])
 
 

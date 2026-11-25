@@ -20,6 +20,7 @@ pluginManagement {
     includeBuild("../android-components/plugins/config")
     includeBuild("./plugins/apksize")
     includeBuild("../gradle/plugins/nimbus-gradle-plugin")
+    includeBuild("../gradle/plugins/android-test-keep-rules")
 }
 
 plugins {
@@ -44,7 +45,6 @@ if (gradle.ext.mozconfig.substs.MOZ_APPSERVICES_IN_TREE && gradle.ext.mozconfig.
 }
 
 include ':app'
-include ':app:longfox'
 include ':mozilla-detekt-rules'
 include ':benchmark'
 

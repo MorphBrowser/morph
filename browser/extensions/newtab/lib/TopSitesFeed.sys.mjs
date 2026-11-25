@@ -14,12 +14,26 @@ import {
   actionCreators as ac,
   actionTypes as at,
 } from "resource://newtab/common/Actions.mjs";
-import { TippyTopProvider } from "resource:///modules/topsites/TippyTopProvider.sys.mjs";
-import { insertPinned } from "resource:///modules/topsites/TopSites.sys.mjs";
-import {
-  TOP_SITES_MAX_ROWS,
-  TOP_SITES_MAX_SITES_PER_ROW,
-} from "resource:///modules/topsites/constants.mjs";
+
+import { ImportHelper } from "resource://newtab/lib/ImportHelper.sys.mjs";
+
+/**
+ * @backward-compat { version 162 }
+ *
+ * Switch back to normal imports once 162 hits release.
+ */
+const { TippyTopProvider } = ImportHelper.import(
+  "moz-src:///browser/components/topsites/TippyTopProvider.sys.mjs",
+  "resource:///modules/topsites/"
+);
+const { insertPinned } = ImportHelper.import(
+  "moz-src:///browser/components/topsites/TopSites.sys.mjs",
+  "resource:///modules/topsites/"
+);
+const { TOP_SITES_MAX_ROWS, TOP_SITES_MAX_SITES_PER_ROW } = ImportHelper.import(
+  "moz-src:///browser/components/topsites/constants.mjs",
+  "resource:///modules/topsites/"
+);
 import { Dedupe } from "resource:///modules/Dedupe.sys.mjs";
 
 import {
@@ -167,6 +181,7 @@ function getTopSitesCount(prefValues) {
 // Smart shortcuts
 import { RankShortcutsProvider } from "resource://newtab/lib/SmartShortcutsRanker/RankShortcuts.mjs";
 import { FrecencyBoostProvider } from "resource://newtab/lib/FrecencyBoostProvider/FrecencyBoostProvider.mjs";
+import { SponsoredTopSitesScoreProvider } from "resource://newtab/lib/SponsoredTopSitesScoreProvider/SponsoredTopSitesScoreProvider.mjs";
 
 const PREF_SYSTEM_SHORTCUTS_PERSONALIZATION =
   "discoverystream.shortcuts.personalization.enabled";
@@ -180,6 +195,28 @@ function smartshortcutsEnabled(values) {
   return !!values[PREF_SYSTEM_SHORTCUTS_PERSONALIZATION];
 }
 const OVERSAMPLE_MULTIPLIER = 2;
+
+/**
+ * Number of slots within the first numItems that ranked organic sites can
+ * fill, after pinned and sponsored tiles take theirs.
+ *
+ * @param {number} numItems Total shortcut slots.
+ * @param {Array<object|null>} pinned Pinned links by position, possibly sparse.
+ * @param {Array<object>} sponsored Sponsored links with a 1-based
+ *   sponsored_position.
+ * @returns {number}
+ */
+function countOrganicSlots(numItems, pinned, sponsored) {
+  const pinnedSlots = pinned.slice(0, numItems).filter(Boolean).length;
+  // A later partner's tile replaces an earlier one at the same position, so
+  // each position takes a single slot.
+  const sponsoredSlots = new Set(
+    sponsored
+      .map(link => link?.sponsored_position)
+      .filter(position => position >= 1 && position <= numItems)
+  ).size;
+  return Math.max(0, numItems - pinnedSlots - sponsoredSlots);
+}
 
 function getShortHostnameForCurrentSearch() {
   return lazy.NewTabUtils.shortHostname(
@@ -403,7 +440,10 @@ export class ContileIntegration {
     let updateDefaultSites = await this._fetchSites();
     await this._topSitesFeed.allocatePositions();
     if (updateDefaultSites) {
-      this._topSitesFeed._readDefaults();
+      // Sponsored tiles changing (including the 15 minute periodic refetch)
+      // must not reshuffle organic shortcuts, so the ranker gates this refresh
+      // on the rerank interval like SYSTEM_TICK.
+      this._topSitesFeed._readDefaults({ reason: "SPONSORED_TILES_UPDATED" });
     }
   }
 
@@ -688,22 +728,31 @@ export class ContileIntegration {
             .filter(item => item)
             .map(item => parseInt(item, 10));
 
+          const marsOhttpEnabled = Services.prefs.getBoolPref(
+            "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled",
+            false
+          );
+          const ohttpRelayURL = Services.prefs.getStringPref(
+            "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL",
+            ""
+          );
+          const ohttpConfigURL = Services.prefs.getStringPref(
+            "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL",
+            ""
+          );
+          const useOhttp = marsOhttpEnabled && ohttpConfigURL && ohttpRelayURL;
+
+          const relevance = useOhttp
+            ? await SponsoredTopSitesScoreProvider.getScores()
+            : {};
+
           if (this._topSitesFeed.adsClient) {
-            body = await this._fetchSitesWithAdsClient(placementsArray);
+            body = await this._fetchSitesWithAdsClient(
+              placementsArray,
+              relevance
+            );
           } else {
             let fetchPromise;
-            const marsOhttpEnabled = Services.prefs.getBoolPref(
-              "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled",
-              false
-            );
-            const ohttpRelayURL = Services.prefs.getStringPref(
-              "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL",
-              ""
-            );
-            const ohttpConfigURL = Services.prefs.getStringPref(
-              "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL",
-              ""
-            );
             const headers = new Headers();
             headers.append("content-type", "application/json");
 
@@ -757,23 +806,28 @@ export class ContileIntegration {
 
             const adsBackendConfig = state.Prefs.values?.adsBackendConfig || {};
 
+            const hasRelevance = !!Object.keys(relevance).length;
+
             const options = {
               method: "POST",
               headers,
               body: JSON.stringify({
-                context_id: await lazy.ContextId.request(),
+                ...(!hasRelevance && {
+                  context_id: await lazy.ContextId.request(),
+                }),
                 flags: adsBackendConfig,
                 placements: placementsArray.map((placement, index) => ({
                   placement,
-                  count: countsArray[index],
+                  count: countsArray[index] || 1,
                 })),
                 blocks: blocksList,
+                ...(hasRelevance && { relevance }),
               }),
               credentials: "omit",
               signal,
             };
 
-            if (marsOhttpEnabled && ohttpConfigURL && ohttpRelayURL) {
+            if (useOhttp) {
               const config =
                 await lazy.ObliviousHTTP.getOHTTPConfig(ohttpConfigURL);
               if (!config) {
@@ -786,20 +840,12 @@ export class ContileIntegration {
               }
 
               // ObliviousHTTP.ohttpRequest only accepts a key/value object, and not
-              // a Headers instance. We normalize any headers to a key/value object.
-              //
-              // We use instanceof here since isInstance isn't available for
-              // Headers, it seems.
-              // eslint-disable-next-line mozilla/use-isInstance
-              if (options.headers && options.headers instanceof Headers) {
-                options.headers = Object.fromEntries(options.headers);
-              }
-
+              // a Headers instance.
               fetchPromise = lazy.ObliviousHTTP.ohttpRequest(
                 ohttpRelayURL,
                 config,
                 fetchUrl,
-                options
+                { ...options, headers: Object.fromEntries(headers) }
               );
             } else {
               fetchPromise = this._topSitesFeed.fetch(fetchUrl, options);
@@ -933,12 +979,13 @@ export class ContileIntegration {
     return false;
   }
 
-  async _fetchSitesWithAdsClient(placements) {
+  async _fetchSitesWithAdsClient(placements, relevance) {
     const options = lazy.AdsClient.requestOptions(
       this._topSitesFeed.store.getState().Prefs.values,
       // Also block the user's current default search engine hostname so
       // MARS returns a substitute sponsor instead of leaving us short.
-      this._topSitesFeed._currentSearchHostname || []
+      this._topSitesFeed._currentSearchHostname || [],
+      relevance
     );
 
     const requests = placements.map(
@@ -1049,6 +1096,27 @@ export class TopSitesFeed {
     Services.prefs.addObserver(DEFAULT_SITES_EXPERIMENTS_PREF_BRANCH, this);
     lazy.NimbusFeatures.newtab.onUpdate(this._nimbusChangeListener);
     this.frecencyBoostProvider.init();
+    this._updateSponsoredScoring();
+  }
+
+  /**
+   * Starts the sponsored top sites scoring when shortcuts and sponsored
+   * shortcuts are both shown, and otherwise stops it and clears its data.
+   */
+  _updateSponsoredScoring() {
+    const { values } = this.store.getState().Prefs;
+    if (values[SHOWN_ON_NEWTAB_PREF] && values[SHOW_SPONSORED_PREF]) {
+      // init() only initializes if initialization has not already occurred,
+      // so it is safe to call while the scoring is running.
+      SponsoredTopSitesScoreProvider.init(
+        () => this.store.getState().Prefs.values.adsBackendConfig
+      );
+    } else {
+      SponsoredTopSitesScoreProvider.clearData().catch(e =>
+        lazy.log.error(`Failed to clear sponsored scoring data: ${e}`)
+      );
+      SponsoredTopSitesScoreProvider.uninit();
+    }
   }
 
   uninit() {
@@ -1061,6 +1129,7 @@ export class TopSitesFeed {
     Services.prefs.removeObserver(DEFAULT_SITES_EXPERIMENTS_PREF_BRANCH, this);
     lazy.NimbusFeatures.newtab.offUpdate(this._nimbusChangeListener);
     this.frecencyBoostProvider.uninit();
+    SponsoredTopSitesScoreProvider.uninit();
   }
 
   observe(subj, topic, data) {
@@ -1154,14 +1223,18 @@ export class TopSitesFeed {
 
   /**
    * _readDefaults - sets DEFAULT_TOP_SITES
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.isStartup] Being called while TopSitesFeed is initting.
+   * @param {string} [options.reason] Passed through to refresh().
    */
-  async _readDefaults({ isStartup = false } = {}) {
+  async _readDefaults({ isStartup = false, reason } = {}) {
     this._useRemoteSetting = false;
 
     if (!Services.prefs.getBoolPref(REMOTE_SETTING_DEFAULTS_PREF)) {
       this.refreshDefaults(
         this.store.getState().Prefs.values[DEFAULT_SITES_PREF],
-        { isStartup }
+        { isStartup, reason }
       );
       return;
     }
@@ -1174,7 +1247,7 @@ export class TopSitesFeed {
       Cu.isInAutomation
     ) {
       let sites = Services.prefs.getStringPref(DEFAULT_SITES_OVERRIDE_PREF, "");
-      this.refreshDefaults(sites, { isStartup });
+      this.refreshDefaults(sites, { isStartup, reason });
       return;
     }
 
@@ -1260,7 +1333,7 @@ export class TopSitesFeed {
       DEFAULT_TOP_SITES.push(link);
     }
 
-    this.refresh({ broadcast: true, isStartup });
+    this.refresh({ broadcast: true, isStartup, reason });
   }
 
   /**
@@ -1315,7 +1388,13 @@ export class TopSitesFeed {
     return eligible.slice(0, this._maxSponsored);
   }
 
-  refreshDefaults(sites, { isStartup = false } = {}) {
+  /**
+   * @param {string} sites Comma separated default site URLs.
+   * @param {object} [options]
+   * @param {boolean} [options.isStartup] Being called while TopSitesFeed is initting.
+   * @param {string} [options.reason] Passed through to refresh().
+   */
+  refreshDefaults(sites, { isStartup = false, reason } = {}) {
     // Clear out the array of any previous defaults
     DEFAULT_TOP_SITES.length = 0;
 
@@ -1331,7 +1410,7 @@ export class TopSitesFeed {
       }
     }
 
-    this.refresh({ broadcast: true, isStartup });
+    this.refresh({ broadcast: true, isStartup, reason });
   }
 
   async _getRemoteConfig(firstTime = true) {
@@ -1537,6 +1616,8 @@ export class TopSitesFeed {
   /**
    * This thin wrapper around global.fetch makes it easier for us to write
    * automated tests that simulate responses from this fetch.
+   *
+   * @param {Parameters<typeof fetch>} args
    */
   fetch(...args) {
     return fetch(...args);
@@ -1680,7 +1761,12 @@ export class TopSitesFeed {
   }
 
   // eslint-disable-next-line max-statements
-  async getLinksWithDefaults(isStartup = false, refreshId = null) {
+  async getLinksWithDefaults(
+    isStartup = false,
+    refreshId = null,
+    reason,
+    onRankedSnapshot
+  ) {
     const prefValues = this.store.getState().Prefs.values;
     // switch on top_sites thompson sampling experiment
     const overSampleMultiplier =
@@ -1901,11 +1987,20 @@ export class TopSitesFeed {
     // Sample topsites via thompson sampling, if in experiment
     let sampledSites;
     if (smartshortcutsEnabled(this.store.getState().Prefs.values)) {
+      // The ranker only orders unpinned, unsponsored sites, so the frozen part
+      // of its order should match the slots those sites can actually fill.
+      // This is an upper bound on what's visible: narrow windows show fewer
+      // tiles per row, which the feed can't see.
+      const organicSlots = countOrganicSlots(
+        numItems,
+        pinned,
+        dedupedSponsored
+      );
       try {
         sampledSites = await this.ranker.rankTopSites(
           checkedAdult,
           prefValues,
-          isStartup
+          { isStartup, reason, numItems: organicSlots, onRankedSnapshot }
         );
       } catch (error) {
         lazy.log.warn(`Smart shortcuts ranking failed: ${error.message}`);
@@ -2099,6 +2194,9 @@ export class TopSitesFeed {
    * @param {object} [options]
    * @param {boolean} [options.broadcast] Should the update be broadcasted.
    * @param {boolean} [options.isStartup] Being called while TopSitesFeed is initting.
+   * @param {string} [options.reason] What triggered the refresh. Smart
+   *   shortcuts only skip an organic rerank for "SYSTEM_TICK" and
+   *   "SPONSORED_TILES_UPDATED"; any other or missing reason reranks.
    */
   async refresh(options = {}) {
     if (this._uninitialized) {
@@ -2121,11 +2219,14 @@ export class TopSitesFeed {
         await this._tippyTopProvider.init();
       }
 
+      let rankedSnapshot;
       const links = await this.getLinksWithDefaults(
-        {
-          isStartup: options.isStartup,
-        },
-        refreshId
+        options.isStartup,
+        refreshId,
+        options.reason,
+        snapshot => {
+          rankedSnapshot = snapshot;
+        }
       );
       if (this._uninitialized || refreshId !== this._refreshGeneration) {
         return;
@@ -2146,6 +2247,13 @@ export class TopSitesFeed {
       } else {
         // Don't broadcast only update the state and update the preloaded tab.
         this.store.dispatch(ac.AlsoToPreloaded(newAction));
+      }
+      if (rankedSnapshot) {
+        void this.ranker.commitSnapshot(rankedSnapshot).catch(error => {
+          lazy.log.warn(
+            `Smart shortcuts snapshot persistence failed: ${error.message}`
+          );
+        });
       }
     })();
 
@@ -2367,8 +2475,12 @@ export class TopSitesFeed {
   /**
    * Pin a site at a specific position saving only the desired keys.
    *
-   * @param customScreenshotURL {string} User set URL of preview image for site
-   * @param label {string} User set string of custom site name
+   * @param {object} site
+   * @param {string} [site.customScreenshotURL] User set URL of preview image for site
+   * @param {string} [site.label] User set string of custom site name
+   * @param {string} site.url
+   * @param {boolean} [site.searchTopSite]
+   * @param {number} index
    */
   async _pinSiteAt({ customScreenshotURL, label, url, searchTopSite }, index) {
     if (this._groupedPinsEnabled) {
@@ -2471,6 +2583,17 @@ export class TopSitesFeed {
     index = this._adjustPinIndexForSponsoredLinks(site, index);
     // If valid index provided, pin at that position
     if (index >= 0) {
+      const currentSite = this._linksWithDefaults?.[requestedIndex];
+      if (
+        this._groupedPinsEnabled &&
+        currentSite?.isPinned &&
+        currentSite.url !== site.url
+      ) {
+        // Bug 2073040: an edit changed a pin's URL, so swap it in place.
+        lazy.NewTabUtils.pinnedLinks.replace(currentSite.url, {
+          url: site.url,
+        });
+      }
       const prefs = this.store.getState().Prefs.values;
       // Classic add button on a full row: replace the last visible frecency tile,
       // matching how a grouped pin pushes the trailing frecency tile off the grid.
@@ -2758,7 +2881,9 @@ export class TopSitesFeed {
       case at.DISCOVERY_STREAM_DEV_SYSTEM_TICK:
       case at.DISCOVERY_STREAM_DEV_EXPIRE_CACHE:
       case at.SYSTEM_TICK:
-        this.refresh({ broadcast: false });
+        // Only SYSTEM_TICK is gated by the smart shortcuts rerank interval;
+        // the dev tick and cache expiry pass their own type and always rerank.
+        this.refresh({ broadcast: false, reason: action.type });
         this._contile.periodicUpdate();
         // We don't need to await on this,
         // we can let this update in the background.
@@ -2806,7 +2931,13 @@ export class TopSitesFeed {
             if (!action.data.value) {
               this._contile._resetContileCache();
             }
+            if (action.data.name === SHOW_SPONSORED_PREF) {
+              this._updateSponsoredScoring();
+            }
 
+            break;
+          case SHOWN_ON_NEWTAB_PREF:
+            this._updateSponsoredScoring();
             break;
           case SEARCH_SHORTCUTS_EXPERIMENT:
             if (action.data.value) {

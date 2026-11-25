@@ -61,6 +61,11 @@ void DisassembleInstruction(char* buffer, size_t bufsize, const Instruction* ins
 
 class MozBaseAssembler;
 
+// Keep 64-bit literals from straddling cache lines. Code starts CodeAlignment
+// aligned, so aligned buffer offsets are aligned addresses.
+static constexpr size_t kPoolDataAlignment = 8;
+static_assert(js::jit::CodeAlignment % kPoolDataAlignment == 0);
+
 using ARMBuffer = js::jit::AssemblerBufferWithConstantPools<
     Instruction, MozBaseAssembler,
     js::jit::AssemblerBufferSettings{
@@ -72,12 +77,16 @@ using ARMBuffer = js::jit::AssemblerBufferWithConstantPools<
         .alignFillInst = HINT | (NOP << ImmHint_offset),
         .nopFillInst = HINT | (NOP << ImmHint_offset),
         .numShortBranchRanges = NumShortBranchRangeTypes,
+        .poolDataAlignment = kPoolDataAlignment,
     }>;
 
 // Base class for vixl::Assembler, for isolating Moz-specific changes to VIXL.
 class MozBaseAssembler : public js::jit::AssemblerShared {
   // Buffer initialization constants.
-  static const size_t   BufferMaxPoolOffset = 1024;
+  // Constant pool loads reach 1 MiB, but the pool data has to stay well within
+  // the 32 KiB reach of TBZ, so that a TBZ just before a pool can still reach a
+  // veneer after the data.
+  static const size_t   BufferMaxPoolOffset = 16 * 1024;
   static const unsigned BufferNumDebugNopsToInsert = 0;
 
 #ifdef JS_DISASM_ARM64
@@ -137,12 +146,13 @@ class MozBaseAssembler : public js::jit::AssemblerShared {
   // Propagate OOM errors.
   BufferOffset allocLiteralLoadEntry(size_t numInst, unsigned numPoolEntries,
 				     uint8_t* inst, uint8_t* data,
+				     js::jit::PoolEntryKind kind,
 				     const LiteralDoc& doc = LiteralDoc())
   {
     MOZ_ASSERT(inst);
     MOZ_ASSERT(numInst == 1);	/* If not, then fix disassembly */
     BufferOffset offset = armbuffer_.allocEntry(numInst, numPoolEntries, inst,
-                                                data);
+                                                data, kind);
     propagateOOM(offset.assigned());
 #ifdef JS_DISASM_ARM64
     Instruction* instruction = armbuffer_.getInstOrNull(offset);

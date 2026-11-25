@@ -5,6 +5,7 @@
 package org.mozilla.fenix.browser.readermode
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -14,6 +15,7 @@ import mozilla.components.browser.state.state.TabSessionState
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.compose.base.text.Text
 import mozilla.components.compose.menu.data.MenuItem
+import mozilla.components.compose.menu.data.MenuItemTitle
 import mozilla.components.compose.menu.data.StandardMenuItem
 import mozilla.components.compose.menu.store.MenuEvent
 import mozilla.components.compose.menu.ui.MenuItemIconRes
@@ -40,16 +42,22 @@ class ReaderViewMenuItemProvider(
     private val appStore: AppStore,
     scope: CoroutineScope,
 ) : MenuItemProvider {
-    override val itemFlow: StateFlow<MenuItem?> =
-        browserStore.stateFlow
-            .map { it.customizeReaderViewItem() }
-            .stateIn(
-                scope = scope,
-                started = SharingStarted.Eagerly,
-                initialValue = browserStore.state.customizeReaderViewItem(),
-            )
+    override val itemsFlow: StateFlow<List<MenuItem>> =
+        if (target == MenuTarget.CustomizeMenu) {
+            MutableStateFlow(listOf(DEFAULT_MENU_ITEM))
+        } else if (target == MenuTarget.Preview) {
+            MutableStateFlow(listOf(DEFAULT_MENU_ITEM.copy(onClickEvent = MenuAction.CustomizeReaderView)))
+        } else {
+            browserStore.stateFlow
+                .map { listOfNotNull(it.customizeReaderViewItem()) }
+                .stateIn(
+                    scope = scope,
+                    started = SharingStarted.Eagerly,
+                    initialValue = listOfNotNull(browserStore.state.customizeReaderViewItem()),
+                )
+        }
 
-    override fun handles(event: MenuEvent) = event == MenuAction.CustomizeReaderView
+    override fun handles(event: MenuEvent) = target != MenuTarget.Preview && (event == MenuAction.CustomizeReaderView)
 
     override fun onEvent(event: MenuEvent, menu: MenuHost) {
         if (target.browserSessionFrom(browserStore.state) == null) return
@@ -61,16 +69,15 @@ class ReaderViewMenuItemProvider(
     /** Customizing the reader view is only offered while the current page is shown in reader view. */
     private fun BrowserState.customizeReaderViewItem() =
         when ((target.browserSessionFrom(this) as? TabSessionState)?.readerState?.active) {
-            true -> CUSTOMIZE_READER_VIEW_ITEM
+            true -> DEFAULT_MENU_ITEM.copy(onClickEvent = MenuAction.CustomizeReaderView)
             else -> null
         }
 
-    private companion object {
-        val CUSTOMIZE_READER_VIEW_ITEM =
+    companion object {
+        private val DEFAULT_MENU_ITEM =
             StandardMenuItem(
-                title = Text.Resource(R.string.browser_menu_customize_reader_view_2),
+                title = MenuItemTitle(Text.Resource(R.string.browser_menu_customize_reader_view_2)),
                 icon = MenuItemIconRes(iconsR.drawable.mozac_ic_tool_24),
-                onClickEvent = MenuAction.CustomizeReaderView,
             )
     }
 }

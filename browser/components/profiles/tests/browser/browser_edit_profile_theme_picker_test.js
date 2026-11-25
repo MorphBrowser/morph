@@ -104,6 +104,9 @@ add_task(async function test_edit_profile_theme() {
   let uninstallSun = await installNovaTheme(NOVA_SUN_ID);
   let uninstallSpark = await installNovaTheme(NOVA_SPARK_ID);
 
+  await Services.fog.testFlushAllChildren();
+  Services.fog.testResetFOG();
+
   await BrowserTestUtils.withNewTab(
     {
       gBrowser,
@@ -178,6 +181,9 @@ add_task(async function test_edit_profile_theme() {
       Assert.ok(sunAddon, "Nova Sun theme should be installed");
       Assert.ok(sunAddon.isActive, "Nova Sun theme should be active");
 
+      await assertThemePickerThemeChange(NOVA_SUN_ID);
+      Services.fog.testResetFOG();
+
       profileUpdated = TestUtils.topicObserved("sps-profiles-updated");
 
       // Test selecting a theme via keyboard navigation
@@ -222,6 +228,8 @@ add_task(async function test_edit_profile_theme() {
       let sparkAddon = await lazy.AddonManager.getAddonByID(NOVA_SPARK_ID);
       Assert.ok(sparkAddon, "Nova Spark theme should be installed");
       Assert.ok(sparkAddon.isActive, "Nova Spark theme should be active");
+
+      await assertThemePickerThemeChange(NOVA_SPARK_ID);
     }
   );
 
@@ -606,10 +614,13 @@ add_task(async function test_device_appearance_changes_theme_swatch_colors() {
           "moz-visual-picker-item[value='nova-sun@mozilla.org']"
         );
         let themePreview = sunThemeItem.querySelector(".theme-preview");
-        let initialColor =
-          content.getComputedStyle(themePreview).backgroundColor;
+        let initialImage =
+          content.getComputedStyle(themePreview).backgroundImage;
 
-        Assert.ok(initialColor, "Theme preview should have initial color");
+        Assert.ok(
+          initialImage,
+          "Theme preview should have initial background image"
+        );
 
         await SpecialPowers.pushPrefEnv({
           set: [["ui.systemUsesDarkTheme", 1]],
@@ -623,14 +634,14 @@ add_task(async function test_device_appearance_changes_theme_swatch_colors() {
         // Wait for the theme preview style to actually update
         await ContentTaskUtils.waitForCondition(
           () =>
-            content.getComputedStyle(themePreview).backgroundColor !==
-            initialColor
+            content.getComputedStyle(themePreview).backgroundImage !==
+            initialImage
         );
 
-        let darkColor = content.getComputedStyle(themePreview).backgroundColor;
+        let darkImage = content.getComputedStyle(themePreview).backgroundImage;
         Assert.notEqual(
-          darkColor,
-          initialColor,
+          darkImage,
+          initialImage,
           "Theme swatch color should change in dark mode"
         );
 
@@ -645,10 +656,10 @@ add_task(async function test_device_appearance_changes_theme_swatch_colors() {
           "Waiting for device appearance to update to light"
         );
 
-        let lightColor = content.getComputedStyle(themePreview).backgroundColor;
+        let lightImage = content.getComputedStyle(themePreview).backgroundImage;
         Assert.equal(
-          lightColor,
-          initialColor,
+          lightImage,
+          initialImage,
           "Theme swatch color should return to original in light mode"
         );
 
@@ -676,6 +687,9 @@ add_task(async function test_theme_picker_responds_to_external_theme_change() {
   );
   let initialThemeFg = SelectableProfileService.currentProfile.theme.themeFg;
   let initialThemeBg = SelectableProfileService.currentProfile.theme.themeBg;
+
+  await Services.fog.testFlushAllChildren();
+  Services.fog.testResetFOG();
 
   await BrowserTestUtils.withNewTab(
     {
@@ -751,9 +765,18 @@ add_task(async function test_theme_picker_responds_to_external_theme_change() {
         initialThemeBg,
         "Profile theme background color should change"
       );
+
+      await Services.fog.testFlushAllChildren();
+      Assert.equal(
+        Glean.themePicker.change.testGetValue(),
+        null,
+        "External theme changes should not record theme telemetry"
+      );
     }
   );
 
+  let profileUpdated = TestUtils.topicObserved("sps-profiles-updated");
   await uninstallSun();
+  await profileUpdated;
   await SpecialPowers.popPrefEnv();
 });

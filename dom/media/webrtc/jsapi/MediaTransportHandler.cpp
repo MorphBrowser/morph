@@ -4,7 +4,6 @@
 
 #include "MediaTransportHandler.h"
 
-#include "MediaTransportHandlerIPC.h"
 #include "nsITimer.h"
 #include "transport/dtlsidentity.h"
 #include "transport/nricemediastream.h"
@@ -18,7 +17,6 @@
 // Config stuff
 #include "mozilla/IceServerParser.h"
 #include "mozilla/Preferences.h"
-#include "mozilla/StaticPrefs_network.h"
 #include "mozilla/dom/RTCConfigurationBinding.h"
 
 // Logging stuff
@@ -32,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "common/RandomHex.h"
 #include "mozilla/Base64.h"
 #include "mozilla/ProfilerMarkers.h"
 #include "mozilla/PublicSSL.h"  // For psm::InitializeCipherSuite
@@ -116,6 +115,10 @@ class MediaTransportImpl {
   virtual void StartIceGathering(bool aDefaultRouteOnly,
                                  bool aObfuscateHostAddresses,
                                  const nsTArray<NrIceStunAddr>& aStunAddrs) = 0;
+  virtual void SetCandidatePoolSize(
+      uint8_t aSize, bool aDefaultRouteOnly, bool aObfuscateHostAddresses,
+      const nsTArray<NrIceStunAddr>& aStunAddrs) = 0;
+  virtual void EmptyCandidatePool() = 0;
   virtual void ActivateTransport(
       const std::string& aTransportId, const std::string& aLocalUfrag,
       const std::string& aLocalPwd, size_t aComponentCount,
@@ -181,6 +184,12 @@ class MediaTransportImplNicer final : public MediaTransportImpl,
                          // own process, because we won't need to get this
                          // via IPC anymore
                          const nsTArray<NrIceStunAddr>& aStunAddrs) override;
+
+  void SetCandidatePoolSize(uint8_t aSize, bool aDefaultRouteOnly,
+                            bool aObfuscateHostAddresses,
+                            const nsTArray<NrIceStunAddr>& aStunAddrs) override;
+
+  void EmptyCandidatePool() override;
 
   void ActivateTransport(
       const std::string& aTransportId, const std::string& aLocalUfrag,
@@ -377,7 +386,7 @@ class MediaTransportImplNicer final : public MediaTransportImpl,
 class MediaTransportHandlerLocal final : public MediaTransportHandler {
  public:
   MediaTransportHandlerLocal()
-      : mImpl(MakeUnique<MediaTransportImplNicer>(mEvents)),
+      : mImpl(std::make_unique<MediaTransportImplNicer>(mEvents)),
         mTarget(mImpl->Init()) {}
 
   RefPtr<IceLogPromise> GetIceLog(const nsCString& aPattern) override {
@@ -449,6 +458,21 @@ class MediaTransportHandlerLocal final : public MediaTransportHandler {
            aImpl.StartIceGathering(aDefaultRouteOnly, aObfuscateHostAddresses,
                                    stunAddrs);
          });
+  }
+
+  void SetCandidatePoolSize(
+      uint8_t aSize, bool aDefaultRouteOnly, bool aObfuscateHostAddresses,
+      const nsTArray<NrIceStunAddr>& aStunAddrs) override {
+    Post(__func__,
+         [=, stunAddrs = aStunAddrs.Clone()](MediaTransportImpl& aImpl) {
+           aImpl.SetCandidatePoolSize(aSize, aDefaultRouteOnly,
+                                      aObfuscateHostAddresses, stunAddrs);
+         });
+  }
+
+  void EmptyCandidatePool() override {
+    Post(__func__,
+         [](MediaTransportImpl& aImpl) { aImpl.EmptyCandidatePool(); });
   }
 
   void ActivateTransport(
@@ -539,14 +563,8 @@ class MediaTransportHandlerLocal final : public MediaTransportHandler {
 
 /* static */
 already_AddRefed<MediaTransportHandler> MediaTransportHandler::Create() {
-  RefPtr<MediaTransportHandler> result;
-  if (XRE_IsContentProcess() &&
-      Preferences::GetBool("media.peerconnection.mtransport_process") &&
-      StaticPrefs::network_process_enabled()) {
-    result = MakeRefPtr<MediaTransportHandlerIPC>();
-  } else {
-    result = MakeRefPtr<MediaTransportHandlerLocal>();
-  }
+  RefPtr<MediaTransportHandler> result =
+      MakeRefPtr<MediaTransportHandlerLocal>();
   result->Initialize();
   return result.forget();
 }
@@ -1128,6 +1146,37 @@ void MediaTransportImplNicer::StartIceGathering(
   }
 }
 
+void MediaTransportImplNicer::SetCandidatePoolSize(
+    uint8_t aSize, bool aDefaultRouteOnly, bool aObfuscateHostAddresses,
+    const nsTArray<NrIceStunAddr>& aStunAddrs) {
+  if (!mIceCtx) {
+    return;
+  }
+
+  mHideLocalPrflx = aObfuscateHostAddresses;
+  mIceCtx->SetGatheringFlags(aDefaultRouteOnly, aObfuscateHostAddresses);
+
+  if (aStunAddrs.Length()) {
+    mIceCtx->SetStunAddrs(aStunAddrs);
+  }
+
+  // The pool gathers when it is asked for rather than waiting for the
+  // gather that setting a local description kicks off, which is the
+  // point of asking for it this early.
+  // Nothing knows yet which transport will use what the pool gathers, so it
+  // gathers under placeholder credentials until a component takes it and is
+  // re-keyed. They are random, like the ones JSEP generates, rather than fixed
+  // so that they are not guessable.
+  mIceCtx->ResizeCandidatePool(aSize, GetRandomHex(1), GetRandomHex(4));
+}
+
+void MediaTransportImplNicer::EmptyCandidatePool() {
+  if (!mIceCtx) {
+    return;
+  }
+  mIceCtx->EmptyCandidatePool();
+}
+
 void MediaTransportImplNicer::StartIceChecks(
     bool aIsControlling, const std::vector<std::string>& aIceOptions) {
   if (!mIceCtx) {
@@ -1340,12 +1389,10 @@ void MediaTransportEvents::OnPacketReceived(std::string&& aTransportId,
       break;
     case MediaPacket::RTP:
     case MediaPacket::RTCP:
-      mRtpPacketReceived.Notify(std::forward<std::string>(aTransportId),
-                                std::forward<MediaPacket>(aPacket));
+      mRtpPacketReceived.Notify(std::move(aTransportId), std::move(aPacket));
       break;
     case MediaPacket::SCTP:
-      mSctpPacketReceived.Notify(std::forward<std::string>(aTransportId),
-                                 std::forward<MediaPacket>(aPacket));
+      mSctpPacketReceived.Notify(std::move(aTransportId), std::move(aPacket));
       break;
   }
 }
@@ -1443,7 +1490,7 @@ static nsString BuildCertificateStats(const nsTArray<uint8_t>& aDerCert,
 RefPtr<dom::RTCStatsPromise> MediaTransportImplNicer::GetIceStats(
     const std::string& aTransportId, DOMHighResTimeStamp aNow) {
   MOZ_ASSERT(mStsThread->IsOnCurrentThread());
-  auto stats = MakeUnique<dom::RTCStatsCollection>();
+  auto stats = std::make_unique<dom::RTCStatsCollection>();
   if (mIceCtx) {
     dom::RTCIceRole iceRole =
         mIceCtx->GetControlling() == NrIceCtx::ICE_CONTROLLING
@@ -1945,9 +1992,9 @@ RefPtr<TransportFlow> MediaTransportImplNicer::CreateTransportFlow(
   RefPtr flow = MakeRefPtr<TransportFlow>(aTransportId);
 
   // The media streams are made on STS so we need to defer setup.
-  auto ice = MakeUnique<TransportLayerIce>();
-  auto dtls = MakeUnique<TransportLayerDtls>();
-  auto srtp = MakeUnique<TransportLayerSrtp>(*dtls);
+  auto ice = std::make_unique<TransportLayerIce>();
+  auto dtls = std::make_unique<TransportLayerDtls>();
+  auto srtp = std::make_unique<TransportLayerSrtp>(*dtls);
   dtls->SetRole(aDtlsClient ? TransportLayerDtls::CLIENT
                             : TransportLayerDtls::SERVER);
 
@@ -2060,8 +2107,8 @@ void MediaTransportImplNicer::OnConnectionStateChange(
   // surfacing a separate pair for RTCP when rtcp-mux is not in use.
   if (NS_SUCCEEDED(
           aIceStream->GetActivePairAsAttributes(1, &localAttr, &remoteAttr))) {
-    selectedPair = Some(dom::IceCandidateAttributePair(nsCString(localAttr),
-                                                       nsCString(remoteAttr)));
+    selectedPair = Some(dom::IceCandidateAttributePair{nsCString(localAttr),
+                                                       nsCString(remoteAttr)});
   }
   if (auto it = mTransports.find(aIceStream->GetId());
       it != mTransports.end()) {
@@ -2156,7 +2203,8 @@ Maybe<dom::RTCErrorParams> GetErrorInfo(const TransportLayerDtls& aDtlsLayer) {
     return Nothing();
   }
 
-  return Some(dom::RTCErrorParams{error, aDtlsLayer.GetErrorDescription()});
+  return Some(
+      dom::RTCErrorParams{std::move(error), aDtlsLayer.GetErrorDescription()});
 }
 
 void MediaTransportImplNicer::OnStateChange(TransportLayer* aLayer,

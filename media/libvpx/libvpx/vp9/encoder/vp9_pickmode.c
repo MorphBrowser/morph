@@ -132,6 +132,9 @@ static int mv_refs_rt(VP9_COMP *cpi, const VP9_COMMON *cm, const MACROBLOCK *x,
     const int prev_layer = cpi->svc.spatial_layer_id - 1;
     const int index =
         (mi_col >> 1) + (mi_row >> 1) * cpi->svc.mi_cols[prev_layer];
+    assert(cm->prev_frame != NULL && cm->prev_frame->mvs != NULL);
+    assert(cpi->svc.mi_cols[prev_layer] <= cm->prev_frame->mi_cols &&
+           cpi->svc.mi_rows[prev_layer] <= cm->prev_frame->mi_rows);
     // prev_frame->mvs[] is allocated to size mi_cols * mi_rows corresponding
     // to the previous spatial layer, so the index check is against
     // svc.mi_col/rows[prev_layer].
@@ -1289,10 +1292,14 @@ static INLINE void find_predictors(
       vp9_find_mv_refs(cm, xd, xd->mi[0], ref_frame, candidates, mi_row, mi_col,
                        x->mbmi_ext->mode_context);
     } else {
+      // Only use base_mv when a lower spatial layer was encoded in this
+      // superframe.
       const_motion[ref_frame] =
           mv_refs_rt(cpi, cm, x, xd, tile_info, xd->mi[0], ref_frame,
                      candidates, &frame_mv[NEWMV][ref_frame], mi_row, mi_col,
-                     (int)(cpi->svc.use_base_mv && cpi->svc.spatial_layer_id));
+                     (int)(cpi->svc.use_base_mv &&
+                           cpi->svc.spatial_layer_id >
+                               cpi->svc.first_spatial_layer_to_encode));
     }
     vp9_find_best_ref_mvs(xd, cm->allow_high_precision_mv, candidates,
                           &frame_mv[NEARESTMV][ref_frame],
@@ -1626,7 +1633,9 @@ static int search_new_mv(VP9_COMP *cpi, MACROBLOCK *x,
         cpi->sf.mv.subpel_search_level, cond_cost_list(cpi, cost_list),
         x->nmvjointcost, x->mvcost, &dis, &x->pred_sse[ref_frame], NULL, 0, 0,
         cpi->sf.use_accurate_subpel_search);
-  } else if (svc->use_base_mv && svc->spatial_layer_id) {
+  } else if (svc->use_base_mv &&
+             svc->spatial_layer_id > svc->first_spatial_layer_to_encode) {
+    // Use base_mv from the lower spatial layer encoded in this superframe.
     if (frame_mv[NEWMV][ref_frame].as_int != INVALID_MV) {
       const int pre_stride = xd->plane[0].pre[0].stride;
       unsigned int base_mv_sse = UINT_MAX;
@@ -1824,9 +1833,10 @@ void vp9_pick_inter_mode(VP9_COMP *cpi, MACROBLOCK *x, TileDataEnc *tile_data,
         &cm->frame_refs[GOLDEN_FRAME - 1].sf;
     gf_temporal_ref = 1;
     // For temporal long term prediction, check that the golden reference
-    // is same scale as last reference, otherwise disable.
+    // is same scale as last reference and not scaled, otherwise disable.
     if ((sf_last->x_scale_fp != sf_golden->x_scale_fp) ||
-        (sf_last->y_scale_fp != sf_golden->y_scale_fp)) {
+        (sf_last->y_scale_fp != sf_golden->y_scale_fp) ||
+        vp9_is_scaled(sf_golden)) {
       gf_temporal_ref = 0;
     } else {
       if (cpi->rc.avg_frame_low_motion > 70)
@@ -1941,20 +1951,21 @@ void vp9_pick_inter_mode(VP9_COMP *cpi, MACROBLOCK *x, TileDataEnc *tile_data,
     }
   }
 
-  // For svc mode, on spatial_layer_id > 0: if the reference has different scale
+  // For svc mode: if the reference has different scale and was not scaled,
   // constrain the inter mode to only test zero motion.
-  if (cpi->use_svc && svc->force_zero_mode_spatial_ref &&
-      svc->spatial_layer_id > 0 && !gf_temporal_ref) {
+  if (cpi->use_svc && svc->force_zero_mode_spatial_ref) {
     if (cpi->ref_frame_flags & VP9_LAST_FLAG) {
       struct scale_factors *const ref_sf = &cm->frame_refs[LAST_FRAME - 1].sf;
-      if (vp9_is_scaled(ref_sf)) {
+      if (vp9_is_scaled(ref_sf) &&
+          vp9_get_scaled_ref_frame(cpi, LAST_FRAME) == NULL) {
         svc_force_zero_mode[LAST_FRAME - 1] = 1;
         inter_layer_ref = LAST_FRAME;
       }
     }
     if (cpi->ref_frame_flags & VP9_GOLD_FLAG) {
       struct scale_factors *const ref_sf = &cm->frame_refs[GOLDEN_FRAME - 1].sf;
-      if (vp9_is_scaled(ref_sf)) {
+      if (vp9_is_scaled(ref_sf) &&
+          vp9_get_scaled_ref_frame(cpi, GOLDEN_FRAME) == NULL) {
         svc_force_zero_mode[GOLDEN_FRAME - 1] = 1;
         inter_layer_ref = GOLDEN_FRAME;
       }

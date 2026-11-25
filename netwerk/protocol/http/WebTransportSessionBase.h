@@ -8,9 +8,11 @@
 #include <functional>
 
 #include "mozilla/Mutex.h"
+#include "mozilla/TimeStamp.h"
 #include "mozilla/dom/PWebTransport.h"
 #include "nsISupportsImpl.h"
 #include "nsIWebTransport.h"
+#include "nsString.h"
 #include "nsTArray.h"
 
 class WebTransportSessionEventListener;
@@ -53,13 +55,24 @@ class WebTransportSessionBase {
   virtual uint64_t GetStreamId() const = 0;
   virtual void CloseSession(uint32_t aStatus, const nsACString& aReason) = 0;
   virtual void GetMaxDatagramSize() = 0;
+  virtual void GetResponseHeaders(nsTArray<nsCString>& aNames,
+                                  nsTArray<nsCString>& aValues) {}
   virtual nsresult ExportKeyingMaterial(const nsTArray<uint8_t>& aLabel,
                                         const nsTArray<uint8_t>& aContext,
+                                        uint32_t aOutputLength,
                                         nsTArray<uint8_t>& aKeyingMaterial) = 0;
   virtual void GetNegotiatedProtocol(nsACString& aProtocol) = 0;
   virtual void GetStats() = 0;
-  virtual void SendDatagram(nsTArray<uint8_t>&& aData, uint64_t aTrackingId,
-                            uint64_t aSendGroupId, int64_t aSendOrder) = 0;
+  virtual void SetAnticipatedConcurrentIncomingUnidirectionalStreams(
+      uint16_t aValue) = 0;
+  virtual void SetAnticipatedConcurrentIncomingBidirectionalStreams(
+      uint16_t aValue) = 0;
+  // aTimestamp is when the datagram was written, for outgoingMaxAge.
+  virtual void SendDatagram(nsTArray<uint8_t>&& aData, uint64_t aSendGroupId,
+                            int64_t aSendOrder, TimeStamp aTimestamp) = 0;
+  virtual void SetDatagramMaxBufferedDatagrams(
+      uint32_t aMaxBufferedDatagrams) = 0;
+  virtual void SetDatagramMaxAge(double aMaxAge) = 0;
   virtual nsresult RegisterSendGroup(uint64_t aGroupId) = 0;
   virtual void CreateOutgoingBidirectionalStream(
       std::function<void(Result<RefPtr<WebTransportStreamBase>, nsresult>&&)>&&
@@ -68,6 +81,33 @@ class WebTransportSessionBase {
       std::function<void(Result<RefPtr<WebTransportStreamBase>, nsresult>&&)>&&
           aCallback) = 0;
   virtual void StartReading() {}
+
+  // Tells the listener that no further datagram will arrive until we return to
+  // the event loop. Call it once after each run of OnDatagramReceived() calls,
+  // so that a listener batching them for IPC knows the batch is complete.
+  void FlushIncomingDatagrams();
+
+  // Tell the listener the outgoing datagram queue has room again.
+  void NotifyOutgoingDatagramSpaceAvailable();
+
+  // Ask for one NotifyOutgoingDatagramSpaceAvailable() after the next output
+  // pass.  neqo only signals space after rejecting a datagram, which a sender
+  // that stays within the credit it was granted never causes.  HTTP/2 already
+  // re-samples after each pass that writes a datagram.  Socket thread.
+  virtual void RequestOutgoingDatagramProgress() {}
+
+  // A snapshot of the outgoing datagram queue, and its cumulative
+  // sent/expired/dropped counts, for WebTransportParent's DatagramCapacity
+  // feedback.  False if the session cannot report them.
+  virtual bool GetDatagramQueueCapacity(size_t* aRemainingBytes,
+                                        size_t* aQueuedDatagrams,
+                                        size_t* aMaxQueuedBytes) {
+    return false;
+  }
+  virtual bool GetDatagramSessionStats(uint64_t* aSent, uint64_t* aExpired,
+                                       uint64_t* aDropped) {
+    return false;
+  }
 
   virtual Http3WebTransportSession* GetHttp3WebTransportSession() {
     return nullptr;

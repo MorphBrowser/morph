@@ -4,6 +4,7 @@
 
 // Documentation for libpref is in modules/libpref/docs/index.rst.
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -892,6 +893,12 @@ class Pref {
 
   nsresult SetDefaultValue(PrefType aType, PrefValue aValue, bool aIsSticky,
                            bool aIsLocked, bool* aValueChanged) {
+    // A typeless pref is an entry that shadows a deleted shared pref, so it
+    // holds no value whose type could conflict.
+    if (IsTypeNone()) {
+      SetType(aType);
+    }
+
     // Types must always match when setting the default value.
     if (!IsType(aType)) {
       return NS_ERROR_UNEXPECTED;
@@ -1439,9 +1446,13 @@ static bool DomainEndsWithMultipleDots(const nsACString& aDomain) {
   return StringEndsWith(aDomain, ".."_ns);
 }
 
-static bool DomainEndsWithMultipleDots(const char* const* aDomains) {
-  for (const char* const* p = aDomains; *p; ++p) {
-    if (DomainEndsWithMultipleDots(nsDependentCString(*p))) {
+static bool HasInvalidCallbackDomains(const nsACString& aDomain) {
+  return DomainEndsWithMultipleDots(aDomain);
+}
+
+static bool HasInvalidCallbackDomains(Span<const char* const> aDomains) {
+  for (const char* domain : aDomains) {
+    if (!domain || DomainEndsWithMultipleDots(nsDependentCString(domain))) {
       return true;
     }
   }
@@ -1473,6 +1484,23 @@ class CallbackData {
 // Owned via RefPtr by the CallbackTrieNode(s) it is registered under; a single
 // node registered for an array of prefs is shared (referenced) by several trie
 // nodes.  Main-thread only, so the refcount is non-atomic.
+struct CallbackDomains {
+  nsTArray<nsCString> mNames;
+  uintptr_t mArrayAddress = 0;
+  size_t mLength = 0;
+};
+
+static CallbackDomains CopyCallbackDomains(Span<const char* const> aDomains) {
+  CallbackDomains result;
+  result.mArrayAddress = reinterpret_cast<uintptr_t>(aDomains.Elements());
+  result.mLength = aDomains.Length();
+  result.mNames.SetCapacity(aDomains.Length());
+  for (const char* domain : aDomains) {
+    result.mNames.AppendElement(nsCString(domain));
+  }
+  return result;
+}
+
 class CallbackNode : public CallbackData {
  public:
   NS_INLINE_DECL_REFCOUNTING(CallbackNode)
@@ -1488,15 +1516,13 @@ class CallbackNode : public CallbackData {
 #endif
   }
 
-  CallbackNode(const char* const* aDomains, PrefChangedFunc aFunc, void* aData,
-               bool aIsPrefix)
+  CallbackNode(Span<const char* const> aDomains, PrefChangedFunc aFunc,
+               void* aData, bool aIsPrefix)
       : CallbackData(aFunc, aData),
-        mDomain(AsVariant(aDomains)),
+        mDomain(AsVariant(CopyCallbackDomains(aDomains))),
         mIsPrefix(aIsPrefix) {}
 
-  const Variant<nsCString, const char* const*>& Domain() const {
-    return mDomain;
-  }
+  const Variant<nsCString, CallbackDomains>& Domain() const { return mDomain; }
 
   const char* DomainForLog() const {
     return mDomain.is<nsCString>() ? mDomain.as<nsCString>().get() : "(multi)";
@@ -1519,8 +1545,8 @@ class CallbackNode : public CallbackData {
       return !mSingleDomainHadTrailingDot;
     }
     // Array entries keep their dots, so an exact one still matches.
-    for (const char* const* p = mDomain.as<const char* const*>(); *p; ++p) {
-      if (aPrefName.Equals(*p)) {
+    for (const nsCString& domain : mDomain.as<CallbackDomains>().mNames) {
+      if (aPrefName.Equals(domain)) {
         return true;
       }
     }
@@ -1546,8 +1572,15 @@ class CallbackNode : public CallbackData {
     return mDomain.as<nsCString>() == Substring(aDomain, 0, len);
   }
 
-  bool DomainIs(const char* const* aPrefs) const {
-    return mDomain == AsVariant(aPrefs);
+  bool DomainIs(Span<const char* const> aPrefs) const {
+    if (!mDomain.is<CallbackDomains>()) {
+      return false;
+    }
+
+    const auto& registered = mDomain.as<CallbackDomains>();
+    return registered.mArrayAddress ==
+               reinterpret_cast<uintptr_t>(aPrefs.Elements()) &&
+           registered.mLength == aPrefs.Length();
   }
 
   void AddSizeOfIncludingThis(MallocSizeOf aMallocSizeOf, PrefsSizes& aSizes) {
@@ -1555,6 +1588,14 @@ class CallbackNode : public CallbackData {
     if (mDomain.is<nsCString>()) {
       aSizes.mCallbacksDomains +=
           mDomain.as<nsCString>().SizeOfExcludingThisIfUnshared(aMallocSizeOf);
+    } else {
+      const auto& names = mDomain.as<CallbackDomains>().mNames;
+      aSizes.mCallbacksDomains +=
+          names.ShallowSizeOfExcludingThis(aMallocSizeOf);
+      for (const nsCString& name : names) {
+        aSizes.mCallbacksDomains +=
+            name.SizeOfExcludingThisIfUnshared(aMallocSizeOf);
+      }
     }
   }
 
@@ -1567,7 +1608,7 @@ class CallbackNode : public CallbackData {
  private:
   ~CallbackNode() = default;
 
-  Variant<nsCString, const char* const*> mDomain;
+  Variant<nsCString, CallbackDomains> mDomain;
 
   bool mIsPrefix;
   // Array entries keep their dots in mDomain, so this stays false for them.
@@ -1630,8 +1671,9 @@ struct CallbackTrieNode {
       return *mChildren[idx].mNode;
     }
     return *mChildren
-                .InsertElementAt(idx, Child{nsCString(aSegment),
-                                            MakeUnique<CallbackTrieNode>()})
+                .InsertElementAt(idx,
+                                 Child{nsCString(aSegment),
+                                       std::make_unique<CallbackTrieNode>()})
                 ->mNode;
   }
 
@@ -1681,9 +1723,12 @@ class CallbackTrie {
       // Domain is already stripped of trailing dot by CallbackNode ctor.
       NodeFor(aNode->Domain().as<nsCString>()).mCallbacks.AppendElement(aNode);
     } else {
-      for (const char* const* p = aNode->Domain().as<const char* const*>(); *p;
-           ++p) {
-        NodeFor(nsDependentCString(*p)).mCallbacks.AppendElement(aNode);
+      const auto& domains = aNode->Domain().as<CallbackDomains>().mNames;
+      if (domains.IsEmpty()) {
+        return;
+      }
+      for (const nsCString& domain : domains) {
+        NodeFor(domain).mCallbacks.AppendElement(aNode);
       }
     }
     ++mLiveCount;
@@ -1744,14 +1789,14 @@ class CallbackTrie {
   }
 
   void CollectMatchingForUnregister(PrefChangedFunc aFunc,
-                                    const char* const* aDomains, void* aData,
-                                    bool aIsPrefix,
+                                    Span<const char* const> aDomains,
+                                    void* aData, bool aIsPrefix,
                                     nsTArray<CallbackNode*>& aOut) {
-    if (!*aDomains) return;
+    if (aDomains.IsEmpty()) return;
     // Array-registered nodes are indexed under each of their names; looking
-    // up the first name is sufficient — DomainIs() distinguishes by array
-    // pointer identity.
-    CallbackTrieNode* trieNode = FindNode(nsDependentCString(*aDomains));
+    // up the first name is sufficient — DomainIs() checks the original array
+    // address and length.
+    CallbackTrieNode* trieNode = FindNode(nsDependentCString(aDomains[0]));
     if (!trieNode) return;
     for (const RefPtr<CallbackNode>& node : trieNode->mCallbacks) {
       if (node->Func() == aFunc && node->Data() == aData &&
@@ -1836,9 +1881,9 @@ class CallbackTrie {
     if (aNode->Domain().is<nsCString>()) {
       RemoveCallbackAndPrune(aNode, aNode->Domain().as<nsCString>());
     } else {
-      for (const char* const* p = aNode->Domain().as<const char* const*>(); *p;
-           ++p) {
-        RemoveCallbackAndPrune(aNode, nsDependentCString(*p));
+      for (const nsCString& domain :
+           aNode->Domain().as<CallbackDomains>().mNames) {
+        RemoveCallbackAndPrune(aNode, domain);
       }
     }
   }
@@ -3488,11 +3533,11 @@ nsPrefBranch::AddObserverImpl(const nsACString& aDomain, nsIObserver* aObserver,
     }
 
     // Construct a PrefCallback with a weak reference to the observer.
-    pCallback = MakeUnique<PrefCallback>(prefName, weakRefFactory, this);
+    pCallback = std::make_unique<PrefCallback>(prefName, weakRefFactory, this);
 
   } else {
     // Construct a PrefCallback with a strong reference to the observer.
-    pCallback = MakeUnique<PrefCallback>(prefName, aObserver, this);
+    pCallback = std::make_unique<PrefCallback>(prefName, aObserver, this);
   }
 
   // Since weak and strong PrefCallbacks hash differently, WithEntryHandle
@@ -3660,7 +3705,7 @@ size_t nsPrefBranch::SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const {
 
   n += mObservers.ShallowSizeOfExcludingThis(aMallocSizeOf);
   for (const auto& entry : mObservers) {
-    const PrefCallback* data = entry.GetWeak();
+    const PrefCallback* data = entry.GetRawPtr();
     n += data->SizeOfIncludingThis(aMallocSizeOf);
   }
 
@@ -4462,7 +4507,7 @@ PreferenceServiceReporter::CollectReports(
   nsTHashMap<nsCStringHashKey, uint32_t> prefCounter;
 
   for (const auto& entry : rootBranch->mObservers) {
-    auto* callback = entry.GetWeak();
+    auto* callback = entry.GetRawPtr();
 
     if (callback->IsWeak()) {
       nsCOMPtr<nsIObserver> callbackRef = do_QueryReferent(callback->mWeakRef);
@@ -5217,7 +5262,8 @@ Preferences::BackupPrefFile(nsIFile* aFile, nsIPrefOverrideMap* aJSOverrideMap,
                                          promise));
 
   using WritePrefFilePromise = PreferencesImpl::WritePrefFilePromise;
-  auto mozPromiseHolder = MakeUnique<MozPromiseHolder<WritePrefFilePromise>>();
+  auto mozPromiseHolder =
+      std::make_unique<MozPromiseHolder<WritePrefFilePromise>>();
   RefPtr<WritePrefFilePromise> writePrefPromise =
       mozPromiseHolder->Ensure(__func__);
 
@@ -5620,8 +5666,7 @@ nsresult PreferencesImpl::WritePrefFile(
   AUTO_PROFILER_LABEL("PreferencesImpl::WritePrefFile", OTHER);
 
   if (Preferences::sPreferences->AllowOffMainThreadSave()) {
-    UniquePtr<PrefSaveData> prefs =
-        MakeUnique<PrefSaveData>(SavePrefs(aPrefOverrideMap));
+    auto prefs = std::make_unique<PrefSaveData>(SavePrefs(aPrefOverrideMap));
 
     nsresult rv = NS_OK;
     bool writingToCurrent = false;
@@ -5989,7 +6034,7 @@ nsresult PreferencesImpl::RegisterCallbackImpl(PrefChangedFunc aCallback,
                                                bool aIsPrefix) {
   MOZ_ASSERT(NS_IsMainThread());
   NS_ENSURE_ARG(aCallback);
-  NS_ENSURE_FALSE(DomainEndsWithMultipleDots(aPrefNode), NS_ERROR_INVALID_ARG);
+  NS_ENSURE_FALSE(HasInvalidCallbackDomains(aPrefNode), NS_ERROR_INVALID_ARG);
   NS_ENSURE_TRUE(Preferences::InitStaticMembers(), NS_ERROR_NOT_AVAILABLE);
 
   RefPtr<CallbackNode> node =
@@ -6002,9 +6047,9 @@ nsresult PreferencesImpl::RegisterCallbackImpl(PrefChangedFunc aCallback,
     if (node->Domain().is<nsCString>()) {
       WarnIfPrefixObserverDiverges(node->RawDomain());
     } else {
-      for (const char* const* p = node->Domain().as<const char* const*>(); *p;
-           ++p) {
-        WarnIfPrefixObserverDiverges(nsDependentCString(*p));
+      for (const nsCString& domain :
+           node->Domain().as<CallbackDomains>().mNames) {
+        WarnIfPrefixObserverDiverges(domain);
       }
     }
   }
@@ -6019,7 +6064,7 @@ nsresult PreferencesImpl::UnregisterCallbackImpl(PrefChangedFunc aCallback,
                                                  bool aIsPrefix) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aCallback);
-  NS_ENSURE_FALSE(DomainEndsWithMultipleDots(aPrefNode), NS_ERROR_INVALID_ARG);
+  NS_ENSURE_FALSE(HasInvalidCallbackDomains(aPrefNode), NS_ERROR_INVALID_ARG);
   if (Preferences::sShutdown) {
     MOZ_ASSERT(!Preferences::sPreferences);
     return NS_OK;
@@ -6710,22 +6755,22 @@ nsresult Preferences::RegisterCallback(PrefChangedFunc aCallback,
 
 /* static */
 nsresult Preferences::RegisterCallbacks(PrefChangedFunc aCallback,
-                                        const char* const* aPrefs, void* aData,
-                                        bool aPrefixMatch) {
+                                        Span<const char* const> aPrefs,
+                                        void* aData, bool aPrefixMatch) {
   return PreferencesImpl::RegisterCallbackImpl(aCallback, aPrefs, aData,
                                                aPrefixMatch);
 }
 
 /* static */
 nsresult Preferences::RegisterCallbacksAndCall(PrefChangedFunc aCallback,
-                                               const char* const* aPrefs,
+                                               Span<const char* const> aPrefs,
                                                void* aClosure) {
   MOZ_ASSERT(aCallback);
 
   nsresult rv = RegisterCallbacks(aCallback, aPrefs, aClosure);
   if (NS_SUCCEEDED(rv)) {
-    for (const char* const* ptr = aPrefs; *ptr; ptr++) {
-      (*aCallback)(*ptr, aClosure);
+    for (const char* pref : aPrefs) {
+      (*aCallback)(pref, aClosure);
     }
   }
   return rv;
@@ -6741,7 +6786,7 @@ nsresult Preferences::UnregisterCallback(PrefChangedFunc aCallback,
 
 /* static */
 nsresult Preferences::UnregisterCallbacks(PrefChangedFunc aCallback,
-                                          const char* const* aPrefs,
+                                          Span<const char* const> aPrefs,
                                           void* aData, bool aPrefixMatch) {
   return PreferencesImpl::UnregisterCallbackImpl(aCallback, aPrefs, aData,
                                                  aPrefixMatch);
@@ -7032,7 +7077,7 @@ static void ShutdownAlwaysPrefs() {
 
 [[maybe_unused]] static void SaveOncePrefToSharedMap(
     SharedPrefMapBuilder& aBuilder, const nsACString& aName, bool aValue) {
-  auto oncePref = MakeUnique<Pref>(aName);
+  auto oncePref = std::make_unique<Pref>(aName);
   oncePref->SetType(PrefType::Bool);
   oncePref->SetIsSkippedByIteration(true);
   bool valueChanged = false;
@@ -7045,7 +7090,7 @@ static void ShutdownAlwaysPrefs() {
 
 [[maybe_unused]] static void SaveOncePrefToSharedMap(
     SharedPrefMapBuilder& aBuilder, const nsACString& aName, int32_t aValue) {
-  auto oncePref = MakeUnique<Pref>(aName);
+  auto oncePref = std::make_unique<Pref>(aName);
   oncePref->SetType(PrefType::Int);
   oncePref->SetIsSkippedByIteration(true);
   bool valueChanged = false;
@@ -7063,7 +7108,7 @@ static void ShutdownAlwaysPrefs() {
 
 [[maybe_unused]] static void SaveOncePrefToSharedMap(
     SharedPrefMapBuilder& aBuilder, const nsACString& aName, float aValue) {
-  auto oncePref = MakeUnique<Pref>(aName);
+  auto oncePref = std::make_unique<Pref>(aName);
   oncePref->SetType(PrefType::String);
   oncePref->SetIsSkippedByIteration(true);
   nsAutoCString value;

@@ -10,6 +10,7 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   Bookmarks: "resource://gre/modules/Bookmarks.sys.mjs",
+  BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
   History: "resource://gre/modules/History.sys.mjs",
   PlacesSyncUtils: "resource://gre/modules/PlacesSyncUtils.sys.mjs",
   Sqlite: "resource://gre/modules/Sqlite.sys.mjs",
@@ -407,6 +408,10 @@ const PAGEINFO_VALIDATORS = Object.freeze({
       if (inVisit.referrer) {
         visit.referrer = PlacesUtils.normalizeToURLOrGUID(inVisit.referrer);
       }
+
+      if (inVisit.userContextId) {
+        visit.userContextId = inVisit.userContextId;
+      }
       visits.push(visit);
     }
     return visits;
@@ -435,21 +440,6 @@ export var PlacesUtils = {
   CHARSET_ANNO: "URIProperties/characterSet",
   // Deprecated: This is only used for supporting import from older datasets.
   MOBILE_ROOT_ANNO: "mobile/bookmarksRoot",
-
-  /**
-   * Escapes a string for safe use in HTML text content or attribute values.
-   *
-   * @param {string} text
-   * @returns {string}
-   */
-  escapeHtmlEntities(text) {
-    return (text || "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  },
 
   TOPIC_SHUTDOWN: "places-shutdown",
   TOPIC_INIT_COMPLETE: "places-init-complete",
@@ -1124,7 +1114,7 @@ export var PlacesUtils = {
 
     function gatherDataHtml(node, recursiveOpen = true) {
       // escape out potential HTML in the title
-      let escapedTitle = PlacesUtils.escapeHtmlEntities(node.title);
+      let escapedTitle = lazy.BrowserUtils.escapeHtmlEntities(node.title);
 
       if (PlacesUtils.nodeIsContainer(node)) {
         asContainer(node);
@@ -1152,7 +1142,7 @@ export var PlacesUtils = {
         return childString + "</DL>" + NEWLINE;
       }
       if (PlacesUtils.nodeIsURI(node)) {
-        return `<A HREF="${PlacesUtils.escapeHtmlEntities(node.uri)}">${escapedTitle}</A>${NEWLINE}`;
+        return `<A HREF="${lazy.BrowserUtils.escapeHtmlEntities(node.uri)}">${escapedTitle}</A>${NEWLINE}`;
       }
       if (PlacesUtils.nodeIsSeparator(node)) {
         return "<HR>" + NEWLINE;
@@ -1689,6 +1679,9 @@ export var PlacesUtils = {
    * @param {any} [aOptions.includeItemIds]
    *   Opt-in to include the deprecated id property.
    *   Use it if you must. It'll be removed once the switch to GUIDs is complete.
+   * @param {boolean} [aOptions.includeIcons]
+   *   Opt-in to include the iconUri property, as looking up favicons is
+   *   expensive for large trees.
    *
    * @returns {Promise}
    *   Resolves to a JS object that represents either a single item or a
@@ -1724,7 +1717,8 @@ export var PlacesUtils = {
    *  - charset (string): the last known charset of the bookmark.
    *  - keyword (string): the bookmark's keyword (unset if none).
    *  - postData (string): the bookmark's keyword postData (unset if none).
-   *  - iconUri (string): the bookmark's favicon url.
+   *  - iconUri (string): the bookmark's favicon url, only if
+   *    aOptions.includeIcons is set.
    * The last four properties are not set at all if they're irrelevant (e.g.
    * |charset| is not set if no charset was previously set for the bookmark
    * url).
@@ -1839,18 +1833,21 @@ export var PlacesUtils = {
        )
        SELECT d.level, d.id, d.guid, d.parent, d.parentGuid, d.type,
               d.position AS [index], IFNULL(d.title, '') AS title, d.dateAdded,
-              d.lastModified, h.url, (SELECT icon_url FROM moz_icons i
+              d.lastModified, h.url, ${
+                aOptions.includeIcons
+                  ? `(SELECT icon_url FROM moz_icons i
                       JOIN moz_icons_to_pages ON icon_id = i.id
                       JOIN moz_pages_w_icons pi ON page_id = pi.id
-                      WHERE pi.page_url_hash = hash(h.url) AND pi.page_url = h.url
-                      ORDER BY (flags & ${Ci.nsIFaviconService.ICONDATA_FLAGS_RICH}) ASC, width DESC LIMIT 1) AS iconUri,
+                      WHERE pi.page_url_hash = h.url_hash AND pi.page_url = h.url
+                      ORDER BY (flags & ${Ci.nsIFaviconService.ICONDATA_FLAGS_RICH}) ASC, width DESC, i.id DESC LIMIT 1)`
+                  : "NULL"
+              } AS iconUri,
               (SELECT tags FROM tagged WHERE place_id = h.id) AS tags,
               (SELECT a.content FROM moz_annos a
                JOIN moz_anno_attributes n ON a.anno_attribute_id = n.id
                WHERE place_id = h.id AND n.name = :charset_anno
               ) AS charset
        FROM descendants d
-       LEFT JOIN moz_bookmarks b3 ON b3.id = d.parent
        LEFT JOIN moz_places h ON h.id = d.fk
        ORDER BY d.level, d.parent, d.position`;
 
@@ -2133,7 +2130,7 @@ export var PlacesUtils = {
   },
 
   /**
-   * Creates a console logger.
+   * Creates a console logger, which logs to the "Places" MOZ_LOG module.
    * Logging level can be controlled through the `places.loglevel` preference.
    *
    * @param {object} [options]
@@ -2147,7 +2144,8 @@ export var PlacesUtils = {
     let logger = this._loggers.get(prefix);
     if (!logger) {
       logger = console.createInstance({
-        prefix: `Places${prefix ? " - " + prefix : ""}`,
+        logModule: "Places",
+        prefix,
         maxLogLevelPref: "places.loglevel",
       });
       this._loggers.set(prefix, logger);

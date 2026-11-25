@@ -14,6 +14,7 @@ import {
   MONITOR_EXPIRY_REASONS,
   MONITOR_PROMPT_VERSION,
   MONITOR_AGENTS_CHANGED_TOPIC,
+  MONITOR_BLOCKED_STATE_CHANGED_TOPIC,
   MONITOR_CONDITION_MET_TOPIC,
   MONITOR_RUN_FAILED_TOPIC,
 } from "moz-src:///browser/components/aiwindow/models/agents/Monitor.sys.mjs";
@@ -21,6 +22,7 @@ import {
   Schedule,
   SCHEDULE_TYPES,
 } from "moz-src:///browser/components/aiwindow/models/agents/Schedule.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 export {
   Monitor,
@@ -29,6 +31,7 @@ export {
   MONITOR_PROMPT_VERSION,
   TOTAL_NUM_URLS_IN_MONITOR,
   MONITOR_AGENTS_CHANGED_TOPIC,
+  MONITOR_BLOCKED_STATE_CHANGED_TOPIC,
   MONITOR_CONDITION_MET_TOPIC,
   MONITOR_EXPIRY_REASONS,
   MONITOR_RUN_FAILED_TOPIC,
@@ -42,29 +45,23 @@ const EXPIRY_BODY_IDS = Object.freeze({
     "ai-tasks-monitor-expired-notification-body-max-age",
 });
 
-const lazy = {};
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
+  AIWindow:
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   MonitorStore:
     "moz-src:///browser/components/aiwindow/models/agents/MonitorStore.sys.mjs",
-});
-
-ChromeUtils.defineLazyGetter(lazy, "log", () =>
-  console.createInstance({
-    prefix: "MonitorAgent",
-    maxLogLevelPref: "browser.smartwindow.monitorAgent.logLevel",
-  })
-);
-
-ChromeUtils.defineLazyGetter(
-  lazy,
-  "l10n",
-  () =>
+  log: () =>
+    console.createInstance({
+      logModule: "MonitorAgent",
+      maxLogLevelPref: "browser.smartwindow.monitorAgent.logLevel",
+    }),
+  l10n: () =>
     new Localization(
       ["preview/aiWindow.ftl", "toolkit/branding/brandings.ftl"],
       true
-    )
-);
+    ),
+});
 
 const AlertNotification = Components.Constructor(
   "@mozilla.org/alert-notification;1",
@@ -77,6 +74,7 @@ const TASKS_PAGE_URL = "about:smartwindowtasks";
 let gMonitors = null;
 let gLoadPromise = null;
 let gShuttingDown = false;
+let gSuspended = false;
 const gNotifiedRunIds = new Set();
 const gSnapshotRefreshPromises = new Map();
 
@@ -104,6 +102,53 @@ export const NOTIFICATION_TYPES = {
   EXPIRED: "expired",
 };
 
+const CHECK_BACKOFF_MS = 15 * 60 * 1000;
+
+let gLastServiceAnswer = null;
+
+const LAST_SERVICE_ANSWER_PREF = "browser.smartwindow.agent.lastServiceAnswer";
+
+export const CHECK_LIMITS = Object.freeze({
+  BUDGET: "budget",
+  THROTTLE: "throttle",
+});
+
+const CHECK_LIMIT_POLICIES = Object.freeze({
+  [CHECK_LIMITS.BUDGET]: {
+    codes: new Set([MONITOR_ERROR_CODES.BUDGET_EXCEEDED]),
+    // The agent's allowance is a seven-day budget on the service, which runs
+    // to Monday 00:00 US/Eastern.
+    // TODO: Bug 2091498 - the boundary is the service's to know, so read the
+    // reset time it reports instead of repeating its schedule here.
+    resumesAt: answeredAt => {
+      const at =
+        Temporal.Instant.fromEpochMilliseconds(answeredAt).toZonedDateTimeISO(
+          "America/New_York"
+        );
+      // dayOfWeek is Monday 1 through Sunday 7.
+      return at.startOfDay().add({ days: 8 - at.dayOfWeek }).epochMilliseconds;
+    },
+  },
+  [CHECK_LIMITS.THROTTLE]: {
+    codes: new Set([
+      MONITOR_ERROR_CODES.RATE_LIMIT,
+      MONITOR_ERROR_CODES.UPSTREAM_RATE_LIMIT,
+      MONITOR_ERROR_CODES.FASTLY_RATE_LIMIT,
+      // Shared service budgets have no known reset time,
+      // so they are retried like a throttle
+      MONITOR_ERROR_CODES.GLOBAL_BUDGET_EXCEEDED,
+      MONITOR_ERROR_CODES.GUEST_BUDGET_EXCEEDED,
+    ]),
+    resumesAt: answeredAt => answeredAt + CHECK_BACKOFF_MS,
+  },
+});
+
+function checkLimitPolicyFor(errorCode) {
+  return Object.entries(CHECK_LIMIT_POLICIES).find(([, { codes }]) =>
+    codes.has(errorCode)
+  );
+}
+
 // Failures the user already knows about, or that only mean Firefox is going
 // away: telling them their monitor could not run would be noise.
 const UNREPORTED_ERROR_CODES = new Set([
@@ -125,6 +170,44 @@ function seedNotifiedRunIds(monitors) {
       }
     }
   }
+}
+
+function isServiceAnswer(entry) {
+  return entry?.status === "success" || !!checkLimitPolicyFor(entry?.errorCode);
+}
+
+/**
+ * When a run finished, which is when the service answered it.
+ *
+ * @param {object} entry - A history entry, as run() leaves it
+ * @returns {number} Epoch ms
+ */
+function serviceAnswerTime(entry) {
+  return new Date(entry?.finishedAt).getTime();
+}
+
+/**
+ * The last answer from the service, kept separately from the monitors. Their
+ * history can't stand in for it, because deleting a task removes its history
+ * along with any answer recorded there.
+ *
+ * @returns {?{answeredAt: number, errorCode: ?string}}
+ */
+function loadLastServiceAnswer() {
+  try {
+    const { answeredAt, errorCode } = JSON.parse(
+      Services.prefs.getCharPref(LAST_SERVICE_ANSWER_PREF, "")
+    );
+    return Number.isFinite(answeredAt)
+      ? { answeredAt, errorCode: errorCode ?? null }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLastServiceAnswer(answer) {
+  Services.prefs.setCharPref(LAST_SERVICE_ANSWER_PREF, JSON.stringify(answer));
 }
 
 function isShuttingDown() {
@@ -289,6 +372,29 @@ function recordUpdateTelemetry(
 }
 
 /**
+ * Indicates that a MonitorAgent operation was refused because Smart Window is
+ * blocked by AI Controls.
+ */
+class MonitorAgentBlockedError extends Error {
+  constructor() {
+    super("Smart Window is blocked by AI Controls.");
+    this.name = "MonitorAgentBlockedError";
+  }
+}
+
+/**
+ * Indicates that a check was refused because the service is still holding
+ * checks back. Carries the limit so a caller can say when they resume.
+ */
+class MonitorAgentLimitedError extends Error {
+  constructor(checkLimit) {
+    super(`Checks are unavailable until ${new Date(checkLimit.until)}.`);
+    this.name = "MonitorAgentLimitedError";
+    this.checkLimit = checkLimit;
+  }
+}
+
+/**
  * Monitor Agent state and behavior.
  *
  * Monitor agent is responsible for managing the collection of monitors, including creating,
@@ -296,7 +402,16 @@ function recordUpdateTelemetry(
  * It also handles persisting the monitor state to IndexedDB and notifying observers of changes.
  */
 export const MonitorAgent = {
+  get isBlocked() {
+    return lazy.AIWindow.isBlocked;
+  },
+
   async init() {
+    if (this.isBlocked) {
+      gSuspended = true;
+      return;
+    }
+    gSuspended = false;
     try {
       await this._ensureLoaded();
     } catch (error) {
@@ -310,6 +425,11 @@ export const MonitorAgent = {
     }
 
     for (const monitor of gMonitors.values()) {
+      // Smart Window may have been blocked while loading or expiring monitors
+      if (this.isBlocked) {
+        gSuspended = true;
+        return;
+      }
       monitor.restore();
       // a monitor that outlived its expiry window while the browser was
       // closed is paused right away instead of waiting for its next run
@@ -337,9 +457,71 @@ export const MonitorAgent = {
     }
   },
 
+  /**
+   * Suspends active monitors when Smart Window is blocked by AI Controls,
+   * and resumes monitoring when the block is lifted.
+   */
+  async onBlockedStateChanged() {
+    const unblocked = !this.isBlocked;
+
+    if (unblocked) {
+      if (gSuspended) {
+        Services.obs.notifyObservers(null, MONITOR_BLOCKED_STATE_CHANGED_TOPIC);
+        // Resume monitoring since Smart Window is no longer blocked
+        await this.init();
+      }
+      return;
+    }
+
+    // If already suspended, no need to do anything further
+    if (gSuspended) {
+      return;
+    }
+
+    // State transition: mark as suspended since Smart Window is blocked
+    gSuspended = true;
+
+    for (const monitor of gMonitors?.values() ?? []) {
+      monitor.dispose(MONITOR_ERROR_CODES.CANCELED);
+    }
+    Services.obs.notifyObservers(null, MONITOR_BLOCKED_STATE_CHANGED_TOPIC);
+  },
+
   async listMonitors() {
     await this._ensureLoaded();
-    return Array.from(gMonitors.values(), monitor => monitor.toSerializable());
+    const checkLimit = this.checkLimit();
+    return Array.from(gMonitors.values(), monitor => ({
+      ...monitor.toSerializable(),
+      checkLimit,
+    }));
+  },
+
+  /**
+   * Records a finished run if the service answered it, so the most recent
+   * answer decides whether checks are limited.
+   *
+   * @param {object} entry - The run's history entry
+   */
+  _noteServiceAnswer(entry) {
+    if (isServiceAnswer(entry)) {
+      gLastServiceAnswer = {
+        answeredAt: serviceAnswerTime(entry),
+        errorCode: entry.errorCode ?? null,
+      };
+      saveLastServiceAnswer(gLastServiceAnswer);
+    }
+  },
+
+  /**
+   * Returns when Check now can be used again after the service refused a check.
+   *
+   * @returns {?{until: number, reason: string, errorCode: string}}
+   */
+  checkLimit() {
+    const { answeredAt, errorCode } = gLastServiceAnswer ?? {};
+    const [reason, policy] = checkLimitPolicyFor(errorCode) ?? [];
+    const until = policy?.resumesAt(answeredAt);
+    return until > Date.now() ? { until, reason, errorCode } : null;
   },
 
   /**
@@ -362,6 +544,9 @@ export const MonitorAgent = {
     messageSeq = null,
     ...args
   }) {
+    if (this.isBlocked) {
+      throw new MonitorAgentBlockedError();
+    }
     const context = buildTelemetryContextExtra({ source, chatId, messageSeq });
     // Load the store first so the submit event counts the stored monitors;
     // a load failure is still reported through create_complete below.
@@ -433,6 +618,9 @@ export const MonitorAgent = {
    * @returns {Promise<void>}
    */
   async updateMonitor(id, updates, telemetryContext = {}) {
+    if (this.isBlocked) {
+      throw new MonitorAgentBlockedError();
+    }
     await this._ensureLoaded();
     const monitor = gMonitors.get(id);
     if (!monitor) {
@@ -617,10 +805,20 @@ export const MonitorAgent = {
   },
 
   async runNow(id) {
+    if (this.isBlocked) {
+      throw new MonitorAgentBlockedError();
+    }
     await this._ensureLoaded();
     const monitor = gMonitors.get(id);
     if (!monitor) {
       return;
+    }
+
+    // The card disables Check now while a limit is in force, so reaching here
+    // means a limit landed between the render and the click.
+    const checkLimit = this.checkLimit();
+    if (checkLimit) {
+      throw new MonitorAgentLimitedError(checkLimit);
     }
     await monitor.run({ manual: true });
   },
@@ -666,6 +864,7 @@ export const MonitorAgent = {
     }
 
     gMonitors = monitors;
+    gLastServiceAnswer = loadLastServiceAnswer();
 
     seedNotifiedRunIds(monitors.values());
     this._updateActionGauges();
@@ -1162,10 +1361,12 @@ export const MonitorAgent = {
   _unloadForTesting() {
     this.uninit();
     gMonitors = null;
+    gLastServiceAnswer = null;
     gLoadPromise = null;
     gNotifiedRunIds.clear();
     gSnapshotRefreshPromises.clear();
     gShuttingDown = false;
+    gSuspended = false;
   },
 
   /**
@@ -1193,6 +1394,7 @@ export const MonitorAgent = {
 
   async _resetForTesting() {
     this._unloadForTesting();
+    Services.prefs.clearUserPref(LAST_SERVICE_ANSWER_PREF);
     await lazy.MonitorStore.destroyDatabase();
   },
 };

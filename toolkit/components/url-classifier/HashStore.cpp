@@ -156,7 +156,7 @@ void TableUpdateV4::NewPrefixes(int32_t aSize, const nsACString& aPrefixes) {
 
   if (aSize <= 4 && LOG_ENABLED()) {
     const uint32_t* p =
-        reinterpret_cast<const uint32_t*>(ToNewCString(aPrefixes));
+        reinterpret_cast<const uint32_t*>(aPrefixes.BeginReading());
 
     // Dump the first/last 10 fixed-length prefixes for debugging.
     LOG(("* The first 10 (maximum) fixed-length prefixes: "));
@@ -175,7 +175,7 @@ void TableUpdateV4::NewPrefixes(int32_t aSize, const nsACString& aPrefixes) {
          aPrefixes.Length() / aSize));
   }
 
-  mPrefixesMap.InsertOrUpdate(aSize, MakeUnique<nsCString>(aPrefixes));
+  mPrefixesMap.InsertOrUpdate(aSize, std::make_unique<nsCString>(aPrefixes));
 }
 
 nsresult TableUpdateV4::NewRemovalIndices(const uint32_t* aIndices,

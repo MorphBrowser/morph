@@ -196,6 +196,7 @@ def try_builder(
         cq = {},
         branch_cq = True,
         builder = None,
+        jobs = None,
         **kwargs):
     """Add a pre-submit builder.
 
@@ -206,6 +207,7 @@ def try_builder(
       cq: None to exclude this from all commit queues, or a dict of kwargs for cq_tryjob_verifier.
       branch_cq: False to exclude this builder just from the release-branch CQ.
       builder: builder to set in the dimensions, if None, builderless:1 is used.
+      jobs: int, number of remote jobs to allow in parallel.
       **kwargs: Pass on to webrtc_builder / luci.builder.
     Returns:
       A luci.builder.
@@ -218,7 +220,7 @@ def try_builder(
         dimensions["builderless"] = "1"
     properties = properties or {}
     properties["builder_group"] = "tryserver.webrtc"
-    properties.update(make_siso_properties("rbe-webrtc-untrusted"))
+    properties.update(make_siso_properties("rbe-webrtc-untrusted", jobs))
     if cq != None:
         luci.cq_tryjob_verifier(name, cq_group = "cq", **cq)
         if branch_cq:
@@ -287,6 +289,7 @@ def chromium_try_builder(name, **kwargs):
         recipe = "chromium_trybot",
         branch_cq = False,
         execution_timeout = 3 * time.hour,
+        jobs = 500,
         **kwargs
     )
 
@@ -312,7 +315,7 @@ ios_builder, ios_try_job = normal_builder_factory(
 
 ci_builder("Android64 (dbg)", "Android|arm64|dbg")
 try_builder("android_compile_arm_dbg")
-try_builder("android_arm_dbg")
+try_builder("android_arm_dbg", cq = None)
 ci_builder("Android64", "Android|arm64|rel")
 try_builder("android_arm_rel")
 ci_builder("Android32 Builder arm", "Android|arm|size", perf_cat = "Android|arm|Builder|", prioritized = True)
@@ -322,7 +325,7 @@ ci_builder("Android64 Builder arm64", "Android|arm64|size", perf_cat = "Android|
 perf_builder("Perf Android64 (R Pixel5)", "Android|arm64|Tester|R Pixel5", triggered_by = ["Android64 Builder arm64"])
 ci_builder("Android64 Builder x64 (dbg)", "Android|x64|dbg")
 try_builder("android_compile_x64_dbg")
-try_builder("android_compile_x64_rel", cq = None)
+try_builder("android_compile_x64_rel")
 ci_builder("Android32 Builder x86 (dbg)", "Android|x86|dbg")
 try_builder("android_compile_x86_dbg")
 ci_builder("Android32 Builder x86", "Android|x86|rel")
@@ -332,7 +335,7 @@ try_builder("android_arm_more_configs")
 chromium_try_builder("android_chromium_compile")
 
 ios_builder("iOS64 Debug", "iOS|arm64|dbg")
-ios_try_job("ios_compile_arm64_dbg")
+ios_try_job("ios_compile_arm64_dbg", cq = None)
 ios_builder("iOS64 Release", "iOS|arm64|rel")
 ios_try_job("ios_compile_arm64_rel")
 ios_builder("iOS Debug (simulator)", "iOS|x64|sim")
@@ -396,8 +399,8 @@ perf_builder("Perf Mac M1 Arm64 12", "Mac|arm64|Tester|12", triggered_by = ["Mac
 ci_builder("Mac Asan", "Mac|x64|asan")
 try_builder("mac_asan")
 ci_builder("MacARM64 M1 Release", "Mac|arm64M1|rel", cpu = "arm64-64-Apple_M1")
-try_builder("mac_rel_m1")
-try_builder("mac_dbg_m1")
+try_builder("mac_rel_m1", cq = None)
+try_builder("mac_dbg_m1", cq = None)
 
 # TODO(b/427073823): Re-enable once the slow compilation issue is fixed.
 chromium_try_builder("mac_chromium_compile", cq = None)
@@ -411,11 +414,11 @@ try_builder("win_compile_x86_clang_rel", cq = None)
 ci_builder("Win64 Builder (Clang)", ci_cat = None, perf_cat = "Win|x64|Builder|")
 perf_builder("Perf Win 10", "Win|x64|Tester|10", triggered_by = ["Win64 Builder (Clang)"])
 ci_builder("Win64 Debug (Clang)", "Win Clang|x64|dbg")
-try_builder("win_x64_clang_dbg")
+try_builder("win_x64_clang_dbg", cq = None)
 try_builder("win_compile_x64_clang_dbg")
 ci_builder("Win64 Release (Clang)", "Win Clang|x64|rel")
 try_builder("win_x64_clang_rel")
-try_builder("win_compile_x64_clang_rel")
+try_builder("win_compile_x64_clang_rel", cq = None)
 ci_builder("Win64 ASan", "Win Clang|x64|asan")
 try_builder("win_asan")
 ci_builder("Win (more configs)", "Win Clang|x86|more")

@@ -116,7 +116,7 @@ export class AddonSuggestions extends SuggestProvider {
       commands.push({
         name: RESULT_MENU_COMMAND.SHOW_LESS_FREQUENTLY,
         l10n: {
-          id: "urlbar-result-menu-show-less-frequently2",
+          id: "urlbar-result-menu-show-less-frequently3",
         },
       });
     }
@@ -161,18 +161,12 @@ export class AddonSuggestions extends SuggestProvider {
       // selType == "dismiss" when the user presses the dismiss key shortcut.
       case RESULT_MENU_COMMAND.DISMISS:
         lazy.QuickSuggest.dismissResult(result);
-        controller.removeResult(result, {
-          acknowledgeDismissalL10n: {
-            id: "firefox-suggest-dismissal-acknowledgment-one",
-          },
-        });
+        controller.removeResult(result);
         break;
       case RESULT_MENU_COMMAND.NOT_INTERESTED:
         lazy.UrlbarPrefs.set("suggest.addons", false);
         controller.removeResult(result, {
-          acknowledgeDismissalL10n: {
-            id: "urlbar-result-dismissal-acknowledgment-all",
-          },
+          acknowledgeDismissal: true,
         });
         break;
       case RESULT_MENU_COMMAND.SHOW_LESS_FREQUENTLY:

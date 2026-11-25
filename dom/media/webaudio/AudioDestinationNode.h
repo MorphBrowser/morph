@@ -8,6 +8,8 @@
 #include "AudioChannelAgent.h"
 #include "AudioChannelService.h"
 #include "AudioNode.h"
+#include "mozilla/StateMirroring.h"
+#include "mozilla/StateWatching.h"
 #include "mozilla/TimeStamp.h"
 
 namespace mozilla::dom {
@@ -16,13 +18,13 @@ class AudioContext;
 class WakeLock;
 
 class AudioDestinationNode final : public AudioNode,
-                                   public nsIAudioChannelAgentCallback,
-                                   public MainThreadMediaTrackListener {
+                                   public nsIAudioChannelAgentCallback {
  public:
   // This node type knows what MediaTrackGraph to use based on
   // whether it's in offline mode.
   AudioDestinationNode(AudioContext* aContext, bool aIsOffline,
-                       uint32_t aNumberOfChannels, uint32_t aLength);
+                       bool aAllowedToStart, uint32_t aNumberOfChannels,
+                       uint32_t aLength);
 
   void DestroyMediaTrack() override;
 
@@ -54,7 +56,12 @@ class AudioDestinationNode final : public AudioNode,
 
   void OfflineShutdown();
 
-  void NotifyMainThreadTrackEnded() override;
+  void OnTrackEnded();
+
+  // The main thread's view of how much data the destination track has
+  // processed.
+  TrackTime CurrentTime() const { return mTrackCurrentTime; }
+
   void FireOfflineCompletionEvent();
 
   const char* NodeType() const override { return "AudioDestinationNode"; }
@@ -126,6 +133,9 @@ class AudioDestinationNode final : public AudioNode,
   RefPtr<Promise> mOfflineRenderingPromise;
 
   bool mIsOffline;
+  WatchManager<AudioDestinationNode> mWatchManager;
+  Mirror<bool> mTrackEnded;
+  Mirror<TrackTime> mTrackCurrentTime;
 };
 
 }  // namespace mozilla::dom

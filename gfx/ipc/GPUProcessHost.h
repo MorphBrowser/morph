@@ -106,14 +106,16 @@ class GPUProcessHost final : public mozilla::ipc::GeckoChildProcessHost {
   // just when we attempted launch.
   TimeStamp GetLaunchTime() const { return mLaunchTime; }
 
-  // Called on the IO thread.
-  void OnChannelConnected(base::ProcessId peer_pid) override;
-
   void SetListener(Listener* aListener);
 
   // Kills the GPU process. Used in normal operation to recover from an error,
   // as well as for tests and diagnostics.
   void KillProcess(bool aGenerateMinidump);
+
+  // Kills the GPU process for tests. Unlike KillProcess, this is not treated as
+  // a crash for the purposes of telemetry, crash reporting and fallbacks.
+  void KillProcessForTesting();
+  bool WasKilledForTesting() const { return mKilledForTesting; }
 
   // Causes the GPU process to crash. Used for tests and diagnostics
   void CrashProcess();
@@ -147,8 +149,6 @@ class GPUProcessHost final : public mozilla::ipc::GeckoChildProcessHost {
   // Kill the remote process, triggering IPC shutdown.
   void KillHard(bool aGenerateMinidump);
 
-  void DestroyProcess();
-
 #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
   static bool sLaunchWithMacSandbox;
   bool IsMacSandboxLaunchEnabled() override { return sLaunchWithMacSandbox; }
@@ -171,17 +171,10 @@ class GPUProcessHost final : public mozilla::ipc::GeckoChildProcessHost {
 
   bool mShutdownRequested;
   bool mChannelClosed;
+  bool mKilledForTesting = false;
   bool mLaunchOomError MOZ_GUARDED_BY(mMonitor) = false;
 
   TimeStamp mLaunchTime;
-
-  // Set to true on construction and to false just prior deletion.
-  // The GPUProcessHost isn't refcounted; so we can capture this by value in
-  // lambdas along with a strong reference to mLiveToken and check if that value
-  // is true before accessing "this".
-  // While a reference to mLiveToken can be taken on any thread; its value can
-  // only be read on the main thread.
-  const RefPtr<media::Refcountable<bool>> mLiveToken;
 
 #ifdef MOZ_WIDGET_ANDROID
   // Binder interface used to send compositor surfaces to GPU process. There is

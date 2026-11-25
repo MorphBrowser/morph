@@ -111,14 +111,12 @@ add_task(async function () {
       );
     }
 
-    let context = await UrlbarTestUtils.promiseAutocompleteResultPopup({
+    await UrlbarTestUtils.promiseAutocompleteResultPopup({
       window,
       value: testcase.input,
     });
 
-    // If testcase.input triggers local search mode, there won't be a heuristic.
-    let resultIndex =
-      context.searchMode && !context.searchMode.engineName ? 0 : 1;
+    let resultIndex = 1;
 
     Assert.greaterOrEqual(
       UrlbarTestUtils.getResultCount(window),
@@ -150,17 +148,13 @@ add_task(async function () {
     if (testcase.expected.typeImageVisible) {
       Assert.equal(
         result.displayed.typeIcon,
-        Services.prefs.getBoolPref("browser.nova.enabled", false)
-          ? 'url("chrome://browser/skin/urlbar/badge-bookmark.svg#ltr-icon")'
-          : 'url("chrome://browser/skin/bookmark-12.svg")',
+        'url("chrome://browser/skin/urlbar/badge-bookmark.svg#ltr-icon")',
         "Should have the star image displayed or not as expected"
       );
     } else {
       Assert.equal(
         result.displayed.typeIcon,
-        Services.prefs.getBoolPref("browser.nova.enabled", false)
-          ? 'url("chrome://browser/skin/urlbar/badge-history.svg#ltr-icon")'
-          : "none",
+        'url("chrome://browser/skin/urlbar/badge-history.svg#ltr-icon")',
         "Should have the star image displayed or not as expected"
       );
     }

@@ -1,7 +1,3 @@
-# META: timeout=long
-
-# Longer timeout required due to a large number of input action and event dispatch subtests.
-
 import pytest
 
 from webdriver.bidi.error import MoveTargetOutOfBoundsException, NoSuchFrameException
@@ -77,7 +73,7 @@ async def test_pointer_down_closes_browsing_context(
     subscribe_events,
     wait_for_event,
 ):
-    url = inline("""<input onpointerdown="window.close()">close</input>""")
+    url = inline("""<input onpointerdown="window.close()">close""")
 
     # Opening a new context via `window.open` is required for script to be able
     # to close it.

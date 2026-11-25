@@ -10,9 +10,13 @@
 
 ChromeUtils.defineESModuleGetters(this, {
   SyncedTabs: "resource://services-sync/SyncedTabs.sys.mjs",
+  WeaveService: "moz-src:///services/sync/Weave.sys.mjs",
 });
 
 add_setup(async function () {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.urlbar.unifiedSearchButton.historyInSearchMode", false]],
+  });
   await SpecialPowers.pushPrefEnv({
     set: [
       ["browser.urlbar.scotchBonnet.enableOverride", true],
@@ -80,12 +84,9 @@ add_setup(async function () {
     },
   };
 
-  // Tell the Sync XPCOM service it is initialized.
-  let weaveXPCService = Cc["@mozilla.org/weave/service;1"].getService(
-    Ci.nsISupports
-  ).wrappedJSObject;
-  let oldWeaveServiceReady = weaveXPCService.ready;
-  weaveXPCService.ready = true;
+  // Tell the Sync service it is initialized.
+  let oldWeaveServiceReady = WeaveService.ready;
+  WeaveService.ready = true;
 
   sandbox
     .stub(SyncedTabs._internal, "getTabClients")
@@ -96,7 +97,7 @@ add_setup(async function () {
 
   registerCleanupFunction(async function () {
     sandbox.restore();
-    weaveXPCService.ready = oldWeaveServiceReady;
+    WeaveService.ready = oldWeaveServiceReady;
     SyncedTabs._internal = originalSyncedTabsInternal;
     await PlacesUtils.history.clear();
   });

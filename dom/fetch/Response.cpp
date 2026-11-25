@@ -4,6 +4,8 @@
 
 #include "Response.h"
 
+#include <memory>
+
 #include "BodyExtractor.h"
 #include "FetchStreamReader.h"
 #include "InternalResponse.h"
@@ -109,9 +111,8 @@ already_AddRefed<Response> Response::Redirect(const GlobalObject& aGlobal,
     MOZ_ASSERT(worker);
     worker->AssertIsOnWorkerThread();
 
-    const auto& baseURL = worker->GetLocationInfo().mHref;
-    RefPtr<URL> url =
-        URL::Constructor(aGlobal.GetAsSupports(), aUrl, baseURL, aRv);
+    RefPtr<URL> url = URL::Constructor(aGlobal.GetAsSupports(), aUrl,
+                                       worker->GetBaseURI(), aRv);
     if (aRv.Failed()) {
       return nullptr;
     }
@@ -195,7 +196,7 @@ already_AddRefed<Response> Response::Redirect(const GlobalObject& aGlobal,
       MOZ_ASSERT(doc);
       info.InitFromDocument(doc);
 
-      principalInfo.reset(new mozilla::ipc::PrincipalInfo());
+      principalInfo = std::make_unique<mozilla::ipc::PrincipalInfo>();
       nsresult rv =
           PrincipalToPrincipalInfo(doc->NodePrincipal(), principalInfo.get());
       if (NS_WARN_IF(NS_FAILED(rv))) {
@@ -222,8 +223,8 @@ already_AddRefed<Response> Response::Redirect(const GlobalObject& aGlobal,
     WorkerPrivate* worker = GetCurrentThreadWorkerPrivate();
     MOZ_ASSERT(worker);
     internalResponse->InitChannelInfo(worker->GetChannelInfo());
-    principalInfo =
-        MakeUnique<mozilla::ipc::PrincipalInfo>(worker->GetPrincipalInfo());
+    principalInfo = std::make_unique<mozilla::ipc::PrincipalInfo>(
+        worker->GetPrincipalInfo());
   }
 
   internalResponse->SetPrincipalInfo(std::move(principalInfo));

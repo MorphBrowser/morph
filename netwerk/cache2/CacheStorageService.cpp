@@ -58,11 +58,16 @@ void AppendMemoryStorageTag(nsAutoCString& key) {
 
 CacheMemoryConsumer::CacheMemoryConsumer(uint32_t aFlags) {
   StoreFlags(aFlags);
+  if (!(aFlags & DONT_REPORT)) {
+    mService = CacheStorageService::Self();
+  }
 }
 
+CacheMemoryConsumer::~CacheMemoryConsumer() { DoMemoryReport(0); }
+
 void CacheMemoryConsumer::DoMemoryReport(uint32_t aCurrentSize) {
-  if (!(LoadFlags() & DONT_REPORT) && CacheStorageService::Self()) {
-    CacheStorageService::Self()->OnMemoryConsumptionChange(this, aCurrentSize);
+  if (mService) {
+    mService->OnMemoryConsumptionChange(this, aCurrentSize);
   }
 }
 
@@ -299,7 +304,7 @@ class WalkMemoryCacheRunnable : public WalkCacheRunnable {
 
       } else {
         LOG(("  entry [left=%zu, canceled=%d]", mEntryArray.Length(),
-             (bool)mCancel));
+             mCancel.load()));
 
         // Third, notify each entry until depleted or canceled.
         if (mNextEntryIdx >= mEntryArray.Length() || mCancel) {
@@ -797,7 +802,7 @@ NS_IMETHODIMP CacheStorageService::ClearBaseDomain(
 
       // If we didn't get a partitionKey match, try to match by entry URI. This
       // requires us to iterate over all entries.
-      CacheEntryTable* table = globalEntry.GetWeak();
+      CacheEntryTable* table = globalEntry.GetRawPtr();
       MOZ_ASSERT(table);
 
       nsTArray<RefPtr<CacheEntry>> entriesToDelete;
@@ -834,6 +839,9 @@ NS_IMETHODIMP CacheStorageService::ClearBaseDomain(
           return rv;
         }
 
+        if (entry->DeferOrBypassRemovalOnPinStatus(false)) {
+          continue;
+        }
         RemoveExactEntry(table, entryKey, entry, false /* don't overwrite */);
       }
     }
@@ -852,8 +860,6 @@ NS_IMETHODIMP CacheStorageService::ClearBaseDomain(
 nsresult CacheStorageService::ClearOriginInternal(
     const nsAString& aOrigin, const OriginAttributes& aOriginAttributes,
     bool aAnonymous) {
-  nsresult rv;
-
   RefPtr<LoadContextInfo> info =
       GetLoadContextInfo(aAnonymous, aOriginAttributes);
   if (NS_WARN_IF(!info)) {
@@ -865,14 +871,14 @@ nsresult CacheStorageService::ClearOriginInternal(
   if (sGlobalEntryTables) {
     for (const auto& globalEntry : *sGlobalEntryTables) {
       bool matches = false;
-      rv = CacheFileUtils::KeyMatchesLoadContextInfo(globalEntry.GetKey(), info,
-                                                     &matches);
+      nsresult rv = CacheFileUtils::KeyMatchesLoadContextInfo(
+          globalEntry.GetKey(), info, &matches);
       NS_ENSURE_SUCCESS(rv, rv);
       if (!matches) {
         continue;
       }
 
-      CacheEntryTable* table = globalEntry.GetWeak();
+      CacheEntryTable* table = globalEntry.GetRawPtr();
       MOZ_ASSERT(table);
 
       nsTArray<RefPtr<CacheEntry>> entriesToDelete;
@@ -900,17 +906,19 @@ nsresult CacheStorageService::ClearOriginInternal(
           return rv;
         }
         MOZ_ASSERT_IF(info->IsPrivate(), !entry->IsUsingDisk());
+        if (entry->DeferOrBypassRemovalOnPinStatus(false)) {
+          continue;
+        }
         RemoveExactEntry(table, entryKey, entry, false /* don't overwrite */);
       }
     }
   }
 
-  if (!info->IsPrivate()) {
-    rv = CacheFileIOManager::EvictByContext(info, false /* pinned */, aOrigin);
+  if (info->IsPrivate()) {
+    return NS_OK;
   }
-  NS_ENSURE_SUCCESS(rv, rv);
 
-  return NS_OK;
+  return CacheFileIOManager::EvictByContext(info, false /* pinned */, aOrigin);
 }
 
 NS_IMETHODIMP CacheStorageService::ClearOriginDictionary(nsIURI* aURI) {
@@ -1143,11 +1151,11 @@ void CacheStorageService::RecordMemoryOnlyEntry(CacheEntry* aEntry,
       return;
     }
 
-    entries = sGlobalEntryTables
-                  ->InsertOrUpdate(
-                      memoryStorageID,
-                      MakeUnique<CacheEntryTable>(CacheEntryTable::MEMORY_ONLY))
-                  .get();
+    entries =
+        sGlobalEntryTables
+            ->InsertOrUpdate(memoryStorageID, std::make_unique<CacheEntryTable>(
+                                                  CacheEntryTable::MEMORY_ONLY))
+            .get();
     LOG(("  new memory-only storage table for %s", memoryStorageID.get()));
   }
 
@@ -1224,6 +1232,10 @@ void CacheStorageService::NoteNoVarySearchEntry(const nsACString& aContextKey,
                                                 const nsACString& aBasePath,
                                                 const nsACString& aFullKey) {
   StaticMutexAutoLock lock(sLock);
+  if (mShutdown) {
+    return;
+  }
+
   CacheEntryTable* entries = sGlobalEntryTables->Get(aContextKey);
   if (entries) {
     entries->NoteNoVarySearchEntry(aBasePath, aFullKey);
@@ -1324,7 +1336,7 @@ bool CacheStorageService::MemoryPool::OnMemoryConsumptionChange(
   mMemorySize -= aSavedMemorySize;
   mMemorySize += aCurrentMemoryConsumption;
 
-  LOG(("  mMemorySize=%u (+%u,-%u)", uint32_t(mMemorySize),
+  LOG(("  mMemorySize=%u (+%u,-%u)", mMemorySize.load(),
        aCurrentMemoryConsumption, aSavedMemorySize));
 
   // Bypass purging when memory has not grew up significantly
@@ -1582,7 +1594,7 @@ Result<size_t, nsresult> CacheStorageService::MemoryPool::PurgeByFrecency(
   LOG(
       ("MemoryPool::PurgeByFrecency done, purged %zu - mMemorySize %u, "
        "memoryLimit %u",
-       numPurged, (uint32_t)mMemorySize, memoryLimit));
+       numPurged, mMemorySize.load(), memoryLimit));
 
   return numPurged;
 }
@@ -1666,7 +1678,7 @@ nsresult CacheStorageService::AddStorageEntry(
                 [&aContextKey] {
                   LOG(("  new storage entries table for context '%s'",
                        PromiseFlatCString(aContextKey).get()));
-                  return MakeUnique<CacheEntryTable>(
+                  return std::make_unique<CacheEntryTable>(
                       CacheEntryTable::ALL_ENTRIES);
                 })
             .get();
@@ -2487,7 +2499,7 @@ CacheStorageService::CollectReports(nsIHandleReportCallback* aHandleReport,
     for (const auto& globalEntry : *sGlobalEntryTables) {
       CacheStorageService::Self()->Lock().AssertCurrentThreadOwns();
 
-      CacheEntryTable* table = globalEntry.GetWeak();
+      CacheEntryTable* table = globalEntry.GetRawPtr();
 
       size_t size = 0;
       mozilla::MallocSizeOf mallocSizeOf = CacheStorageService::MallocSizeOf;

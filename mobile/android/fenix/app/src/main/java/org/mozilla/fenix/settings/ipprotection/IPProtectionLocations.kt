@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-@file:OptIn(ExperimentalAndroidComponentsApi::class)
-
 package org.mozilla.fenix.settings.ipprotection
 
 import androidx.compose.foundation.Image
@@ -19,7 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -36,7 +33,6 @@ import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.role
@@ -44,7 +40,6 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.PreviewParameter
 import java.text.Collator
-import mozilla.components.ExperimentalAndroidComponentsApi
 import mozilla.components.compose.base.annotation.FlexibleWindowPreview
 import mozilla.components.compose.base.button.IconButton
 import mozilla.components.compose.base.theme.PreviewThemeProvider
@@ -64,7 +59,6 @@ import org.mozilla.fenix.theme.FirefoxTheme
  * @param selectedLocation The currently selected location.
  * @param locations A list of available locations for user to choose from.
  * @param snackbarHostState The [SnackbarHostState] used to display snackbars.
- * @param isActivating Whether we are waiting on the VPN to connect. While `true` nothing in the list can be tapped,
  * @param onNavigateBack Called when the back navigation icon is tapped.
  * @param onLocationSelected Called with the user taps on a location.
  */
@@ -73,7 +67,6 @@ fun IPProtectionLocationsScreen(
     selectedLocation: Location,
     locations: List<Location>,
     snackbarHostState: SnackbarHostState,
-    isActivating: Boolean = false,
     onNavigateBack: () -> Unit,
     onLocationSelected: (Location) -> Unit,
 ) {
@@ -95,7 +88,6 @@ fun IPProtectionLocationsScreen(
             LocationList(
                 selectedLocation = selectedLocation,
                 locations = locations,
-                isActivating = isActivating,
                 onLocationSelected = onLocationSelected,
             )
         }
@@ -106,7 +98,6 @@ fun IPProtectionLocationsScreen(
 private fun LocationList(
     selectedLocation: Location,
     locations: List<Location>,
-    isActivating: Boolean,
     onLocationSelected: (Location) -> Unit,
 ) {
     val recommended = locations.filterIsInstance<Recommended>().firstOrNull()
@@ -127,7 +118,6 @@ private fun LocationList(
                     label = stringResource(R.string.ip_protection_location_recommended_label),
                     description = stringResource(R.string.ip_protection_location_fastest_description),
                     isSelected = selectedLocation == recommended,
-                    isActivating = isActivating,
                     onClick = { onLocationSelected(recommended) },
                 )
             }
@@ -148,7 +138,6 @@ private fun LocationList(
                     LocationOption(
                         label = country.displayName(locale),
                         isSelected = country == selectedLocation,
-                        isActivating = isActivating,
                         description =
                             stringResource(R.string.ip_protection_location_unavailable_description).takeIf {
                                 !country.available
@@ -211,7 +200,6 @@ private fun LocationsEmptyState() {
 private fun LocationOption(
     label: String,
     isSelected: Boolean,
-    isActivating: Boolean,
     description: String? = null,
     enabled: Boolean = true,
     onClick: () -> Unit,
@@ -222,9 +210,6 @@ private fun LocationOption(
             Modifier.semantics(mergeDescendants = true) {
                 selected = isSelected
                 role = Role.RadioButton
-                if (isActivating) {
-                    disabled()
-                }
             },
         description = description,
         maxDescriptionLines = 3,
@@ -235,15 +220,10 @@ private fun LocationOption(
             } else {
                 null
             },
-        onClick = {
-            if (!isActivating) {
-                onClick()
-            }
-        },
+        onClick = onClick,
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun IPProtectionLocationsTopAppBar(onNavigateBack: () -> Unit) {
     TopAppBar(
@@ -292,21 +272,6 @@ private fun IPProtectionLocationsCountrySelectedPreview(@PreviewParameter(Previe
             selectedLocation = SAMPLE_LOCATIONS[1],
             locations = SAMPLE_LOCATIONS,
             snackbarHostState = SnackbarHostState(),
-            onNavigateBack = {},
-            onLocationSelected = {},
-        )
-    }
-}
-
-@FlexibleWindowPreview
-@Composable
-private fun IPProtectionLocationsActivatingPreview(@PreviewParameter(PreviewThemeProvider::class) theme: Theme) {
-    FirefoxTheme(theme = theme) {
-        IPProtectionLocationsScreen(
-            selectedLocation = SAMPLE_LOCATIONS[1],
-            locations = SAMPLE_LOCATIONS,
-            snackbarHostState = SnackbarHostState(),
-            isActivating = true,
             onNavigateBack = {},
             onLocationSelected = {},
         )

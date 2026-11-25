@@ -266,9 +266,12 @@
 
   dialog {
     background: var(--newtab-background-color-secondary);
-    border: 1px solid var(--card-border-color);
-    border-radius: var(--border-radius-medium);
-    box-shadow: var(--card-box-shadow);
+    // @backward-compat { version 160 }
+    // The --dialog-* tokens are only defined from Firefox 160, so older
+    // versions fall back to the --popup-* tokens they alias.
+    border: var(--border-width) solid var(--dialog-border-color, var(--popup-border-color));
+    border-radius: var(--dialog-border-radius, var(--popup-border-radius));
+    box-shadow: var(--dialog-box-shadow, var(--popup-box-shadow));
     display: flex;
     width: 332px;
 
@@ -280,6 +283,28 @@
       margin-inline-end: var(--space-medium);
       height: var(--icon-size-xlarge);
       width: var(--icon-size-xlarge);
+    }
+
+    // Arrow pointed upwards from the right side of the dialog
+    &::after {
+      content: '';
+      position: absolute;
+      inset-block-start: -9%;
+      inset-inline-end: 5%;
+      transform: translateX(-50%) rotate(225deg);
+      height: 16px;
+      width: 16px;
+      background: var(--newtab-background-color-secondary);
+      box-shadow: 4px 4px 6px -2px var(--card-box-shadow);
+      border-inline-end: 1px solid var(--card-border-color);
+      border-block-end: 1px solid var(--card-border-color);
+    }
+
+    &:dir(rtl)::after {
+      border-inline-start: 1px solid var(--card-border-color);
+      border-block-end: 1px solid var(--card-border-color);
+      border-inline-end: none;
+      inset-inline-end: 10%;
     }
 
     &:focus-visible {
@@ -316,31 +341,6 @@
     inset-block-end: calc(var(--space-medium) * -1);
     inset-inline-start: calc(var(--space-xxlarge) * -5.5);
   }
-}
-
-// Arrow pointed upwards from the right side of the dialog
-dialog {
-  &::after {
-    content: '';
-    position: absolute;
-    inset-block-start: -9%;
-    inset-inline-end: 5%;
-    transform: translateX(-50%) rotate(225deg);
-    height: 16px;
-    width: 16px;
-    background: var(--newtab-background-color-secondary);
-    box-shadow: 4px 4px 6px -2px var(--card-box-shadow);
-    border-inline-end: 1px solid var(--card-border-color);
-    border-block-end: 1px solid var(--card-border-color);
-  }
-
-  &:dir(rtl)::after {
-    border-inline-start: 1px solid var(--card-border-color);
-    border-block-end: 1px solid var(--card-border-color);
-    border-inline-end: none;
-    inset-inline-end: 10%;
-  }
-
 }
 
 .weatherInfoLink, .weatherButtonContextMenuWrapper {
@@ -701,37 +701,33 @@ dialog {
       background-color: var(--background-color-box);
     }
   }
+}
 
-  .search-icon {
-    content: url('chrome://global/skin/icons/search-glass.svg');
-    -moz-context-properties: fill;
-    fill: var(--icon-color);
-    position: absolute;
-    inset-block-start: 50%;
-    transform: translateY(-50%);
-    inset-inline-start: var(--space-large);
+// Shared by every LocationSearch: the legacy Weather card and the Weather and
+// Weather Forecast widgets.
+.location-search {
+  .location-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: var(--space-small);
   }
 
-  .close-icon {
-    position: absolute;
-    inset-block-start: 50%;
-    transform: translateY(-50%);
-    inset-inline-end: var(--space-medium);
-
-    &:focus-visible {
-      outline: var(--focus-outline);
-    }
+  .location-search-field {
+    position: relative;
+    flex: 1;
+    min-inline-size: 0;
   }
 
-  input {
-    border-radius: var(--border-radius-medium);
-    background-color: light-dark(var(--color-white), var(--newtab-background-color-secondary));
-    padding: var(--space-small) var(--space-xxlarge);
-    border: 1px solid var(--border-color);
+  .location-input {
+    inline-size: 100%;
+  }
 
-    &:focus-visible {
-      outline: var(--focus-outline);
-    }
+  .location-search-results {
+    @include widget-search-results;
+  }
+
+  .location-search-result {
+    @include widget-search-result('.location-search-result-city', '.location-search-result-region');
   }
 }
 

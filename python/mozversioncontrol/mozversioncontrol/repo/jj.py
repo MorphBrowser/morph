@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import string
 import subprocess
 import sys
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +32,19 @@ from mozversioncontrol.errors import (
 from mozversioncontrol.repo.base import Repository
 from mozversioncontrol.repo.git import GitRepository
 
+_git_root_lock = threading.Lock()
+
+
+@functools.cache
+def _git_root(jj: str, path: str) -> str:
+    return subprocess.run(
+        (jj, "--quiet", "git", "root"),
+        cwd=path,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    ).stdout
+
 
 class JjVersionError(Exception):
     """Raised when the installed jj version is too old."""
@@ -40,17 +55,17 @@ class JjVersionError(Exception):
 class JujutsuRepository(Repository):
     """An implementation of `Repository` for JJ repositories using the git backend."""
 
-    # Revset for a "HEAD-like" change. Use @ (the working copy commit) unless it
-    # would be discarded when switching away (because it's empty and has no
-    # description.)
-    HEAD_REVSET = 'coalesce(@ ~ (empty() & description(exact:"")) ~ bookmarks(), @-)'
+    # Use @ unless it would be discarded when switching away: empty, without
+    # a description, and without bookmarks.
+    HEAD_REVSET = 'coalesce(@ ~ (empty() & description(exact:"") ~ bookmarks()), @-)'
 
     def __init__(self, path: Path, jj="jj", git="git"):
         super().__init__(path, tool=jj)
         self._git = GitRepository(path, git=git)
 
         try:
-            git_dir = self._run("git", "root", stderr=subprocess.PIPE)
+            with _git_root_lock:
+                git_dir = _git_root(str(self._tool), self.path)
         except subprocess.CalledProcessError as e:
             stderr = e.stderr or ""
             if "working copy is stale" in stderr.lower():
@@ -121,6 +136,10 @@ class JujutsuRepository(Repository):
     @property
     def head_rev(self):
         return self._resolve_to_commit(self.HEAD_REVSET)
+
+    @property
+    def is_shallow(self):
+        return self._git.is_shallow
 
     def is_cinnabar_repo(self) -> bool:
         return self._git.is_cinnabar_repo()
@@ -333,6 +352,11 @@ class JujutsuRepository(Repository):
         files = [mozpath.normsep(p) for p in self._run("file", "list").splitlines()]
         return FileListFinder(files)
 
+    def _get_tracked_files(self, patterns):
+        fileset = " | ".join(f'root-glob:"{pattern}"' for pattern in patterns)
+        files = self._run("file", "list", fileset).splitlines()
+        return sorted(mozpath.normsep(p) for p in files)
+
     def get_ignored_files_finder(self):
         raise Exception("unimplemented")
 
@@ -389,6 +413,9 @@ class JujutsuRepository(Repository):
         if ref and dest_branch:
             ref = self._resolve_to_commit(ref)
         self._git.push(remote, ref=ref, dest_branch=dest_branch, force=force, env=env)
+
+    def _try_head_to_commit(self, head):
+        return self._resolve_to_commit(head)
 
     def _resolve_try_branch(self):
         dest_branch = self.branch
@@ -476,6 +503,10 @@ class JujutsuRepository(Repository):
             cmd.extend(follow)
 
         return list(reversed(self._run_read_only(*cmd).splitlines()))
+
+    def get_ancestors(self, limit: int = 20) -> list[str]:
+        """Return the SHAs of the head commit and its ancestors, newest first."""
+        return self._git.get_ancestors(self.head_rev, limit)
 
     def _looks_like_change_id(self, id):
         return len(id) > 0 and all(letter >= "k" and letter <= "z" for letter in id)

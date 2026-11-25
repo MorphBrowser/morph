@@ -1154,10 +1154,15 @@ class WorkerPrivate::MemoryReporter final : public nsIMemoryReporter {
 
   SharedMutex mMutex;
   WorkerPrivate* mWorkerPrivate;
+  // Outlives mWorkerPrivate and rejects dispatches once the worker has been
+  // destroyed, so CollectReports never has to keep the worker alive itself.
+  const nsCOMPtr<nsISerialEventTarget> mControlEventTarget;
 
  public:
   explicit MemoryReporter(WorkerPrivate* aWorkerPrivate)
-      : mMutex(aWorkerPrivate->mMutex), mWorkerPrivate(aWorkerPrivate) {
+      : mMutex(aWorkerPrivate->mMutex),
+        mWorkerPrivate(aWorkerPrivate),
+        mControlEventTarget(aWorkerPrivate->ControlEventTarget()) {
     aWorkerPrivate->AssertIsOnWorkerThread();
   }
 
@@ -1168,19 +1173,22 @@ class WorkerPrivate::MemoryReporter final : public nsIMemoryReporter {
  private:
   class FinishCollectRunnable;
 
-  class CollectReportsRunnable final : public MainThreadWorkerControlRunnable {
+  // Dispatched through mControlEventTarget, which wraps it in a control
+  // runnable. Cancel is a no-op so that draining the control queue of a dead
+  // worker only releases it, and the destructor still finishes the report.
+  class CollectReportsRunnable final : public CancelableRunnable {
     RefPtr<FinishCollectRunnable> mFinishCollectRunnable;
     const bool mAnonymize;
 
    public:
-    CollectReportsRunnable(WorkerPrivate* aWorkerPrivate,
-                           nsIHandleReportCallback* aHandleReport,
+    CollectReportsRunnable(nsIHandleReportCallback* aHandleReport,
                            nsISupports* aHandlerData, bool aAnonymize,
                            const nsACString& aPath);
 
-   private:
-    bool WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate) override;
+    NS_IMETHOD Run() override;
+    nsresult Cancel() override { return NS_OK; }
 
+   private:
     ~CollectReportsRunnable() {
       if (NS_IsMainThread()) {
         mFinishCollectRunnable->Run();
@@ -1282,11 +1290,15 @@ WorkerPrivate::MemoryReporter::CollectReports(
     }
     path.AppendPrintf(", 0x%p)/", static_cast<void*>(mWorkerPrivate));
 
-    runnable = new CollectReportsRunnable(mWorkerPrivate, aHandleReport, aData,
-                                          aAnonymize, path);
+    runnable =
+        new CollectReportsRunnable(aHandleReport, aData, aAnonymize, path);
   }
 
-  if (!runnable->Dispatch(mWorkerPrivate)) {
+  // The worker may be destroyed by its parent thread at any point from here
+  // on. The event target checks for that atomically with the dispatch, and a
+  // failed dispatch releases the runnable here, which finishes the report.
+  if (NS_FAILED(mControlEventTarget->Dispatch(runnable.forget(),
+                                              NS_DISPATCH_NORMAL))) {
     return NS_ERROR_UNEXPECTED;
   }
 
@@ -1294,18 +1306,21 @@ WorkerPrivate::MemoryReporter::CollectReports(
 }
 
 WorkerPrivate::MemoryReporter::CollectReportsRunnable::CollectReportsRunnable(
-    WorkerPrivate* aWorkerPrivate, nsIHandleReportCallback* aHandleReport,
-    nsISupports* aHandlerData, bool aAnonymize, const nsACString& aPath)
-    : MainThreadWorkerControlRunnable("CollectReportsRunnable"),
+    nsIHandleReportCallback* aHandleReport, nsISupports* aHandlerData,
+    bool aAnonymize, const nsACString& aPath)
+    : CancelableRunnable(
+          "dom::WorkerPrivate::MemoryReporter::CollectReportsRunnable"),
       mFinishCollectRunnable(new FinishCollectRunnable(
           aHandleReport, aHandlerData, aAnonymize, aPath)),
       mAnonymize(aAnonymize) {}
 
-bool WorkerPrivate::MemoryReporter::CollectReportsRunnable::WorkerRun(
-    JSContext* aCx, WorkerPrivate* aWorkerPrivate) {
-  aWorkerPrivate->AssertIsOnWorkerThread();
+NS_IMETHODIMP
+WorkerPrivate::MemoryReporter::CollectReportsRunnable::Run() {
+  WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate();
+  MOZ_ASSERT(workerPrivate);
+  workerPrivate->AssertIsOnWorkerThread();
 
-  RefPtr<WorkerGlobalScope> scope = aWorkerPrivate->GlobalScope();
+  RefPtr<WorkerGlobalScope> scope = workerPrivate->GlobalScope();
   RefPtr<Performance> performance =
       scope ? scope->GetPerformanceIfExists() : nullptr;
   if (performance) {
@@ -1315,10 +1330,10 @@ bool WorkerPrivate::MemoryReporter::CollectReportsRunnable::WorkerRun(
     mFinishCollectRunnable->SetPerformanceSizes(userEntries, resourceEntries);
   }
 
-  mFinishCollectRunnable->SetSuccess(aWorkerPrivate->CollectRuntimeStats(
+  mFinishCollectRunnable->SetSuccess(workerPrivate->CollectRuntimeStats(
       &mFinishCollectRunnable->mCxStats, mAnonymize));
 
-  return true;
+  return NS_OK;
 }
 
 WorkerPrivate::MemoryReporter::FinishCollectRunnable::FinishCollectRunnable(
@@ -1425,33 +1440,10 @@ void WorkerPrivate::EvictFromBFCache() {
   runnable->Dispatch(this);
 }
 
-nsresult WorkerPrivate::SetCsp(nsIContentSecurityPolicy* aCSP) {
+nsresult WorkerPrivate::SetPolicyContainerFromHeaders(
+    const PolicyContainer::Headers& aHeaders) {
   AssertIsOnMainThread();
-  if (!aCSP) {
-    return NS_OK;
-  }
-  aCSP->EnsureEventTarget(mMainThreadEventTarget);
-
-  mLoadInfo.mCSP = aCSP;
-  auto ctx = OffThreadCSPContext::CreateFromCSP(aCSP);
-  if (NS_WARN_IF(ctx.isErr())) {
-    return ctx.unwrapErr();
-  }
-  mLoadInfo.mCSPContext = ctx.unwrap();
-  return NS_OK;
-}
-
-nsresult WorkerPrivate::SetCSPFromHeaderValues(
-    const nsACString& aCSPHeaderValue,
-    const nsACString& aCSPReportOnlyHeaderValue) {
-  AssertIsOnMainThread();
-  MOZ_DIAGNOSTIC_ASSERT(!mLoadInfo.mCSP);
-
-  NS_ConvertASCIItoUTF16 cspHeaderValue(aCSPHeaderValue);
-  NS_ConvertASCIItoUTF16 cspROHeaderValue(aCSPReportOnlyHeaderValue);
-
-  nsresult rv;
-  nsCOMPtr<nsIContentSecurityPolicy> csp = new nsCSPContext();
+  MOZ_DIAGNOSTIC_ASSERT(!mLoadInfo.mPolicyContainer);
 
   // First, we try to query the URI from the Principal, but
   // in case selfURI remains empty (e.g in case the Principal
@@ -1469,44 +1461,11 @@ nsresult WorkerPrivate::SetCSPFromHeaderValues(
   }
   MOZ_ASSERT(selfURI, "need a self URI for CSP");
 
-  rv = csp->SetRequestContextWithPrincipal(mLoadInfo.mPrincipal, selfURI, ""_ns,
-                                           0);
-  NS_ENSURE_SUCCESS(rv, rv);
+  RefPtr<PolicyContainer> policyContainer =
+      MOZ_TRY(PolicyContainer::CreateForNonDocument(mLoadInfo.mPrincipal,
+                                                    selfURI, aHeaders));
 
-  csp->EnsureEventTarget(mMainThreadEventTarget);
-
-  // If there's a CSP header, apply it.
-  if (!cspHeaderValue.IsEmpty()) {
-    rv = CSP_AppendCSPFromHeader(csp, cspHeaderValue, false);
-    NS_ENSURE_SUCCESS(rv, rv);
-  }
-  // If there's a report-only CSP header, apply it.
-  if (!cspROHeaderValue.IsEmpty()) {
-    rv = CSP_AppendCSPFromHeader(csp, cspROHeaderValue, true);
-    NS_ENSURE_SUCCESS(rv, rv);
-  }
-
-  RefPtr<extensions::WebExtensionPolicy> addonPolicy;
-
-  if (basePrin) {
-    addonPolicy = basePrin->AddonPolicy();
-  }
-
-  // For extension workers there aren't any csp header values,
-  // instead it will inherit the Extension CSP.
-  if (addonPolicy) {
-    csp->AppendPolicy(addonPolicy->BaseCSP(), false, false);
-    csp->AppendPolicy(addonPolicy->ExtensionPageCSP(), false, false);
-  }
-
-  mLoadInfo.mCSP = csp;
-
-  auto ctx = OffThreadCSPContext::CreateFromCSP(csp);
-  if (NS_WARN_IF(ctx.isErr())) {
-    return ctx.unwrapErr();
-  }
-  mLoadInfo.mCSPContext = ctx.unwrap();
-  return NS_OK;
+  return SetPolicyContainerOnMainThread(policyContainer);
 }
 
 bool WorkerPrivate::IsFrozenForWorkerThread() const {
@@ -1526,14 +1485,12 @@ void WorkerPrivate::StorePolicyContainerArgsOnClient() {
 
   mozilla::ipc::PolicyContainerArgs policyContainerArgs;
 
-  if (mLoadInfo.mCSPContext) {
-    policyContainerArgs.csp() = Some(mLoadInfo.mCSPContext->CSPInfo());
+  if (mLoadInfo.mPolicyContainerArgs) {
+    policyContainerArgs = *mLoadInfo.mPolicyContainerArgs;
   }
 
   policyContainerArgs.ipAddressSpace() =
       static_cast<nsILoadInfo::IPAddressSpace>(mLoadInfo.mIPAddressSpace);
-  // TODO(Bug 2017654): Check if integrity policy args need to be propagated
-  // to workers as well. Currently not set explicitly here.
 
   clientSource.SetPolicyContainerArgs(policyContainerArgs);
 }
@@ -2624,65 +2581,35 @@ void WorkerPrivate::SetBaseURI(nsIURI* aBaseURI) {
   }
 
   mLoadInfo.mBaseURI = aBaseURI;
-
-  if (NS_FAILED(aBaseURI->GetSpec(mLocationInfo.mHref))) {
-    mLocationInfo.mHref.Truncate();
-  }
-
-  mLocationInfo.mHostname.Truncate();
-  nsContentUtils::GetHostOrIPv6WithBrackets(aBaseURI, mLocationInfo.mHostname);
-
-  nsCOMPtr<nsIURL> url(do_QueryInterface(aBaseURI));
-  if (!url || NS_FAILED(url->GetFilePath(mLocationInfo.mPathname))) {
-    mLocationInfo.mPathname.Truncate();
-  }
-
-  nsCString temp;
-
-  if (url && NS_SUCCEEDED(url->GetQuery(temp)) && !temp.IsEmpty()) {
-    mLocationInfo.mSearch.Assign('?');
-    mLocationInfo.mSearch.Append(temp);
-  }
-
-  if (NS_SUCCEEDED(aBaseURI->GetRef(temp)) && !temp.IsEmpty()) {
-    if (mLocationInfo.mHash.IsEmpty()) {
-      mLocationInfo.mHash.Assign('#');
-      mLocationInfo.mHash.Append(temp);
-    }
-  }
-
-  if (NS_SUCCEEDED(aBaseURI->GetScheme(mLocationInfo.mProtocol))) {
-    mLocationInfo.mProtocol.Append(':');
-  } else {
-    mLocationInfo.mProtocol.Truncate();
-  }
-
-  int32_t port;
-  if (NS_SUCCEEDED(aBaseURI->GetPort(&port)) && port != -1) {
-    mLocationInfo.mPort.AppendInt(port);
-
-    nsAutoCString host(mLocationInfo.mHostname);
-    host.Append(':');
-    host.Append(mLocationInfo.mPort);
-
-    mLocationInfo.mHost.Assign(host);
-  } else {
-    mLocationInfo.mHost.Assign(mLocationInfo.mHostname);
-  }
-
-  nsContentUtils::GetWebExposedOriginSerialization(aBaseURI,
-                                                   mLocationInfo.mOrigin);
 }
 
-nsresult WorkerPrivate::SetPrincipalsAndCSPOnMainThread(
+nsresult WorkerPrivate::SetPrincipalsOnMainThread(
     nsIPrincipal* aPrincipal, nsIPrincipal* aPartitionedPrincipal,
-    nsILoadGroup* aLoadGroup, nsIContentSecurityPolicy* aCsp) {
-  return mLoadInfo.SetPrincipalsAndCSPOnMainThread(
-      aPrincipal, aPartitionedPrincipal, aLoadGroup, aCsp);
+    nsILoadGroup* aLoadGroup) {
+  return mLoadInfo.SetPrincipalsOnMainThread(aPrincipal, aPartitionedPrincipal,
+                                             aLoadGroup);
 }
 
-nsresult WorkerPrivate::SetPrincipalsAndCSPFromChannel(nsIChannel* aChannel) {
-  return mLoadInfo.SetPrincipalsAndCSPFromChannel(aChannel);
+nsresult WorkerPrivate::SetPolicyContainerOnMainThread(
+    PolicyContainer* aPolicyContainer) {
+  MOZ_TRY(mLoadInfo.SetPolicyContainerOnMainThread(aPolicyContainer));
+
+  if (nsIContentSecurityPolicy* csp = GetCsp()) {
+    csp->EnsureEventTarget(mMainThreadEventTarget);
+  }
+
+  return NS_OK;
+}
+
+nsresult WorkerPrivate::SetPrincipalsAndPolicyContainerFromChannel(
+    nsIChannel* aChannel) {
+  MOZ_TRY(mLoadInfo.SetPrincipalsAndPolicyContainerFromChannel(aChannel));
+
+  if (nsIContentSecurityPolicy* csp = GetCsp()) {
+    csp->EnsureEventTarget(mMainThreadEventTarget);
+  }
+
+  return NS_OK;
 }
 
 bool WorkerPrivate::FinalChannelPrincipalIsValid(nsIChannel* aChannel) {
@@ -2745,6 +2672,8 @@ void WorkerPrivate::UpdateIsOnContentBlockingAllowList(
             shouldResistFingerprinting;
         ref->Private()->mLoadInfo.mShouldResistFingerprinting =
             shouldResistFingerprinting;
+        ref->Private()->mFontVisibilityProvider->SetShouldResistFingerprinting(
+            shouldResistFingerprinting);
       }));
 
   /* From:
@@ -2947,7 +2876,7 @@ WorkerPrivate::WorkerPrivate(
       mIsPrivilegedAddonGlobal(false),
       mTopLevelWorkerFinishedRunnableCount(0),
       mWorkerFinishedRunnableCount(0),
-      mFontVisibility(ComputeFontVisibility()) {
+      mFontVisibilityProvider(new WorkerFontVisibilityProvider(*this)) {
   LOG(WorkerLog(), ("WorkerPrivate::WorkerPrivate [%p]", this));
   MOZ_ASSERT_IF(!IsDedicatedWorker(), NS_IsMainThread());
 
@@ -3227,6 +3156,21 @@ already_AddRefed<WorkerPrivate> WorkerPrivate::Constructor(
     aLoadInfo = stackLoadInfo.ptr();
   }
 
+  // Until the worker is registered and holds mSelfRef, a failure destroys it
+  // on this thread. For a nested worker that is the parent's worker thread, so
+  // the main-thread-only load info members have to be proxy released.
+  RefPtr<WorkerPrivate> worker;
+  auto releaseLoadInfoOnFailure = MakeScopeExit([&] {
+    if (!parent) {
+      return;
+    }
+    if (worker) {
+      worker->ProxyReleaseMainThreadObjects();
+    } else if (stackLoadInfo) {
+      MOZ_ALWAYS_TRUE(stackLoadInfo->ProxyReleaseMainThreadObjects(parent));
+    }
+  });
+
   // NB: This has to be done before creating the WorkerPrivate, because it will
   // attempt to use static variables that are initialized in the RuntimeService
   // constructor.
@@ -3253,7 +3197,7 @@ already_AddRefed<WorkerPrivate> WorkerPrivate::Constructor(
   AgentClusterIdAndCoop idAndCoop = ComputeAgentClusterIdAndCoop(
       parent, aWorkerKind, aLoadInfo, aIsChromeWorker);
 
-  RefPtr<WorkerPrivate> worker = new WorkerPrivate(
+  worker = new WorkerPrivate(
       parent, aScriptURL, aIsChromeWorker, aWorkerKind, aRequestCredentials,
       aWorkerType, aWorkerName, aServiceWorkerScope, *aLoadInfo, std::move(aId),
       idAndCoop.mId, idAndCoop.mCoop, std::move(aCancellationCallback),
@@ -3285,6 +3229,7 @@ already_AddRefed<WorkerPrivate> WorkerPrivate::Constructor(
   // ClearSelfAndParentEventTargetRef().
   worker->mSelfRef = worker;
   worker->mParentRef = MakeRefPtr<WorkerParentRef>(worker);
+  releaseLoadInfoOnFailure.release();
 
   // The remote and local debugger mechanisms are mutually exclusive. Enable the
   // remote worker debugger once the worker is really scheduled; otherwise
@@ -3765,7 +3710,7 @@ nsresult WorkerPrivate::GetLoadInfo(
                                      : nsILoadInfo::NoStoragePermission);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    rv = loadInfo.SetPrincipalsAndCSPFromChannel(loadInfo.mChannel);
+    rv = loadInfo.SetPrincipalsAndPolicyContainerFromChannel(loadInfo.mChannel);
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
@@ -5112,7 +5057,6 @@ bool WorkerPrivate::ChangePeerConnectionsInternal(bool aHasPeerConnections) {
 void WorkerPrivate::PropagateStorageAccessPermissionGrantedInternal() {
   auto data = mWorkerThreadAccessible.Access();
 
-  mLoadInfo.mUseRegularPrincipal = true;
   mLoadInfo.mUsingStorageAccess = true;
 
   WorkerGlobalScope* globalScope = GlobalScope();
@@ -6168,7 +6112,7 @@ void WorkerPrivate::ReportError(JSContext* aCx,
                    data->mErrorHandlerRecursionCount == 1,
                "Bad recursion logic!");
 
-  UniquePtr<WorkerErrorReport> report = MakeUnique<WorkerErrorReport>();
+  auto report = std::make_unique<WorkerErrorReport>();
   if (aReport) {
     report->AssignErrorReport(aReport);
   }
@@ -6795,7 +6739,7 @@ void WorkerPrivate::DumpCrashInformation(nsACString& aString) {
     if (workerRef->IsPreventingShutdown()) {
       aString.Append("|");
       aString.Append(workerRef->Name());
-      const nsCString status = GET_WORKERREF_DEBUG_STATUS(workerRef);
+      const nsCString& status = GET_WORKERREF_DEBUG_STATUS(workerRef);
       if (!status.IsEmpty()) {
         aString.Append("[");
         aString.Append(status);
@@ -7138,35 +7082,14 @@ WorkerPrivate::AutoPushEventLoopGlobal::~AutoPushEventLoopGlobal() {
   data->mCurrentEventLoopGlobal = std::move(mOldEventLoopGlobal);
 }
 
-// FontVisibilityProvider implementation
-FontVisibility WorkerPrivate::GetFontVisibility() const {
-  return mFontVisibility;
-}
-
-void WorkerPrivate::ReportBlockedFontFamily(const nsCString& aMsg) const {
-  MOZ_LOG(gFingerprinterDetection, mozilla::LogLevel::Info, ("%s", aMsg.get()));
-  nsContentUtils::ReportToConsoleByWindowID(NS_ConvertUTF8toUTF16(aMsg),
-                                            nsIScriptError::warningFlag,
-                                            "Security"_ns, WindowID());
-}
-
-bool WorkerPrivate::IsChrome() const { return IsChromeWorker(); }
-
-bool WorkerPrivate::IsPrivateBrowsing() const {
-  return mLoadInfo.mOriginAttributes.IsPrivateBrowsing();
-}
-
-nsICookieJarSettings* WorkerPrivate::GetCookieJarSettings() const {
-  return CookieJarSettings();
-}
-
-Maybe<FontVisibility> WorkerPrivate::MaybeInheritFontVisibility() const {
-  if (mParent) {
+static Maybe<FontVisibility> InheritedWorkerFontVisibility(
+    const WorkerPrivate& aWorkerPrivate) {
+  if (WorkerPrivate* parent = aWorkerPrivate.GetParent()) {
     // If we have a parent, we inherit the parent's font visibility.
-    return Some(mParent->GetFontVisibility());
+    return Some(parent->GetFontVisibility());
   }
 
-  dom::Document* doc = GetDocument();
+  dom::Document* doc = aWorkerPrivate.GetDocument();
   if (!doc) {
     return Nothing();
   }
@@ -7177,7 +7100,55 @@ Maybe<FontVisibility> WorkerPrivate::MaybeInheritFontVisibility() const {
   return Some(presContext->GetFontVisibility());
 }
 
-void WorkerPrivate::UserFontSetUpdated(gfxUserFontEntry*) {}
+WorkerFontVisibilityProvider::WorkerFontVisibilityProvider(
+    const WorkerPrivate& aWorkerPrivate)
+    : mShouldResistFingerprinting(
+          aWorkerPrivate.mLoadInfo.mShouldResistFingerprinting),
+      mOverriddenFingerprintingSettings(
+          aWorkerPrivate.mLoadInfo.mOverriddenFingerprintingSettings),
+      mIsChrome(aWorkerPrivate.IsChromeWorker()),
+      mIsPrivateBrowsing(aWorkerPrivate.IsPrivateBrowsing()),
+      mWindowID(aWorkerPrivate.WindowID()),
+      mCookieJarSettings(aWorkerPrivate.CookieJarSettings()),
+      mInheritedFontVisibility(InheritedWorkerFontVisibility(aWorkerPrivate)),
+      mFontVisibility(ComputeFontVisibility()) {}
+
+FontVisibility WorkerFontVisibilityProvider::GetFontVisibility() const {
+  return mFontVisibility;
+}
+
+bool WorkerFontVisibilityProvider::ShouldResistFingerprinting(
+    RFPTarget aTarget) const {
+  return mShouldResistFingerprinting &&
+         nsRFPService::IsRFPEnabledFor(mIsPrivateBrowsing, aTarget,
+                                       mOverriddenFingerprintingSettings);
+}
+
+void WorkerFontVisibilityProvider::ReportBlockedFontFamily(
+    const nsCString& aMsg) const {
+  MOZ_LOG(gFingerprinterDetection, mozilla::LogLevel::Info, ("%s", aMsg.get()));
+  nsContentUtils::ReportToConsoleByWindowID(NS_ConvertUTF8toUTF16(aMsg),
+                                            nsIScriptError::warningFlag,
+                                            "Security"_ns, mWindowID);
+}
+
+bool WorkerFontVisibilityProvider::IsChrome() const { return mIsChrome; }
+
+bool WorkerFontVisibilityProvider::IsPrivateBrowsing() const {
+  return mIsPrivateBrowsing;
+}
+
+nsICookieJarSettings* WorkerFontVisibilityProvider::GetCookieJarSettings()
+    const {
+  return mCookieJarSettings;
+}
+
+Maybe<FontVisibility> WorkerFontVisibilityProvider::MaybeInheritFontVisibility()
+    const {
+  return mInheritedFontVisibility;
+}
+
+void WorkerFontVisibilityProvider::UserFontSetUpdated(gfxUserFontEntry*) {}
 
 // -----------------------------------------------------------------------------
 // AutoSyncLoopHolder

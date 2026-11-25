@@ -5,8 +5,10 @@
 // Base preferences file used by the xpcshell harness
 /* globals user_pref */
 /* eslint quotes: 0 */
-user_pref("app.normandy.api_url", "https://%(server)s/selfsupport-dummy/");
 user_pref("browser.safebrowsing.downloads.remote.url", "https://%(server)s/safebrowsing-dummy");
+// Port 1 is blocked by necko, so the captive portal HTTPS check fails without
+// making a connection.
+user_pref("captivedetect.httpsCheck.url", "https://localhost:1/captive-detect/https-check");
 user_pref("extensions.systemAddon.update.url", "http://%(server)s/dummy-system-addons.xml");
 // Treat WebExtension API/schema warnings as errors.
 user_pref("extensions.webextensions.warnings-as-errors", true);
@@ -34,6 +36,9 @@ user_pref("security.remote_settings.intermediates.enabled", false);
 // all processes would run at low priority, which is not desirable, so we
 // disable the process priority manager entirely here.
 user_pref("dom.ipc.processPriorityManager.enabled", false);
+// xpcshell tests composite nothing, so a GPU process is only overhead, and on
+// macOS it can hang at shutdown.
+user_pref("layers.gpu-process.enabled", false);
 // Bug 455077 - Ensure we use sRGB as the output profile for test consistency.
 user_pref("gfx.color_management.force_srgb", true);
 user_pref("gfx.color_management.mode", 1);
@@ -41,8 +46,12 @@ user_pref("gfx.color_management.mode", 1);
 user_pref("browser.topsites.contile.enabled", false);
 // Don't pull weather data from the network
 user_pref("browser.newtabpage.activity-stream.system.showWeather", false);
-// Don't pull picture of the day content from the network
+// Don't render or load any New Tab widget
+user_pref("browser.newtabpage.activity-stream.widgets.enabled", false);
+// Widgets that load from the network stay off even when a test turns widgets
+// back on
 user_pref("browser.newtabpage.activity-stream.widgets.system.pictureOfTheDay.enabled", false);
+user_pref("browser.newtabpage.activity-stream.widgets.system.crossword.enabled", false);
 // Don't pull wallpaper content from the network
 user_pref("browser.newtabpage.activity-stream.newtabWallpapers.enabled", false);
 // Don't pull sponsored Top Sites content from the network
@@ -54,22 +63,11 @@ user_pref("app.update.disabledForTesting", true);
 // Better stacks for errors.
 user_pref("javascript.options.asyncstack_capture_debuggee_only", false);
 
-// Disable writing to the ProfileDatastoreService by Nimbus in xpcshell tests.
-// TODO(bug 1967779): Require the ProfileDatastoreService by default and remove
-// this.
-// TODO(bug 2032586): Remove this pref.
-user_pref("nimbus.profilesdatastoreservice.enabled", false);
-
-// Disable reading from the ProfilesDatastoreService by Nimbus in xpcshell tests.
-// TODO(bug 1967779): Require the ProfileDatastoreService by default.
-// TODO(bug 2032586): Remove this pref.
-user_pref("nimbus.profilesdatastoreservice.read.enabled", false);
-
-// Disable syncing enrollments from other profiles in xpcshell tests.
-// TODO(bug 1967779): Require the ProfileDatastoreService by default.
-// TODO(bug 2032586): Remove this pref.
-user_pref("nimbus.profilesdatastoreservice.sync.enabled", false);
-
 // Turn off semantic history search as it triggers network connections to
 // download ML models.
 user_pref("places.semanticHistory.featureGate", false);
+
+// Disable Nimbus persistence in all xpcshell tests. Persistence requires the
+// ProfilesDatastoreService to be enabled, which is not initialized by default
+// in xpcshell tests.
+user_pref("nimbus.persistence.enabled", false);

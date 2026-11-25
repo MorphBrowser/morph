@@ -6,7 +6,6 @@ package mozilla.components.feature.listentopage.playback
 
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import mozilla.components.feature.listentopage.PlaybackPhase
 import mozilla.components.support.test.mock
 import mozilla.components.support.test.whenever
 import org.junit.Assert.assertEquals
@@ -99,6 +98,22 @@ class PlaybackControllerTest {
         val displayData = ArticleDisplayData(title = "An article", site = "example.org")
 
         assertEquals(displayData, displayData.withAppNameIfUntitled("Firefox Nightly"))
+    }
+
+    @Test
+    fun `test that an article from a private tab hides its title and site`() {
+        val displayData =
+            ArticleDisplayData(title = "An article", site = "example.org", isPrivate = true)
+                .hiddenIfPrivate("Private tab", "Website hidden")
+
+        assertEquals(ArticleDisplayData(title = "Private tab", site = "Website hidden", isPrivate = true), displayData)
+    }
+
+    @Test
+    fun `test that an article from a normal tab keeps its title and site`() {
+        val displayData = ArticleDisplayData(title = "An article", site = "example.org")
+
+        assertEquals(displayData, displayData.hiddenIfPrivate("Private tab", "Website hidden"))
     }
 
     private fun player(

@@ -8,25 +8,12 @@ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 /** @typedef {import("moz-src:///browser/components/aiwindow/ui/actors/SmartFormFillParent.sys.mjs").SmartFormFillParent} SmartFormFillParent */
 
-const lazy = {};
-
-ChromeUtils.defineLazyGetter(
-  lazy,
-  "l10n",
-  () => new Localization(["preview/aiWindow.ftl"], true)
-);
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
+  l10n: () => new Localization(["browser/aiWindow.ftl"], true),
   AIWindow:
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
+  SFF_ENABLED: { pref: "browser.smartwindow.smartformfill.enabled" },
 });
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "SFF_ENABLED",
-  "browser.smartwindow.smartformfill.enabled",
-  false
-);
 
 const AUTOFILL_ICON = "chrome://browser/skin/smart-window-simplified.svg";
 
@@ -210,7 +197,7 @@ export const SmartFormFillAutocomplete = {
         id: "ai-smart-form-fill-autocomplete-tabs-count",
         args: { tabs: sffActor.getSelectedTabSources(formId).length },
       },
-      { id: "ai-smart-form-fill-edit-sources" },
+      { id: "ai-smart-form-fill-edit-sources-button" },
     ]);
     const relevantTabsReady = sffActor.areRelevantTabsReady(formId);
     const hasSources =

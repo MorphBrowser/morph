@@ -70,12 +70,17 @@ class HomeActivityTestRule(
         openLinksInExternalApp: OpenLinksInApp = getOpenLinksInApp(settings),
         hasSeenShakeToSummarizeToolbarCfr: Boolean = true,
         shakeToSummarizeFeatureFlagEnabled: Boolean = settings.shakeToSummarizeFeatureFlagEnabled,
-        isPrivateModeAndStoriesEntryPointEnabled: Boolean = false,
         shouldUseExpandedToolbar: Boolean = false,
         isTabStripEnabled: Boolean = false,
         nativeShareSheetEnabled: Boolean = false,
         showVoiceSearchInDisplayToolbar: Boolean = false,
         isHomepageTrendingRecentSearchEnabled: Boolean = false,
+        isHomepageCustomizationEnabled: Boolean = false,
+        isCollectionsToTabGroupsMigrationEnabled: Boolean = false,
+        isCollectionsUiHidden: Boolean = false,
+        isGoogleLensIntegrationEnabled: Boolean = true,
+        isGoogleLensIntegrationUserEnabled: Boolean = true,
+        isFxSuggestEnabled: Boolean = true,
         showAddressBarInFocusMode: Boolean = false,
         crashReportOption: CrashReportOption = settings.crashReportOption(),
     ) : this(initialTouchMode, launchActivity, skipOnboarding) {
@@ -98,12 +103,17 @@ class HomeActivityTestRule(
         this.openLinksInExternalApp = openLinksInExternalApp
         this.hasSeenShakeToSummarizeToolbarCfr = hasSeenShakeToSummarizeToolbarCfr
         this.shakeToSummarizeFeatureFlagEnabled = shakeToSummarizeFeatureFlagEnabled
-        this.isPrivateModeAndStoriesEntryPointEnabled = isPrivateModeAndStoriesEntryPointEnabled
         this.shouldUseExpandedToolbar = shouldUseExpandedToolbar
         this.isTabStripEnabled = isTabStripEnabled
         this.nativeShareSheetEnabled = nativeShareSheetEnabled
         this.showVoiceSearchInDisplayToolbar = showVoiceSearchInDisplayToolbar
         this.isHomepageTrendingRecentSearchEnabled = isHomepageTrendingRecentSearchEnabled
+        this.isHomepageCustomizationEnabled = isHomepageCustomizationEnabled
+        this.isCollectionsToTabGroupsMigrationEnabled = isCollectionsToTabGroupsMigrationEnabled
+        this.isCollectionsUiHidden = isCollectionsUiHidden
+        this.isGoogleLensIntegrationEnabled = isGoogleLensIntegrationEnabled
+        this.isGoogleLensIntegrationUserEnabled = isGoogleLensIntegrationUserEnabled
+        this.isFxSuggestEnabled = isFxSuggestEnabled
         this.showAddressBarInFocusMode = showAddressBarInFocusMode
         this.crashReportOption = crashReportOption
     }
@@ -169,7 +179,6 @@ class HomeActivityTestRule(
                 isTabSwipeCFREnabled = true,
                 hasSeenShakeToSummarizeToolbarCfr = true,
                 isTermsOfServiceAccepted = true,
-                isPrivateModeAndStoriesEntryPointEnabled = false,
                 isTabStripEnabled = false,
             )
     }
@@ -220,12 +229,17 @@ internal constructor(
         tabManagerOpeningAnimationEnabled: Boolean = false,
         hasSeenShakeToSummarizeToolbarCfr: Boolean = true,
         shakeToSummarizeFeatureFlagEnabled: Boolean = settings.shakeToSummarizeFeatureFlagEnabled,
-        isPrivateModeAndStoriesEntryPointEnabled: Boolean = false,
         shouldUseExpandedToolbar: Boolean = false,
         isTabStripEnabled: Boolean = false,
         nativeShareSheetEnabled: Boolean = false,
         showVoiceSearchInDisplayToolbar: Boolean = false,
         isHomepageTrendingRecentSearchEnabled: Boolean = false,
+        isHomepageCustomizationEnabled: Boolean = false,
+        isCollectionsToTabGroupsMigrationEnabled: Boolean = false,
+        isCollectionsUiHidden: Boolean = false,
+        isGoogleLensIntegrationEnabled: Boolean = true,
+        isGoogleLensIntegrationUserEnabled: Boolean = true,
+        isFxSuggestEnabled: Boolean = true,
         showAddressBarInFocusMode: Boolean = false,
         crashReportOption: CrashReportOption = settings.crashReportOption(),
     ) : this(initialTouchMode, launchActivity, skipOnboarding) {
@@ -250,12 +264,17 @@ internal constructor(
         this.tabManagerOpeningAnimationEnabled = tabManagerOpeningAnimationEnabled
         this.hasSeenShakeToSummarizeToolbarCfr = hasSeenShakeToSummarizeToolbarCfr
         this.shakeToSummarizeFeatureFlagEnabled = shakeToSummarizeFeatureFlagEnabled
-        this.isPrivateModeAndStoriesEntryPointEnabled = isPrivateModeAndStoriesEntryPointEnabled
         this.shouldUseExpandedToolbar = shouldUseExpandedToolbar
         this.isTabStripEnabled = isTabStripEnabled
         this.nativeShareSheetEnabled = nativeShareSheetEnabled
         this.showVoiceSearchInDisplayToolbar = showVoiceSearchInDisplayToolbar
         this.isHomepageTrendingRecentSearchEnabled = isHomepageTrendingRecentSearchEnabled
+        this.isHomepageCustomizationEnabled = isHomepageCustomizationEnabled
+        this.isCollectionsToTabGroupsMigrationEnabled = isCollectionsToTabGroupsMigrationEnabled
+        this.isCollectionsUiHidden = isCollectionsUiHidden
+        this.isGoogleLensIntegrationEnabled = isGoogleLensIntegrationEnabled
+        this.isGoogleLensIntegrationUserEnabled = isGoogleLensIntegrationUserEnabled
+        this.isFxSuggestEnabled = isFxSuggestEnabled
         this.showAddressBarInFocusMode = showAddressBarInFocusMode
         this.crashReportOption = crashReportOption
     }
@@ -329,10 +348,15 @@ internal constructor(
         openLinksInExternalApp = getOpenLinksInApp(settings)
         tabManagerOpeningAnimationEnabled = settings.tabManagerOpeningAnimationEnabled
         hasSeenShakeToSummarizeToolbarCfr = settings.shakeToSummarizeToolbarCfrShown
-        isPrivateModeAndStoriesEntryPointEnabled = settings.privateModeAndStoriesEntryPointEnabled
         nativeShareSheetEnabled = settings.nativeShareSheetEnabled
         isHomepageTrendingRecentSearchEnabled = settings.enableHomepageTrendingRecentSearch
+        isHomepageCustomizationEnabled = settings.enableHomepageCustomization
+        isCollectionsToTabGroupsMigrationEnabled = settings.migrateCollectionsToTabGroupsEnabled
+        isCollectionsUiHidden = settings.hideCollectionsUi
         isTabStripEnabled = settings.isTabStripEnabled
+        isGoogleLensIntegrationEnabled = settings.googleLensIntegrationEnabled
+        isGoogleLensIntegrationUserEnabled = settings.googleLensIntegrationUserEnabled
+        isFxSuggestEnabled = settings.enableFxSuggest
         showAddressBarInFocusMode = settings.showAddressBarInFocusMode
         crashReportOption = settings.crashReportOption()
     }
@@ -370,7 +394,6 @@ internal constructor(
                 hasSeenShakeToSummarizeToolbarCfr = true,
                 isTermsOfServiceAccepted = true,
                 tabManagerOpeningAnimationEnabled = false,
-                isPrivateModeAndStoriesEntryPointEnabled = false,
                 isTabStripEnabled = false,
             )
     }

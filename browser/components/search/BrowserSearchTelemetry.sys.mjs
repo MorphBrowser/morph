@@ -7,7 +7,6 @@ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 const lazy = XPCOMUtils.declareLazy({
   ConfigSearchEngine:
     "moz-src:///toolkit/components/search/ConfigSearchEngine.sys.mjs",
-  ContextId: "moz-src:///browser/modules/ContextId.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
   SearchSERPTelemetry:
     "moz-src:///browser/components/search/SearchSERPTelemetry.sys.mjs",
@@ -15,6 +14,12 @@ const lazy = XPCOMUtils.declareLazy({
   SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
   UrlbarSearchUtils:
     "moz-src:///browser/components/urlbar/UrlbarSearchUtils.sys.mjs",
+  logConsole: () => {
+    return console.createInstance({
+      logModule: "SearchTelemetry",
+      maxLogLevel: lazy.SearchUtils.loggingEnabled ? "Debug" : "Warn",
+    });
+  },
 });
 
 /**
@@ -40,7 +45,8 @@ class BrowserSearchTelemetryHandler {
    * - sap.counts
    * - sap.deprecated_counts (deprecated), and associated SEARCH_COUNTS histogram
    * - sap.search_form_counts
-   * - sap.impression_counts (currently only used for context menu items)
+   * - sap.impression_counts (currently only used for context menu items and the
+   *   text selection menu)
    * - serp.impression
    * - browser.engagement.navigation.*
    * - browser.search.content.* (deprecated, some may need to be mirrored)
@@ -180,9 +186,6 @@ class BrowserSearchTelemetryHandler {
     if (typeof engine == "string") {
       engine = lazy.SearchService.getEngineById(engine);
     }
-    if (engine.clickUrl) {
-      this.#reportSearchInGlean(engine.clickUrl);
-    }
 
     try {
       if (!this.shouldRecordSearchCount(browser)) {
@@ -241,16 +244,20 @@ class BrowserSearchTelemetryHandler {
         partnerCodeToUse !== "" &&
         !engine.getURLOfType(searchUrlType)?.excludePartnerCodeFromTelemetry;
 
-      Glean.sap.counts.record({
+      let providerId =
+        engine instanceof lazy.ConfigSearchEngine ? engine.id : "other";
+      /** @type {Parameters<typeof Glean.sap.counts["record"]>[0]} */
+      let sapData = {
         source,
-        provider_id:
-          engine instanceof lazy.ConfigSearchEngine ? engine.id : "other",
+        provider_id: providerId,
         provider_name: engine.name,
         // If no code is reported, we must returned undefined, Glean will then
         // not report the field.
         partner_code: reportPartnerCode ? partnerCodeToUse : undefined,
         overridden_by_third_party: isOverridden.toString(),
-      });
+      };
+      lazy.logConsole.log("Reported SAP", sapData);
+      Glean.sap.counts.record(sapData);
 
       // Dispatch the search signal to other handlers.
       switch (source) {
@@ -303,7 +310,7 @@ class BrowserSearchTelemetryHandler {
    *
    * @param {SearchEngine} engine
    *   The engine whose search form is being visited.
-   * @param {"newtab_searchbar"|"searchbar"|"smartbar"|"urlbar"} source
+   * @param {UrlbarSapName} source
    *   Where the search form was opened from. This is a sub-set of the
    *   KNOWN_SEARCH_SOURCES.
    */
@@ -385,33 +392,6 @@ class BrowserSearchTelemetryHandler {
     let label = action ? "search_" + action : "search";
     let name = source.replace(/_([a-z])/g, (m, p) => p.toUpperCase());
     Glean.browserEngagementNavigation[name][label].add(1);
-  }
-
-  /**
-   * Records the search in Glean for contextual services.
-   *
-   * @param {string} reportingUrl
-   *   The url to be sent to contextual services.
-   */
-  async #reportSearchInGlean(reportingUrl) {
-    let defaultValuesByGleanKey = {
-      contextId: await lazy.ContextId.request(),
-    };
-
-    let sendGleanPing = valuesByGleanKey => {
-      valuesByGleanKey = { ...defaultValuesByGleanKey, ...valuesByGleanKey };
-      for (let [gleanKey, value] of Object.entries(valuesByGleanKey)) {
-        let glean = Glean.searchWith[gleanKey];
-        if (value !== undefined && value !== "") {
-          glean.set(value);
-        }
-      }
-      GleanPings.searchWith.submit();
-    };
-
-    sendGleanPing({
-      reportingUrl,
-    });
   }
 }
 

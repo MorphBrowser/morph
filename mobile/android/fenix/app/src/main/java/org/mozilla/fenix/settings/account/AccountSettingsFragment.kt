@@ -33,7 +33,6 @@ import mozilla.components.concept.sync.ConstellationState
 import mozilla.components.concept.sync.DeviceConstellationObserver
 import mozilla.components.concept.sync.Profile
 import mozilla.components.concept.sync.SyncEngine
-import mozilla.components.feature.automotive.isAndroidAutomotiveAvailable
 import mozilla.components.lib.state.ext.consumeFrom
 import mozilla.components.lib.state.helpers.StoreProvider.Companion.fragmentStore
 import mozilla.components.service.fxa.manager.FxaAccountManager
@@ -67,14 +66,19 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
     private lateinit var accountManager: FxaAccountManager
     private lateinit var accountSettingsStore: AccountSettingsFragmentStore
     private lateinit var accountSettingsInteractor: AccountSettingsInteractor
+
+    private val deviceConstellation by lazy {
+        accountManager.authenticatedAccount()?.deviceConstellation()
+    }
     private val args by navArgs<AccountSettingsFragmentArgs>()
 
     private val isNewUiEnabled: Boolean
         get() = requireComponents.settings.accountSettingsNewUi
 
-    // Password and credit card syncing is disabled on Android Automotive until we implement the UX Google
-    // requires for handling sensitive information there. See bug 2060936.
-    private val areCredentialsSyncable by lazy { !requireContext().isAndroidAutomotiveAvailable() }
+    private val isSyncDecouplingEnabled: Boolean
+        get() = requireComponents.settings.syncDecouplingEnabled
+
+    private val isAutofillSupported by lazy { requireComponents.settings.isAutofillSupported }
 
     // Navigate away from this fragment when we encounter auth problems or logout events.
     private val accountStateObserver =
@@ -180,7 +184,9 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
                             } else {
                                 LastSyncTime.Success(getLastSynced(requireContext()))
                             },
-                        deviceName = requireComponents.backgroundServices.defaultDeviceName(requireContext()),
+                        deviceName =
+                            deviceConstellation?.state()?.currentDevice?.displayName
+                                ?: requireComponents.backgroundServices.defaultDeviceName(requireContext()),
                     )
                 ) {
                     AccountSettingsFragmentStore(it)
@@ -203,7 +209,6 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
         setupPreferenceListeners()
     }
 
-    @Suppress("LongMethod", "CyclomaticComplexMethod")
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         val isNewUiEnabled = requireComponents.settings.accountSettingsNewUi
         val layout =
@@ -219,11 +224,16 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
     private fun setPreferencesVisibility() {
         requirePreference<TwoStatePreference>(R.string.pref_key_sync_address).isVisible =
             requireComponents.settings.isAddressSyncEnabled
+
         SyncEngineUiData.entries
             .filter { it.needsPinWarning }
             .forEach { engineUiData ->
-                requirePreference<TwoStatePreference>(engineUiData.prefId).isVisible = areCredentialsSyncable
+                requirePreference<TwoStatePreference>(engineUiData.prefId).isVisible = isAutofillSupported
             }
+
+        if (isNewUiEnabled) {
+            requirePreference<Preference>(R.string.pref_key_sync_enable_sync).isVisible = isSyncDecouplingEnabled
+        }
     }
 
     override fun onDisplayPreferenceDialog(preference: Preference) {
@@ -245,6 +255,7 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
         setupSignInOutPreferenceListeners()
         setupDeviceNamePreferenceListeners()
         setupSyncCategoriesPreferenceListeners()
+        setupDeviceSyncPreferenceListener()
 
         // NB: ObserverRegistry will take care of cleaning up internal references to 'observer' and
         // 'owner' when appropriate.
@@ -277,15 +288,8 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
     }
 
     private fun setupDeviceNamePreferenceListeners() {
-        val deviceConstellation = accountManager.authenticatedAccount()?.deviceConstellation()
-
         requirePreference<EditTextPreference>(R.string.pref_key_sync_device_name).apply {
             onPreferenceChangeListener = getChangeListenerForDeviceName()
-            deviceConstellation?.state()?.currentDevice?.let { device ->
-                summary = device.displayName
-                text = device.displayName
-                accountSettingsStore.dispatch(AccountSettingsFragmentAction.UpdateDeviceName(device.displayName))
-            }
             setOnBindEditTextListener { editText ->
                 editText.filters = arrayOf(InputFilter.LengthFilter(DEVICE_NAME_MAX_LENGTH))
                 editText.minHeight = pixelSizeFor(R.dimen.account_settings_device_name_min_height)
@@ -297,6 +301,30 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
             owner = this,
             autoPause = true,
         )
+    }
+
+    private fun setupDeviceSyncPreferenceListener() {
+        if (isNewUiEnabled && isSyncDecouplingEnabled) {
+            requirePreference<TwoStatePreference>(R.string.pref_key_sync_enable_sync).apply {
+                setDeviceSyncSummary(isChecked)
+
+                setOnPreferenceChangeListener { _, checked ->
+                    setDeviceSyncSummary(checked as Boolean)
+                    true
+                }
+            }
+        }
+    }
+
+    private fun setDeviceSyncSummary(checked: Boolean) {
+        requirePreference<TwoStatePreference>(R.string.pref_key_sync_enable_sync).apply {
+            summary =
+                if (checked) {
+                    getString(R.string.preferences_enable_sync_summary_sync_enabled)
+                } else {
+                    getString(R.string.preferences_enable_sync_summary_sync_disabled_2)
+                }
+        }
     }
 
     /**
@@ -324,7 +352,7 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
         setDisabledWhileSyncing(accountManager.isSyncActive())
 
         SyncEngineUiData.entries
-            .filter { !it.needsPinWarning || areCredentialsSyncable }
+            .filter { !it.needsPinWarning || isAutofillSupported }
             .forEach { engineUiData ->
                 requirePreference<TwoStatePreference>(engineUiData.prefId).apply {
                     tintIcon()
@@ -351,7 +379,7 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
         val isAnyEngineEnabled =
             SyncEngineUiData.entries
                 .filterNot { it.engine == SyncEngine.Addresses && !settings.isAddressSyncEnabled }
-                .filterNot { it.needsPinWarning && !areCredentialsSyncable }
+                .filterNot { it.needsPinWarning && !isAutofillSupported }
                 .any {
                     syncEnginesStatus.getOrElse(it.engine) { false }
                 }
@@ -463,7 +491,7 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
             // Trigger a sync.
             requireComponents.backgroundServices.accountManager.syncNow(SyncReason.User)
             // Poll for device events & update devices.
-            accountManager.authenticatedAccount()?.deviceConstellation()?.run {
+            deviceConstellation?.run {
                 refreshDevices()
                 pollForCommands()
             }
@@ -482,9 +510,8 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
         // This may fail, and we'll have a disparity in the UI until `updateDeviceName` is called.
         viewLifecycleOwner.lifecycleScope.launch(Main) {
             context?.let {
-                accountManager.authenticatedAccount()?.deviceConstellation()?.setDeviceName(newDeviceName, it)
+                deviceConstellation?.setDeviceName(newDeviceName, it)
             }
-            accountSettingsStore.dispatch(AccountSettingsFragmentAction.UpdateDeviceName(newDeviceName))
         }
         return true
     }
@@ -603,8 +630,9 @@ class AccountSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFr
         }
 
     private fun updateDeviceName(state: AccountSettingsFragmentState) {
-        val preferenceDeviceName = requirePreference<Preference>(R.string.pref_key_sync_device_name)
+        val preferenceDeviceName = requirePreference<EditTextPreference>(R.string.pref_key_sync_device_name)
         preferenceDeviceName.summary = state.deviceName
+        preferenceDeviceName.text = state.deviceName
     }
 
     private fun updateLastSyncTimePref(state: AccountSettingsFragmentState) {

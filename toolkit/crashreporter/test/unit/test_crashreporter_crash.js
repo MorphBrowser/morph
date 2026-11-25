@@ -24,8 +24,9 @@ add_task(async function run_test() {
   await do_content_crash(null, function (mdump, extra) {
     Assert.ok(mdump.exists());
     Assert.greater(mdump.fileSize, 0);
-    Assert.ok("StartupTime" in extra);
-    Assert.ok("CrashTime" in extra);
+    Assert.ok("StartupTime" in extra, "StartupTime annotation is present");
+    Assert.ok("CrashTime" in extra, "CrashTime annotation is present");
+    Assert.ok("UptimeTS" in extra, "UptimeTS annotation is present");
     Assert.ok(
       CrashTestUtils.dumpHasStream(
         mdump.path,
@@ -56,7 +57,7 @@ add_task(async function run_test() {
 
   // check setting some basic data
   await do_crash(
-    function () {
+    async function () {
       // Add various annotations
       crashReporter.annotateCrashReport("TestKey", "TestValue");
       crashReporter.annotateCrashReport(
@@ -73,9 +74,13 @@ add_task(async function run_test() {
       let { TelemetryController } = ChromeUtils.importESModule(
         "resource://gre/modules/TelemetryController.sys.mjs"
       );
-      TelemetryController.testSetup();
+      await TelemetryController.testSetup();
     },
     function (mdump, extra) {
+      Assert.ok("StartupTime" in extra, "StartupTime annotation is present");
+      Assert.ok("CrashTime" in extra, "CrashTime annotation is present");
+      Assert.ok("UptimeTS" in extra, "UptimeTS annotation is present");
+
       Assert.equal(extra.TestKey, "TestValue");
       Assert.equal(extra.TestUnicode, "\u{1F4A9}\n\u{0000}Escape");
       Assert.ok(
@@ -109,7 +114,7 @@ add_task(async function run_test() {
   );
 
   await do_crash(
-    function () {
+    async function () {
       // Enable the FHR, official policy bypass (since we're in a test) and
       // specify a telemetry server & client ID.
       Services.prefs.setBoolPref("termsofuse.bypassNotification", true);
@@ -144,7 +149,7 @@ add_task(async function run_test() {
         "resource://gre/modules/TelemetrySend.sys.mjs"
       );
       TelemetrySend.setTestModeEnabled(true);
-      TelemetryController.testSetup();
+      await TelemetryController.testSetup();
     },
     function (mdump, extra) {
       Assert.ok(
@@ -178,7 +183,7 @@ add_task(async function run_test() {
   );
 
   await do_crash(
-    function () {
+    async function () {
       // Disable the FHR upload, no telemetry annotations should be present.
       Services.prefs.setBoolPref(
         "datareporting.policy.dataSubmissionPolicyBypassNotification",
@@ -198,7 +203,7 @@ add_task(async function run_test() {
         "resource://gre/modules/TelemetrySend.sys.mjs"
       );
       TelemetrySend.setTestModeEnabled(true);
-      TelemetryController.testSetup();
+      await TelemetryController.testSetup();
     },
     function (mdump, extra) {
       Assert.ok(
@@ -217,7 +222,7 @@ add_task(async function run_test() {
   );
 
   await do_crash(
-    function () {
+    async function () {
       // No telemetry annotations should be present if the user has not been
       // notified yet
       Services.prefs.setBoolPref(
@@ -237,7 +242,7 @@ add_task(async function run_test() {
         "resource://gre/modules/TelemetrySend.sys.mjs"
       );
       TelemetrySend.setTestModeEnabled(true);
-      TelemetryController.testSetup();
+      await TelemetryController.testSetup();
     },
     function (mdump, extra) {
       Assert.ok(

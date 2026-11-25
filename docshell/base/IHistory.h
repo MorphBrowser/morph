@@ -94,6 +94,12 @@ class IHistory : public nsISupports {
   virtual void NotifyVisited(nsIURI*, VisitedStatus,
                              const ContentParentSet* = nullptr) = 0;
 
+  /**
+   * Notifies that all history was removed, so every URI is now unvisited. In
+   * the parent process, this is broadcasted to all child processes.
+   */
+  virtual void NotifyHistoryCleared() = 0;
+
   enum VisitFlags {
     /**
      * Indicates whether the URI was loaded in a top-level window.
@@ -150,9 +156,16 @@ class IHistory : public nsISupports {
    *        The VisitFlags describing this visit.
    * @param aBrowserId
    *        The id of browser used for this visit.
+   * @param aUserContextId
+   *        The user context id (container) of this visit. Only used when the
+   *        visit is recorded in the same process as the docshell. Content
+   *        processes forward the visit to the parent through
+   *        PBrowser::VisitURI without this value, and the parent takes it
+   *        from the BrowserParent's browsing context.
    */
   NS_IMETHOD VisitURI(nsIWidget* aWidget, nsIURI* aURI, nsIURI* aLastVisitedURI,
-                      uint32_t aFlags, uint64_t aBrowserId) = 0;
+                      uint32_t aFlags, uint64_t aBrowserId,
+                      uint32_t aUserContextId) = 0;
 
   /**
    * Set the title of the URI.

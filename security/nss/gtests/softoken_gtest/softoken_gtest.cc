@@ -70,6 +70,11 @@ static unsigned char certDER[] = {
     0x3E, 0x34, 0x95, 0x80, 0xB9, 0xA3, 0x38, 0xE0, 0x56, 0x68, 0xDA, 0xE5,
     0xC1, 0xF5, 0x37, 0xC7, 0xB5, 0xCE, 0x0D};
 
+// Passwords that also meet the FIPS token's quality requirements.
+static const char kPassword[] = "pa$$w0rd!";
+static const char kPassword2[] = "pa$$w0rd2!";
+static const char kNewPassword[] = "newpa$$w0rd!";
+
 class SoftokenTest : public ::testing::Test {
  protected:
   SoftokenTest() : mNSSDBDir("SoftokenTest.d-") {}
@@ -93,10 +98,16 @@ class SoftokenTest : public ::testing::Test {
   ScopedUniqueDirectory mNSSDBDir;
 };
 
+TEST_F(SoftokenTest, CheckKeySlotIsReadWrite) {
+  ScopedPK11SlotInfo keySlot(PK11_GetInternalKeySlot());
+  ASSERT_TRUE(keySlot);
+  ASSERT_FALSE(PK11_IsReadOnly(keySlot.get()));
+}
+
 TEST_F(SoftokenTest, CheckDefaultPbkdf2Iterations) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
 
   // Open key4.db and check encoded PBE algorithm and iteration count.
   // Compare bytes against the expected values to avoid ASN.1 here.
@@ -265,7 +276,7 @@ TEST_F(SoftokenTest, UpgradeKDFOnLogin) {
 
   // Initialize with an artificially low iteration count.
   ASSERT_EQ(PR_SUCCESS, PR_SetEnv(kMaxIterationCountLow));
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   ASSERT_EQ(PR_SUCCESS, PR_SetEnv(kMaxIterationCountUnset));
 
   std::string key_db = mNSSDBDir.GetPath() + "/key4.db";
@@ -273,7 +284,7 @@ TEST_F(SoftokenTest, UpgradeKDFOnLogin) {
 
   // Log out and back in; login should trigger the silent KDF upgrade.
   ASSERT_EQ(SECSuccess, PK11_Logout(slot.get()));
-  ASSERT_EQ(SECSuccess, PK11_CheckUserPassword(slot.get(), "password"));
+  ASSERT_EQ(SECSuccess, PK11_CheckUserPassword(slot.get(), kPassword));
 
   EXPECT_EQ(10000, ReadMetaDataIterationCount(key_db));
 }
@@ -301,7 +312,7 @@ TEST_F(SoftokenTest, UpgradeKDFPreservesKeys) {
   ASSERT_TRUE(slot);
 
   ASSERT_EQ(PR_SUCCESS, PR_SetEnv(kMaxIterationCountLow));
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
 
   // Store a persistent symmetric key with a known ID.
   int aesKeySize = PK11_GetBestKeyLength(slot.get(), CKM_AES_CBC);
@@ -318,7 +329,7 @@ TEST_F(SoftokenTest, UpgradeKDFPreservesKeys) {
 
   // Log out and back in, triggering the KDF upgrade.
   ASSERT_EQ(SECSuccess, PK11_Logout(slot.get()));
-  ASSERT_EQ(SECSuccess, PK11_CheckUserPassword(slot.get(), "password"));
+  ASSERT_EQ(SECSuccess, PK11_CheckUserPassword(slot.get(), kPassword));
 
   std::string key_db = mNSSDBDir.GetPath() + "/key4.db";
   EXPECT_EQ(10000, ReadMetaDataIterationCount(key_db));
@@ -343,7 +354,7 @@ TEST_F(SoftokenTest, ChangePasswordWithKDFUpgradePending) {
 
   // Initialize with an artificially low iteration count and stay logged in.
   ASSERT_EQ(PR_SUCCESS, PR_SetEnv(kMaxIterationCountLow));
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
 
   // Store a persistent symmetric key with a known ID.
   int aesKeySize = PK11_GetBestKeyLength(slot.get(), CKM_AES_CBC);
@@ -365,7 +376,7 @@ TEST_F(SoftokenTest, ChangePasswordWithKDFUpgradePending) {
   ASSERT_EQ(PR_SUCCESS, PR_SetEnv(kMaxIterationCountUnset));
 
   // This must complete rather than deadlock on its own transaction.
-  EXPECT_EQ(SECSuccess, PK11_ChangePW(slot.get(), "password", "newpassword"));
+  EXPECT_EQ(SECSuccess, PK11_ChangePW(slot.get(), kPassword, kNewPassword));
 
   // The password change re-encrypts at the current minimum either way.
   EXPECT_EQ(10000, ReadMetaDataIterationCount(key_db));
@@ -377,8 +388,14 @@ TEST_F(SoftokenTest, ChangePasswordWithKDFUpgradePending) {
 
   ASSERT_EQ(SECSuccess, PK11_Logout(slot.get()));
   // PK11_CheckUserPassword reports a wrong password as SECWouldBlock.
-  EXPECT_EQ(SECWouldBlock, PK11_CheckUserPassword(slot.get(), "password"));
-  EXPECT_EQ(SECSuccess, PK11_CheckUserPassword(slot.get(), "newpassword"));
+  EXPECT_EQ(SECWouldBlock, PK11_CheckUserPassword(slot.get(), kPassword));
+  EXPECT_EQ(SECSuccess, PK11_CheckUserPassword(slot.get(), kNewPassword));
+}
+
+// A FIPS token keeps the minimum PIN length it adopted on the first InitPIN
+// across a reset, so it can't be re-initialized with an empty password.
+static const char* PasswordAfterReset() {
+  return PK11_IsFIPS() ? kPassword : nullptr;
 }
 
 TEST_F(SoftokenTest, ResetSoftokenEmptyPassword) {
@@ -386,15 +403,16 @@ TEST_F(SoftokenTest, ResetSoftokenEmptyPassword) {
   ASSERT_TRUE(slot);
   EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, nullptr));
   EXPECT_EQ(SECSuccess, PK11_ResetToken(slot.get(), nullptr));
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, nullptr));
+  EXPECT_EQ(SECSuccess,
+            PK11_InitPin(slot.get(), nullptr, PasswordAfterReset()));
 }
 
 TEST_F(SoftokenTest, ResetSoftokenNonEmptyPassword) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   EXPECT_EQ(SECSuccess, PK11_ResetToken(slot.get(), nullptr));
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password2"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword2));
 }
 
 // Test certificate to use in the CreateObject tests.
@@ -445,7 +463,7 @@ static const CK_ATTRIBUTE attributes[] = {
 TEST_F(SoftokenTest, GetInvalidAttribute) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   ASSERT_NE(nullptr, obj);
@@ -460,7 +478,7 @@ TEST_F(SoftokenTest, GetInvalidAttribute) {
 TEST_F(SoftokenTest, GetValidAttributes) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   ASSERT_NE(nullptr, obj);
@@ -491,7 +509,7 @@ TEST_F(SoftokenTest, GetValidAttributes) {
 TEST_F(SoftokenTest, GetOnlyInvalidAttributes) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   ASSERT_NE(nullptr, obj);
@@ -518,7 +536,7 @@ TEST_F(SoftokenTest, GetOnlyInvalidAttributes) {
 TEST_F(SoftokenTest, GetAttributesInvalidInterspersed1) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   ASSERT_NE(nullptr, obj);
@@ -546,7 +564,7 @@ TEST_F(SoftokenTest, GetAttributesInvalidInterspersed1) {
 TEST_F(SoftokenTest, GetAttributesInvalidInterspersed2) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   ASSERT_NE(nullptr, obj);
@@ -574,7 +592,7 @@ TEST_F(SoftokenTest, GetAttributesInvalidInterspersed2) {
 TEST_F(SoftokenTest, GetAttributesInvalidInterspersed3) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   ASSERT_NE(nullptr, obj);
@@ -614,7 +632,7 @@ TEST_F(SoftokenTest, GetAttributesInvalidInterspersed3) {
 TEST_F(SoftokenTest, CreateObjectNonEmptyPassword) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
   EXPECT_EQ(SECSuccess, PK11_Logout(slot.get()));
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
@@ -625,8 +643,11 @@ TEST_F(SoftokenTest, CreateObjectChangePassword) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
   EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, nullptr));
-  EXPECT_EQ(SECSuccess, PK11_ChangePW(slot.get(), "", "password"));
-  EXPECT_EQ(SECSuccess, PK11_Logout(slot.get()));
+  EXPECT_EQ(SECSuccess, PK11_ChangePW(slot.get(), "", kPassword));
+  // Going from no password to one leaves a FIPS token logged out already.
+  if (!PK11_IsFIPS()) {
+    EXPECT_EQ(SECSuccess, PK11_Logout(slot.get()));
+  }
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   EXPECT_EQ(nullptr, obj);
@@ -647,17 +668,23 @@ TEST_F(SoftokenTest, CreateObjectChangeToBigPassword) {
                     "FvL3jvslkiImzTNuTvl32fQDXXMSc8vVk5Q3mH7trMZM0VDdwHWYERjHbz"
                     "kGxFgp0VhediHx7p9kkz6H6ac4et9sW4UkTnN7xhYc1Zr17wRSk2heQtcX"
                     "oZJGwuzhiKm8A8wkuVxms6zO56P4JORIk8oaUW6lyNTLo2kWWnTA"));
-  EXPECT_EQ(SECSuccess, PK11_Logout(slot.get()));
+  // Going from no password to one leaves a FIPS token logged out already.
+  if (!PK11_IsFIPS()) {
+    EXPECT_EQ(SECSuccess, PK11_Logout(slot.get()));
+  }
   ScopedPK11GenericObject obj(PK11_CreateGenericObject(
       slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
   EXPECT_EQ(nullptr, obj);
 }
 
 TEST_F(SoftokenTest, CreateObjectChangeToEmptyPassword) {
+  if (PK11_IsFIPS()) {
+    GTEST_SKIP() << "FIPS tokens can't remove a password";
+  }
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
-  EXPECT_EQ(SECSuccess, PK11_ChangePW(slot.get(), "password", ""));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
+  EXPECT_EQ(SECSuccess, PK11_ChangePW(slot.get(), kPassword, ""));
   // PK11_Logout returnes an error and SEC_ERROR_TOKEN_NOT_LOGGED_IN if the user
   // is not "logged in".
   EXPECT_EQ(SECFailure, PK11_Logout(slot.get()));
@@ -667,6 +694,100 @@ TEST_F(SoftokenTest, CreateObjectChangeToEmptyPassword) {
   // Because there's no password we can't logout and the operation should have
   // succeeded.
   EXPECT_NE(nullptr, obj);
+}
+
+// GLOB of the signature row of |type| of the cert DB object.
+static std::string sig_glob(CK_ATTRIBUTE_TYPE type) {
+  char glob[32];
+  snprintf(glob, sizeof(glob), "sig_cert_*_%08x", (unsigned int)type);
+  return glob;
+}
+
+// Runs |sql| on key4.db, ?1 and ?2 bound to the signature GLOBs of
+// CKA_TRUST_SERVER_AUTH and CKA_TRUST_EMAIL_PROTECTION.
+static void ExecOnKeyDB(const std::string& db_dir, const char* sql,
+                        int* changes, std::string* item1 = nullptr) {
+  std::string key_db = db_dir + "/key4.db";
+  std::string broken = sig_glob(CKA_TRUST_SERVER_AUTH);
+  std::string intact = sig_glob(CKA_TRUST_EMAIL_PROTECTION);
+  sqlite3* sql_db = NULL;
+  ASSERT_EQ(SQLITE_OK, sqlite3_open(key_db.c_str(), &sql_db));
+  sqlite3_stmt* statement = NULL;
+  int rv = sqlite3_prepare_v2(sql_db, sql, -1, &statement, NULL);
+  if (rv == SQLITE_OK) {
+    sqlite3_bind_text(statement, 1, broken.c_str(), -1, SQLITE_STATIC);
+    if (sqlite3_bind_parameter_count(statement) > 1) {
+      sqlite3_bind_text(statement, 2, intact.c_str(), -1, SQLITE_STATIC);
+    }
+    rv = sqlite3_step(statement);
+    if (rv == SQLITE_ROW && item1) {
+      item1->assign((const char*)sqlite3_column_blob(statement, 0),
+                    sqlite3_column_bytes(statement, 0));
+      rv = SQLITE_DONE;
+    }
+  }
+  *changes = sqlite3_changes(sql_db);
+  sqlite3_finalize(statement);
+  sqlite3_close(sql_db);
+  ASSERT_EQ(SQLITE_DONE, rv);
+}
+
+// Breaks the CKA_TRUST_SERVER_AUTH MAC with |break_mac_sql|, then changes the
+// password. A missing or non-matching MAC (bug 1592984) must neither fail the
+// change nor be re-signed; any other must fail it and leave all as it was.
+static void ChangePasswordWithBrokenTrustMac(const std::string& db_dir,
+                                             const char* break_mac_sql,
+                                             bool expect_success) {
+  ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
+  ASSERT_TRUE(slot);
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
+  ScopedPK11GenericObject obj(PK11_CreateGenericObject(
+      slot.get(), attributes, PR_ARRAY_SIZE(attributes), true));
+  ASSERT_NE(nullptr, obj);
+
+  const char* select_sql = "SELECT item1 FROM metaData WHERE id GLOB ?1;";
+  int changes = 0;
+  ASSERT_NO_FATAL_FAILURE(ExecOnKeyDB(db_dir, break_mac_sql, &changes));
+  ASSERT_EQ(1, changes);
+  std::string before, after;
+  ASSERT_NO_FATAL_FAILURE(ExecOnKeyDB(db_dir, select_sql, &changes, &before));
+
+  EXPECT_EQ(expect_success ? SECSuccess : SECFailure,
+            PK11_ChangePW(slot.get(), kPassword, kPassword2));
+  ASSERT_NO_FATAL_FAILURE(ExecOnKeyDB(db_dir, select_sql, &changes, &after));
+  EXPECT_EQ(before, after);
+  SECItem item = {siBuffer, NULL, 0};
+  EXPECT_EQ(SECFailure, PK11_ReadRawAttribute(PK11_TypeGeneric, obj.get(),
+                                              CKA_TRUST_SERVER_AUTH, &item));
+  SECITEM_FreeItem(&item, PR_FALSE);
+  EXPECT_EQ(SECSuccess,
+            PK11_ReadRawAttribute(PK11_TypeGeneric, obj.get(),
+                                  CKA_TRUST_EMAIL_PROTECTION, &item));
+  SECITEM_FreeItem(&item, PR_FALSE);
+  if (expect_success) {
+    EXPECT_EQ(SECSuccess, PK11_ChangePW(slot.get(), kPassword2, kNewPassword));
+  }
+}
+
+TEST_F(SoftokenTest, ChangePasswordWithMissingTrustMac) {
+  ChangePasswordWithBrokenTrustMac(
+      mNSSDBDir.GetPath(), "DELETE FROM metaData WHERE id GLOB ?1;", true);
+}
+
+TEST_F(SoftokenTest, ChangePasswordWithWrongTrustMac) {
+  // Well-formed, but made for another attribute.
+  ChangePasswordWithBrokenTrustMac(
+      mNSSDBDir.GetPath(),
+      "UPDATE metaData SET item1 = (SELECT item1 FROM metaData WHERE id GLOB "
+      "?2) WHERE id GLOB ?1;",
+      true);
+}
+
+// Might come from a newer NSS, so it must not be skipped.
+TEST_F(SoftokenTest, ChangePasswordWithUndecodableTrustMac) {
+  ChangePasswordWithBrokenTrustMac(
+      mNSSDBDir.GetPath(),
+      "UPDATE metaData SET item1 = x'00' WHERE id GLOB ?1;", false);
 }
 
 // We should be able to read CRLF, LF and CR.
@@ -756,7 +877,7 @@ static SECItem keyID2Item = {SECItemType::siBuffer, keyID2, sizeof(keyID2)};
 TEST_F(SoftokenTest, CreateKeyUnique) {
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, "password"));
+  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, kPassword));
 
   int aesKeySize = PK11_GetBestKeyLength(slot.get(), CKM_AES_CBC);
   int des3KeySize = PK11_GetBestKeyLength(slot.get(), CKM_DES3_CBC);
@@ -806,7 +927,8 @@ TEST_F(SoftokenNonAsciiTest, NonAsciiPathWorking) {
   ASSERT_TRUE(slot);
   EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, nullptr));
   EXPECT_EQ(SECSuccess, PK11_ResetToken(slot.get(), nullptr));
-  EXPECT_EQ(SECSuccess, PK11_InitPin(slot.get(), nullptr, nullptr));
+  EXPECT_EQ(SECSuccess,
+            PK11_InitPin(slot.get(), nullptr, PasswordAfterReset()));
 }
 #endif
 
@@ -821,6 +943,10 @@ class SoftokenPasswordChangeTest
 
 TEST_P(SoftokenPasswordChangeTest, KeepTrustAfterPasswordChange) {
   const PasswordPair& passwords = GetParam();
+  if (PK11_IsFIPS() && *passwords.mInitialPassword &&
+      !*passwords.mSecondPassword) {
+    GTEST_SKIP() << "FIPS tokens can't remove a password";
+  }
   ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
   ASSERT_TRUE(slot);
   // Set a password.
@@ -861,9 +987,9 @@ TEST_P(SoftokenPasswordChangeTest, KeepTrustAfterPasswordChange) {
 }
 
 static const PasswordPair PASSWORD_CHANGE_TESTS[] = {
-    {"password", ""},           // non-empty to empty password
-    {"", "password"},           // empty to non-empty password
-    {"password", "password2"},  // non-empty to non-empty password
+    {kPassword, ""},          // non-empty to empty password
+    {"", kPassword},          // empty to non-empty password
+    {kPassword, kPassword2},  // non-empty to non-empty password
 };
 
 INSTANTIATE_TEST_SUITE_P(SoftokenPasswordChangeTests,
@@ -879,6 +1005,16 @@ TEST_F(SoftokenNoDBTest, NeedUserInitNoDB) {
   EXPECT_EQ(PR_FALSE, PK11_NeedUserInit(slot.get()));
 
   // When shutting down in here we have to release the slot first.
+  slot = nullptr;
+  ASSERT_EQ(SECSuccess, NSS_Shutdown());
+}
+
+TEST_F(SoftokenNoDBTest, NeedUserInitNoDBAfterRestart) {
+  ASSERT_EQ(SECSuccess, NSS_NoDB_Init("."));
+  ScopedPK11SlotInfo slot(PK11_GetInternalKeySlot());
+  ASSERT_TRUE(slot);
+  ASSERT_EQ(SECSuccess, SECMOD_RestartModules(PR_TRUE));
+  EXPECT_EQ(PR_FALSE, PK11_NeedUserInit(slot.get()));
   slot = nullptr;
   ASSERT_EQ(SECSuccess, NSS_Shutdown());
 }
@@ -962,6 +1098,9 @@ class SoftokenDhTest : public SoftokenTest {
 
   virtual void SetUp() {
     SoftokenTest::SetUp();
+    if (PK11_IsFIPS()) {
+      GTEST_SKIP() << "SoftokenFipsDhValidate covers FIPS mode";
+    }
 
 #ifdef NSS_USE_TIMING_CODE
     ScopedPK11SlotInfo slot(PK11_GetInternalSlot());
@@ -1084,6 +1223,46 @@ TEST_P(SoftokenDhValidate, DhVectors) {
 INSTANTIATE_TEST_SUITE_P(DhValidateCases, SoftokenDhValidate,
                          ::testing::ValuesIn(DH_TEST_VECTORS));
 
+class SoftokenReadOnlyTest : public ::testing::Test {
+ protected:
+  SoftokenReadOnlyTest() : mNSSDBDir("SoftokenReadOnlyTest.d-") {}
+  SoftokenReadOnlyTest(const std::string& prefix) : mNSSDBDir(prefix) {}
+
+  virtual void SetUp() {
+    std::string nssInitArg("sql:");
+    nssInitArg.append(mNSSDBDir.GetUTF8Path());
+    // First initialize in read-write mode to create the databases.
+    ASSERT_EQ(SECSuccess, NSS_Initialize(nssInitArg.c_str(), "", "", SECMOD_DB,
+                                         NSS_INIT_NOROOTINIT));
+    // Shut down and re-initialize in read-only mode.
+    ASSERT_EQ(SECSuccess, NSS_Shutdown());
+    ASSERT_EQ(SECSuccess,
+              NSS_Initialize(nssInitArg.c_str(), "", "", SECMOD_DB,
+                             NSS_INIT_NOROOTINIT | NSS_INIT_READONLY));
+  }
+
+  virtual void TearDown() {
+    ASSERT_EQ(SECSuccess, NSS_Shutdown());
+    const std::string& nssDBDirPath = mNSSDBDir.GetPath();
+    ASSERT_EQ(0, unlink((nssDBDirPath + "/cert9.db").c_str()));
+    ASSERT_EQ(0, unlink((nssDBDirPath + "/key4.db").c_str()));
+    ASSERT_EQ(0, unlink((nssDBDirPath + "/pkcs11.txt").c_str()));
+  }
+
+  ScopedUniqueDirectory mNSSDBDir;
+};
+
+TEST_F(SoftokenReadOnlyTest, CheckKeySlotIsReadOnly) {
+  ScopedPK11SlotInfo keySlot(PK11_GetInternalKeySlot());
+  ASSERT_TRUE(keySlot);
+  ASSERT_TRUE(PK11_IsReadOnly(keySlot.get()));
+
+  // PK11_InitPin needs a read-write session, so it attempts to open one. This
+  // should fail with an error indicating the token is read-only.
+  EXPECT_EQ(SECFailure, PK11_InitPin(keySlot.get(), nullptr, kPassword));
+  EXPECT_EQ(SEC_ERROR_READ_ONLY, PORT_GetError());
+}
+
 #ifndef NSS_FIPS_DISABLED
 
 class SoftokenFipsTest : public SoftokenTest {
@@ -1094,9 +1273,12 @@ class SoftokenFipsTest : public SoftokenTest {
   virtual void SetUp() {
     SoftokenTest::SetUp();
 
+    // The token is already in FIPS mode if NSS_FIPS is set.
+    if (PK11_IsFIPS()) {
+      return;
+    }
     // Turn on FIPS mode (code borrowed from FipsMode in modutil/pk11.c)
     char* internal_name;
-    ASSERT_FALSE(PK11_IsFIPS());
     internal_name = PR_smprintf("%s", SECMOD_GetInternalModule()->commonName);
     ASSERT_EQ(SECSuccess, SECMOD_DeleteInternalModule(internal_name))
         << PORT_ErrorToName(PORT_GetError());

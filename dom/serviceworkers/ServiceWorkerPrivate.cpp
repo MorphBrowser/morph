@@ -401,21 +401,16 @@ Result<IPCInternalRequest, nsresult> GetIPCInternalRequest(
   }
 
   Maybe<PrincipalInfo> principalInfo;
-  Maybe<PrincipalInfo> interceptionPrincipalInfo;
   if (loadInfo->TriggeringPrincipal()) {
     principalInfo.emplace();
-    interceptionPrincipalInfo.emplace();
     MOZ_ALWAYS_SUCCEEDS(PrincipalToPrincipalInfo(
         loadInfo->TriggeringPrincipal(), principalInfo.ptr()));
-    MOZ_ALWAYS_SUCCEEDS(PrincipalToPrincipalInfo(
-        loadInfo->TriggeringPrincipal(), interceptionPrincipalInfo.ptr()));
   }
 
   nsTArray<RedirectHistoryEntryInfo> redirectChain;
   for (const nsCOMPtr<nsIRedirectHistoryEntry>& redirectEntry :
        loadInfo->RedirectChain()) {
-    RedirectHistoryEntryInfo* entry = redirectChain.AppendElement();
-    MOZ_ALWAYS_SUCCEEDS(RHEntryToRHEntryInfo(redirectEntry, entry));
+    redirectChain.AppendElement(MOZ_TRY(RHEntryToRHEntryInfo(redirectEntry)));
   }
 
   bool isThirdPartyChannel;
@@ -440,8 +435,9 @@ Result<IPCInternalRequest, nsresult> GetIPCInternalRequest(
       referrer, referrerPolicy, environmentReferrerPolicy, requestMode,
       requestCredentials, cacheMode, requestRedirect, requestPriority,
       integrity, /* keepalive */ false, /* hasStreamBody */ false, fragment,
-      principalInfo, interceptionPrincipalInfo, contentPolicyType,
-      redirectChain, isThirdPartyChannel, embedderPolicy);
+      principalInfo,
+      /* interceptionTriggeringPrincipal */ loadInfo->TriggeringPrincipal(),
+      contentPolicyType, redirectChain, isThirdPartyChannel, embedderPolicy);
 }
 
 nsresult MaybeStoreStreamForBackgroundThread(nsIInterceptedChannel* aChannel,
@@ -457,14 +453,10 @@ nsresult MaybeStoreStreamForBackgroundThread(nsIInterceptedChannel* aChannel,
     RefPtr<net::HttpBaseChannel> httpBase = do_QueryObject(channel);
     if (httpBase && httpBase->UploadStreamIsStreaming()) {
       // Transfer streaming uploads to the worker; fallback returns its unread
-      // body instead of replaying a clone. AddStream() below starts draining
-      // this stream into a cloneable replacement pipe, so the channel's own
-      // mUploadStream is consumed from here on and can only be reset if the
-      // worker returns the stream.
-      nsCOMPtr<nsIUploadChannel> uploadChannel1 = do_QueryInterface(channel);
-      if (uploadChannel1) {
-        MOZ_TRY(uploadChannel1->GetUploadStream(getter_AddRefs(uploadStream)));
-      }
+      // body instead of replaying a clone. The channel gives up its reference
+      // so that the stream, which serialization may drain and close
+      // It is only restored if the worker returns it.
+      uploadStream = httpBase->TakeUploadStream();
       // The length is only known once the stream ends.
       aIPCRequest.bodySize() = -1;
       aIPCRequest.hasStreamBody() = !!uploadStream;
@@ -569,9 +561,6 @@ nsresult ServiceWorkerPrivate::Initialize() {
   if (!uri) {
     return fail("the principal has no URI", NS_ERROR_FAILURE);
   }
-
-  URIParams baseScriptURL;
-  SerializeURI(uri, baseScriptURL);
 
   nsString id;
   rv = mInfo->GetId(id);
@@ -809,8 +798,7 @@ nsresult ServiceWorkerPrivate::Initialize() {
   ipcClientInfo.SetPolicyContainerArgs(policyContainerArgs);
 
   mRemoteWorkerData = RemoteWorkerData(
-      NS_ConvertUTF8toUTF16(mInfo->ScriptSpec()), baseScriptURL, baseScriptURL,
-      workerOptions,
+      NS_ConvertUTF8toUTF16(mInfo->ScriptSpec()), uri, uri, workerOptions,
       /* loading principal */ principalInfo, principalInfo,
       partitionedPrincipalInfo,
       /* useRegularPrincipal */ true,
@@ -1053,8 +1041,8 @@ nsresult ServiceWorkerPrivate::SendCookieChangeEvent(
 
   if (mInfo->State() == ServiceWorkerState::Activating) {
     UniquePtr<PendingFunctionalEvent> pendingEvent =
-        MakeUnique<PendingCookieChangeEvent>(this, std::move(aRegistration),
-                                             std::move(args));
+        std::make_unique<PendingCookieChangeEvent>(
+            this, std::move(aRegistration), std::move(args));
 
     mPendingFunctionalEvents.AppendElement(std::move(pendingEvent));
 
@@ -1113,7 +1101,7 @@ RefPtr<PushHandledPromise> ServiceWorkerPrivate::SendPushEvent(
   }
 
   if (mInfo->State() == ServiceWorkerState::Activating) {
-    UniquePtr<PendingPushEvent> pendingEvent = MakeUnique<PendingPushEvent>(
+    auto pendingEvent = std::make_unique<PendingPushEvent>(
         this, std::move(aRegistration), std::move(args));
     RefPtr<PushHandledPromise> promise = pendingEvent->Promise();
 
@@ -1309,9 +1297,9 @@ nsresult ServiceWorkerPrivate::SendFetchEvent(
 
   if (mInfo->State() == ServiceWorkerState::Activating) {
     UniquePtr<PendingFunctionalEvent> pendingEvent =
-        MakeUnique<PendingFetchEvent>(this, std::move(registration),
-                                      std::move(args), std::move(aChannel),
-                                      std::move(preloadResponsePromises));
+        std::make_unique<PendingFetchEvent>(
+            this, std::move(registration), std::move(args), std::move(aChannel),
+            std::move(preloadResponsePromises));
 
     mPendingFunctionalEvents.AppendElement(std::move(pendingEvent));
 

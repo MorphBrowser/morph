@@ -3,7 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/Attributes.h"
+#include "mozilla/CheckedInt.h"
 #include "mozilla/DebugOnly.h"
+#include "mozilla/FloatingPoint.h"
 #include "mozilla/MemoryReporting.h"
 
 #include "mozilla/dom/ContentChild.h"
@@ -36,7 +38,6 @@
 #include "nsIXULRuntime.h"
 #include "nsContentUtils.h"  // for nsAutoScriptBlocker
 #include "nsJSUtils.h"
-#include "nsStandardURL.h"
 #include "mozilla/ipc/URIUtils.h"
 #include "nsPrintfCString.h"
 #include "nsTHashtable.h"
@@ -52,6 +53,7 @@
 #include "mozilla/dom/PlacesVisitTitle.h"
 #include "mozilla/dom/ScriptSettings.h"
 #include "mozilla/glean/PlacesMetrics.h"
+#include "mozilla/places/INativePlacesEventCallback.h"
 
 #include "nsIBrowserWindowTracker.h"
 #include "nsImportModule.h"
@@ -92,7 +94,8 @@ struct VisitData {
         source(nsINavHistoryService::VISIT_SOURCE_ORGANIC),
         triggeringPlaceId(0),
         triggeringSponsoredURLVisitTimeMS(0),
-        bookmarked(false) {
+        bookmarked(false),
+        userContextId(0) {
     guid.SetIsVoid(true);
     title.SetIsVoid(true);
     baseDomain.SetIsVoid(true);
@@ -119,7 +122,8 @@ struct VisitData {
         source(nsINavHistoryService::VISIT_SOURCE_ORGANIC),
         triggeringPlaceId(0),
         triggeringSponsoredURLVisitTimeMS(0),
-        bookmarked(false) {
+        bookmarked(false),
+        userContextId(0) {
     MOZ_ASSERT(aURI);
     if (aURI) {
       (void)aURI->GetSpec(spec);
@@ -191,6 +195,7 @@ struct VisitData {
   nsCString triggeringSponsoredURLBaseDomain;
   int64_t triggeringSponsoredURLVisitTimeMS;
   bool bookmarked;
+  uint32_t userContextId;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -356,12 +361,12 @@ nsresult GetIntFromJSObject(JSContext* aCtx, JS::Handle<JSObject*> aObject,
   NS_ENSURE_ARG(value.isPrimitive());
   NS_ENSURE_ARG(value.isNumber());
 
-  double num;
-  rc = JS::ToNumber(aCtx, value, &num);
-  NS_ENSURE_TRUE(rc, NS_ERROR_UNEXPECTED);
-  NS_ENSURE_ARG(IntType(num) == num);
+  int64_t num;
+  NS_ENSURE_ARG(mozilla::NumberEqualsInt64(value.toNumber(), &num));
+  CheckedInt<IntType> checked(num);
+  NS_ENSURE_ARG(checked.isValid());
 
-  *_int = IntType(num);
+  *_int = checked.value();
   return NS_OK;
 }
 
@@ -391,6 +396,34 @@ nsresult GetJSObjectFromArray(JSContext* aCtx, JS::Handle<JSObject*> aArray,
 }
 
 }  // namespace
+
+class HistoryClearedListener final : public INativePlacesEventCallback {
+ public:
+  NS_INLINE_DECL_REFCOUNTING(HistoryClearedListener, override)
+
+  HistoryClearedListener() {
+    AutoTArray<PlacesEventType, 1> events;
+    events.AppendElement(PlacesEventType::History_cleared);
+    PlacesObservers::AddListener(events, this);
+  }
+
+  void HandlePlacesEvent(const PlacesEventSequence& aEvents) override {
+    for (const auto& event : aEvents) {
+      if (event->Type() == PlacesEventType::History_cleared) {
+        // The History service owns this listener, so it is still alive.
+        History* history = History::GetService();
+        // Reloads of recently visited URIs are not stored, so forget the
+        // visits that were just cleared.
+        history->ClearRecentlyVisitedURIs();
+        history->OnHistoryCleared();
+        return;
+      }
+    }
+  }
+
+ private:
+  ~HistoryClearedListener() = default;
+};
 
 class VisitedQuery final : public PendingStatementCallback {
  public:
@@ -429,7 +462,7 @@ class VisitedQuery final : public PendingStatementCallback {
         urls.InsertOrUpdate(spec, std::move(info));
       }
     }
-    RefPtr<VisitedQuery> query = new VisitedQuery(std::move(urls));
+    RefPtr<VisitedQuery> query = new VisitedQuery(history, std::move(urls));
     return history->QueueVisitedStatement(std::move(query));
   }
 
@@ -453,7 +486,8 @@ class VisitedQuery final : public PendingStatementCallback {
           VisitedUrlInfo(std::move(uri), History::ContentParentSet());
       urls.InsertOrUpdate(spec, std::move(info));
     }
-    RefPtr<VisitedQuery> query = new VisitedQuery(std::move(urls), callback);
+    RefPtr<VisitedQuery> query =
+        new VisitedQuery(history, std::move(urls), callback);
     return history->QueueVisitedStatement(std::move(query));
   }
 
@@ -480,9 +514,21 @@ class VisitedQuery final : public PendingStatementCallback {
   }
 
   NS_IMETHOD HandleCompletion(uint16_t aReason) override {
-    if (aReason == mozIStorageStatementCallback::REASON_FINISHED) {
-      NotifyVisitedStatus();
+    if (aReason != mozIStorageStatementCallback::REASON_FINISHED) {
+      return NS_OK;
     }
+    History* history = History::GetService();
+    if (history && history->HistoryClearedCount() != mHistoryClearedCount) {
+      // History was cleared while this query ran, its results may be stale.
+      for (auto& entry : mUrlsToContentParentSet) {
+        entry.GetModifiableData()->mIsVisited = false;
+      }
+      RefPtr<VisitedQuery> query = new VisitedQuery(
+          history, std::move(mUrlsToContentParentSet), mCallback);
+      (void)history->QueueVisitedStatement(std::move(query));
+      return NS_OK;
+    }
+    NotifyVisitedStatus();
     return NS_OK;
   }
 
@@ -523,16 +569,19 @@ class VisitedQuery final : public PendingStatementCallback {
   }
 
  private:
-  explicit VisitedQuery(VisitedUrlsToContentParentSet&& aUrlsToContentParentSet,
-                        const nsMainThreadPtrHandle<mozIVisitedStatusCallback>&
-                            aCallback = nullptr)
+  VisitedQuery(History* aHistory,
+               VisitedUrlsToContentParentSet&& aUrlsToContentParentSet,
+               const nsMainThreadPtrHandle<mozIVisitedStatusCallback>&
+                   aCallback = nullptr)
       : mUrlsToContentParentSet(std::move(aUrlsToContentParentSet)),
-        mCallback(aCallback) {}
+        mCallback(aCallback),
+        mHistoryClearedCount(aHistory->HistoryClearedCount()) {}
 
   ~VisitedQuery() = default;
 
   VisitedUrlsToContentParentSet mUrlsToContentParentSet;
   nsMainThreadPtrHandle<mozIVisitedStatusCallback> mCallback;
+  uint32_t mHistoryClearedCount;
 };
 
 NS_IMPL_ISUPPORTS_INHERITED0(VisitedQuery, PendingStatementCallback)
@@ -589,6 +638,7 @@ class NotifyManyVisitsObservers : public Runnable {
     visitEvent->mVisitCount = aPlace.visitCount + 1;  // Add current visit
     visitEvent->mTypedCount = static_cast<uint32_t>(aPlace.typed);
     visitEvent->mLastKnownTitle.Assign(aPlace.title);
+    visitEvent->mUserContextId = aPlace.userContextId;
 
     bool success = !!aEvents.AppendElement(visitEvent.forget(), fallible);
     MOZ_RELEASE_ASSERT(success);
@@ -1182,9 +1232,9 @@ class InsertVisitedURIs final : public Runnable {
     stmt = mHistory->GetStatement(
         "INSERT INTO moz_historyvisits "
         "(from_visit, place_id, visit_date, visit_type, session, source, "
-        "triggeringPlaceId) "
+        "triggeringPlaceId, userContextId) "
         "VALUES (:from_visit, :page_id, :visit_date, :visit_type, 0, :source, "
-        ":triggeringPlaceId) ");
+        ":triggeringPlaceId, :userContextId) ");
     NS_ENSURE_STATE(stmt);
     mozStorageStatementScoper scoper(stmt);
 
@@ -1208,6 +1258,8 @@ class InsertVisitedURIs final : public Runnable {
     } else {
       rv = stmt->BindNullByName("triggeringPlaceId"_ns);
     }
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = stmt->BindInt64ByName("userContextId"_ns, _place.userContextId);
     NS_ENSURE_SUCCESS(rv, rv);
 
     rv = stmt->Execute();
@@ -1526,6 +1578,10 @@ History::History()
   NS_WARNING_ASSERTION(os, "Observer service was not found!");
   if (os) {
     (void)os->AddObserver(this, TOPIC_PLACES_SHUTDOWN, false);
+  }
+
+  if (XRE_IsParentProcess()) {
+    mHistoryClearedListener = new HistoryClearedListener();
   }
 }
 
@@ -1926,7 +1982,8 @@ void History::AppendToRecentlyVisitedURIs(nsIURI* aURI, bool aHidden) {
 
 NS_IMETHODIMP
 History::VisitURI(nsIWidget* aWidget, nsIURI* aURI, nsIURI* aLastVisitedURI,
-                  uint32_t aFlags, uint64_t aBrowserId) {
+                  uint32_t aFlags, uint64_t aBrowserId,
+                  uint32_t aUserContextId) {
   MOZ_ASSERT(NS_IsMainThread());
   NS_ENSURE_ARG(aURI);
 
@@ -2035,6 +2092,7 @@ History::VisitURI(nsIWidget* aWidget, nsIURI* aURI, nsIURI* aLastVisitedURI,
   place.visitTime = PR_Now();
   place.SetTransitionType(transitionType);
   place.hidden = isHidden;
+  place.userContextId = aUserContextId;
 
   if (isRedirect) {
     place.useFrecencyRedirectBonus =
@@ -2108,21 +2166,21 @@ History::VisitURI(nsIWidget* aWidget, nsIURI* aURI, nsIURI* aLastVisitedURI,
             triggeringSponsoredURLVisitTimeMS.ToInteger64(&rv);
         NS_ENSURE_SUCCESS(rv, rv);
 
-        // Get base domain. We need to get it here since nsIEffectiveTLDService
-        // referred in DomainNameFromURI should access on main thread.
-        nsCOMPtr<nsIURI> currentURL;
-        rv = NS_MutateURI(new net::nsStandardURL::Mutator())
-                 .SetSpec(place.spec)
-                 .Finalize(currentURL);
-        NS_ENSURE_SUCCESS(rv, rv);
         nsCOMPtr<nsIURI> sponsoredURL;
-        rv = NS_MutateURI(new net::nsStandardURL::Mutator())
-                 .SetSpec(place.triggeringSponsoredURL)
-                 .Finalize(sponsoredURL);
-        NS_ENSURE_SUCCESS(rv, rv);
-        navHistory->DomainNameFromURI(currentURL, place.baseDomain);
-        navHistory->DomainNameFromURI(sponsoredURL,
-                                      place.triggeringSponsoredURLBaseDomain);
+        rv = NS_NewURI(getter_AddRefs(sponsoredURL),
+                       place.triggeringSponsoredURL);
+        bool sameDomain = false;
+        if (!NS_WARN_IF(NS_FAILED(rv))) {
+          // Get base domains here since nsIEffectiveTLDService referred in
+          // DomainNameFromURI should access on main thread.
+          nsCString visitedBaseDomain, sponsoredBaseDomain;
+          navHistory->DomainNameFromURI(visitedURI, visitedBaseDomain);
+          navHistory->DomainNameFromURI(sponsoredURL, sponsoredBaseDomain);
+          sameDomain = visitedBaseDomain.Equals(sponsoredBaseDomain);
+        }
+        if (!sameDomain) {
+          place.triggeringSponsoredURL.Truncate();
+        }
       }
     }
   }
@@ -2320,6 +2378,16 @@ History::UpdatePlaces(JS::Handle<JS::Value> aPlaceInfos,
           GetURIFromJSObject(aCtx, visit, "referrerURI");
       if (referrer) {
         (void)referrer->GetSpec(data.referrerSpec);
+      }
+
+      JS::Rooted<JS::Value> userContextIdVal(aCtx);
+      if (!JS_GetProperty(aCtx, visit, "userContextId", &userContextIdVal)) {
+        return NS_ERROR_UNEXPECTED;
+      }
+      if (!userContextIdVal.isUndefined()) {
+        rv = GetIntFromJSObject(aCtx, visit, "userContextId",
+                                &data.userContextId);
+        NS_ENSURE_SUCCESS(rv, rv);
       }
     }
   }

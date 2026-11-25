@@ -28,6 +28,7 @@
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/CSPMessageUtils.h"
 #include "mozilla/dom/PolicyContainerMessageUtils.h"
+#include "mozilla/dom/Document.h"
 #include "mozilla/dom/DocumentBinding.h"
 #include "mozilla/dom/DOMTypes.h"
 #include "mozilla/dom/NavigationAPIIPCUtils.h"
@@ -190,6 +191,22 @@ uint64_t SessionHistoryInfo::SharedId() const {
   return mSharedState.Get()->mId;
 }
 
+Maybe<NewSessionHistorySharedState> SessionHistoryInfo::NewSharedStateRequest()
+    const {
+  MOZ_ASSERT(XRE_IsContentProcess());
+  SHEntrySharedState* state = mSharedState.Get();
+  if (!nsContentUtils::IsProcessSpecificIdFrom(state->mId, XRE_GetChildID())) {
+    return Nothing();
+  }
+  return Some(NewSessionHistorySharedState{state->mId, state->mPolicyContainer,
+                                           state->mContentType});
+}
+
+void SessionHistoryInfo::SetSharedState(SHEntrySharedParentState* aState) {
+  MOZ_ASSERT(XRE_IsParentProcess());
+  mSharedState.Set(aState);
+}
+
 nsILayoutHistoryState* SessionHistoryInfo::GetLayoutHistoryState() {
   return mSharedState.Get()->mLayoutHistoryState;
 }
@@ -305,7 +322,7 @@ SessionHistoryInfo::SharedState SessionHistoryInfo::SharedState::Create(
         aPartitionedPrincipalToInherit, aPolicyContainer, aContentType));
   }
 
-  return SharedState(MakeUnique<SHEntrySharedState>(
+  return SharedState(std::make_unique<SHEntrySharedState>(
       aTriggeringPrincipal, aPrincipalToInherit, aPartitionedPrincipalToInherit,
       aPolicyContainer, aContentType));
 }
@@ -331,8 +348,8 @@ SessionHistoryInfo::SharedState::~SharedState() {
     mParent
         .RefPtr<SHEntrySharedParentState>::~RefPtr<SHEntrySharedParentState>();
   } else {
-    mChild.UniquePtr<SHEntrySharedState>::~unique_ptr<
-        SHEntrySharedState, DefaultDelete<SHEntrySharedState>>();
+    mChild
+        .std::unique_ptr<SHEntrySharedState>::~unique_ptr<SHEntrySharedState>();
   }
 }
 
@@ -342,7 +359,7 @@ SessionHistoryInfo::SharedState& SessionHistoryInfo::SharedState::operator=(
     if (XRE_IsParentProcess()) {
       mParent = aOther.mParent;
     } else {
-      mChild = MakeUnique<SHEntrySharedState>(*aOther.mChild);
+      mChild = std::make_unique<SHEntrySharedState>(*aOther.mChild);
     }
   }
   return *this;
@@ -370,7 +387,7 @@ void SessionHistoryInfo::SharedState::Init() {
         RefPtr<SHEntrySharedParentState>(new SHEntrySharedParentState());
   } else {
     new (&mChild)
-        UniquePtr<SHEntrySharedState>(MakeUnique<SHEntrySharedState>());
+        UniquePtr<SHEntrySharedState>(std::make_unique<SHEntrySharedState>());
   }
 }
 
@@ -380,7 +397,7 @@ void SessionHistoryInfo::SharedState::Init(
     new (&mParent) RefPtr<SHEntrySharedParentState>(aOther.mParent);
   } else {
     new (&mChild) UniquePtr<SHEntrySharedState>(
-        MakeUnique<SHEntrySharedState>(*aOther.mChild));
+        std::make_unique<SHEntrySharedState>(*aOther.mChild));
   }
 }
 
@@ -398,7 +415,6 @@ LoadingSessionHistoryInfo::LoadingSessionHistoryInfo(
 LoadingSessionHistoryInfo::LoadingSessionHistoryInfo(
     SessionHistoryEntry* aEntry, const LoadingSessionHistoryInfo* aInfo)
     : mInfo(aEntry->Info()),
-      mPreviousEntry(aInfo->mPreviousEntry),
       mTriggeringNavigationType(aInfo->mTriggeringNavigationType),
       mLoadId(aInfo->mLoadId),
       mLoadIsFromSessionHistory(aInfo->mLoadIsFromSessionHistory),
@@ -447,7 +463,7 @@ void SessionHistoryEntry::SetByLoadId(uint64_t aLoadId,
       aLoadId, LoadingEntry{
                    .mEntry = aEntry,
                    .mInfoSnapshotForValidation =
-                       MakeUnique<SessionHistoryInfo>(aEntry->Info()),
+                       std::make_unique<SessionHistoryInfo>(aEntry->Info()),
                });
 }
 
@@ -463,18 +479,18 @@ void SessionHistoryEntry::RemoveLoadId(uint64_t aLoadId) {
 }
 
 SessionHistoryEntry::SessionHistoryEntry()
-    : mInfo(MakeUnique<SessionHistoryInfo>()), mID(++gEntryID) {}
+    : mInfo(std::make_unique<SessionHistoryInfo>()), mID(++gEntryID) {}
 
 SessionHistoryEntry::SessionHistoryEntry(nsDocShellLoadState* aLoadState,
                                          nsIChannel* aChannel)
-    : mInfo(MakeUnique<SessionHistoryInfo>(aLoadState, aChannel)),
+    : mInfo(std::make_unique<SessionHistoryInfo>(aLoadState, aChannel)),
       mID(++gEntryID) {}
 
 SessionHistoryEntry::SessionHistoryEntry(SessionHistoryInfo* aInfo)
-    : mInfo(MakeUnique<SessionHistoryInfo>(*aInfo)), mID(++gEntryID) {}
+    : mInfo(std::make_unique<SessionHistoryInfo>(*aInfo)), mID(++gEntryID) {}
 
 SessionHistoryEntry::SessionHistoryEntry(const SessionHistoryEntry& aEntry)
-    : mInfo(MakeUnique<SessionHistoryInfo>(*aEntry.mInfo)),
+    : mInfo(std::make_unique<SessionHistoryInfo>(*aEntry.mInfo)),
       mParent(aEntry.mParent),
       mID(aEntry.mID),
       mBCHistoryLength(aEntry.mBCHistoryLength) {}
@@ -970,13 +986,6 @@ SessionHistoryEntry::SetScrollRestorationIsManual(
 }
 
 NS_IMETHODIMP
-SessionHistoryEntry::GetLoadedInThisProcess(bool* aLoadedInThisProcess) {
-  // FIXME
-  //*aLoadedInThisProcess = mInfo->mLoadedInThisProcess;
-  return NS_OK;
-}
-
-NS_IMETHODIMP
 SessionHistoryEntry::GetShistory(nsISHistory** aShistory) {
   nsCOMPtr<nsISHistory> sHistory = do_QueryReferent(SharedInfo()->mSHistory);
   sHistory.forget(aShistory);
@@ -1056,21 +1065,6 @@ SessionHistoryEntry::InitLayoutHistoryState(
   }
 
   return GetLayoutHistoryState(aLayoutHistoryState);
-}
-
-NS_IMETHODIMP
-SessionHistoryEntry::Create(
-    nsIURI* aURI, const nsAString& aTitle, nsIInputStream* aInputStream,
-    uint32_t aCacheKey, const nsACString& aContentType,
-    nsIPrincipal* aTriggeringPrincipal, nsIPrincipal* aPrincipalToInherit,
-    nsIPrincipal* aPartitionedPrincipalToInherit,
-    nsIPolicyContainer* aPolicyContainer, const nsID& aDocshellID,
-    bool aDynamicCreation, nsIURI* aOriginalURI, nsIURI* aResultPrincipalURI,
-    nsIURI* aUnstrippedURI, bool aLoadReplace, nsIReferrerInfo* aReferrerInfo,
-    const nsAString& aSrcdoc, bool aSrcdocEntry, nsIURI* aBaseURI,
-    bool aSaveLayoutState, bool aExpired, bool aUserActivation) {
-  MOZ_CRASH("Might need to implement this");
-  return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP
@@ -1338,12 +1332,6 @@ SessionHistoryEntry::ClearEntry() {
 }
 
 NS_IMETHODIMP
-SessionHistoryEntry::CreateLoadInfo(nsDocShellLoadState** aLoadState) {
-  NS_WARNING("We shouldn't be calling this!");
-  return NS_OK;
-}
-
-NS_IMETHODIMP
 SessionHistoryEntry::GetBfcacheID(uint64_t* aBfcacheID) {
   *aBfcacheID = SharedInfo()->mId;
   return NS_OK;
@@ -1404,7 +1392,7 @@ SessionHistoryEntry::SyncTreesForSubframeNavigation(
 }
 
 void SessionHistoryEntry::ReplaceWith(const SessionHistoryEntry& aSource) {
-  mInfo = MakeUnique<SessionHistoryInfo>(*aSource.mInfo);
+  mInfo = std::make_unique<SessionHistoryInfo>(*aSource.mInfo);
   mChildren.Clear();
 }
 
@@ -1443,12 +1431,26 @@ nsFrameLoader* SessionHistoryEntry::GetFrameLoader() {
 
 void SessionHistoryEntry::SetInfo(SessionHistoryInfo* aInfo) {
   // FIXME Assert that we're not changing shared state!
-  mInfo = MakeUnique<SessionHistoryInfo>(*aInfo);
+  mInfo = std::make_unique<SessionHistoryInfo>(*aInfo);
 }
 
-already_AddRefed<nsIURI> SessionHistoryInfo::GetURIOrInheritedForAboutBlank()
-    const {
-  if (mURI && NS_IsAboutBlankAllowQueryAndFragment(mURI)) {
+void SessionHistoryEntry::ReplaceInfo(SessionHistoryInfo* aInfo) {
+  const RefPtr<SHEntrySharedParentState> oldState = SharedInfo();
+  SetInfo(aInfo);
+  SHEntrySharedParentState* newState = SharedInfo();
+  if (newState == oldState) {
+    return;
+  }
+  newState->mDocShellID = oldState->mDocShellID;
+  newState->mSHistory = oldState->mSHistory;
+  newState->mIsFrameNavigation = oldState->mIsFrameNavigation;
+  newState->mDynamicallyCreated = oldState->mDynamicallyCreated;
+  mChildren.Clear();
+}
+
+already_AddRefed<nsIURI>
+SessionHistoryInfo::GetURIOrInheritedForAboutBlankOrSrcdoc() const {
+  if (mURI && NS_IsAboutBlankOrSrcdoc(mURI)) {
     auto* principal = GetPrincipalToInherit();
     if (principal) {
       return principal->GetURI();
@@ -1457,9 +1459,9 @@ already_AddRefed<nsIURI> SessionHistoryInfo::GetURIOrInheritedForAboutBlank()
   return do_AddRef(mURI);
 }
 
-already_AddRefed<nsIURI> SessionHistoryEntry::GetURIOrInheritedForAboutBlank()
-    const {
-  return mInfo->GetURIOrInheritedForAboutBlank();
+already_AddRefed<nsIURI>
+SessionHistoryEntry::GetURIOrInheritedForAboutBlankOrSrcdoc() const {
+  return mInfo->GetURIOrInheritedForAboutBlankOrSrcdoc();
 }
 
 already_AddRefed<nsSHistory> SessionHistoryEntry::GetSessionHistory() {
@@ -1473,18 +1475,22 @@ already_AddRefed<nsSHistory> SessionHistoryEntry::GetSessionHistory() {
 /* static */
 Maybe<PreviousSessionHistoryInfo>
 PreviousSessionHistoryInfo::CreateValidatedPreviousEntry(
-    const SessionHistoryInfo& aCurrentEntry,
-    const Maybe<SessionHistoryInfo>& aPreviousEntryForActivation,
-    Maybe<NavigationType> aNavigationType) {
+    SessionHistoryEntry* aCurrentEntry,
+    SessionHistoryEntry* aPreviousEntryForActivation,
+    Maybe<NavigationType> aNavigationType,
+    nsIPrincipal* aPreviousDocumentPrincipal) {
   // https://html.spec.whatwg.org/#update-document-for-history-step-application
   // Step 7 If all the following are true:
   // * previousEntryForActivation is given;
   // * navigationType is non-null; and
   // * navigationType is "reload" or previousEntryForActivation's document is
   //   not document,
-  if (!aPreviousEntryForActivation || !aNavigationType ||
-      (*aNavigationType != NavigationType::Reload &&
-       aCurrentEntry.SharesDocumentWith(*aPreviousEntryForActivation))) {
+  if (!aPreviousEntryForActivation || !aNavigationType) {
+    return Nothing();
+  }
+  bool isReload = *aNavigationType == NavigationType::Reload;
+  if (!isReload && aCurrentEntry->Info().SharesDocumentWith(
+                       aPreviousEntryForActivation->Info())) {
     return Nothing();
   }
 
@@ -1496,15 +1502,36 @@ PreviousSessionHistoryInfo::CreateValidatedPreviousEntry(
   // then set activation's old entry to a new NavigationHistoryEntry in
   // navigation's relevant realm, whose session history entry is
   // previousEntryForActivation.
-  nsCOMPtr previousURI =
-      aPreviousEntryForActivation->GetURIOrInheritedForAboutBlank();
-  nsCOMPtr currentURI = aCurrentEntry.GetURIOrInheritedForAboutBlank();
-  if (NS_FAILED(nsContentUtils::GetSecurityManager()->CheckSameOriginURI(
-          currentURI, previousURI, false, false))) {
-    return Some(PreviousSessionHistoryInfo{});
+  // Content also needs this entry for step 7.3; on reload, it is the current
+  // entry. The replace-only conditions in step 7.4 are checked in content.
+  nsCOMPtr currentURI = aCurrentEntry->GetURIOrInheritedForAboutBlankOrSrcdoc();
+  if (isReload || (aPreviousDocumentPrincipal &&
+                   aPreviousDocumentPrincipal->IsSameOrigin(currentURI))) {
+    return Some(
+        PreviousSessionHistoryInfo(aPreviousEntryForActivation->Info()));
   }
 
-  return Some(PreviousSessionHistoryInfo(aPreviousEntryForActivation));
+  return Some(PreviousSessionHistoryInfo{});
+}
+
+/* static */
+Maybe<PreviousSessionHistoryInfo>
+PreviousSessionHistoryInfo::CreateValidatedPreviousEntry(
+    const Document& aCurrentDocument, const Document& aPreviousDocument,
+    const SessionHistoryInfo* aPreviousEntryForActivation) {
+  // https://html.spec.whatwg.org/#update-document-for-history-step-application
+  if (&aCurrentDocument == &aPreviousDocument) {
+    return Nothing();
+  }
+
+  // Expose the replaced entry if the documents are same-origin and the
+  // previous document is past initial about:blank.
+  if (aPreviousEntryForActivation && !aPreviousDocument.IsInitialDocument() &&
+      aPreviousDocument.NodePrincipal()->Equals(
+          aCurrentDocument.NodePrincipal())) {
+    return Some(PreviousSessionHistoryInfo(*aPreviousEntryForActivation));
+  }
+  return Some(PreviousSessionHistoryInfo{});
 }
 
 SessionHistoryEntry* SessionHistoryEntry::GetAsSessionHistoryEntry() {
@@ -1587,6 +1614,7 @@ bool ParamTraits<mozilla::dom::SessionHistoryInfo>::Read(
   }
 
   if (aResult->mURI && aResult->mURI->SchemeIs("javascript")) {
+    // Note: Session restore also skips javascript: URIs to avoid hitting this.
     aReader->FatalError("javascript: URIs should not enter session history");
     return false;
   }
@@ -1624,23 +1652,8 @@ bool ParamTraits<mozilla::dom::SessionHistoryInfo>::Read(
   if (sharedState) {
     aResult->mSharedState.Set(sharedState);
 
-    MOZ_ASSERT(triggeringPrincipal
-                   ? triggeringPrincipal->Equals(
-                         aResult->mSharedState.Get()->mTriggeringPrincipal)
-                   : !aResult->mSharedState.Get()->mTriggeringPrincipal,
-               "We don't expect this to change!");
-    MOZ_ASSERT(principalToInherit
-                   ? principalToInherit->Equals(
-                         aResult->mSharedState.Get()->mPrincipalToInherit)
-                   : !aResult->mSharedState.Get()->mPrincipalToInherit,
-               "We don't expect this to change!");
-    MOZ_ASSERT(
-        partitionedPrincipalToInherit
-            ? partitionedPrincipalToInherit->Equals(
-                  aResult->mSharedState.Get()->mPartitionedPrincipalToInherit)
-            : !aResult->mSharedState.Get()->mPartitionedPrincipalToInherit,
-        "We don't expect this to change!");
-
+    // The principals content sent are ignored. They can differ for state that
+    // content created, as the parent took those from the document instead.
     MOZ_ASSERT(policyContainer
                    ? PolicyContainer::Equals(
                          PolicyContainer::Cast(policyContainer),
@@ -1650,7 +1663,7 @@ bool ParamTraits<mozilla::dom::SessionHistoryInfo>::Read(
                "We don't expect this to change!");
     MOZ_ASSERT(contentType.Equals(aResult->mSharedState.Get()->mContentType),
                "We don't expect this to change!");
-  } else {
+  } else if (!XRE_IsParentProcess()) {
     aResult->mSharedState.ChangeId(sharedId);
     aResult->mSharedState.Get()->mTriggeringPrincipal =
         triggeringPrincipal.forget();
@@ -1661,6 +1674,10 @@ bool ParamTraits<mozilla::dom::SessionHistoryInfo>::Read(
     aResult->mSharedState.Get()->mPolicyContainer = policyContainer.forget();
     aResult->mSharedState.Get()->mContentType = contentType;
   }
+  // Otherwise the parent doesn't know sharedId. It never adopts an id from
+  // content: aResult keeps the fresh state it was constructed with, which no
+  // document is bound to. Content asks for new state explicitly, see
+  // CanonicalBrowsingContext::CreateSharedState.
 
   if (!ReadParam(aReader, &aResult->mSharedState.Get()->mLayoutHistoryState) ||
       !ReadParam(aReader, &aResult->mSharedState.Get()->mCacheKey) ||
@@ -1676,6 +1693,9 @@ bool ParamTraits<mozilla::dom::SessionHistoryInfo>::Read(
 
 IMPLEMENT_IPC_SERIALIZER_WITH_FIELDS(mozilla::dom::PreviousSessionHistoryInfo,
                                      mSameOriginSessionHistoryInfo);
+
+IMPLEMENT_IPC_SERIALIZER_WITH_FIELDS(mozilla::dom::NewSessionHistorySharedState,
+                                     mId, mPolicyContainer, mContentType);
 
 IMPLEMENT_IPC_SERIALIZER_WITH_FIELDS(mozilla::dom::LoadingSessionHistoryInfo,
                                      mInfo, mContiguousEntries, mPreviousEntry,
@@ -1726,7 +1746,7 @@ bool ParamTraits<nsILayoutHistoryState*>::Read(
     (*aResult)->SetScrollPositionOnly(scrollPositionOnly);
     for (uint32_t i = 0; i < keys.Length(); ++i) {
       mozilla::PresState& state = states[i];
-      auto newState = mozilla::MakeUnique<mozilla::PresState>(state);
+      auto newState = std::make_unique<mozilla::PresState>(state);
       (*aResult)->AddState(keys[i], std::move(newState));
     }
   }

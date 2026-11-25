@@ -14,6 +14,7 @@ import UrlbarPrefs from "chrome://browser/content/urlbar/UrlbarContentPrefs.mjs"
 
 /**
  * @import { URILoadingHelper } from "resource:///modules/URILoadingHelper.sys.mjs"
+ * @import { SearchMode } from "moz-src:///browser/components/urlbar/content/UrlbarInputBase.mjs"
  */
 
 /**
@@ -167,6 +168,7 @@ export const UrlbarShared = {
       "clearL10nCache",
       "clearTopSitesCache",
       "close",
+      "invalidateResults",
       "startTail150",
       "updateResultMenuCommands",
     ]),
@@ -184,12 +186,10 @@ export const UrlbarShared = {
     RESTRICT_TAG: 6,
     RESTRICT_OPENPAGE: 7,
     RESTRICT_SEARCH: 8,
-    RESTRICT_TITLE: 9,
-    RESTRICT_URL: 10,
-    RESTRICT_ACTION: 11,
+    RESTRICT_ACTION: 9,
     // `looksLikeOrigin()` returned `LOOKS_LIKE_ORIGIN.OTHER` for this token.
     // It may or may not be an origin.
-    POSSIBLE_ORIGIN_BUT_SEARCH_ALLOWED: 12,
+    POSSIBLE_ORIGIN_BUT_SEARCH_ALLOWED: 10,
   }),
 
   /**
@@ -207,8 +207,6 @@ export const UrlbarShared = {
     TAG: "+",
     OPENPAGE: "%",
     SEARCH: "?",
-    TITLE: "#",
-    URL: "$",
     ACTION: ">",
   }),
 
@@ -290,6 +288,7 @@ export const UrlbarShared = {
     SEMANTIC_HISTORY: "semanticHistory",
     SUGGESTED_INDEX: "suggestedIndex",
     TAIL_SUGGESTION: "tailSuggestion",
+    TEMPORAL_SUGGESTION: "temporalSuggestion",
   }),
 
   // Defines provider types.
@@ -371,6 +370,14 @@ export const UrlbarShared = {
   // Size in `px` of icons in top-pick rows in the view. Should be kept in sync
   // with the `--urlbarview-top-pick-icon-size` CSS variable.
   TOP_PICK_ICON_SIZE: 58,
+
+  // Possible best-match types for results. These types map to the
+  // `top-pick-type` attribute that `UrlbarView` sets on rows.
+  BEST_MATCH_TYPE: {
+    NONE: "",
+    SMALL: "small",
+    LARGE: "large",
+  },
 
   // The number of results by which Page Up/Down move the selection.
   PAGE_UP_DOWN_DELTA: 5,
@@ -574,11 +581,10 @@ export const UrlbarShared = {
       return logger;
     }
 
-    let fullPrefix = `URLBar${prefix ? " - " + prefix : ""}`;
     if (console.createInstance) {
-      logger = createLoggerChrome(fullPrefix, maxLogLevelPref);
+      logger = createLoggerChrome(prefix, maxLogLevelPref);
     } else {
-      logger = createLoggerContent(fullPrefix, maxLogLevelPref);
+      logger = createLoggerContent(prefix, maxLogLevelPref);
     }
     loggers.set(prefix, logger);
     return logger;
@@ -696,7 +702,7 @@ export const UrlbarShared = {
   /**
    * Whether a SAP is one of SEARCHBAR_SAPS.
    *
-   * @param {string} sapName
+   * @param {UrlbarSapName} sapName
    *   The SAP name to check.
    * @returns {boolean}
    *   Whether the SAP is dedicated to search-engine queries.
@@ -710,7 +716,7 @@ export const UrlbarShared = {
    * disambiguates input in a bar that also takes an address, so a search bar
    * searches whatever the pref says.
    *
-   * @param {string} sapName
+   * @param {UrlbarSapName} sapName
    *   The SAP name to check.
    * @returns {boolean}
    *   Whether a keyword search is enabled.
@@ -723,7 +729,7 @@ export const UrlbarShared = {
    * Whether a string that is a URL may be navigated to. The toolbar search bar
    * only searches; the address bar and New Tab's bar both navigate.
    *
-   * @param {string} sapName
+   * @param {UrlbarSapName} sapName
    *   The SAP name to check.
    * @returns {boolean}
    *   Whether navigation is enabled.
@@ -733,21 +739,30 @@ export const UrlbarShared = {
   },
 
   /**
-   * Whether a string that is a URL may be navigated to in an engine search
-   * mode, as it would be outside of search mode, rather than searched for. This
-   * holds where the unified search button is always available.
+   * Whether a string that is a URL may be navigated to in a search mode, as it
+   * would be outside of search mode, rather than searched for or ignored. In
+   * an engine search mode this holds where the unified search button is always
+   * available. In a local search mode it holds except in actions search mode,
+   * and the default engine is used to search for other strings.
    *
-   * @param {string} sapName
+   * @param {UrlbarSapName} sapName
    *   The SAP name to check.
+   * @param {SearchMode} searchMode
+   *   The search mode to check.
    * @returns {boolean}
-   *   Whether navigation is enabled in an engine search mode.
+   *   Whether navigation is enabled in the search mode.
    */
-  navigationInSearchModeEnabled(sapName) {
-    return (
-      this.navigationEnabled(sapName) &&
-      (this.isSearchbarSAP(sapName) ||
-        UrlbarPrefs.get("unifiedSearchButton.always"))
-    );
+  navigationInSearchModeEnabled(sapName, searchMode) {
+    if (!this.navigationEnabled(sapName)) {
+      return false;
+    }
+    if (searchMode.engineName) {
+      return (
+        this.isSearchbarSAP(sapName) ||
+        UrlbarPrefs.get("unifiedSearchButton.always")
+      );
+    }
+    return searchMode.source != this.RESULT_SOURCE.ACTIONS;
   },
 
   /**
@@ -1227,9 +1242,12 @@ export const UrlbarShared = {
       case UrlbarShared.RESULT_GROUP.SEMANTIC_HISTORY: {
         return "general";
       }
-      // Group of UrlbarProviderQuickSuggest is GENERAL_PARENT.
+      // GENERAL_PARENT is the group for typical Suggest results.
       case UrlbarShared.RESULT_GROUP.GENERAL_PARENT: {
         return "suggest";
+      }
+      case UrlbarShared.RESULT_GROUP.TEMPORAL_SUGGESTION: {
+        return "temporal";
       }
       case UrlbarShared.RESULT_GROUP.ABOUT_PAGES: {
         return "about_page";
@@ -1319,8 +1337,6 @@ export const UrlbarShared = {
             return "tab_to_search";
           case "UrlbarProviderUnitConversion":
             return "unit";
-          case "UrlbarProviderQuickSuggestContextualOptIn":
-            return "fxsuggest_data_sharing_opt_in";
           case "UrlbarProviderAddonsShortcutMoved":
             return "addons_shortcut_moved";
           case "UrlbarProviderGlobalActions":
@@ -1681,25 +1697,25 @@ export const UrlbarShared = {
       if (Math.abs(daysAgo) <= 1) {
         // "yesterday", "today", or "tomorrow"
         dateFormatType = this.DATE_FORMAT_TYPE.YESTERDAY_TODAY_TOMORROW;
-        formattedDate = new Intl.RelativeTimeFormat(undefined, {
+        formattedDate = new Intl.RelativeTimeFormat(this.locale(), {
           numeric: "auto",
         }).format(-daysAgo, "day");
       } else if (0 < daysAgo && daysAgo <= 6) {
         // <= 6 days ago: "{n} days ago"
         dateFormatType = this.DATE_FORMAT_TYPE.DAYS_WEEKS_MONTHS_AGO;
-        formattedDate = new Intl.RelativeTimeFormat(undefined, {
+        formattedDate = new Intl.RelativeTimeFormat(this.locale(), {
           numeric: "always",
         }).format(-daysAgo, "day");
       } else if (0 < weeksAgo && (weeksAgo <= 4 || monthsAgo == 0)) {
         // <= 4 weeks ago or same month: "{n} weeks ago"
         dateFormatType = this.DATE_FORMAT_TYPE.DAYS_WEEKS_MONTHS_AGO;
-        formattedDate = new Intl.RelativeTimeFormat(undefined, {
+        formattedDate = new Intl.RelativeTimeFormat(this.locale(), {
           numeric: "always",
         }).format(-weeksAgo, "week");
       } else if (0 < monthsAgo && monthsAgo <= 11) {
         // <= 11 months ago: "{n} months ago"
         dateFormatType = this.DATE_FORMAT_TYPE.DAYS_WEEKS_MONTHS_AGO;
-        formattedDate = new Intl.RelativeTimeFormat(undefined, {
+        formattedDate = new Intl.RelativeTimeFormat(this.locale(), {
           numeric: "always",
         }).format(-monthsAgo, "month");
       }
@@ -1727,7 +1743,7 @@ export const UrlbarShared = {
           opts.year = "numeric";
         }
       }
-      formattedDate = new Intl.DateTimeFormat(undefined, opts).format(date);
+      formattedDate = new Intl.DateTimeFormat(this.locale(), opts).format(date);
       dateFormatType = this.DATE_FORMAT_TYPE.ABSOLUTE;
       isRelative = false;
     }
@@ -1735,7 +1751,7 @@ export const UrlbarShared = {
     // Now format the time.
     let formattedTime;
     if (isFuture) {
-      formattedTime = new Intl.DateTimeFormat(undefined, {
+      formattedTime = new Intl.DateTimeFormat(this.locale(), {
         hour: "numeric",
         minute: "numeric",
         timeZoneName: includeTimeZone ? "short" : undefined,
@@ -1794,7 +1810,7 @@ export const UrlbarShared = {
    *   in the previous calendar month, this value will be 1, and so on.
    */
   parseDate(date) {
-    let zonedNow = this._zonedDateTimeISO();
+    let zonedNow = this.zonedDateTimeISO();
     let zonedDate = date.toTemporalInstant().toZonedDateTimeISO(zonedNow);
     let isFuture = Temporal.ZonedDateTime.compare(zonedNow, zonedDate) < 0;
 
@@ -1833,8 +1849,15 @@ export const UrlbarShared = {
 
   // Thin wrapper around `zonedDateTimeISO` so that tests can easily set a mock
   // "now" date and time. See `UrlbarTestUtils.stubNowZonedDateTime()`.
-  _zonedDateTimeISO() {
+  zonedDateTimeISO() {
     return Temporal.Now.zonedDateTimeISO();
+  },
+
+  // Thin wrapper around the locale passed to `Intl` formatters so that tests can
+  // force a locale that doesn't depend on the OS regional settings. `undefined`
+  // means the default locale. See `UrlbarTestUtils.stubLocale()`.
+  locale() {
+    return undefined;
   },
 
   // Thin wrapper around `getWeekInfo` so that tests can easily set a mock first
@@ -1872,14 +1895,19 @@ export const UrlbarShared = {
 };
 
 /**
- * Create a logger that uses `console.createInstance`.
+ * Create a logger that uses `console.createInstance`
+ * and logs to the "URLBar" MOZ_LOG module.
  *
- * @param {string} prefix
+ * @param {string} prefix Can be empty, for no prefix.
  * @param {string} maxLogLevelPref
  * @returns {Console}
  */
 function createLoggerChrome(prefix, maxLogLevelPref) {
-  let logger = console.createInstance({ prefix, maxLogLevelPref });
+  let logger = console.createInstance({
+    logModule: "URLBar",
+    prefix,
+    maxLogLevelPref,
+  });
   // Casting from ConsoleInstance to Console. Note that it is technically not a
   // `Console` because it is missing the chrome-only property `createInstance`.
   return /** @type {Console} */ (/** @type {unknown} */ (logger));
@@ -1888,12 +1916,17 @@ function createLoggerChrome(prefix, maxLogLevelPref) {
 /**
  * Create a logger that uses the global `console`.
  *
- * @param {string} prefix
+ * Its tag matches the MOZ_LOG output of the "URLBar" module, but it logs to
+ * the "console" module, and the "URLBar" module doesn't control it: the
+ * `console.createInstance` that names a module is chrome-only, so a content
+ * realm can't create a console that logs to it.
+ *
+ * @param {string} prefix Can be empty, for no prefix.
  * @param {string} maxLogLevelPref
  * @returns {Console}
  */
 function createLoggerContent(prefix, maxLogLevelPref) {
-  let tag = `[${prefix}]`;
+  let tag = prefix ? `URLBar: ${prefix}:` : "URLBar:";
   const LEVEL_NUMBERS = {
     all: 0,
     trace: 1,

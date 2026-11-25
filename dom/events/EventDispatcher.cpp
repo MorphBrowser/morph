@@ -265,6 +265,12 @@ class EventTargetChainItem {
     mFlags.mPreHandleEventOnly = aWants;
   }
 
+  void SetWantsPostHandleEvent(bool aWants) {
+    mFlags.mWantsPostHandleEvent = aWants;
+  }
+
+  bool WantsPostHandleEvent() const { return mFlags.mWantsPostHandleEvent; }
+
   bool PreHandleEventOnly() const { return mFlags.mPreHandleEventOnly; }
 
   void SetRootOfClosedTree(bool aSet) { mFlags.mRootOfClosedTree = aSet; }
@@ -365,8 +371,9 @@ class EventTargetChainItem {
                    "CurrentTarget should be null!");
 
       mManager->HandleEvent(aVisitor.mPresContext, aVisitor.mEvent,
-                            &aVisitor.mDOMEvent, CurrentTarget(),
-                            &aVisitor.mEventStatus, IsItemInShadowTree());
+                            aVisitor.mTypeAtom, &aVisitor.mDOMEvent,
+                            CurrentTarget(), &aVisitor.mEventStatus,
+                            IsItemInShadowTree());
       NS_ASSERTION(aVisitor.mEvent->mCurrentTarget == nullptr,
                    "CurrentTarget should be null!");
     }
@@ -396,6 +403,7 @@ class EventTargetChainItem {
     bool mIsChromeContent : 1;
     bool mWantsPreHandleEvent : 1;
     bool mPreHandleEventOnly : 1;
+    bool mWantsPostHandleEvent : 1;
     bool mRootOfClosedTree : 1;
     bool mItemInShadowTree : 1;
     bool mIsSlotInClosedTree : 1;
@@ -433,13 +441,23 @@ void EventTargetChainItem::GetEventTargetParent(
     EventChainPreVisitor& aVisitor) {
   aVisitor.Reset();
   mTarget->GetEventTargetParent(aVisitor);
-  SetForceContentDispatch(aVisitor.mForceContentDispatch);
-  SetWantsWillHandleEvent(aVisitor.mWantsWillHandleEvent);
-  SetMayHaveListenerManager(aVisitor.mMayHaveListenerManager);
-  SetWantsPreHandleEvent(aVisitor.mWantsPreHandleEvent);
-  SetPreHandleEventOnly(aVisitor.mWantsPreHandleEvent && !aVisitor.mCanHandle);
-  SetRootOfClosedTree(aVisitor.mRootOfClosedTree);
-  SetItemInShadowTree(aVisitor.mItemInShadowTree);
+  // Read the visitor first, so the compiler can combine the bitfield writes.
+  const bool forceContentDispatch = aVisitor.mForceContentDispatch;
+  const bool wantsWillHandleEvent = aVisitor.mWantsWillHandleEvent;
+  const bool mayHaveListenerManager = aVisitor.mMayHaveListenerManager;
+  const bool wantsPreHandleEvent = aVisitor.mWantsPreHandleEvent;
+  const bool wantsPostHandleEvent = aVisitor.mWantsPostHandleEvent;
+  const bool canHandle = aVisitor.mCanHandle;
+  const bool rootOfClosedTree = aVisitor.mRootOfClosedTree;
+  const bool itemInShadowTree = aVisitor.mItemInShadowTree;
+  SetForceContentDispatch(forceContentDispatch);
+  SetWantsWillHandleEvent(wantsWillHandleEvent);
+  SetMayHaveListenerManager(mayHaveListenerManager);
+  SetWantsPreHandleEvent(wantsPreHandleEvent);
+  SetPreHandleEventOnly(wantsPreHandleEvent && !canHandle);
+  SetWantsPostHandleEvent(wantsPostHandleEvent);
+  SetRootOfClosedTree(rootOfClosedTree);
+  SetItemInShadowTree(itemInShadowTree);
   SetRetargetedRelatedTarget(aVisitor.mRetargetedRelatedTarget);
   SetRetargetedTouchTarget(std::move(aVisitor.mRetargetedTouchTargets));
   mItemFlags = aVisitor.mItemFlags;
@@ -482,6 +500,9 @@ void EventTargetChainItem::LegacyCanceledActivationBehavior(
 }
 
 void EventTargetChainItem::PostHandleEvent(EventChainPostVisitor& aVisitor) {
+  if (!WantsPostHandleEvent()) {
+    return;
+  }
   aVisitor.mItemFlags = mItemFlags;
   mTarget->PostHandleEvent(aVisitor);
   MOZ_ASSERT(mItemFlags == aVisitor.mItemFlags);
@@ -1151,6 +1172,7 @@ nsresult EventDispatcher::Dispatch(EventTarget* aTarget,
   nsCOMPtr<EventTarget> targetForPreVisitor = aEvent->mTarget;
   EventChainPreVisitor preVisitor(aPresContext, aEvent, aDOMEvent, status,
                                   isInAnon, targetForPreVisitor);
+  preVisitor.mTypeAtom = nsContentUtils::GetEventType(aEvent);
   preVisitor.mMaybeUncancelable = IsUncancelableIfOnlyPassiveListeners(aEvent);
   targetEtci->GetEventTargetParent(preVisitor);
 

@@ -18,6 +18,7 @@
 #include "mozilla/Mutex.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/Result.h"
+#include "mozilla/StaticString.h"
 #include "mozilla/ThreadBound.h"
 #include "mozilla/dom/Nullable.h"
 #include "mozilla/dom/UnboundedMPSCQueue.h"
@@ -53,6 +54,13 @@ class nsIFile;
 class nsIRunnable;
 class nsIThread;
 class nsITimer;
+
+namespace mozilla::dom::quota {
+class CipherKeyStoreBackend;
+template <typename CipherStrategy>
+class CipherKeyManager;
+struct NSSCipherStrategy;
+}  // namespace mozilla::dom::quota
 
 namespace mozilla {
 
@@ -91,9 +99,10 @@ class SaveOriginAccessTimeOp;
 class UniversalDirectoryLock;
 
 namespace test {
+class GTEST_CLASS(TestGroupInfo, ReplacementNullsMGroupInfo);
 class GTEST_CLASS(TestQuotaManagerAndShutdownFixture,
                   ThumbnailPrivateIdentityTemporaryOriginCount);
-}
+}  // namespace test
 
 class QuotaManager final : public BackgroundThreadObject {
   friend class CanonicalQuotaObject;
@@ -116,6 +125,7 @@ class QuotaManager final : public BackgroundThreadObject {
   friend class PersistOp;
   friend class SaveOriginAccessTimeOp;
   friend class ShutdownStorageOp;
+  friend class test::GTEST_CLASS(TestGroupInfo, ReplacementNullsMGroupInfo);
   friend class test::GTEST_CLASS(TestQuotaManagerAndShutdownFixture,
                                  ThumbnailPrivateIdentityTemporaryOriginCount);
   friend class UniversalDirectoryLock;
@@ -260,6 +270,11 @@ class QuotaManager final : public BackgroundThreadObject {
   nsresult LoadQuota();
 
   void UnloadQuota();
+
+  // Upserts the origin row for every OriginInfo whose row is missing or stale
+  // after a full scan and marks the cache complete if every origin directory
+  // is represented. Failures leave the cache marked incomplete.
+  Result<Ok, nsresult> PopulateCacheAfterScan();
 
   void RemoveOriginFromCache(const OriginMetadata& aOriginMetadata);
 
@@ -670,7 +685,7 @@ class QuotaManager final : public BackgroundThreadObject {
     }
   }
 
-  void AssertCurrentThreadOwnsQuotaMutex() {
+  void AssertCurrentThreadOwnsQuotaMutex() const {
     mQuotaMutex.AssertCurrentThreadOwns();
   }
 
@@ -809,6 +824,14 @@ class QuotaManager final : public BackgroundThreadObject {
   OriginMetadataArray GetTemporaryOrigins(
       PersistenceType aPersistenceType) const;
 
+  Result<RefPtr<CipherKeyManager<NSSCipherStrategy>>, nsresult>
+  GetOrCreateCipherKeyManager(const nsACString& aOrigin,
+                              Client::Type aClientType);
+
+  bool IsStorageEncryptionEnabled() const { return mStorageEncryptionEnabled; }
+
+  bool IsOriginEncrypted(const OriginMetadata& aOriginMetadata);
+
  private:
   virtual ~QuotaManager();
 
@@ -832,6 +855,10 @@ class QuotaManager final : public BackgroundThreadObject {
 
   void LockedRemoveQuotaForOrigin(const OriginMetadata& aOriginMetadata);
 
+  // Records the quotamanager.temporary_storage_usage_underflow event if
+  // mTemporaryStorageUsage is negative.
+  void LockedMaybeRecordTemporaryStorageUsageUnderflow(StaticString aCallSite);
+
   bool LockedHasGroupInfoPair(const nsACString& aGroup) const;
 
   already_AddRefed<GroupInfo> LockedGetOrCreateGroupInfo(
@@ -841,6 +868,18 @@ class QuotaManager final : public BackgroundThreadObject {
   already_AddRefed<OriginInfo> LockedGetOriginInfo(
       PersistenceType aPersistenceType,
       const OriginMetadata& aOriginMetadata) const;
+
+  // True when every non-private temporary origin has an OriginInfo with an
+  // existing directory and an up-to-date origin row.
+  bool LockedIsCacheComplete() const;
+
+  Result<Ok, nsresult> StartCacheTransaction();
+
+  Result<Ok, nsresult> CommitCacheTransaction();
+
+  void RollbackCacheTransactionIfInProgress();
+
+  Result<Ok, nsresult> MarkCacheComplete();
 
   nsresult UpgradeFromIndexedDBDirectoryToPersistentStorageDirectory(
       nsIFile* aIndexedDBDir);
@@ -1293,6 +1332,9 @@ class QuotaManager final : public BackgroundThreadObject {
   // sense. See bug 1585978 for details.
   int64_t mTemporaryStorageLimit;
   int64_t mTemporaryStorageUsage;
+  // How many times a negative mTemporaryStorageUsage was seen. Used to
+  // throttle temporary_storage_usage_underflow telemetry events.
+  uint32_t mTemporaryStorageUsageUnderflowCount = 0;
 
   int64_t mNextDirectoryLockId;
   bool mStorageInitialized;
@@ -1304,7 +1346,13 @@ class QuotaManager final : public BackgroundThreadObject {
   bool mAllTemporaryOriginsInitialized;
   bool mCacheUsable;
   bool mCacheRequiresFullScan;
+  // True on the IO thread while the repository scan runs, for the rows that
+  // PopulateCacheAfterScan will write once the scan is done.
+  bool mFullScanInProgress = false;
   std::atomic<bool> mUsageModificationDisabled{false};
+  bool mStorageEncryptionEnabled = false;
+
+  RefPtr<CipherKeyStoreBackend> mCipherKeyStore;
 };
 
 }  // namespace mozilla::dom::quota

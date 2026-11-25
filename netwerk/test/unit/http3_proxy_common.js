@@ -43,7 +43,6 @@ function channelOpenPromise(chan, flags) {
 let pps = Cc["@mozilla.org/network/protocol-proxy-service;1"].getService();
 let proxyHost;
 let proxyPort;
-let noResponsePort;
 let proxyAuth;
 let proxyFilter;
 
@@ -63,8 +62,7 @@ async function setup_http3_proxy() {
   addCertFromFile(certdb, "proxy-ca.pem", "CTu,u,u");
 
   proxyHost = "foo.example.com";
-  ({ masqueProxyPort: proxyPort, noResponsePort } =
-    await create_masque_proxy_server());
+  ({ masqueProxyPort: proxyPort } = await create_masque_proxy_server());
   proxyAuth = "";
 
   Assert.notEqual(proxyPort, null);
@@ -92,6 +90,14 @@ async function setup_http3_proxy() {
  * Tests HTTP connect through H3 proxy to HTTP, HTTPS and H2 servers
  * Makes multiple requests. Expects success.
  */
+function checkProxyType(req, expected) {
+  Assert.equal(
+    req.QueryInterface(Ci.nsIHttpChannelInternal).proxyType,
+    expected,
+    "The proxy type of the connection the response came from"
+  );
+}
+
 async function test_http_connect() {
   info("Running test_http_connect");
   await with_node_servers(
@@ -119,6 +125,7 @@ async function test_http_connect() {
       );
       Assert.equal(req.status, Cr.NS_OK);
       Assert.equal(buf, "first");
+      checkProxyType(req, Ci.nsIHttpChannelInternal.PROXY_TYPE_MASQUE);
       chan = makeChan(
         `${server.protocol()}://alt1.example.com:${server.port()}/second`
       );
@@ -347,6 +354,7 @@ async function test_connect_udp() {
     Assert.equal(req.protocolVersion, "h3");
     Assert.equal(req.status, Cr.NS_OK);
     Assert.equal(req.responseStatus, 200);
+    checkProxyType(req, Ci.nsIHttpChannelInternal.PROXY_TYPE_MASQUE);
   }
 }
 
@@ -359,10 +367,8 @@ async function test_http_connect_fallback() {
     ""
   );
 
-  let proxyPort = noResponsePort;
   let proxy = new NodeHTTP2ProxyServer();
-  await proxy.startWithoutProxyFilter(proxyPort);
-  Assert.equal(proxyPort, proxy.port());
+  await proxy.startWithNoResponseUdpPort(() => proxy.startWithoutProxyFilter());
   dump(`proxy port=${proxy.port()}\n`);
 
   let server = new NodeHTTP2Server();
@@ -412,6 +418,8 @@ async function test_http_connect_fallback() {
     const [req, buf] = results[i];
     Assert.equal(req.status, Cr.NS_OK);
     Assert.equal(buf, `response${i + 1}`);
+    // The proxy is reached over HTTP/2 instead of HTTP/3.
+    checkProxyType(req, Ci.nsIHttpChannelInternal.PROXY_TYPE_HTTPS);
   }
 
   let h3Port = server.port();
@@ -505,9 +513,6 @@ async function test_inner_connection_fallback(ServerClass) {
   // Register the connect-udp proxy.
   pps.registerFilter(proxyFilter, 10);
 
-  let httpsProxy = new NodeHTTP2ProxyServer();
-  await httpsProxy.startWithoutProxyFilter(proxyPort);
-
   // The H3 attempt must get no response while the TCP fallback reaches server.
   let server = new ServerClass();
   await server.startWithNoResponseUdpPort();
@@ -529,7 +534,6 @@ async function test_inner_connection_fallback(ServerClass) {
   });
   registerCleanupFunction(async () => {
     await server.stop();
-    await httpsProxy.stop();
   });
 
   Services.prefs.setCharPref(
@@ -555,7 +559,6 @@ async function test_inner_connection_fallback(ServerClass) {
     Assert.equal(buf, `fallback${i + 1}`);
   }
   await server.stop();
-  await httpsProxy.stop();
 
   pps.unregisterFilter(proxyFilter);
 }

@@ -58,7 +58,6 @@ JitFrameIter& JitFrameIter::operator=(const JitFrameIter& another) {
   MOZ_ASSERT(this != &another);
 
   act_ = another.act_;
-  wasmExitInstance_ = another.wasmExitInstance_;
   mustUnwindActivation_ = another.mustUnwindActivation_;
 
   if (isSome()) {
@@ -78,28 +77,50 @@ JitFrameIter& JitFrameIter::operator=(const JitFrameIter& another) {
   return *this;
 }
 
-JitFrameIter::JitFrameIter(jit::JitActivation* act, bool mustUnwindActivation) {
+JitFrameIter::JitFrameIter(jit::JitActivation* act, bool mustUnwindActivation,
+                           uintptr_t* shadowStackPointer) {
   act_ = act;
   mustUnwindActivation_ = mustUnwindActivation;
   MOZ_ASSERT(act->hasExitFP(),
              "packedExitFP is used to determine if JSJit or wasm");
+  // We track the shadow stack pointer only when unwinding.
+  MOZ_ASSERT_IF(shadowStackPointer, mustUnwindActivation);
   if (act->hasJSExitFP()) {
-    iter_.construct<jit::JSJitFrameIter>(act);
+    iter_.construct<jit::JSJitFrameIter>(act, shadowStackPointer);
   } else {
     MOZ_ASSERT(act->hasWasmExitFP());
-    iter_.construct<wasm::WasmFrameIter>(act);
+    iter_.construct<wasm::WasmFrameIter>(act, nullptr, shadowStackPointer);
   }
   settle();
 }
 
-void JitFrameIter::skipNonScriptedJSFrames() {
-  if (isJSJit()) {
-    // Stop at the first scripted frame.
-    jit::JSJitFrameIter& frames = asJSJit();
-    while (!frames.isScripted() && !frames.done()) {
-      ++frames;
+void JitFrameIter::skipNonScriptedFrames() {
+  while (!done()) {
+    if (isJSJit()) {
+      // Stop at the first scripted frame.
+      jit::JSJitFrameIter& frames = asJSJit();
+      while (!frames.isScripted() && !frames.done()) {
+        ++frames;
+      }
+      // Stay on this iterator if we found a scripted frame.
+      if (!frames.done()) {
+        break;
+      }
+      // Otherwise go to the next iterator.
+      settle();
+    } else if (isWasm()) {
+      // Skip all return_call fallback frames.
+      wasm::WasmFrameIter& frames = asWasm();
+      while (!frames.done() && frames.currentFrameIsReturnCallFallback()) {
+        ++frames;
+      }
+      // Stay on this iterator if we found a normal frame.
+      if (!frames.done()) {
+        break;
+      }
+      // Otherwise go to the next iterator.
+      settle();
     }
-    settle();
   }
 }
 
@@ -135,6 +156,13 @@ uint8_t* JitFrameIter::resumePCinCurrentFrame() const {
   return asJSJit().resumePCinCurrentFrame();
 }
 
+uintptr_t* JitFrameIter::shadowStackPointer() const {
+  if (isWasm()) {
+    return asWasm().shadowStackPointer();
+  }
+  return asJSJit().shadowStackPointer();
+}
+
 bool JitFrameIter::done() const {
   if (!isSome()) {
     return true;
@@ -149,7 +177,6 @@ bool JitFrameIter::done() const {
 }
 
 void JitFrameIter::settle() {
-  wasmExitInstance_ = nullptr;
   if (isJSJit()) {
     const jit::JSJitFrameIter& jitFrame = asJSJit();
     if (jitFrame.type() != jit::FrameType::WasmToJSJit) {
@@ -181,14 +208,11 @@ void JitFrameIter::settle() {
       act_->setWasmExitFP(prevFP);
     }
 
+    uintptr_t* shadowStackPointer = jitFrame.shadowStackPointer();
     iter_.destroy();
-    iter_.construct<wasm::WasmFrameIter>(act_, prevFP);
-    if (asWasm().done()) {
-      // A return_call emptied this wasm segment, so no frame will be visited to
-      // trace the instance whose exit stub we entered through. Carry it out for
-      // GC (see TraceJitFrames), then fall through to the transition below.
-      wasmExitInstance_ = asWasm().exitInstance();
-    }
+    iter_.construct<wasm::WasmFrameIter>(act_, prevFP, shadowStackPointer);
+    MOZ_ASSERT(!asWasm().done());
+    return;
   }
 
   if (isWasm()) {
@@ -213,8 +237,12 @@ void JitFrameIter::settle() {
       act_->setJSExitFP(prevFP);
     }
 
+    uintptr_t* shadowStackPointer = wasmFrame.shadowStackPointer();
+    // We should be on the main stack when switching to JS JIT frames.
+    MOZ_ASSERT(!wasmFrame.shadowStackSwitchPointer());
     iter_.destroy();
-    iter_.construct<jit::JSJitFrameIter>(act_, prevFP, mustUnwindActivation_);
+    iter_.construct<jit::JSJitFrameIter>(act_, prevFP, mustUnwindActivation_,
+                                         shadowStackPointer);
     MOZ_ASSERT(!asJSJit().done());
     return;
   }
@@ -308,7 +336,7 @@ void FrameIter::settleOnActivation() {
 
     if (activation->isJit()) {
       data_.jitFrames_ = JitFrameIter(activation->asJit());
-      data_.jitFrames_.skipNonScriptedJSFrames();
+      data_.jitFrames_.skipNonScriptedFrames();
       if (data_.jitFrames_.done()) {
         // It's possible to have an JitActivation with no scripted
         // frames, for instance if we hit an over-recursion during
@@ -419,7 +447,7 @@ void FrameIter::popJitFrame() {
   }
 
   ++data_.jitFrames_;
-  data_.jitFrames_.skipNonScriptedJSFrames();
+  data_.jitFrames_.skipNonScriptedFrames();
 
   if (!data_.jitFrames_.done()) {
     nextJitFrame();

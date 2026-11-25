@@ -41,7 +41,6 @@ pub struct StyleAdjuster<'a, 'b: 'a> {
     style: &'a mut StyleBuilder<'b>,
 }
 
-#[cfg(feature = "gecko")]
 fn is_topmost_svg_svg_element<E>(e: E) -> bool
 where
     E: TElement,
@@ -64,7 +63,6 @@ where
 }
 
 // https://drafts.csswg.org/css-display/#unbox
-#[cfg(feature = "gecko")]
 fn is_effective_display_none_for_display_contents<E>(element: E) -> bool
 where
     E: TElement,
@@ -509,7 +507,6 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     /// https://drafts.csswg.org/css-display/#unbox-html
     ///
     /// And forbidding display: contents in pseudo-elements, at least for now.
-    #[cfg(feature = "gecko")]
     fn adjust_for_prohibited_display_contents<E>(&mut self, element: Option<E>)
     where
         E: TElement,
@@ -519,6 +516,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         }
 
         // FIXME(emilio): ::before and ::after should support display: contents, see bug 1418138.
+        #[cfg(feature = "gecko")]
         if self.style.pseudo.is_some_and(|p| !p.is_element_backed()) {
             self.style.mutate_box().set_display(Display::Inline);
             return;
@@ -609,8 +607,12 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     where
         E: TElement,
     {
+        let self_box = self.style.get_box();
         // Line break suppression should only be propagated to in-flow children.
-        if self.style.is_floating() || self.style.is_absolutely_positioned() {
+        if !self_box.get_display().is_contents()
+            && (self_box.get_float().is_floating()
+                || self_box.get_position().is_absolutely_positioned())
+        {
             return false;
         }
         let parent_display = *self.style.get_parent_box().get_display();
@@ -625,7 +627,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
                 return true;
             }
         }
-        match *self.style.get_box().get_display() {
+        match *self_box.get_display() {
             // Ruby base and text are always non-breakable.
             Display::RubyBase | Display::RubyText => true,
             // Ruby base container and text container are breakable.
@@ -698,27 +700,44 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         }
     }
 
-    /// Computes the RELEVANT_LINK_VISITED flag based on the parent style and on
-    /// whether we're a relevant link.
-    ///
-    /// NOTE(emilio): We don't do this for text styles, which is... dubious, but
-    /// Gecko doesn't seem to do it either. It's extremely easy to do if needed
-    /// though.
-    ///
-    /// FIXME(emilio): This isn't technically a style adjustment thingie, could
-    /// it move somewhere else?
-    fn adjust_for_visited<E>(&mut self, element: Option<E>)
+    fn enforce_link_underline(&mut self) {
+        use crate::values::computed::{Color, TextDecorationLine, TextDecorationStyle};
+
+        let text_style = self.style.get_text();
+        let old_line = *text_style.get_text_decoration_line();
+        let needs_adjustment = !old_line.intersects(TextDecorationLine::UNDERLINE)
+            || text_style.get_text_decoration_style() != &TextDecorationStyle::Solid
+            || text_style.get_text_decoration_color() != &Color::CurrentColor;
+        if !needs_adjustment {
+            return;
+        }
+
+        let text_style = self.style.mutate_text();
+        // Preserve any existing flags that could be mixed with underline.
+        let new_line = (old_line & TextDecorationLine::MIXED_FLAGS) | TextDecorationLine::UNDERLINE;
+        text_style.set_text_decoration_line(new_line);
+        text_style.set_text_decoration_color(Color::CurrentColor);
+        text_style.set_text_decoration_style(TextDecorationStyle::Solid);
+    }
+
+    /// Sets or unset the RELEVANT_LINK_VISITED flag if we're a link (note that it's otherwise
+    /// propagated via flag inheritance), and enforces underlines if configured to do so.
+    fn adjust_for_links<E>(&mut self, element: Option<E>)
     where
         E: TElement,
     {
         if !self.style.has_visited_style() {
+            // Not inside a link.
             return;
         }
 
         let is_link_element = self.style.pseudo.is_none() && element.is_some_and(|e| e.is_link());
-
         if !is_link_element {
             return;
+        }
+
+        if crate::pref!("layout.css.always_underline_links") {
+            self.enforce_link_underline();
         }
 
         if element.unwrap().is_visited_link() {
@@ -735,7 +754,6 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     /// to comply with:
     ///
     /// <https://drafts.csswg.org/css-align/#valdef-justify-items-legacy>
-    #[cfg(feature = "gecko")]
     fn adjust_for_justify_items(&mut self) {
         use crate::values::specified::align;
         let justify_items = *self.style.get_position().get_justify_items();
@@ -1046,10 +1064,10 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         //     "Should always have an element around for non-pseudo styles"
         // );
 
-        self.adjust_for_visited(element);
+        self.adjust_for_links(element);
+        self.adjust_for_prohibited_display_contents(element);
         #[cfg(feature = "gecko")]
         {
-            self.adjust_for_prohibited_display_contents(element);
             self.adjust_for_fieldset_content();
             self.adjust_for_text_control_editing_root();
         }
@@ -1063,8 +1081,8 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         {
             self.adjust_for_contain();
             self.adjust_for_contain_intrinsic_size();
-            self.adjust_for_justify_items();
         }
+        self.adjust_for_justify_items();
         self.adjust_for_table_text_align();
         self.adjust_for_writing_mode(layout_parent_style);
         #[cfg(feature = "gecko")]

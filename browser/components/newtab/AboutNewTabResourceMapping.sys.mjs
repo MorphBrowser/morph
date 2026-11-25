@@ -458,10 +458,9 @@ export var AboutNewTabResourceMapping = {
     // Tell Experimenter to re-evaluate experiment recipe targeting in case we
     // just installed an XPI.
     try {
-      await lazy.ExperimentAPI._rsLoader.finishedUpdating();
-      await lazy.ExperimentAPI._rsLoader.updateRecipes("newtab-trainhop", {
-        onlyFeatureIds: new Set(["newtabTrainhop"]),
-      });
+      await lazy.ExperimentAPI.updateRecipesForFeatures("newtab-trainhop", [
+        "newtabTrainhop",
+      ]);
     } catch (e) {
       // TODO: consider if we should collect this in telemetry.
       this.logger.error("Error when re-evaluating Nimbus recipes:", e);
@@ -594,11 +593,9 @@ export var AboutNewTabResourceMapping = {
     // The TOPIC_LOCALES_CHANGED, TOPIC_LANGPACK_STARTUP, and
     // TOPIC_LANGPACK_SHUTDOWN handlers all call L10nRegistry.{register,
     // update,remove}Sources, and each of those calls fires
-    // intl:l10n-sources-changed (and, because LocaleService::
-    // SetAvailableLocales compares as an order-sensitive nsTArray against
-    // an array built from a Rust HashSet, spuriously fires
-    // intl:app-locales-changed too). Without this guard, those broadcasts can
-    // re-enter observe synchronously and the resulting cascade can pump
+    // intl:l10n-sources-changed (and intl:app-locales-changed too when the
+    // negotiated app locales change). Without this guard, those broadcasts
+    // can re-enter observe synchronously and the resulting cascade can pump
     // unbounded source mutations through the registry at startup,
     // exploding memory on installations with downloaded langpacks
     // (Flatpak/Snap/MSIX). The first invocation does its work; any
@@ -969,6 +966,9 @@ export var AboutNewTabResourceMapping = {
       let newInstall = await lazy.AddonManager.getInstallForURL(
         xpiDownloadURL,
         {
+          id: BUILTIN_ADDON_ID,
+          type: "extension",
+          version: trainhopAddonVersion,
           // Categorizes the install as coming from the Nimbus newtab train-hop
           // mechanism. This source id is kept stable for historical continuity
           // (it predates the co-enrollment newtabTrainhopAddonDeployment feature).
@@ -1147,7 +1147,7 @@ export var AboutNewTabResourceMapping = {
 };
 
 AboutNewTabResourceMapping.logger = console.createInstance({
-  prefix: "AboutNewTabResourceMapping",
+  logModule: "AboutNewTabResourceMapping",
   maxLogLevel: Services.prefs.getBoolPref(
     "browser.newtabpage.resource-mapping.log",
     false

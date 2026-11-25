@@ -13,15 +13,15 @@ import {
   UrlbarUtils,
 } from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
 
-const lazy = {};
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   AboutNewTab: "resource:///modules/AboutNewTab.sys.mjs",
   NewTabUtils: "resource://gre/modules/NewTabUtils.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
-  TopSites: "resource:///modules/topsites/TopSites.sys.mjs",
-  TOP_SITES_DEFAULT_ROWS: "resource:///modules/topsites/constants.mjs",
-  TOP_SITES_MAX_SITES_PER_ROW: "resource:///modules/topsites/constants.mjs",
+  TopSites: "moz-src:///browser/components/topsites/TopSites.sys.mjs",
+  TOP_SITES_DEFAULT_ROWS:
+    "moz-src:///browser/components/topsites/constants.mjs",
+  TOP_SITES_MAX_SITES_PER_ROW:
+    "moz-src:///browser/components/topsites/constants.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
   UrlbarProviderOpenTabs:
     "moz-src:///browser/components/urlbar/UrlbarProviderOpenTabs.sys.mjs",
@@ -150,7 +150,7 @@ export class UrlbarProviderTopSites extends UrlbarProvider {
     // Sites greater than what is visible in the New Tab Page, because the
     // additional ones couldn't be managed from the page.
     let numTopSites = Math.min(
-      lazy.UrlbarPrefs.get("maxRichResults"),
+      queryContext.maxResults,
       lazy.TOP_SITES_MAX_SITES_PER_ROW * UrlbarProviderTopSites.topSitesRows
     );
     sites = sites.slice(0, numTopSites);

@@ -209,7 +209,7 @@ class WebRenderBridgeParent final : public PWebRenderBridgeParent,
 
   // CompositableParentManager
   bool IsSameProcess() const override;
-  base::ProcessId GetChildProcessId() override;
+  GeckoChildID GetChildID() override;
   dom::ContentParentId GetContentId() override;
   void NotifyNotUsed(PTextureParent* aTexture,
                      uint64_t aTransactionId) override;
@@ -238,6 +238,10 @@ class WebRenderBridgeParent final : public PWebRenderBridgeParent,
   void RetrySkippedComposite();
 
   TextureFactoryIdentifier GetTextureFactoryIdentifier();
+  // Returns Nothing if we were destroyed, or if we are a root bridge which has
+  // not finished initializing. Content bridges are always initialized when
+  // created.
+  Maybe<TextureFactoryIdentifier> MaybeGetTextureFactoryIdentifier();
 
   void ExtractImageCompositeNotifications(
       nsTArray<ImageCompositeNotificationInfo>* aNotifications);
@@ -264,6 +268,13 @@ class WebRenderBridgeParent final : public PWebRenderBridgeParent,
     return aFontKey.mNamespace == mLateInit->mIdNamespace;
   }
 
+  // Returns the bridge whose namespace is aNamespace, if it is this bridge or
+  // another bridge of the same content process and the same WebRender window.
+  // Otherwise returns null. A snapshot image can only be adopted
+  // (OpAdoptSnapshotImage) from such a bridge.
+  already_AddRefed<WebRenderBridgeParent> FindSnapshotSourceBridge(
+      const wr::IdNamespace& aNamespace);
+
   bool OwnsExternalImageId(const wr::ExternalImageId& aId) const {
     return static_cast<uint32_t>(wr::AsUint64(aId) >> 32) ==
            mLateInit->mIdNamespace.mHandle;
@@ -271,11 +282,11 @@ class WebRenderBridgeParent final : public PWebRenderBridgeParent,
 
   /**
    * AnimationHelper::GetNextCompositorAnimationsId() encodes the child
-   * process PID in the upper 32 bits of the id, verify that this is as
-   * expected.
+   * process's GeckoChildID in the upper 32 bits of the id, verify that this is
+   * as expected.
    */
   bool OwnsCompositorAnimationsId(uint64_t aId) const {
-    return (aId >> 32) == (uint64_t)OtherPid();
+    return (aId >> 32) == (uint64_t)OtherChildID();
   }
 
   void FlushRendering(wr::RenderReasons aReasons, bool aBlocking);
@@ -320,6 +331,10 @@ class WebRenderBridgeParent final : public PWebRenderBridgeParent,
   void RemoveEpochDataPriorTo(const wr::Epoch& aRenderedEpoch);
 
   bool IsRootWebRenderBridgeParent() const;
+
+  // Sends this bridge's embed policy to WebRender, for when the set of layer
+  // trees it embeds changes.
+  void RefreshEmbedPolicy();
   LayersId GetLayersId() const;
 
   void BeginRecording(const TimeStamp& aRecordingStart);
@@ -363,6 +378,11 @@ class WebRenderBridgeParent final : public PWebRenderBridgeParent,
                               const VsyncId& aVsyncId);
 
   void SanitizeScrollData(WebRenderScrollData& aScrollData);
+
+  // The namespaces of the pipelines this bridge's display lists may embed:
+  // those of its process's async image pipelines and of the layer trees it
+  // embeds. Nothing() if they may embed any pipeline.
+  Maybe<nsTArray<uint32_t>> ComputeEmbedPolicy() const;
 
   bool SetDisplayList(const LayoutDeviceRect& aRect, ipc::ByteBuf&& aDLItems,
                       ipc::ByteBuf&& aSpatialTreeDL,

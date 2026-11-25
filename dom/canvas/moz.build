@@ -33,6 +33,7 @@ MOCHITEST_MANIFESTS += [
     "test/crash/mochitest.toml",
     "test/crossorigin/mochitest.toml",
     "test/mochitest.toml",
+    "test/webgl-mochitest/mochitest-no-angle.toml",
     "test/webgl-mochitest/mochitest.toml",
 ]
 
@@ -59,7 +60,6 @@ EXPORTS.mozilla.dom += [
     "ImageBitmapRenderingContext.h",
     "ImageBitmapSource.h",
     "ImageData.h",
-    "ImageUtils.h",
     "OffscreenCanvas.h",
     "OffscreenCanvasDisplayHelper.h",
     "OffscreenCanvasRenderingContext2D.h",
@@ -80,11 +80,6 @@ EXPORTS.mozilla.gfx += [
 ]
 
 # Canvas 2D and common sources
-#
-# Due to bug 1745384, and the associated clang mingw cross compile crash, we
-# must be careful about disturbing the unified file combinations.
-# nsICanvasRenderingContextInternal.cpp cannot be built standalone until this
-# is resolved, so new files may need to be added to SOURCES for the time being.
 UNIFIED_SOURCES += [
     "CanvasGradient.cpp",
     "CanvasImageCache.cpp",
@@ -97,15 +92,14 @@ UNIFIED_SOURCES += [
     "ImageData.cpp",
     "nsICanvasRenderingContextInternal.cpp",
     "OffscreenCanvas.cpp",
+    "OffscreenCanvasDisplayHelper.cpp",
+    "OffscreenCanvasRenderingContext2D.cpp",
     "XRWebGLLayer.cpp",
 ]
 
 SOURCES += [
     "DrawTargetWebgl.cpp",  # Isolate Skia
     "FilterNodeWebgl.cpp",
-    "ImageUtils.cpp",
-    "OffscreenCanvasDisplayHelper.cpp",  # See bug 1745384
-    "OffscreenCanvasRenderingContext2D.cpp",  # See bug 1745384
     "SourceSurfaceWebgl.cpp",
 ]
 
@@ -240,7 +234,6 @@ SOURCE_HEADERS += [
     "WebGLBuffer.h",
     "WebGLContext.h",
     "WebGLContextLossHandler.h",
-    "WebGLContextUtils.h",
     "WebGLExtensions.h",
     "WebGLFormats.h",
     "WebGLFramebuffer.h",

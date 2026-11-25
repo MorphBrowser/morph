@@ -11,9 +11,13 @@
 #include "mozilla/dom/PrefetchLog.h"
 #include "mozilla/dom/ReferrerInfo.h"
 #include "mozilla/dom/WindowGlobalParent.h"
+#include "mozilla/glean/DomMetrics.h"
 #include "mozilla/net/NoVarySearchUtils.h"
+#include "mozilla/net/SFVService.h"
 #include "nsContentPolicyUtils.h"
 #include "nsIAsyncVerifyRedirectCallback.h"
+#include "nsICacheEntry.h"
+#include "nsICachingChannel.h"
 #include "nsIHttpChannel.h"
 #include "nsILoadInfo.h"
 #include "nsMixedContentBlocker.h"
@@ -82,17 +86,16 @@ void PrefetchRecordParent::Init(WindowGlobalParent* aWGP,
           : PrefetchAnonymizationPolicy::None;
   mStartTime = TimeStamp::Now();
 
-  // Compute cross-origin flag directly from docPrincipal since Manager() is
-  // not yet set during AllocPPrefetchRecordParent (IsCrossOriginToDocument
-  // uses Manager() internally and would return false incorrectly here).
-  bool isCrossOrigin = false;
-  docPrincipal->IsSameOrigin(mURL, &isCrossOrigin);
-  isCrossOrigin = !isCrossOrigin;
+  // The spec separates prefetches by network partition key, i.e. by site:
+  // same-site cross-origin prefetches share the document's partition, and only
+  // cross-site ones need the isolated partition.
+  bool isCrossSite = true;
+  docPrincipal->IsThirdPartyURI(mURL, &isCrossSite);
 
-  if (StaticPrefs::dom_speculation_rules_same_origin_only() && isCrossOrigin) {
+  if (StaticPrefs::dom_speculation_rules_same_site_only() && isCrossSite) {
     LOG_SPECRULES_WARN(
-        ("PrefetchRecordParent::Init: this=%p cross-origin rejected "
-         "(same_origin_only=true)",
+        ("PrefetchRecordParent::Init: this=%p cross-site rejected "
+         "(same_site_only=true)",
          this));
     mState = PrefetchState::Canceled;
     return;
@@ -106,13 +109,22 @@ void PrefetchRecordParent::Init(WindowGlobalParent* aWGP,
     return;
   }
 
-  // Set up the prefetch record's "isolated partition key" for cross-origin
+  mIsEligibleForPrefetch = true;
+
+  // Set up the prefetch record's "isolated partition key" for cross-site
   // isolation (used when creating navigation params by fetching).
   OriginAttributes isolatedAttrs = sourceAttrs;
-  if (isCrossOrigin) {
+  if (isCrossSite) {
     PopulateIsolatedPartitionKey(isolatedAttrs);
   }
   mIsolatedPartitionKey = isolatedAttrs.mPartitionKey;
+
+  if (StaticPrefs::dom_speculation_rules_prefetch_dry_run()) {
+    LOG_SPECRULES(
+        ("PrefetchRecordParent::Init: this=%p dry run, not fetching", this));
+    mState = PrefetchState::DryRun;
+    return;
+  }
 
   // Use CreateForNonDocument (instead of passing a null aLoadingNode to
   // NS_NewChannelInternal) so the resulting LoadInfo carries aWGP's
@@ -143,6 +155,7 @@ void PrefetchRecordParent::Init(WindowGlobalParent* aWGP,
   }
 
   ConfigureSecPurpose(mChannel);
+  ConfigureSpeculationTags(mChannel, docPrincipal, isCrossSite);
 
   MOZ_ASSERT(mReferrerInfo);
   nsCOMPtr<nsIHttpChannel> http = do_QueryInterface(mChannel);
@@ -160,7 +173,10 @@ void PrefetchRecordParent::Init(WindowGlobalParent* aWGP,
          this, static_cast<uint32_t>(rv)));
     mState = PrefetchState::Canceled;
     mChannel = nullptr;
+    return;
   }
+
+  mOutcome = Outcome::Incomplete;
 }
 
 bool PrefetchRecordParent::IsCrossOriginToDocument(nsIURI* aURI) const {
@@ -200,6 +216,66 @@ void PrefetchRecordParent::ConfigureSecPurpose(nsIChannel* aChannel) {
        this, secPurpose.get()));
 }
 
+static nsresult SerializeSpeculationTags(const nsTArray<Maybe<nsString>>& aTags,
+                                         nsACString& aResult) {
+  nsCOMPtr<nsISFVService> sfv = net::GetSFVService();
+  if (!sfv) {
+    return NS_ERROR_FAILURE;
+  }
+  nsTArray<RefPtr<nsISFVItemOrInnerList>> members;
+  for (const Maybe<nsString>& tag : aTags) {
+    nsCOMPtr<nsISFVBareItem> value;
+    nsresult rv;
+    if (tag) {
+      nsCOMPtr<nsISFVString> str;
+      rv = sfv->NewString(NS_ConvertUTF16toUTF8(*tag), getter_AddRefs(str));
+      value = str;
+    } else {
+      nsCOMPtr<nsISFVToken> token;
+      rv = sfv->NewToken("null"_ns, getter_AddRefs(token));
+      value = token;
+    }
+    NS_ENSURE_SUCCESS(rv, rv);
+    nsCOMPtr<nsISFVParams> params;
+    rv = sfv->NewParameters(getter_AddRefs(params));
+    NS_ENSURE_SUCCESS(rv, rv);
+    nsCOMPtr<nsISFVItem> item;
+    rv = sfv->NewItem(value, params, getter_AddRefs(item));
+    NS_ENSURE_SUCCESS(rv, rv);
+    members.AppendElement(item);
+  }
+  nsCOMPtr<nsISFVList> list;
+  nsresult rv = sfv->NewList(members, getter_AddRefs(list));
+  NS_ENSURE_SUCCESS(rv, rv);
+  return list->Serialize(aResult);
+}
+
+// Spec:
+// https://wicg.github.io/nav-speculation/prefetch.html#create-navigation-params-by-fetching
+void PrefetchRecordParent::ConfigureSpeculationTags(
+    nsIChannel* aChannel, nsIPrincipal* aDocumentPrincipal, bool aIsCrossSite) {
+  nsCOMPtr<nsIHttpChannel> http = do_QueryInterface(aChannel);
+  if (!http) {
+    return;
+  }
+  // Unlike the spec text, compare with the document's site, as WPT expects.
+  // IsThirdPartyURI compares base domains, so also check the scheme.
+  nsCOMPtr<nsIURI> uri;
+  aChannel->GetURI(getter_AddRefs(uri));
+  nsAutoCString scheme;
+  uri->GetScheme(scheme);
+  nsAutoCString tags;
+  if (aIsCrossSite || !aDocumentPrincipal->SchemeIs(scheme.get()) ||
+      NS_FAILED(SerializeSpeculationTags(mTags, tags))) {
+    tags.Truncate();
+  }
+  (void)http->SetRequestHeader("Sec-Speculation-Tags"_ns, tags, false);
+  LOG_SPECRULES_V(
+      ("PrefetchRecordParent::ConfigureSpeculationTags: this=%p "
+       "Sec-Speculation-Tags=%s",
+       this, tags.get()));
+}
+
 bool PrefetchRecordParent::PrefetchIPAnonymizationPolicyRequiresAnonymity(
     nsIURI* aURI) const {
   // Implements "prefetch IP anonymization policy requires anonymity".
@@ -237,6 +313,23 @@ void PrefetchRecordParent::FillResponseOnLastEntry(nsIChannel* aChannel) {
   }
 }
 
+already_AddRefed<nsIURI> PrefetchRecordParent::CacheEntryURI() const {
+  if (mRedirectChain.Length() != 1) {
+    return nullptr;
+  }
+  nsCOMPtr<nsICacheEntry> entry = do_QueryInterface(mCacheToken);
+  if (!entry) {
+    return nullptr;
+  }
+  nsAutoCString key;
+  nsCOMPtr<nsIURI> uri;
+  if (NS_FAILED(entry->GetKey(key)) ||
+      NS_FAILED(NS_NewURI(getter_AddRefs(uri), key))) {
+    return nullptr;
+  }
+  return uri.forget();
+}
+
 bool PrefetchRecordParent::MatchesURL(nsIURI* aURL) const {
   // Implements "prefetch record matches a URL".
   // Spec:
@@ -266,6 +359,17 @@ bool PrefetchRecordParent::MatchesURL(nsIURI* aURL) const {
   return net::URLsAreEquivalentModuloVariationConfig(mURL, aURL, data);
 }
 
+// Steps 2a-2b of "prefetch record is expected to match a URL": compare using
+// the rule's No-Vary-Search hint, which is available before any response.
+bool PrefetchRecordParent::MatchesNoVarySearchHint(nsIURI* aURL) const {
+  if (!mURL || mNoVarySearchHint.IsEmpty()) {
+    return false;
+  }
+  net::NoVarySearchData hint =
+      net::ParseNoVarySearchHeader(NS_ConvertUTF16toUTF8(mNoVarySearchHint));
+  return net::URLsAreEquivalentModuloVariationConfig(mURL, aURL, hint);
+}
+
 bool PrefetchRecordParent::IsExpectedToMatch(nsIURI* aURL) const {
   // Implements "prefetch record is expected to match a URL".
   // Spec:
@@ -275,18 +379,20 @@ bool PrefetchRecordParent::IsExpectedToMatch(nsIURI* aURL) const {
     return true;
   }
 
-  // Step 2: "If prefetchRecord's response is null" (there is no response yet,
-  // so use the rule's No-Vary-Search hint instead); step 3 "Otherwise, return
-  // false" covers the early return below.
-  if (mNoVarySearchHint.IsEmpty()) {
+  // Steps 2-3: with no response yet, fall back to the hint.
+  return MatchesNoVarySearchHint(aURL);
+}
+
+bool PrefetchRecordParent::MatchesCandidateURL(nsIURI* aURL) const {
+  if (!mURL) {
     return false;
   }
-  // Step 2a: "Let searchVariance be prefetchRecord's No-Vary-Search hint."
-  net::NoVarySearchData hint =
-      net::ParseNoVarySearchHeader(NS_ConvertUTF16toUTF8(mNoVarySearchHint));
-  // Step 2b: "If prefetchRecord's URL and url are equivalent modulo search
-  // variance given searchVariance, return true."
-  return net::URLsAreEquivalentModuloVariationConfig(mURL, aURL, hint);
+  bool eq = false;
+  mURL->Equals(aURL, &eq);
+  if (eq) {
+    return true;
+  }
+  return MatchesNoVarySearchHint(aURL);
 }
 
 nsString PrefetchRecordParent::ComputePartitionKeyForChannel(
@@ -325,6 +431,9 @@ NS_IMETHODIMP
 PrefetchRecordParent::OnStartRequest(nsIRequest* aRequest) {
   nsCOMPtr<nsIChannel> ch = do_QueryInterface(aRequest);
   FillResponseOnLastEntry(ch);
+  if (nsCOMPtr<nsICachingChannel> caching = do_QueryInterface(aRequest)) {
+    (void)caching->GetCacheToken(getter_AddRefs(mCacheToken));
+  }
 
   if (LOG_SPECRULES_ENABLED()) {
     nsCOMPtr<nsIHttpChannel> http = do_QueryInterface(aRequest);
@@ -366,6 +475,8 @@ PrefetchRecordParent::OnDataAvailable(nsIRequest* aRequest,
 
 NS_IMETHODIMP
 PrefetchRecordParent::OnStopRequest(nsIRequest* aRequest, nsresult aStatus) {
+  // aRequest, not mChannel: a redirected prefetch ends on the last hop.
+  mFinalResponseHadNetworkTransfer = AccumulateTransferSize(aRequest) != 0;
   mChannel = nullptr;
 
   if (NS_FAILED(aStatus)) {
@@ -406,11 +517,17 @@ PrefetchRecordParent::OnStopRequest(nsIRequest* aRequest, nsresult aStatus) {
   mExpiryTime = TimeStamp::Now() +
                 TimeDuration::FromMilliseconds(
                     StaticPrefs::dom_speculation_rules_record_expiry_ms());
+  NS_NewTimerWithCallback(
+      getter_AddRefs(mExpiryTimer),
+      [self = RefPtr{this}](nsITimer*) { self->ReleaseCacheToken(); },
+      StaticPrefs::dom_speculation_rules_record_expiry_ms(),
+      nsITimer::TYPE_ONE_SHOT, "PrefetchRecordParent::Expiry"_ns);
 
   // Step 4: remove prior completed records with the same URL.
   wgp->DedupePrefetchRecords(this);
   // Step 5: set state to "completed".
   mState = PrefetchState::Completed;
+  mOutcome = Outcome::Unused;
   // Step 6: trigger a prefetch status updated event ("ready").
   FirePrefetchStatusUpdated(true);
   wgp->NotifyPrefetchStateChanged(this);
@@ -442,6 +559,7 @@ PrefetchRecordParent::AsyncOnChannelRedirect(
       ("PrefetchRecordParent::AsyncOnChannelRedirect: this=%p flags=%u", this,
        aFlags));
   FillResponseOnLastEntry(aOldChannel);
+  AccumulateTransferSize(aOldChannel);
 
   // Validate the partition key on a cross-site redirect. Per "create
   // navigation params by fetching"
@@ -469,8 +587,42 @@ PrefetchRecordParent::AsyncOnChannelRedirect(
     aCb->OnRedirectVerifyCallback(NS_BINDING_ABORTED);
     return NS_OK;
   }
+
+  // "If request's current URL is not potentially trustworthy, then set
+  // response to a network error", checked on every hop, not just the first.
+  if (!nsMixedContentBlocker::IsPotentiallyTrustworthyOrigin(newURI)) {
+    LOG_SPECRULES_WARN(
+        ("PrefetchRecordParent::AsyncOnChannelRedirect: this=%p redirect to "
+         "a non-trustworthy URL rejected",
+         this));
+    aCb->OnRedirectVerifyCallback(NS_BINDING_ABORTED);
+    return NS_OK;
+  }
+
+  // Cross-site prefetches are not supported yet: the isolated partition that
+  // keeps a cross-site hop uncredentialed is not implemented, so don't follow
+  // a redirect off the document's site either.
+  auto* wgp = static_cast<WindowGlobalParent*>(Manager());
+  nsCOMPtr<nsIPrincipal> docPrincipal =
+      wgp ? wgp->DocumentPrincipal() : nullptr;
+  bool isCrossSite = true;
+  if (docPrincipal) {
+    docPrincipal->IsThirdPartyURI(newURI, &isCrossSite);
+  }
+  if (StaticPrefs::dom_speculation_rules_same_site_only()) {
+    if (isCrossSite) {
+      LOG_SPECRULES_WARN(
+          ("PrefetchRecordParent::AsyncOnChannelRedirect: this=%p cross-site "
+           "redirect rejected (same_site_only=true)",
+           this));
+      aCb->OnRedirectVerifyCallback(NS_BINDING_ABORTED);
+      return NS_OK;
+    }
+  }
+
   AppendRedirectChainEntry(newURI);
   ConfigureSecPurpose(aNewChannel);
+  ConfigureSpeculationTags(aNewChannel, docPrincipal, isCrossSite);
   aCb->OnRedirectVerifyCallback(NS_OK);
   return NS_OK;
 }
@@ -485,6 +637,14 @@ void PrefetchRecordParent::FirePrefetchStatusUpdated(bool aSuccess) {
   // https://wicg.github.io/nav-speculation/prefetch.html#trigger-a-prefetch-status-updated-event
 }
 
+void PrefetchRecordParent::ReleaseCacheToken() {
+  mCacheToken = nullptr;
+  if (mExpiryTimer) {
+    mExpiryTimer->Cancel();
+    mExpiryTimer = nullptr;
+  }
+}
+
 void PrefetchRecordParent::MarkCanceled() {
   // Implements "cancel and discard a prefetch record".
   // Spec:
@@ -497,6 +657,7 @@ void PrefetchRecordParent::MarkCanceled() {
   LOG_SPECRULES(("PrefetchRecordParent::MarkCanceled: this=%p", this));
 
   mState = PrefetchState::Canceled;  // Step 3: set state to "canceled"
+  ReleaseCacheToken();
 
   if (mChannel) {  // Step 4: abort the fetch controller
     mChannel->Cancel(NS_BINDING_ABORTED);
@@ -531,6 +692,43 @@ void PrefetchRecordParent::ActorDestroy(ActorDestroyReason aReason) {
     mChannel->Cancel(NS_BINDING_ABORTED);
     mChannel = nullptr;
   }
+  ReleaseCacheToken();
+
+  RecordDataUsage();
+}
+
+uint64_t PrefetchRecordParent::AccumulateTransferSize(nsIRequest* aRequest) {
+  nsCOMPtr<nsIHttpChannel> http = do_QueryInterface(aRequest);
+  if (!http) {
+    return 0;
+  }
+  uint64_t size = 0;
+  if (NS_FAILED(http->GetTransferSize(&size))) {
+    return 0;
+  }
+  mTransferSize += size;
+  return size;
+}
+
+void PrefetchRecordParent::RecordDataUsage() {
+  nsAutoCString label;
+  switch (mOutcome) {
+    // A candidate rejected before AsyncOpen cost no data.
+    case Outcome::NotStarted:
+      return;
+    case Outcome::Incomplete:
+      label.AssignLiteral("incomplete");
+      break;
+    case Outcome::Unused:
+      label.AssignLiteral("unused");
+      break;
+    case Outcome::Used:
+      label.AssignLiteral("used");
+      break;
+  }
+
+  glean::speculation_rules::prefetch_transfer_size.Get(label).Accumulate(
+      mTransferSize);
 }
 
 }  // namespace mozilla::dom

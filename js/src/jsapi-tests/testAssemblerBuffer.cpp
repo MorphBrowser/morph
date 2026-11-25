@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <functional>
+#include <iterator>
 
 #include "jit/shared/IonAssemblerBufferWithConstantPools.h"
 #include "jsapi-tests/tests.h"
@@ -466,6 +467,7 @@ struct TestAssembler {
 
   static void WritePoolHeader(void* start, js::jit::Pool* p, bool isNatural) {
     MOZ_ASSERT(!isNatural, "Natural pool guards not implemented.");
+    MOZ_ASSERT(p->getFill() == 0);
     uint32_t* hdr = reinterpret_cast<uint32_t*>(start);
     *hdr = Instr::PoolHeader(p->getPoolSize());
   }
@@ -656,6 +658,66 @@ BEGIN_TEST(testAssemblerBuffer_AssemblerBufferWithConstantPools) {
   return true;
 }
 END_TEST(testAssemblerBuffer_AssemblerBufferWithConstantPools)
+
+BEGIN_TEST(testAssemblerBuffer_AssemblerBufferWithConstantPools_SharedEntries) {
+  using js::jit::BufferOffset;
+  using js::jit::PoolEntryKind;
+
+  // A large pool range so that nothing below spills the pool.
+  AsmBufWithPool ab(/* poolMaxOffset= */ 1024, /* nopFill= */ 0);
+
+  uint32_t a[] = {0xdddd0000};
+  uint32_t b[] = {0xdddd0001};
+  uint32_t c[] = {0xdddd0002, 0xdddd0003};
+
+  struct Load {
+    uint32_t* data;
+    unsigned num;
+    PoolEntryKind kind;
+    unsigned index;
+  };
+  // Equal values share an entry only within a kind, and never when unshared.
+  const Load loads[] = {
+      {a, 1, PoolEntryKind::Constant, 0}, {a, 1, PoolEntryKind::GCThing, 1},
+      {a, 1, PoolEntryKind::Unshared, 2}, {a, 1, PoolEntryKind::Unshared, 3},
+      {b, 1, PoolEntryKind::Constant, 4}, {a, 1, PoolEntryKind::Constant, 0},
+      {a, 1, PoolEntryKind::GCThing, 1},  {c, 2, PoolEntryKind::Constant, 5},
+      {c, 2, PoolEntryKind::Constant, 5},
+  };
+  const size_t numLoads = std::size(loads);
+
+  for (size_t i = 0; i < numLoads; i++) {
+    uint32_t poolLoad[] = {Instr::PoolLoadUninit(0)};
+    BufferOffset load = ab.allocEntry(1, loads[i].num, (uint8_t*)poolLoad,
+                                      (uint8_t*)loads[i].data, loads[i].kind);
+    CHECK_EQUAL(load.getOffset(), int(i * 4));
+    CHECK_EQUAL(*ab.getInst(load), Instr::PoolLoadIndex(loads[i].index));
+  }
+
+  // Expected layout:
+  //
+  //   0..32: the nine loads
+  //   36: guard branch
+  //   40: pool header
+  //   44: a, a, a, a, b, c (7 words)
+  //   72: arith(1)
+  ab.flushPool();
+  BufferOffset after = ab.putInt(Instr::Arith(1));
+  CHECK_EQUAL(after.getOffset(), 72);
+  CHECK_EQUAL(*ab.getInst(BufferOffset(36)), Instr::Branch(36));
+  CHECK_EQUAL(*ab.getInst(BufferOffset(40)), Instr::PoolHeader(28));
+  const uint32_t data[] = {a[0], a[0], a[0], a[0], b[0], c[0], c[1]};
+  for (size_t i = 0; i < std::size(data); i++) {
+    CHECK_EQUAL(*ab.getInst(BufferOffset(44 + i * 4)), data[i]);
+  }
+  for (size_t i = 0; i < numLoads; i++) {
+    CHECK_EQUAL(*ab.getInst(BufferOffset(i * 4)),
+                Instr::PoolLoadPc(44 - i * 4 + loads[i].index * 4));
+  }
+
+  return true;
+}
+END_TEST(testAssemblerBuffer_AssemblerBufferWithConstantPools_SharedEntries)
 
 BEGIN_TEST(testAssemblerBuffer_AssemblerBufferWithConstantPools_ShortBranch) {
   using js::jit::BufferOffset;
@@ -1039,6 +1101,7 @@ struct LongVeneerTestAssembler {
 
   static void WritePoolHeader(void* start, js::jit::Pool* p, bool isNatural) {
     MOZ_ASSERT(!isNatural, "Natural pool guards not implemented.");
+    MOZ_ASSERT(p->getFill() == 0);
     Inst* hdr = reinterpret_cast<Inst*>(start);
     *hdr = Instr::PoolHeader(p->getPoolSize());
   }
@@ -1913,6 +1976,82 @@ BEGIN_TEST(testAssemblerBuffer_ARM64_BoundLabelBranchDeadline) {
   return true;
 }
 END_TEST(testAssemblerBuffer_ARM64_BoundLabelBranchDeadline)
+
+BEGIN_TEST(testAssemblerBuffer_ARM64_PoolDataAlignment) {
+  using namespace js::jit;
+  using namespace AArch64;
+
+  js::LifoAlloc lifo(4096, js::MallocArena);
+  TempAllocator alloc(&lifo);
+  JitContext jc(cx);
+  StackMacroAssembler masm(cx, alloc);
+  AutoCreatedBy acb(masm, __func__);
+
+  auto target = [&](BufferOffset load) {
+    return BufferOffset(load.getOffset() +
+                        masm.getInstructionAt(load)->ImmLLiteral() * 4);
+  };
+
+  // The first pool's data starts 8-byte aligned and the second pool's needs
+  // fill after the header. In both, the 4-byte entries leave the 8-byte
+  // entries after them to be padded.
+  for (int extraNops = 0; extraNops < 2; extraNops++) {
+    for (int i = 0; i < extraNops; i++) {
+      masm.nop();
+    }
+    const uint64_t i64 = 0x0123456789abcdef + extraNops;
+    const double f64 = 3.5 + extraNops;
+    BufferOffset f32Load = masm.fImmPool32(vixl::s0, 1.5f);
+    BufferOffset i64Load =
+        masm.immPool64(vixl::x0, i64, PoolEntryKind::Unshared);
+    masm.fImmPool32(vixl::s1, 2.5f);
+    BufferOffset f64Load = masm.fImmPool64(vixl::d2, f64);
+    BufferOffset guard(masm.currentOffset());
+    masm.flush();
+    CHECK(!masm.oom());
+
+    size_t fill = 4 * extraNops;
+    CHECK_EQUAL(size_t(guard.getOffset() + 8) % 8, fill);
+    CHECK_EQUAL(size_t(target(f32Load).getOffset()),
+                guard.getOffset() + 8 + fill);
+    CHECK_EQUAL(target(i64Load).getOffset() % 8, 0);
+    CHECK_EQUAL(target(f64Load).getOffset() % 8, 0);
+
+    // Two 4-byte entries, two 8-byte entries and two padding units, after the
+    // header and the fill.
+    CHECK_EQUAL(masm.getInstructionAt(BufferOffset(guard.getOffset() + 4))
+                    ->InstructionBits(),
+                poolheader(1 + fill / 4 + 8));
+
+    uint64_t value;
+    memcpy(&value, masm.getInstructionAt(target(i64Load)), sizeof(value));
+    CHECK_EQUAL(value, i64);
+    double d;
+    memcpy(&d, masm.getInstructionAt(target(f64Load)), sizeof(d));
+    CHECK_EQUAL(d, f64);
+  }
+
+  // A pool of only 4-byte entries gets no fill, even where an 8-byte entry
+  // would need it.
+  if (masm.currentOffset() % 8 == 0) {
+    masm.nop();
+  }
+  BufferOffset f32Load = masm.fImmPool32(vixl::s0, 1.5f);
+  BufferOffset f32Load2 = masm.fImmPool32(vixl::s1, 2.5f);
+  BufferOffset guard(masm.currentOffset());
+  masm.flush();
+  CHECK(!masm.oom());
+
+  CHECK_EQUAL(size_t(guard.getOffset() + 8) % 8, size_t(4));
+  CHECK_EQUAL(target(f32Load).getOffset(), guard.getOffset() + 8);
+  CHECK_EQUAL(target(f32Load2).getOffset(), guard.getOffset() + 12);
+  CHECK_EQUAL(masm.getInstructionAt(BufferOffset(guard.getOffset() + 4))
+                  ->InstructionBits(),
+              poolheader(1 + 2));
+
+  return true;
+}
+END_TEST(testAssemblerBuffer_ARM64_PoolDataAlignment)
 #endif /* JS_CODEGEN_ARM64 */
 
 // Test that everything is put together correctly in the RISCV64 assembler.
@@ -2306,5 +2445,38 @@ BEGIN_TEST(testAssemblerBuffer_RISCV64_PendingDeadlinesExceedNewBranchRange) {
   return true;
 }
 END_TEST(testAssemblerBuffer_RISCV64_PendingDeadlinesExceedNewBranchRange)
+
+BEGIN_TEST(testAssemblerBuffer_RISCV64_PatchableWord) {
+  using namespace js::jit;
+
+  js::LifoAlloc lifo(4096, js::MallocArena);
+  TempAllocator alloc(&lifo);
+  JitContext jc(cx);
+  StackMacroAssembler masm(cx, alloc);
+  AutoCreatedBy acb(masm, __func__);
+
+  // A patchable word that fits in 48 bits, as pointers and the -1 placeholder
+  // do, is loaded with the six instructions of li_ptr, any other with the
+  // eight of li_constant.
+  CodeOffset placeholder = masm.movWithPatch(ImmWord(uintptr_t(-1)), a0);
+  CodeOffset value = masm.movWithPatch(ImmWord(0xfffe'0000'1234'5678), a1);
+  CodeOffset end(masm.currentOffset());
+  CHECK(!masm.oom());
+  CHECK_EQUAL(value.offset() - placeholder.offset(), size_t(6 * kInstrSize));
+  CHECK_EQUAL(end.offset() - value.offset(), size_t(8 * kInstrSize));
+
+  Instruction* inst = masm.getInstructionAt(BufferOffset(placeholder.offset()));
+  CHECK_EQUAL(Assembler::ExtractLoad64Value(inst), uint64_t(-1));
+  Assembler::UpdateLoad64Value(inst, 0x7fff'1234'5678);
+  CHECK_EQUAL(Assembler::ExtractLoad64Value(inst), uint64_t(0x7fff'1234'5678));
+  Assembler::UpdateLoad64Value(inst, uint64_t(-1));
+  CHECK_EQUAL(Assembler::ExtractLoad64Value(inst), uint64_t(-1));
+
+  inst = masm.getInstructionAt(BufferOffset(value.offset()));
+  CHECK_EQUAL(Assembler::ExtractLoad64Value(inst), 0xfffe'0000'1234'5678);
+
+  return true;
+}
+END_TEST(testAssemblerBuffer_RISCV64_PatchableWord)
 
 #endif /* JS_CODEGEN_RISCV64 */

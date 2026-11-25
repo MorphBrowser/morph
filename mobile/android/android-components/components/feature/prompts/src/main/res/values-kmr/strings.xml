@@ -59,6 +59,8 @@
   <string name="mozac_feature_prompts_deny">Red bike</string>
   <!-- Text of the title of a dialog when a page is requesting to open a new window. -->
   <string name="mozac_feature_prompts_popup_dialog_title">Destûrê didî vê malperê ku vebe?</string>
+  <!-- Text of the title of a dialog when a third-party redirect is blocked. -->
+  <string name="mozac_feature_prompts_redirect_dialog_title">Destûrê bide beralîkirina vê malperê?</string>
   <!-- Title of the dialog shown when a user is leaving a website and there is still data not saved yet. -->
   <string name="mozac_feature_prompt_before_unload_dialog_title">Bi rastî jî?</string>
   <!-- Body text of the dialog shown when a user is leaving a website and there is still data not saved yet. -->
@@ -67,6 +69,12 @@
   <string name="mozac_feature_prompts_before_unload_stay">Lê bimîne</string>
   <!-- Leave button of the dialog shown when a user is leaving a website and there is still data not saved yet, this indicates that the user wants to leave in the website. -->
   <string name="mozac_feature_prompts_before_unload_leave">Derkeve</string>
+  <!-- Message shown when a site wants to create a passkey for a related domain. %1$s is the requesting site, %2$s is the related domain the passkey is for. -->
+  <string name="webauthn_related_origin_create_message">%1$s dixwaze ji bo %2$s nifteya derbasbûnê çêke.</string>
+  <!-- Message shown when a site wants to use a passkey from a related domain. %1$s is the requesting site, %2$s is the related domain the passkey is for. -->
+  <string name="webauthn_related_origin_use_message">%1$s dixwaze ji bo %2$s nifteya derbasbûnê bi kar bîne.</string>
+  <!-- Continue button label for WebAuthn related origin prompt. -->
+  <string name="webauthn_continue">Bidomîne</string>
   <!-- Title of the month chooser dialog. -->
   <string name="mozac_feature_prompts_set_month">Mehekê hilbijêre</string>
   <!-- January (short description), used on the month chooser dialog. -->
@@ -126,6 +134,14 @@
   <string name="mozac_feature_prompt_repost_positive_button_text">Daneyan dîsa bişîne</string>
   <!-- Pressing this will dismiss the dialog and not refresh the webpage -->
   <string name="mozac_feature_prompt_repost_negative_button_text">Betal bike</string>
+  <!-- Strings show in a dialog that appear when user confirm folder upload -->
+  <string name="mozac_feature_prompt_folder_upload_confirm_title">Bila dosye bên barkirin?</string>
+  <!-- Prompt message displayed when user selects a specific folder. %1$s is a folder / directory name. -->
+  <string name="mozac_feature_prompt_folder_upload_confirm_message">Berî ku tu ji \"%1$s\"ê barkirinê bikî, pê ewle be ku baweriya te bi vê malperê heye.</string>
+  <!-- Pressing this will dismiss the dialog and allow to upload folder -->
+  <string name="mozac_feature_prompt_folder_upload_confirm_positive_button_text">Lêbar bike</string>
+  <!-- Pressing this will dismiss the dialog and disallow to upload folder -->
+  <string name="mozac_feature_prompt_folder_upload_confirm_negative_button_text">Betal bike</string>
   <!--
     Credit Card Autofill
 
@@ -144,6 +160,42 @@
   <string name="mozac_feature_prompts_update_credit_card_prompt_title">Dîroka dawî ya kardê venû bikin?</string>
   <!-- Subtitle text displayed under the title of the saved card dialog. %s is the name of the app (for example "Firefox"). -->
   <string name="mozac_feature_prompts_save_credit_card_prompt_body_2">%s hejmara karta te şîfre dike. Koda te ya ewlekariyê wê neyê hilanîn.</string>
+  <!-- Title of dialog to store credit card information in the user's account -->
+  <string name="mozac_feature_prompts_save_payment_method_prompt_title">Vê rêbaza peredanê tomar bikî?</string>
+  <!-- Title of dialog to update stored credit card information in the user's account -->
+  <string name="mozac_feature_prompts_update_payment_method_prompt_title">Vê rêbaza peredanê nûve bikî?</string>
+  <!-- Body of the dialog to confirm saving or updating credit card information when the "Save security codes" toggle is on. %s is the name of the app (for example "Firefox"). -->
+  <string name="mozac_feature_prompts_save_payment_method_prompt_body_with_security_code">%s hejmara karta te û koda ewlekariyê ji bo peredanên bileztir yên dahtûyê şîfre dike.</string>
+  <!-- Body of the dialog to confirm saving or updating credit card information when the "Save security codes" toggle is off. %s is the name of the app (for example "Firefox"). -->
+  <string name="mozac_feature_prompts_save_payment_method_prompt_body_without_security_code">%s hejmara karta te ji bo peredanên bileztir şîfre dike.</string>
+  <!-- Label for the masked card security code in a save or update credit card dialog. %s is the masked security code (for example "•••"). -->
+  <string name="mozac_feature_prompts_save_payment_method_security_code">Koda ewlehiyê %s</string>
+  <!-- Content description for the masked card security code in a save or update credit card dialog. Screen readers read it instead of the masked characters. -->
+  <string name="mozac_feature_prompts_save_payment_method_security_code_description">Koda ewlehiyê veşartî ye</string>
+  <!-- Label of the toggle in a save or update credit card dialog that controls whether the card security code is saved. -->
+  <string name="mozac_feature_prompts_always_save_security_codes">Kodên ewlehiyê tomar bike</string>
+  <!-- Text for the button that closes a save or update credit card dialog without saving. -->
+  <string name="mozac_feature_prompts_save_payment_method_dismiss">Bigire</string>
+  <!-- Title of the edit credit card screen (also used as the accessibility description for the button that opens this screen). -->
+  <string name="mozac_feature_prompts_edit_credit_card_title">Kartê serast bike</string>
+  <!-- Edit credit card screen - label of the credit card number field -->
+  <string name="mozac_feature_prompts_edit_credit_card_number">Hejmara kartê</string>
+  <!-- Edit credit card screen - Error message displayed for the credit card number field -->
+  <string name="mozac_feature_prompts_edit_credit_card_number_error">Hejmareke kartê ya derbasdar binivîse</string>
+  <!-- Edit credit card screen - label of the cardholder name field -->
+  <string name="mozac_feature_prompts_edit_credit_card_name">Navê li ser kartê</string>
+  <!-- Edit credit card screen - label for the credit card expiration date field (month only) -->
+  <string name="mozac_feature_prompts_edit_credit_card_expiry_month">Tarîxa dawî ya bikaranînê - Meh</string>
+  <!-- Edit credit card screen - format for options in the month dropdown: %1$s is the name of the month (for example "January"), and %2$s is the month number with two digits (for example "01"). The result would be "January (01)". -->
+  <string name="mozac_feature_prompts_edit_credit_card_expiry_month_option">%1$s (%2$s)</string>
+  <!-- Edit credit card screen - label for the credit card expiration date field (year only) -->
+  <string name="mozac_feature_prompts_edit_credit_card_expiry_year">Tarîxa dawî ya bikaranînê - Sal</string>
+  <!-- Edit credit card screen - label for the credit card security code field (CVV is the common short form in English and stands for Card Verification Value) -->
+  <string name="mozac_feature_prompts_edit_credit_card_security_code">CVV (vebijarkî)</string>
+  <!-- Edit credit card screen - Error message for the security code field when the entered code is too short. -->
+  <string name="mozac_feature_prompts_edit_credit_card_security_code_error">Kodeke ewlehiyê ya 3 an 4 reqemî binivîse</string>
+  <!-- Edit credit card screen - Accessibility description of the button that clears the security code field -->
+  <string name="mozac_feature_prompts_edit_credit_card_security_code_clear">Koda ewlehiyê paqij bike</string>
   <!--
     Address Autofill
 
@@ -156,6 +208,10 @@
   <string name="mozac_feature_prompts_collapse_address_content_description_2">Navnîşanên tomarkirî berteng bike</string>
   <!-- Text for the manage addresses button. -->
   <string name="mozac_feature_prompts_manage_address">Navnîşanan bi rê ve bibe</string>
+  <!-- Text for the title of a save address dialog. -->
+  <string name="mozac_feature_prompts_save_address_prompt_title">Navnîşanê qeyd bike?</string>
+  <!-- Text for the title of an update address dialog, shown when the address adds information to an already saved address. -->
+  <string name="mozac_feature_prompts_update_address_prompt_title">Navnîşanê nûve bike?</string>
   <!--
     Federated Credential Management prompts
 
@@ -174,4 +230,12 @@
   <string name="mozac_feature_prompts_identity_credentials_continue">Bidomîne</string>
   <!-- Text for the cancel button of the Identity Credential dialogs. -->
   <string name="mozac_feature_prompts_identity_credentials_cancel">Betal bike</string>
+  <!--
+    Email Mask Autofill
+
+    Text for the email mask prompt to allow users to fill an email input field in a sign up form with an email mask.
+  -->
+  <string name="mozac_feature_relay_chip_text">Maska e-maîlê bikar bîne</string>
+  <!-- Informational text for the contextual feature recommendation (CFR) enabling the email mask aliases. The %s is the name of the service, "Firefox Relay". -->
+  <string name="mozac_feature_relay_email_masks_cfr">Nû! Niha li ser mobîlê %s maskên e-maîlê berdest in.</string>
 </resources>

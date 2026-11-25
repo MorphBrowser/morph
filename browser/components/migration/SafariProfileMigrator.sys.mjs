@@ -50,6 +50,7 @@ Bookmarks.prototype = {
       if (!children) {
         throw new Error("Invalid Bookmarks.plist format");
       }
+      this.available = 0;
 
       let collection =
         dict.get("Title") == "com.apple.ReadingList"
@@ -209,6 +210,7 @@ Bookmarks.prototype = {
         let readingListTitle = await MigrationUtils.getLocalizedString(
           "migration-imported-safari-reading-list"
         );
+        this.available++;
         folderGuid = (
           await MigrationUtils.insertBookmarkWrapper({
             parentGuid: lazy.PlacesUtils.bookmarks.menuGuid,
@@ -279,6 +281,7 @@ Bookmarks.prototype = {
     for (const entry of entries) {
       let type = entry.get("WebBookmarkType");
       if (type == "WebBookmarkTypeList" && entry.has("Children")) {
+        this.available++;
         let convertedChildren = await this._convertEntries(
           entry.get("Children"),
           bookmarkURLToUUIDMap
@@ -290,6 +293,7 @@ Bookmarks.prototype = {
           children: convertedChildren.convertedEntries,
         });
       } else if (type == "WebBookmarkTypeLeaf" && entry.has("URLString")) {
+        this.available++;
         // Check we understand this URL before adding it:
         let url = entry.get("URLString");
         if (!URL.canParse(url)) {
@@ -344,9 +348,14 @@ Bookmarks.prototype = {
   },
 };
 
-async function GetHistoryResource() {
+/**
+ * @param {boolean} aShouldCheckForHistory
+ *   False if History.db must not be read yet, in which case the history is
+ *   presumed to exist.
+ */
+async function GetHistoryResource(aShouldCheckForHistory) {
   let dbPath = FileUtils.getDir("ULibDir", ["Safari", "History.db"]).path;
-  let maxAge = msToNSDate(
+  const maxAge = msToNSDate(
     Date.now() - MigrationUtils.HISTORY_MAX_AGE_IN_MILLISECONDS
   );
 
@@ -355,29 +364,31 @@ async function GetHistoryResource() {
   // directory, let's assume that there's history to import and give the
   // user the option to migrate it.
   let canReadHistory = false;
-  try {
-    // 'stat' is always allowed, but reading is somehow not, if the user hasn't
-    // allowed it:
-    await IOUtils.read(dbPath, { maxBytes: 1 });
-    canReadHistory = true;
-  } catch (ex) {
-    console.error(
-      "Cannot yet read from Safari profile directory. Will presume history exists for import."
-    );
+  if (aShouldCheckForHistory) {
+    try {
+      // 'stat' is always allowed, but reading is somehow not, if the user
+      // hasn't allowed it:
+      await IOUtils.read(dbPath, { maxBytes: 1 });
+      canReadHistory = true;
+    } catch (ex) {
+      console.error(
+        "Cannot yet read from Safari profile directory. Will presume history exists for import."
+      );
+    }
   }
 
-  if (canReadHistory) {
-    let countQuery = `
-      SELECT COUNT(*)
-      FROM history_items LEFT JOIN history_visits
-      ON history_items.id = history_visits.history_item
-      WHERE history_visits.visit_time > ${maxAge}
-      LIMIT 1;`;
+  // Redirect sources and failed loads are skipped, since they would get
+  // a high frecency when imported as typed visits.
+  const visitFilter = `visit_time > ${maxAge}
+    AND load_successful = 1
+    AND redirect_destination IS NULL`;
+  const importableQuery = `SELECT COUNT(*) FROM history_visits WHERE ${visitFilter};`;
 
+  if (canReadHistory) {
     let countResult = await MigrationUtils.getRowsFromDBWithoutLocks(
       dbPath,
       "Safari history",
-      countQuery
+      importableQuery
     );
 
     if (!countResult[0].getResultByName("COUNT(*)")) {
@@ -385,26 +396,62 @@ async function GetHistoryResource() {
     }
   }
 
-  let selectQuery = `
-    SELECT
-      history_items.url as history_url,
-      history_visits.title as history_title,
-      history_visits.visit_time as history_time
-    FROM history_items LEFT JOIN history_visits
-    ON history_items.id = history_visits.history_item
-    WHERE history_visits.visit_time > ${maxAge};`;
-
   return {
     type: MigrationUtils.resourceTypes.HISTORY,
 
     async migrate(callback) {
-      callback(await this._migrate());
+      try {
+        callback(await this._migrate());
+      } catch (ex) {
+        console.error(ex);
+        callback(false);
+      }
     },
 
     async _migrate() {
+      const TOTAL_LIMIT = Services.prefs.getIntPref(
+        "browser.migrate.safari.history.limit"
+      );
+      const VISIT_LIMIT = MigrationUtils.getHistoryVisitLimit(
+        "browser.migrate.safari.history.visit.limit"
+      );
+      // Pages only need sorting to pick the most recent ones for the limit.
+      const limitClause = TOTAL_LIMIT
+        ? `ORDER BY last_visit_time DESC LIMIT ${TOTAL_LIMIT}`
+        : "";
+      // Safari gives a score of 0 to visits that follow a visit to the same
+      // URL within about a minute. They're imported as reloads, which don't
+      // count towards frecency, and ranked last so they only fill slots not
+      // taken by other visits.
+      let selectQuery = `WITH pages AS (
+  SELECT i.id, i.url, MAX(v.visit_time) AS last_visit_time
+  FROM history_items i
+  JOIN history_visits v ON v.history_item = i.id
+  WHERE ${visitFilter}
+  GROUP BY i.id
+  ${limitClause}
+)
+SELECT p.id, p.url, v.title, v.visit_time, v.score
+FROM pages p
+JOIN history_visits v ON v.id IN (
+  SELECT id FROM history_visits
+  WHERE history_item = p.id
+  AND ${visitFilter}
+  ORDER BY score = 0, visit_time DESC
+  LIMIT ${VISIT_LIMIT}
+)
+ORDER BY p.last_visit_time DESC, v.visit_time DESC`;
+
       let historyRows;
 
       try {
+        let availableRows = await MigrationUtils.getRowsFromDBWithoutLocks(
+          dbPath,
+          "Safari history",
+          "SELECT COUNT(*) FROM history_items;"
+        );
+        this.available = availableRows[0].getResultByName("COUNT(*)");
+
         historyRows = await MigrationUtils.getRowsFromDBWithoutLocks(
           dbPath,
           "Safari history",
@@ -420,23 +467,49 @@ async function GetHistoryResource() {
         return false;
       }
 
-      let pageInfos = [];
+      // Pages whose URL can't be parsed are kept as null so that the error is
+      // only reported once.
+      let pageInfosById = new Map();
       for (let row of historyRows) {
-        try {
-          pageInfos.push({
-            title: row.getResultByName("history_title"),
-            url: new URL(row.getResultByName("history_url")),
-            visits: [
-              {
-                transition: lazy.PlacesUtils.history.TRANSITIONS.TYPED,
-                date: parseNSDate(row.getResultByName("history_time")),
-              },
-            ],
-          });
-        } catch (e) {
-          console.error("Could not create a history row: ", e);
+        let id = row.getResultByName("id");
+        let pageInfo = pageInfosById.get(id);
+        if (pageInfo === null) {
+          continue;
         }
+        if (!pageInfo) {
+          try {
+            pageInfo = {
+              url: new URL(row.getResultByName("url")),
+              visits: [],
+            };
+          } catch (e) {
+            console.error("Could not create a history row: ", e);
+            pageInfosById.set(id, null);
+            continue;
+          }
+          pageInfosById.set(id, pageInfo);
+        }
+        let title = row.getResultByName("title");
+        if (title && !pageInfo.title) {
+          pageInfo.title = title;
+        }
+        // Safari doesn't store how a visit was made, so visits are imported as
+        // typed. A score of 0 marks a repeat record of a page view Safari
+        // already counted, which is imported as a reload so it's kept in
+        // history without adding to the page's visit count and frecency.
+        pageInfo.visits.push({
+          transition: row.getResultByName("score")
+            ? lazy.PlacesUtils.history.TRANSITIONS.TYPED
+            : lazy.PlacesUtils.history.TRANSITIONS.RELOAD,
+          date: parseNSDate(row.getResultByName("visit_time")),
+        });
       }
+      // Drop the null entries left for pages whose URL couldn't be parsed.
+      let pageInfos = [...pageInfosById.values()].filter(Boolean);
+      if (!pageInfos.length) {
+        return false;
+      }
+
       await MigrationUtils.insertVisitsWrapper(pageInfos);
 
       return true;
@@ -497,14 +570,17 @@ SearchStrings.prototype = {
   type: MigrationUtils.resourceTypes.OTHERDATA,
 
   migrate: function SS_migrate(aCallback) {
+    let resource = this;
     this._mainPreferencesPropertyList.read(
       MigrationUtils.wrapMigrateFunction(function migrateSearchStrings(aDict) {
         if (!aDict) {
           throw new Error("Could not get preferences dictionary");
         }
 
+        resource.available = 0;
         if (aDict.has("RecentSearchStrings")) {
           let recentSearchStrings = aDict.get("RecentSearchStrings");
+          resource.available = recentSearchStrings?.length ?? 0;
           if (recentSearchStrings && recentSearchStrings.length) {
             let changes = recentSearchStrings.map(searchString => ({
               op: "add",
@@ -523,6 +599,22 @@ SearchStrings.prototype = {
  * Safari migrator
  */
 export class SafariProfileMigrator extends MigratorBase {
+  /**
+   * True once the user has selected a folder in the file picker opened by
+   * getPermissions. Reset if that folder did not give access and the user
+   * then cancels the file picker.
+   *
+   * @type {boolean}
+   */
+  #hasUserSelectedSafariFolder = false;
+
+  #shouldAvoidReadingData() {
+    return (
+      !this.#hasUserSelectedSafariFolder &&
+      MigratorBase.needsFolderSelectionToReadData()
+    );
+  }
+
   static get key() {
     return "safari";
   }
@@ -564,7 +656,7 @@ export class SafariProfileMigrator extends MigratorBase {
       resources.push(new SearchStrings(prefs));
     }
 
-    resources.push(GetHistoryResource());
+    resources.push(GetHistoryResource(!this.#shouldAvoidReadingData()));
 
     resources = await Promise.all(resources);
 
@@ -588,6 +680,9 @@ export class SafariProfileMigrator extends MigratorBase {
   async hasPermissions() {
     if (this._hasPermissions) {
       return true;
+    }
+    if (this.#shouldAvoidReadingData()) {
+      return false;
     }
     // Check if we have access to some key files, but only if they exist.
     let historyTarget = FileUtils.getDir("ULibDir", ["Safari", "History.db"]);
@@ -623,7 +718,7 @@ export class SafariProfileMigrator extends MigratorBase {
     }
   }
 
-  async getPermissions(win) {
+  async getPermissions(win, { onFilePickerShown } = {}) {
     // Keep prompting the user until they pick something that grants us access
     // to Safari's bookmarks and favicons or they cancel out of the file open panel.
     while (!(await this.hasPermissions())) {
@@ -631,16 +726,21 @@ export class SafariProfileMigrator extends MigratorBase {
       // The title (second arg) is not displayed on macOS, so leave it blank.
       fp.init(win?.browsingContext, "", Ci.nsIFilePicker.modeGetFolder);
       fp.filterIndex = 1;
-      fp.displayDirectory = FileUtils.getDir("ULibDir", [""]);
+      fp.displayDirectory = FileUtils.getDir("ULibDir", ["Safari"]);
       // Now wait for the filepicker to open and close. If the user picks
       // the Safari folder, macOS will grant us read access to everything
       // inside, so we don't need to check or do anything else with what's
       // returned by the filepicker.
+      onFilePickerShown?.();
       let result = await new Promise(resolve => fp.open(resolve));
       // Bail if the user cancels the dialog:
       if (result == Ci.nsIFilePicker.returnCancel) {
+        this.#hasUserSelectedSafariFolder = false;
         return false;
       }
+      this.#hasUserSelectedSafariFolder = true;
+      // Resources looked up before the folder was selected may be incomplete.
+      this._resourcesByProfile = null;
     }
     return true;
   }

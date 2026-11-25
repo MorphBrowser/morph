@@ -370,7 +370,7 @@ class CycleCollectedJSContext::SavedMicroTaskQueue
     JS::Rooted<MustConsumeMicroTask> suppressedTasks(cx);
     MOZ_ASSERT(JS::GetRegularMicroTaskCount(cx) <= 1);
     if (JS::HasRegularMicroTasks(cx)) {
-      suppressedTasks = DequeueNextRegularMicroTask(cx);
+      DequeueNextRegularMicroTask(cx, &suppressedTasks);
       MOZ_ASSERT(MaybeUnwrapTaskToRunnable(suppressedTasks) ==
                  ccjs->mSuppressedMicroTaskList);
     }
@@ -397,8 +397,9 @@ js::UniquePtr<JS::JobQueue::SavedJobQueue>
 CycleCollectedJSContext::saveJobQueue(JSContext* cx) {
   auto saved = js::MakeUnique<SavedMicroTaskQueue>(this);
   if (!saved) {
-    // When MakeUnique's allocation fails, the SavedMicroTaskQueue constructor
-    // is never called, so mPendingMicroTaskRunnables is still initialized.
+    // When std::make_unique's allocation fails, the SavedMicroTaskQueue
+    // constructor is never called, so mPendingMicroTaskRunnables is still
+    // initialized.
     JS_ReportOutOfMemory(cx);
     return nullptr;
   }
@@ -840,8 +841,8 @@ static void MaybeGetFlowMarker(
   if (profiler_is_active_and_unpaused() &&
       profiler_feature_active(ProfilerFeature::Flows)) {
     uint64_t flowId = 0;
-    // Since this only returns false when the microtask won't run (dead wrapper)
-    // we can elide the marker if it does fail.
+    // This only returns false when the microtask won't run (dead wrapper) or
+    // has no flow, so we can elide the marker if it does fail.
     if (AsJSMicroTask(aMicroTask).getFlowId(&flowId)) {
       aTerminatingMarker.emplace("RunMicroTask",
                                  mozilla::baseprofiler::category::OTHER,
@@ -1073,8 +1074,8 @@ void RunJSMicroTask(JSContext* aCx, CycleCollectedJSContext* aCCJS,
     }
 
     do {
-      JS::RootedField<WontConsumeMicroTask, 4> peekTask(roots,
-                                                        PeekNextMicroTask(aCx));
+      JS::RootedField<WontConsumeMicroTask, 4> peekTask(roots);
+      PeekNextMicroTask(aCx, &peekTask);
 
       // We can only coalesce JS tasks.
       if (!peekTask.get().IsJSMicroTask()) {
@@ -1119,7 +1120,7 @@ void RunJSMicroTask(JSContext* aCx, CycleCollectedJSContext* aCCJS,
       }
 
       // Ok, we're good to run again.
-      aMicroTask.set(DequeueNextMicroTask(aCx));
+      DequeueNextMicroTask(aCx, aMicroTask);
 
       // Notify the JS engine if the queue is now empty, enabling optimizations
       // like skipping await microtask creation for resolved promises.
@@ -1159,20 +1160,32 @@ void RunJSMicroTask(JSContext* aCx, CycleCollectedJSContext* aCCJS,
   }
 }
 
-MustConsumeMicroTask DequeueNextMicroTask(JSContext* aCx) {
-  return MustConsumeMicroTask(JS::DequeueNextMicroTask(aCx));
+void DequeueNextMicroTask(JSContext* aCx,
+                          JS::MutableHandle<MustConsumeMicroTask> aMicroTask) {
+  // We musn't clobber an unconsumed value.
+  MOZ_ASSERT(aMicroTask.get().IsConsumed());
+  JS::DequeueNextMicroTask(aCx,
+                           MustConsumeMicroTask::MicroTaskHandle(aMicroTask));
 }
 
-MustConsumeMicroTask DequeueNextRegularMicroTask(JSContext* aCx) {
-  return MustConsumeMicroTask(JS::DequeueNextRegularMicroTask(aCx));
+void DequeueNextRegularMicroTask(
+    JSContext* aCx, JS::MutableHandle<MustConsumeMicroTask> aMicroTask) {
+  MOZ_ASSERT(aMicroTask.get().IsConsumed());
+  JS::DequeueNextRegularMicroTask(
+      aCx, MustConsumeMicroTask::MicroTaskHandle(aMicroTask));
 }
 
-MustConsumeMicroTask DequeueNextDebuggerMicroTask(JSContext* aCx) {
-  return MustConsumeMicroTask(JS::DequeueNextDebuggerMicroTask(aCx));
+void DequeueNextDebuggerMicroTask(
+    JSContext* aCx, JS::MutableHandle<MustConsumeMicroTask> aMicroTask) {
+  MOZ_ASSERT(aMicroTask.get().IsConsumed());
+  JS::DequeueNextDebuggerMicroTask(
+      aCx, MustConsumeMicroTask::MicroTaskHandle(aMicroTask));
 }
 
-WontConsumeMicroTask PeekNextMicroTask(JSContext* aCx) {
-  return WontConsumeMicroTask(JS::PeekNextMicroTask(aCx));
+void PeekNextMicroTask(JSContext* aCx,
+                       JS::MutableHandle<WontConsumeMicroTask> aMicroTask) {
+  JS::PeekNextMicroTask(aCx, WontConsumeMicroTask::MicroTaskHandle(aMicroTask));
+  MOZ_RELEASE_ASSERT(aMicroTask.get().mMicroTask.isSome());
 }
 
 static bool IsSuppressed(JS::Handle<MustConsumeMicroTask> aTask) {
@@ -1247,7 +1260,7 @@ bool CycleCollectedJSContext::PerformMicroTaskCheckPoint(bool aForce) {
   // Make sure we don't leak tasks into the Gecko MicroTask queues.
   JS::Rooted<MustConsumeMicroTask> job(cx);
   while (JS::HasAnyMicroTasks(cx)) {
-    job.set(DequeueNextMicroTask(cx));
+    DequeueNextMicroTask(cx, &job);
 
     // To avoid us accidentally re-enqueing a SuppressionMicroTaskList in
     // itself, we determine here if the job is actually the suppression task
@@ -1256,6 +1269,9 @@ bool CycleCollectedJSContext::PerformMicroTaskCheckPoint(bool aForce) {
         mSuppressedMicroTaskList
             ? MaybeUnwrapTaskToRunnable(job) == mSuppressedMicroTaskList
             : false;
+    if (isSuppressionJob) {
+      mSuppressedMicroTaskList->mIsQueued = false;
+    }
 
     // No need to check Suppressed if there aren't ongoing sync operations nor
     // pending mSuppressedMicroTasks.s
@@ -1307,11 +1323,15 @@ bool CycleCollectedJSContext::PerformMicroTaskCheckPoint(bool aForce) {
     // owned happens, inside of RunMicroTask, the remaining ref will be
     // dropped, and the code will be cleaned up.
     //
-    // This should work generally, as if you re-enqueue the task list (we have
-    // no code to prevent this!) you'll just have more refs in the queue,
-    // all of which is good.
-    if (!EnqueueMicroTask(cx, do_AddRef(mSuppressedMicroTaskList))) {
-      MOZ_CRASH("Failed to re-enqueue suppressed microtask list");
+    // The list must only be in the queue once: a stale duplicate would be
+    // dequeued after a newer list replaced this one. This matters for nested
+    // checkpoints run by AutoDebuggerJobQueueInterruption, where the list may
+    // already be sitting in the saved queue.
+    if (!mSuppressedMicroTaskList->mIsQueued) {
+      if (!EnqueueMicroTask(cx, do_AddRef(mSuppressedMicroTaskList))) {
+        MOZ_CRASH("Failed to re-enqueue suppressed microtask list");
+      }
+      mSuppressedMicroTaskList->mIsQueued = true;
     }
   }
 
@@ -1328,7 +1348,7 @@ void CycleCollectedJSContext::PerformDebuggerMicroTaskCheckpoint() {
 
   JS::Rooted<MustConsumeMicroTask> job(cx);
   while (JS::HasDebuggerMicroTasks(cx)) {
-    job.set(DequeueNextDebuggerMicroTask(cx));
+    DequeueNextDebuggerMicroTask(cx, &job);
 
     // MG:XXX: Need to add a JS::JobQueueIsEmpty call here.
 
@@ -1395,8 +1415,10 @@ NS_IMETHODIMP CycleCollectedJSContext::NotifyUnhandledRejections::Run() {
     // pre-existing behavior where FlushRejections reported before handling
     // could occur. Only preventDefault() suppresses the console report.
     if (!defaultPrevented && !suppressReporting) {
-      JSAutoRealm ar(cccx->Context(), promiseObj);
-      Promise::ReportRejectedPromise(cccx->Context(), promiseObj);
+      AutoJSAPI jsapi;
+      jsapi.Init();
+      JSAutoRealm ar(jsapi.cx(), promiseObj);
+      Promise::ReportRejectedPromise(jsapi.cx(), promiseObj);
     }
 
     // Remove from the pending table. May already be removed if the
@@ -1434,8 +1456,10 @@ nsresult CycleCollectedJSContext::NotifyUnhandledRejections::Cancel() {
       }
 
       if (!suppressReporting) {
-        JSAutoRealm ar(cccx->Context(), promiseObj);
-        Promise::ReportRejectedPromise(cccx->Context(), promiseObj);
+        AutoJSAPI jsapi;
+        jsapi.Init();
+        JSAutoRealm ar(jsapi.cx(), promiseObj);
+        Promise::ReportRejectedPromise(jsapi.cx(), promiseObj);
       }
     }
 
@@ -1565,9 +1589,8 @@ void FinalizationRegistryCleanup::DoCleanup() {
   std::swap(callbacks.get(), mCallbacks.get());
 
   for (const Callback& callback : callbacks) {
-    JS::ExposeObjectToActiveJS(
-        JS_GetFunctionObject(callback.mCallbackFunction));
-    JS::ExposeObjectToActiveJS(callback.mIncumbentGlobal);
+    JS::AssertObjectIsNotGray(JS_GetFunctionObject(callback.mCallbackFunction));
+    JS::AssertObjectIsNotGray(callback.mIncumbentGlobal);
 
     JS::RootedObject functionObj(
         cx, JS_GetFunctionObject(callback.mCallbackFunction));

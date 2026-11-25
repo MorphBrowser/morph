@@ -15,14 +15,9 @@ add_setup(async function () {
     set: [
       ["browser.altClickSave", true],
       ["browser.urlbar.autoFill", false],
-      // Tests get no default Top Sites, and the view is opened on an empty
-      // string here, which would otherwise leave it closed with no results.
-      [
-        "browser.newtabpage.activity-stream.default.sites",
-        "https://example.com/",
-      ],
     ],
   });
+  UrlbarTestUtils.registerZeroPrefixProvider();
 });
 
 add_task(async function alt_left_click_test() {
@@ -105,7 +100,11 @@ add_task(async function shift_accel_left_click_test() {
 
   // Check the load occurred in a new background tab.
   info("URL should be loaded in a new background tab");
-  is(gURLBar.value, "", "Urlbar reverted to original value");
+  is(
+    gURLBar.value,
+    "http://example.com/",
+    "Urlbar keeps the value after opening in a background tab"
+  );
   ok(gURLBar.focused, "Urlbar keeps focus after opening in a background tab");
   is(gBrowser.selectedTab, tab, "Focus did not change to the new tab");
 

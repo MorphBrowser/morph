@@ -338,7 +338,7 @@ async function cleanupFormReviewTest(context) {
   _setRemoteClientForTesting({
     get: async () => MOCK_RS_RECORDS,
   });
-  context.mockEngineManager.rejectAllRequests();
+  await context.mockEngineManager.rejectAllRequests();
   context.mockEngineManager.cleanupMocks();
 
   try {
@@ -449,7 +449,7 @@ async function getFormReviewSnapshot(reviewBrowser) {
       ),
       fillButtonDisabled:
         review.renderRoot.querySelector(
-          'moz-button[data-l10n-id="ai-smart-form-fill-fill-form"]'
+          'moz-button[data-l10n-id="ai-smart-form-fill-fill-form-button"]'
         )?.disabled ?? null,
     };
   });

@@ -412,6 +412,26 @@ export var PlacesDBUtils = {
         },
       },
 
+      // D.1.1 remove tag entries for urls that are not bookmarked
+      // A bookmark with a missing parent still counts as a bookmark, D.3 will
+      // move it to the unfiled folder.
+      {
+        query: `DELETE FROM moz_bookmarks WHERE id IN (
+          SELECT b.id FROM moz_bookmarks b
+          JOIN moz_bookmarks t ON t.id = b.parent
+          WHERE t.parent = :tags_folder
+            AND NOT EXISTS (
+              SELECT 1 FROM moz_bookmarks b2
+              LEFT JOIN moz_bookmarks p2 ON p2.id = b2.parent
+              WHERE b2.fk = b.fk
+                AND p2.parent IS NOT :tags_folder
+            )
+        )`,
+        params: {
+          tags_folder: lazy.PlacesUtils.tagsFolderId,
+        },
+      },
+
       // D.2 remove empty tags
       {
         query: `DELETE FROM moz_bookmarks WHERE guid NOT IN (
@@ -648,17 +668,10 @@ export var PlacesDBUtils = {
         )`,
       },
 
-      // Remove icons whose origin is not in moz_origins, unless referenced.
+      // Remove orphan icons.
       {
         query: `DELETE FROM moz_icons WHERE id IN (
-          SELECT id FROM moz_icons WHERE root = 0
-          UNION ALL
-          SELECT id FROM moz_icons
-          WHERE root = 1
-            AND get_host_and_port(icon_url) NOT IN (SELECT host FROM moz_origins)
-            AND fixup_url(get_host_and_port(icon_url)) NOT IN (SELECT host FROM moz_origins)
-          EXCEPT
-          SELECT icon_id FROM moz_icons_to_pages
+          SELECT id FROM moz_orphan_icons
         )`,
       },
 

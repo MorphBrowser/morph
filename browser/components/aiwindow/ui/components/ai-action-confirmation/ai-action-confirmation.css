@@ -19,7 +19,6 @@
 }
 
 .action-confirmation-wrapper {
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   background-color: var(--ai-action-confirmation-background-color);
   border: var(--border-width) solid var(--border-color-transparent);
   border-radius: var(--border-radius-large);
@@ -70,7 +69,7 @@
 }
 
 .action-confirmation-icon {
-  background-image: url("chrome://browser/skin/closed-tabs.svg");
+  background-image: var(--ai-action-confirmation-icon-image);
   background-position: center;
   background-repeat: no-repeat;
   background-size: contain;
@@ -89,8 +88,7 @@
   }
 }
 
-.action-confirmation-label,
-.action-confirmation-tab-label {
+.action-confirmation-label {
   font-size: var(--font-size-small);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -153,7 +151,6 @@
     inset-block-end: 0;
     inset-inline: 0;
     block-size: var(--size-item-medium);
-    /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
     background: linear-gradient(to top, var(--ai-action-confirmation-background-color), transparent);
     pointer-events: none;
     /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
@@ -190,7 +187,7 @@
   }
 }
 
-.action-confirmation-tabs {
+.action-confirmation-items {
   display: flex;
   flex-direction: column;
   gap: var(--space-xxsmall);
@@ -203,50 +200,4 @@
   scrollbar-gutter: stable;
   scroll-timeline-name: --action-confirmation-scroll;
   scroll-timeline-axis: block;
-}
-
-.action-confirmation-tab {
-  align-items: center;
-  border-radius: var(--border-radius-medium);
-  color: inherit;
-  cursor: pointer;
-  display: flex;
-  gap: var(--space-small);
-  min-width: 0;
-  padding: var(--space-xsmall) var(--space-small);
-  text-decoration: none;
-
-  &:hover {
-    background-color: var(--button-background-color-ghost-hover);
-    color: var(--button-text-color-ghost-hover);
-
-    &:active {
-      background-color: var(--button-background-color-ghost-active);
-      color: var(--button-text-color-ghost-active);
-    }
-  }
-
-  &:focus-visible {
-    outline: var(--focus-outline);
-    outline-offset: var(--focus-outline-inset);
-  }
-}
-
-.action-confirmation-tab-icon {
-  border-radius: var(--border-radius-small);
-  flex-shrink: 0;
-  height: var(--icon-size);
-  width: var(--icon-size);
-  -moz-context-properties: fill;
-  fill: var(--icon-color);
-
-  @media (forced-colors: active) {
-    fill: currentColor;
-  }
-}
-
-.action-confirmation-tab-label {
-  color: inherit;
-  flex: 1 1 auto;
-  min-width: 0;
 }

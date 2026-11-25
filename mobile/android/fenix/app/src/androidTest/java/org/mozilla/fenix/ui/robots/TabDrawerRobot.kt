@@ -7,7 +7,6 @@
 package org.mozilla.fenix.ui.robots
 
 import android.util.Log
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -141,7 +140,6 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
         )
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyExistingOpenTabs(vararg titles: String) {
         titles.forEach { title ->
             Log.i(TAG, "verifyExistingOpenTabs: Waiting for $waitingTime ms for tab with title: $title to exist")
@@ -153,7 +151,6 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
         }
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyOpenTabsOrder(title: String, position: Int, isListViewEnabled: Boolean = false) {
         composeTestRule.waitUntilAtLeastOneExists(
             hasText(title),
@@ -191,7 +188,6 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
         }
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyNormalTabsList() {
         composeTestRule.waitUntilAtLeastOneExists(hasTestTag(NORMAL_TABS_LIST), waitingTime)
         Log.i(TAG, "verifyNormalTabsList: Trying to verify that the normal tabs list exists")
@@ -297,6 +293,35 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "verifyTabCloseButton: Verified that the close tab button exists")
     }
 
+    // Indicator lives only in the unmerged tree: it is merged into the tab item's clickable root.
+    /** Verifies the media indicator on a tab, shown while its media session is PLAYING. */
+    fun verifyTabMediaIndicator() {
+        Log.i(TAG, "verifyTabMediaIndicator: Waiting for $waitingTime ms until the tab media indicator exists")
+        composeTestRule.waitUntil(waitingTime) {
+            composeTestRule
+                .onAllNodesWithTag(TabsTrayTestTag.TAB_ITEM_MEDIA_INDICATOR, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        Log.i(TAG, "verifyTabMediaIndicator: Trying to verify that the tab media indicator exists")
+        composeTestRule.tabMediaIndicator().assertExists()
+        Log.i(TAG, "verifyTabMediaIndicator: Verified that the tab media indicator exists")
+    }
+
+    /** Verifies the media indicator is gone, as happens once the tab's media is paused. */
+    fun verifyTabMediaIndicatorDoesNotExist() {
+        Log.i(TAG, "verifyTabMediaIndicatorDoesNotExist: Waiting for $waitingTime ms until the media indicator is gone")
+        composeTestRule.waitUntil(waitingTime) {
+            composeTestRule
+                .onAllNodesWithTag(TabsTrayTestTag.TAB_ITEM_MEDIA_INDICATOR, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        Log.i(TAG, "verifyTabMediaIndicatorDoesNotExist: Trying to verify that the tab media indicator does not exist")
+        composeTestRule.tabMediaIndicator().assertDoesNotExist()
+        Log.i(TAG, "verifyTabMediaIndicatorDoesNotExist: Verified that the tab media indicator does not exist")
+    }
+
     fun verifyTabTrayIsOpen() {
         Log.i(TAG, "verifyTabTrayIsOpen: Trying to verify that the tabs tray exists")
         composeTestRule.tabsTray().assertExists()
@@ -310,7 +335,6 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
     }
 
     /** Closes a tab when there is only one tab open. */
-    @OptIn(ExperimentalTestApi::class)
     fun closeTab() {
         Log.i(TAG, "closeTab: Waiting until the close tab button exists")
         composeTestRule.waitUntilAtLeastOneExists(hasTestTag(TabsTrayTestTag.TAB_ITEM_CLOSE))
@@ -355,37 +379,7 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "swipeTabRight: mDevice.waitForIdle() returned")
     }
 
-    /** Creates a collection from the provided [tabTitles]. */
-    fun createCollection(
-        vararg tabTitles: String,
-        collectionName: String,
-        firstCollection: Boolean = true,
-    ) {
-        Log.i(TAG, "createCollection: Trying to click the three dot button")
-        composeTestRule.threeDotButton().performClick()
-        Log.i(TAG, "createCollection: Clicked the three dot button")
-        Log.i(TAG, "createCollection: Trying to click the \"Select tabs\" menu button")
-        composeTestRule.dropdownMenuItemSelectTabs().performClick()
-        Log.i(TAG, "createCollection: Clicked the \"Select tabs\" menu button")
-
-        for (tab in tabTitles) {
-            selectTab(tab, numberOfSelectedTabs = tabTitles.indexOf(tab) + 1)
-        }
-
-        Log.i(TAG, "createCollection: Trying to click the three dot button")
-        composeTestRule.threeDotButton().performClick()
-        Log.i(TAG, "createCollection: Clicked the three dot button")
-
-        clickCollectionsButton(composeTestRule) {
-            if (!firstCollection) {
-                clickAddNewCollection()
-            }
-            typeCollectionNameAndSave(collectionName)
-        }
-    }
-
     /** Selects a tab with [title]. */
-    @OptIn(ExperimentalTestApi::class)
     fun selectTab(title: String, numberOfSelectedTabs: Int = 0) {
         Log.i(TAG, "selectTab: Waiting for $waitingTime ms until the tab with title: $title exists")
         composeTestRule.waitUntilExactlyOneExists(hasText(title), waitingTime)
@@ -614,15 +608,6 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
             return BrowserRobot.Transition(composeTestRule)
         }
 
-        fun clickSaveCollection(interact: CollectionRobot.() -> Unit): CollectionRobot.Transition {
-            Log.i(TAG, "clickSaveCollection: Trying to click the collections button")
-            composeTestRule.collectionsButton().performClick()
-            Log.i(TAG, "clickSaveCollection: Clicked collections button")
-
-            CollectionRobot(composeTestRule).interact()
-            return CollectionRobot.Transition(composeTestRule)
-        }
-
         fun clickSelectTabsButton(interact: TabDrawerRobot.() -> Unit): Transition {
             Log.i(TAG, "clickSelectTabsButton: Trying to click the \"Select tabs\" menu button")
             composeTestRule.dropdownMenuItemSelectTabs().performClick()
@@ -656,19 +641,6 @@ class TabDrawerRobot(private val composeTestRule: ComposeTestRule) {
 fun composeTabDrawer(composeTestRule: ComposeTestRule, interact: TabDrawerRobot.() -> Unit): TabDrawerRobot.Transition {
     TabDrawerRobot(composeTestRule).interact()
     return TabDrawerRobot.Transition(composeTestRule)
-}
-
-/** Clicks on the Collections button in the Tabs Tray banner and opens a transition in the [CollectionRobot]. */
-private fun clickCollectionsButton(
-    composeTestRule: ComposeTestRule,
-    interact: CollectionRobot.() -> Unit,
-): CollectionRobot.Transition {
-    Log.i(TAG, "clickCollectionsButton: Trying to click the collections button")
-    composeTestRule.collectionsButton().performClick()
-    Log.i(TAG, "clickCollectionsButton: Clicked the collections button")
-
-    CollectionRobot(composeTestRule).interact()
-    return CollectionRobot.Transition(composeTestRule)
 }
 
 /** Obtains the root Tabs Tray. */
@@ -728,6 +700,10 @@ private fun ComposeTestRule.closeTabButton() = onNodeWithTag(TabsTrayTestTag.TAB
 /** Obtains an open tab's thumbnail when there's only one tab open. */
 private fun ComposeTestRule.tabThumbnail() = onNodeWithTag(TabsTrayTestTag.TAB_ITEM_THUMBNAIL)
 
+/** Obtains a tab's media-playing indicator (unmerged tree; see verifyTabMediaIndicator). */
+private fun ComposeTestRule.tabMediaIndicator() =
+    onNodeWithTag(TabsTrayTestTag.TAB_ITEM_MEDIA_INDICATOR, useUnmergedTree = true)
+
 /** Obtains the three dot button in the Tabs Tray banner. */
 private fun ComposeTestRule.threeDotButton() = onNodeWithTag(TabsTrayTestTag.THREE_DOT_BUTTON)
 
@@ -748,9 +724,6 @@ private fun ComposeTestRule.dropdownMenuItemTabSettings() = onNodeWithTag(TabsTr
 
 /** Obtains the dropdown menu item to share tabs. */
 private fun ComposeTestRule.dropdownMenuItemShare() = onNodeWithTag(TabsTrayTestTag.SHARE_BUTTON)
-
-/** Obtains the Tabs Tray banner collections button. */
-private fun ComposeTestRule.collectionsButton() = onNodeWithTag(TabsTrayTestTag.COLLECTIONS_BUTTON)
 
 /** Obtains the Tabs Tray banner multi selection counter. */
 private fun ComposeTestRule.multiSelectionCounter() = onNodeWithTag(TabsTrayTestTag.SELECTION_COUNTER)

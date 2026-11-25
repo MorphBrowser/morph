@@ -264,6 +264,10 @@ class WindowGlobalParent final : public WindowContext,
 
   bool DocumentHasLoaded() { return mDocumentHasLoaded; }
 
+  bool MayHaveViewTransitionOptIn() const {
+    return mMayHaveViewTransitionOptIn;
+  }
+
   bool DocumentHasUserInteracted() { return mDocumentHasUserInteracted; }
 
   uint32_t SandboxFlags() { return mSandboxFlags; }
@@ -276,7 +280,7 @@ class WindowGlobalParent final : public WindowContext,
 
   uint32_t HttpsOnlyStatus() { return mHttpsOnlyStatus; }
 
-  void AddSecurityState(uint32_t aStateFlags);
+  void ApplySecurityStateToTop(uint32_t aStateFlags);
   uint32_t GetSecurityFlags() { return mSecurityState; }
 
   const RemoteType& GetRemoteType() const override;
@@ -305,6 +309,10 @@ class WindowGlobalParent final : public WindowContext,
   // loaded, if known.
   already_AddRefed<nsIChannel> GetFailedChannel();
 
+  // The LoadingSessionHistoryInfo::mLoadId of the parent process load which
+  // produced this document, or 0 if there was none.
+  uint64_t DocumentHistoryLoadId() const { return mDocumentHistoryLoadId; }
+
   dom::NoCorsMediaRequestState NoCorsMediaRequestState(nsIURI* aURI);
 
   void RecordSubsequentNoCorsRequestState(nsIURI* aURI);
@@ -321,13 +329,16 @@ class WindowGlobalParent final : public WindowContext,
       const MaybeDiscarded<dom::BrowsingContext>& aTargetBC,
       nsDocShellLoadState* aLoadState, bool aSetNavigating);
   mozilla::ipc::IPCResult RecvInternalLoad(nsDocShellLoadState* aLoadState);
+  mozilla::ipc::IPCResult RecvAddSecurityState(uint32_t aStateFlags);
   mozilla::ipc::IPCResult RecvUpdateDocumentURI(NotNull<nsIURI*> aURI);
   mozilla::ipc::IPCResult RecvUpdateDocumentPrincipal(
-      nsIPrincipal* aNewDocumentPrincipal,
-      nsIPrincipal* aNewDocumentPartitionedPrincipal);
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& aNewDocumentPrincipal,
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&&
+          aNewDocumentPartitionedPrincipal);
   mozilla::ipc::IPCResult RecvUpdatePrincipalPartitioning(
       bool aPartitionStoragePrincipal);
   mozilla::ipc::IPCResult RecvUpdateDocumentHasLoaded(bool aDocumentHasLoaded);
+  mozilla::ipc::IPCResult RecvSetMayHaveViewTransitionOptIn(bool aMayHave);
   mozilla::ipc::IPCResult RecvUpdateDocumentHasUserInteracted(
       bool aDocumentHasUserInteracted);
   mozilla::ipc::IPCResult RecvUpdateSandboxFlags(uint32_t aSandboxFlags);
@@ -354,7 +365,7 @@ class WindowGlobalParent final : public WindowContext,
       ParentProcessChannelHandle* aDocumentHandle,
       ParentProcessChannelHandle* aFailedHandle);
   mozilla::ipc::IPCResult RecvSetClientInfo(
-      const IPCClientInfo& aIPCClientInfo);
+      Tainted<IPCClientInfo>&& aIPCClientInfo);
   mozilla::ipc::IPCResult RecvDestroy();
   mozilla::ipc::IPCResult RecvRawMessage(const JSActorMessageMeta& aMeta,
                                          JSIPCValue&& aData,
@@ -416,9 +427,8 @@ class WindowGlobalParent final : public WindowContext,
       GetStorageAccessPermissionResolver&& aResolve);
 
   mozilla::ipc::IPCResult RecvSetCookies(
-      const nsCString& aBaseDomain, const OriginAttributes& aOriginAttributes,
-      nsIURI* aHost, bool aIsThirdParty,
-      const nsTArray<CookieStruct>& aCookies);
+      const OriginAttributes& aOriginAttributes, nsIURI* aHost,
+      bool aIsThirdParty, const nsTArray<CookieStruct>& aCookies);
 
   mozilla::ipc::IPCResult RecvRecordUserActivationForBTP();
 
@@ -459,18 +469,21 @@ class WindowGlobalParent final : public WindowContext,
   void NotifyPrefetchStateChanged(dom::PrefetchRecordParent* aRec);
   void DedupePrefetchRecords(dom::PrefetchRecordParent* aJustCompleted);
 
+  static void ClearPrefetchCache(nsIPrincipal* aPartitionedPrincipal);
+
   // "Find a matching complete prefetch record": synchronous lookup of a
   // completed prefetch record for navigation.
   // Spec:
   // https://wicg.github.io/nav-speculation/prefetch.html#find-a-matching-complete-prefetch-record
   dom::PrefetchRecordParent* FindMatchingPrefetchRecord(nsIURI* aURI);
 
-  // "Wait for a matching prefetch record": async wait; resolves when a match
-  // completes or timeout expires.
+  // "Wait for a matching prefetch record": returns null if no ongoing
+  // prefetch could match aURI, otherwise a promise that resolves when a match
+  // completes (or with nullptr when none can, or when
+  // dom.speculation_rules.wait_timeout_ms expires).
   // Spec:
   // https://wicg.github.io/nav-speculation/prefetch.html#wait-for-a-matching-prefetch-record
-  RefPtr<PrefetchMatchPromise> WaitForMatchingPrefetchRecord(
-      nsIURI* aURI, TimeDuration aTimeout);
+  RefPtr<PrefetchMatchPromise> WaitForMatchingPrefetchRecord(nsIURI* aURI);
 
   // Whether some ongoing prefetch record could still become a matching
   // prefetch record for aURI once it completes. Used by
@@ -479,6 +492,11 @@ class WindowGlobalParent final : public WindowContext,
   // Spec:
   // https://wicg.github.io/nav-speculation/prefetch.html#wait-for-a-matching-prefetch-record
   bool HasPotentialPrefetchMatch(nsIURI* aURI);
+
+  // Whether a prefetch candidate covered aURI, whether or not it was fetched.
+  // Branch-symmetric, so the experiment can compare prefetched navigations
+  // against ones that would have been prefetched.
+  bool HasMatchingPrefetchCandidate(nsIURI* aURI);
 
   void RemoveWaiter(PrefetchMatchWaiter* aWaiter);
 
@@ -557,6 +575,8 @@ class WindowGlobalParent final : public WindowContext,
   // May not match the channel in the content process in some cases.
   nsCOMPtr<nsIChannel> mFailedChannel;
 
+  uint64_t mDocumentHistoryLoadId = 0;
+
   uint32_t mSandboxFlags;
 
   struct OriginCounter {
@@ -574,6 +594,7 @@ class WindowGlobalParent final : public WindowContext,
 
   bool mDocumentHasLoaded;
   bool mDocumentHasUserInteracted;
+  bool mMayHaveViewTransitionOptIn = false;
   bool mDocumentTreeWouldPreloadResources = false;
   bool mBlockAllMixedContent;
   bool mUpgradeInsecureRequests;

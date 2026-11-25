@@ -3,7 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 @file:Suppress("TooManyFunctions")
-@file:OptIn(ExperimentalMaterial3Api::class)
 
 package org.mozilla.fenix.bookmarks
 
@@ -13,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,7 +29,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
@@ -102,6 +99,7 @@ import mozilla.components.compose.base.text.Text
 import mozilla.components.compose.base.textfield.TextField
 import mozilla.components.compose.base.utils.BackInvokedHandler
 import mozilla.components.compose.browser.toolbar.concept.BrowserToolbarTestTags.ADDRESSBAR_SEARCH_BOX
+import mozilla.components.support.ktx.util.URLStringUtils
 import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.bookmarks.BookmarksTestTag.BOOKMARK_PLACEHOLDER
@@ -191,7 +189,6 @@ internal object BookmarksDestinations {
 }
 
 /** The Bookmarks list screen. */
-@OptIn(ExperimentalLayoutApi::class) // for WindowInsets.isImeVisible
 @Suppress("LongMethod", "CyclomaticComplexMethod")
 @Composable
 private fun BookmarksList(store: BookmarksStore) {
@@ -360,7 +357,7 @@ private fun BookmarksSearchListContent(
             FaviconListItem(
                 label = item.title,
                 url = item.previewImageUrl,
-                description = item.url,
+                description = URLStringUtils.toLosslessDisplayUrl(item.url),
                 onClick = { onBookmarkClicked(item) },
                 modifier = Modifier.width(FirefoxTheme.layout.size.containerMaxWidth).testTag(BOOKMARK_SEARCH_ITEM),
             )
@@ -464,7 +461,7 @@ private fun BookmarksListContent(
                                 modifier = Modifier.size(24.dp),
                             ) {
                                 Icon(
-                                    painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
+                                    painter = painterResource(iconsR.drawable.mozac_ic_more_vertical_round_24),
                                     contentDescription = null,
                                 )
                             }
@@ -494,7 +491,7 @@ private fun BookmarksListContent(
                     label = item.title,
                     url = item.previewImageUrl,
                     isSelected = isSelected,
-                    description = item.url,
+                    description = URLStringUtils.toLosslessDisplayUrl(item.url),
                     onClick = { dispatcher.invoke(BookmarkClicked(item)) },
                     onLongClick = { dispatcher.invoke(BookmarkLongClicked(item)) },
                     modifier =
@@ -523,7 +520,7 @@ private fun BookmarksListContent(
                             modifier = Modifier.size(24.dp),
                         ) {
                             Icon(
-                                painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
+                                painter = painterResource(iconsR.drawable.mozac_ic_more_vertical_round_24),
                                 contentDescription = null,
                             )
                         }
@@ -777,7 +774,7 @@ private fun BookmarksListTopBarActionsSelections(
             contentDescription = stringResource(R.string.content_description_menu),
         ) {
             Icon(
-                painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
+                painter = painterResource(iconsR.drawable.mozac_ic_more_vertical_round_24),
                 contentDescription = null,
                 tint = iconColor,
             )
@@ -828,7 +825,7 @@ private fun BookmarksListTopBarActionsFolderSelections(
             contentDescription = stringResource(R.string.content_description_menu),
         ) {
             Icon(
-                painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
+                painter = painterResource(iconsR.drawable.mozac_ic_more_vertical_round_24),
                 contentDescription = null,
                 tint = iconColor,
             )
@@ -904,7 +901,7 @@ private fun BookmarksListTopBarActionsNoSelection(
                 contentDescription = stringResource(R.string.bookmark_import_bookmarks_button_content_description),
             ) {
                 Icon(
-                    painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
+                    painter = painterResource(iconsR.drawable.mozac_ic_more_vertical_round_24),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurface,
                 )
@@ -1348,6 +1345,7 @@ private fun EditBookmarkScreen(store: BookmarksStore) {
 
     val bookmark = state?.bookmark ?: return
     val folder = state?.folder ?: return
+    val urlText = state?.urlText ?: return
 
     Scaffold(
         topBar = {
@@ -1364,6 +1362,7 @@ private fun EditBookmarkScreen(store: BookmarksStore) {
             Column(modifier = Modifier.width(FirefoxTheme.layout.size.containerMaxWidth)) {
                 BookmarkEditor(
                     bookmarkItem = bookmark,
+                    urlText = urlText,
                     onTitleChanged = { store.dispatch(EditBookmarkAction.TitleChanged(it)) },
                     onURLChanged = { store.dispatch(EditBookmarkAction.URLChanged(it)) },
                 )
@@ -1380,6 +1379,7 @@ private fun EditBookmarkScreen(store: BookmarksStore) {
 @Composable
 private fun BookmarkEditor(
     bookmarkItem: BookmarkItem.Bookmark,
+    urlText: String,
     onTitleChanged: (String) -> Unit,
     onURLChanged: (String) -> Unit,
 ) {
@@ -1412,7 +1412,7 @@ private fun BookmarkEditor(
             Spacer(modifier = Modifier.height(16.dp))
 
             ClearableTextField(
-                value = bookmarkItem.url,
+                value = urlText,
                 onValueChange = onURLChanged,
                 placeholder = stringResource(R.string.bookmark_url_label),
                 modifier =

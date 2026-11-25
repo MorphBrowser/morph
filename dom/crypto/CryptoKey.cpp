@@ -624,7 +624,8 @@ SECItem* CreateEDPointForXCoordinate(const CryptoBuffer& aX,
   return point;
 }
 
-UniqueSECKEYPrivateKey CryptoKey::PrivateKeyFromJwk(const JsonWebKey& aJwk) {
+UniqueSECKEYPrivateKey CryptoKey::PrivateKeyFromJwk(const JsonWebKey& aJwk,
+                                                    const nsString aAlgName) {
   CK_OBJECT_CLASS privateKeyValue = CKO_PRIVATE_KEY;
   CK_BBOOL falseValue = CK_FALSE;
 
@@ -735,6 +736,18 @@ UniqueSECKEYPrivateKey CryptoKey::PrivateKeyFromJwk(const JsonWebKey& aJwk) {
 
     if (!namedCurve.EqualsLiteral(WEBCRYPTO_NAMED_CURVE_ED25519) &&
         !namedCurve.EqualsLiteral(WEBCRYPTO_NAMED_CURVE_CURVE25519)) {
+      return nullptr;
+    }
+
+    MOZ_ASSERT(!aAlgName.IsEmpty());
+
+    if (namedCurve.EqualsLiteral(WEBCRYPTO_NAMED_CURVE_ED25519) &&
+        !aAlgName.EqualsLiteral(WEBCRYPTO_ALG_ED25519)) {
+      return nullptr;
+    }
+
+    if (namedCurve.EqualsLiteral(WEBCRYPTO_NAMED_CURVE_CURVE25519) &&
+        !aAlgName.EqualsLiteral(WEBCRYPTO_ALG_X25519)) {
       return nullptr;
     }
 
@@ -960,6 +973,9 @@ nsresult CryptoKey::PrivateKeyToJwk(SECKEYPrivateKey* aPrivKey,
         // SECKEY_ConvertToPublicKey will try to derive public key
         UniqueSECKEYPublicKey pubKey =
             UniqueSECKEYPublicKey(SECKEY_ConvertToPublicKey(aPrivKey));
+        if (!pubKey) {
+          return NS_ERROR_DOM_OPERATION_ERR;
+        }
         rv = PK11_ReadRawAttribute(PK11_TypePubKey, pubKey.get(), CKA_EC_POINT,
                                    &ecPoint);
 
@@ -1009,6 +1025,30 @@ nsresult CryptoKey::PrivateKeyToJwk(SECKEYPrivateKey* aPrivKey,
         return NS_ERROR_DOM_OPERATION_ERR;
       }
 
+      return NS_OK;
+    }
+
+    case kyberKey: {
+      CryptoBuffer seed;
+      nsresult rv = PrivateMLKEMKeyToSeed(aPrivKey, seed);
+      if (NS_FAILED(rv)) {
+        return rv;
+      }
+
+      UniqueSECKEYPublicKey pubKey(SECKEY_ConvertToPublicKey(aPrivKey));
+      if (!pubKey || pubKey->keyType != kyberKey) {
+        return NS_ERROR_DOM_OPERATION_ERR;
+      }
+
+      rv = PublicKeyToJwk(pubKey.get(), aRetVal);
+      if (NS_FAILED(rv)) {
+        return rv;
+      }
+
+      aRetVal.mPriv.Construct();
+      if (NS_FAILED(seed.ToJwkBase64(aRetVal.mPriv.Value()))) {
+        return NS_ERROR_DOM_OPERATION_ERR;
+      }
       return NS_OK;
     }
     default:
@@ -1085,7 +1125,8 @@ UniqueSECKEYPublicKey CreateECPublicKey(const SECItem* aKeyData,
   return key;
 }
 
-UniqueSECKEYPublicKey CryptoKey::PublicKeyFromJwk(const JsonWebKey& aJwk) {
+UniqueSECKEYPublicKey CryptoKey::PublicKeyFromJwk(const JsonWebKey& aJwk,
+                                                  const nsString aAlgName) {
   if (aJwk.mKty.EqualsLiteral(JWK_TYPE_RSA)) {
     // Verify that all of the required parameters are present
     CryptoBuffer n, e;
@@ -1183,6 +1224,17 @@ UniqueSECKEYPublicKey CryptoKey::PublicKeyFromJwk(const JsonWebKey& aJwk) {
       return nullptr;
     }
 
+    MOZ_ASSERT(!aAlgName.IsEmpty());
+    if (namedCurve.EqualsLiteral(WEBCRYPTO_NAMED_CURVE_ED25519) &&
+        !aAlgName.EqualsLiteral(WEBCRYPTO_ALG_ED25519)) {
+      return nullptr;
+    }
+
+    if (namedCurve.EqualsLiteral(WEBCRYPTO_NAMED_CURVE_CURVE25519) &&
+        !aAlgName.EqualsLiteral(WEBCRYPTO_ALG_X25519)) {
+      return nullptr;
+    }
+
     return CreateECPublicKey(point, namedCurve);
   }
 
@@ -1219,6 +1271,17 @@ nsresult CryptoKey::PublicKeyToJwk(SECKEYPublicKey* aPubKey,
                       &aPubKey->u.ec.publicValue, aRetVal)) {
         return NS_ERROR_DOM_OPERATION_ERR;
       }
+      return NS_OK;
+    }
+    case kyberKey: {
+      CryptoBuffer pub;
+      aRetVal.mPub.Construct();
+      if (NS_FAILED(PublicMLKEMKeyToRaw(aPubKey, pub)) ||
+          NS_FAILED(pub.ToJwkBase64(aRetVal.mPub.Value()))) {
+        return NS_ERROR_DOM_OPERATION_ERR;
+      }
+
+      aRetVal.mKty = NS_LITERAL_STRING_FROM_CSTRING(JWK_TYPE_AKP);
       return NS_OK;
     }
     default:

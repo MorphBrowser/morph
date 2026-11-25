@@ -9,8 +9,6 @@ prefs = [
   "media.seamless-looping-video=false",
   # Bug 2021606
   "privacy.baselineFingerprintingProtection=false",
-  # Bug 2077709
-  "dom.navigation.navigationRateLimit.count=0",
 ]
 
 support-files = [
@@ -29,6 +27,9 @@ support-files = [
 ["test_2_conformance__context__context-attributes-alpha-depth-stencil-antialias.html"]
 fail-if = [
   "os == 'linux' && os_version == '22.04' && arch == 'x86_64' && display == 'wayland'",
+]
+skip-if = [
+  "os == 'mac' && os_version == '10.15' && arch == 'x86_64'",
 ]
 
 ["test_2_conformance__context__context-creation-and-destruction.html"]

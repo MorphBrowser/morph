@@ -46,7 +46,7 @@ describe("Smart Form Fill form review generation", () => {
     const dialogClosed = waitForFormReviewClose(context.win, dialog);
     await activateFormReviewButton(
       reviewBrowser,
-      "ai-smart-form-fill-close-review"
+      "ai-smart-form-fill-close-review-button"
     );
     await dialogClosed;
   });
@@ -121,7 +121,7 @@ describe("Smart Form Fill form review generation", () => {
     const dialogClosed = waitForFormReviewClose(context.win, dialog);
     await activateFormReviewButton(
       reviewBrowser,
-      "ai-smart-form-fill-cancel-review"
+      "ai-smart-form-fill-cancel-review-button"
     );
     await dialogClosed;
   });
@@ -147,7 +147,7 @@ describe("Smart Form Fill form review generation", () => {
     const dialogClosed = waitForFormReviewClose(context.win, dialog);
     await activateFormReviewButton(
       reviewBrowser,
-      "ai-smart-form-fill-close-review"
+      "ai-smart-form-fill-close-review-button"
     );
     await dialogClosed;
   });
@@ -177,7 +177,7 @@ describe("Smart Form Fill form review generation", () => {
       const dialogClosed = waitForFormReviewClose(context.win, dialog);
       await activateFormReviewButton(
         reviewBrowser,
-        "ai-smart-form-fill-close-review"
+        "ai-smart-form-fill-close-review-button"
       );
       await dialogClosed;
     } finally {
@@ -192,7 +192,7 @@ describe("Smart Form Fill form review generation", () => {
       context.mockEngineManager,
       FORM_VALUES_SCHEMA
     );
-    context.mockEngineManager.rejectAllRequests();
+    await context.mockEngineManager.rejectAllRequests();
     await waitForFormReviewState(reviewBrowser, FORM_REVIEW_STATES.FINAL);
 
     const snapshot = await getFormReviewSnapshot(reviewBrowser);
@@ -209,7 +209,7 @@ describe("Smart Form Fill form review generation", () => {
     const dialogClosed = waitForFormReviewClose(context.win, dialog);
     await activateFormReviewButton(
       reviewBrowser,
-      "ai-smart-form-fill-close-review"
+      "ai-smart-form-fill-close-review-button"
     );
     await dialogClosed;
   });

@@ -4,9 +4,9 @@
 
 import { AIWindow } from "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs";
 import { AIWindowUI } from "moz-src:///browser/components/aiwindow/ui/modules/AIWindowUI.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-const lazy = {};
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
 });
 
@@ -16,6 +16,15 @@ const MAX_RECENT_CHATS = 4;
  * Adds the AI Window menuitems to the app menu
  */
 export class AIWindowMenu {
+  static canShowAITabMenu(win, uris) {
+    return (
+      Services.prefs.getBoolPref("browser.smartwindow.aitab.menus", false) &&
+      Services.prefs.getBoolPref("browser.smartwindow.aitab.enabled", false) &&
+      AIWindow.isAIWindowActiveAndEnabled(win) &&
+      uris.some(uri => uri.schemeIs("http") || uri.schemeIs("https"))
+    );
+  }
+
   constructor() {}
 
   /**

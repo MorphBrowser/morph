@@ -32,7 +32,6 @@ function feedStubs() {
     SystemTickFeed: class SystemTickFeed {},
     TelemetryFeed: class TelemetryFeed {},
     TopSitesFeed: class TopSitesFeed {},
-    TopStoriesFeed: class TopStoriesFeed {},
   };
 }
 
@@ -262,10 +261,6 @@ describe("ActivityStream", () => {
       const feed = as.feeds.get("feeds.section.highlights")();
       expect(feed).toBeTruthy();
     });
-    it("should create a TopStoriesFeed feed", () => {
-      const feed = as.feeds.get("feeds.system.topstories")();
-      expect(feed).toBeTruthy();
-    });
     it("should create a AboutPreferences feed", () => {
       const feed = as.feeds.get("feeds.aboutpreferences")();
       expect(feed).toBeTruthy();
@@ -366,8 +361,6 @@ describe("ActivityStream", () => {
     const FEATURE_ENABLED_PREF = "system.showWeather";
     const REGION_WEATHER_CONFIG =
       "browser.newtabpage.activity-stream.discoverystream.region-weather-config";
-    const LOCALE_WEATHER_CONFIG =
-      "browser.newtabpage.activity-stream.discoverystream.locale-weather-config";
     beforeEach(() => {
       services.locale.appLocaleAsBCP47 = "en-US";
 
@@ -376,11 +369,6 @@ describe("ActivityStream", () => {
 
       // Set default regions
       getStringPrefStub.whenCalledWith(REGION_WEATHER_CONFIG).returns("US, CA");
-
-      // Set default locales
-      getStringPrefStub
-        .whenCalledWith(LOCALE_WEATHER_CONFIG)
-        .returns("en-US,en-GB,en-CA");
     });
     it("should turn off when region and locale are not set", () => {
       region.home = "";
@@ -403,27 +391,21 @@ describe("ActivityStream", () => {
       as._updateDynamicPrefs();
       expect(PREFS_CONFIG.get(FEATURE_ENABLED_PREF).value).toBe(false);
     });
-    it("should turn off when locale is not set", () => {
+    it("should turn on in any locale when region is supported", () => {
       region.home = "US";
-      services.locale.appLocaleAsBCP47 = "";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(FEATURE_ENABLED_PREF).value).toBe(false);
-    });
-    it("should turn on when locale is supported", () => {
-      region.home = "US";
-      services.locale.appLocaleAsBCP47 = "en-US";
+      services.locale.appLocaleAsBCP47 = "ja";
       as._updateDynamicPrefs();
       expect(PREFS_CONFIG.get(FEATURE_ENABLED_PREF).value).toBe(true);
     });
-    it("should turn off when locale is not supported", () => {
+    it("should turn on when locale is not set and region is supported", () => {
       region.home = "US";
-      services.locale.appLocaleAsBCP47 = "fr";
+      services.locale.appLocaleAsBCP47 = "";
       as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(FEATURE_ENABLED_PREF).value).toBe(false);
+      expect(PREFS_CONFIG.get(FEATURE_ENABLED_PREF).value).toBe(true);
     });
-    it("should turn off when region and locale are both not supported", () => {
+    it("should turn off in any locale when region is not supported", () => {
       region.home = "FR";
-      services.locale.appLocaleAsBCP47 = "fr";
+      services.locale.appLocaleAsBCP47 = "en-US";
       as._updateDynamicPrefs();
       expect(PREFS_CONFIG.get(FEATURE_ENABLED_PREF).value).toBe(false);
     });
@@ -533,22 +515,15 @@ describe("ActivityStream", () => {
       getStringPrefStub = argsStub((_pref, defaultValue) => defaultValue);
       services.prefs.getStringPref = getStringPrefStub;
     });
-    it("should be available and on everywhere by default", () => {
-      region.home = "CZ";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(true);
-    });
-    it("should stay available but turn off in a blocked region", () => {
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.lists.region-block`)
-        .returns("DE,FR,PL,US");
-      region.home = "US";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(CONTAINER_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
-    });
+    it.each(["CZ", "US"])(
+      "should be available but off by default in %s",
+      geo => {
+        region.home = geo;
+        as._updateDynamicPrefs();
+        expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
+        expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
+      }
+    );
     it("should not follow the container block list", () => {
       // Blocking the container does not narrow the widget's own prefs; the
       // container gate is applied separately by isWidgetsContainerVisible.
@@ -564,9 +539,6 @@ describe("ActivityStream", () => {
       getStringPrefStub
         .whenCalledWith(`${BRANCH}widgets.system.lists.region-block`)
         .returns("PL");
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.lists.region-block`)
-        .returns("DE,FR,PL,US");
       region.home = "PL";
       as._updateDynamicPrefs();
       expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(false);
@@ -583,28 +555,19 @@ describe("ActivityStream", () => {
       getStringPrefStub = argsStub((_pref, defaultValue) => defaultValue);
       services.prefs.getStringPref = getStringPrefStub;
     });
-    it("should be available and on everywhere by default", () => {
-      region.home = "CZ";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(true);
-    });
-    it("should stay available but turn off in a blocked region", () => {
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.focusTimer.region-block`)
-        .returns("DE,FR,PL,US");
-      region.home = "US";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
-    });
+    it.each(["CZ", "US"])(
+      "should be available but off by default in %s",
+      geo => {
+        region.home = geo;
+        as._updateDynamicPrefs();
+        expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
+        expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
+      }
+    );
     it("should be unavailable and off in PL", () => {
       getStringPrefStub
         .whenCalledWith(`${BRANCH}widgets.system.focusTimer.region-block`)
         .returns("PL");
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.focusTimer.region-block`)
-        .returns("DE,FR,PL,US");
       region.home = "PL";
       as._updateDynamicPrefs();
       expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(false);
@@ -621,28 +584,19 @@ describe("ActivityStream", () => {
       getStringPrefStub = argsStub((_pref, defaultValue) => defaultValue);
       services.prefs.getStringPref = getStringPrefStub;
     });
-    it("should be available and on everywhere by default", () => {
-      region.home = "CZ";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(true);
-    });
-    it("should stay available but turn off in a blocked region", () => {
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.clocks.region-block`)
-        .returns("DE,FR,PL,US");
-      region.home = "US";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
-    });
+    it.each(["CZ", "US"])(
+      "should be available but off by default in %s",
+      geo => {
+        region.home = geo;
+        as._updateDynamicPrefs();
+        expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
+        expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
+      }
+    );
     it("should be unavailable and off in PL", () => {
       getStringPrefStub
         .whenCalledWith(`${BRANCH}widgets.system.clocks.region-block`)
         .returns("PL");
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.clocks.region-block`)
-        .returns("DE,FR,PL,US");
       region.home = "PL";
       as._updateDynamicPrefs();
       expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(false);
@@ -659,33 +613,64 @@ describe("ActivityStream", () => {
       getStringPrefStub = argsStub((_pref, defaultValue) => defaultValue);
       services.prefs.getStringPref = getStringPrefStub;
     });
-    it("should be available and on everywhere by default", () => {
-      region.home = "CZ";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(true);
-    });
-    it("should stay available but turn off in a blocked region", () => {
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.pictureOfTheDay.region-block`)
-        .returns("DE,FR,PL,US");
-      region.home = "US";
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
-      expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
-    });
+    it.each(["CZ", "US"])(
+      "should be available but off by default in %s",
+      geo => {
+        region.home = geo;
+        as._updateDynamicPrefs();
+        expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(true);
+        expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
+      }
+    );
     it("should be unavailable and off in PL", () => {
       getStringPrefStub
         .whenCalledWith(`${BRANCH}widgets.system.pictureOfTheDay.region-block`)
         .returns("PL");
-      getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.pictureOfTheDay.region-block`)
-        .returns("DE,FR,PL,US");
       region.home = "PL";
       as._updateDynamicPrefs();
       expect(PREFS_CONFIG.get(AVAILABLE_PREF).value).toBe(false);
       expect(PREFS_CONFIG.get(ENABLED_PREF).value).toBe(false);
     });
+  });
+  describe("market-gated widgets on Nightly", () => {
+    const BRANCH = "browser.newtabpage.activity-stream.";
+    it.each([
+      ["lists", false, true],
+      ["focusTimer", false, true],
+      ["clocks", false, true],
+      ["pictureOfTheDay", false, true],
+      ["crossword", false, true],
+      ["lists", true, false],
+      ["focusTimer", true, false],
+      ["clocks", true, false],
+      ["pictureOfTheDay", true, false],
+      ["crossword", true, false],
+    ])(
+      "should make %s available on Nightly (enforceOnNightly=%s, on=%s)",
+      (widget, enforce, expected) => {
+        const wasNightly = globalThis.AppConstants.NIGHTLY_BUILD;
+        globalThis.AppConstants.NIGHTLY_BUILD = true;
+        services.prefs.getStringPref = argsStub(
+          (_pref, defaultValue) => defaultValue
+        );
+        services.prefs.getBoolPref
+          .whenCalledWith(`${BRANCH}widgets.marketGate.enforceOnNightly`, false)
+          .returns(enforce);
+        try {
+          region.home = "US";
+          services.locale.appLocaleAsBCP47 = "en-US";
+          as._updateDynamicPrefs();
+          expect(
+            PREFS_CONFIG.get(`widgets.system.${widget}.enabled`).value
+          ).toBe(true);
+          expect(PREFS_CONFIG.get(`widgets.${widget}.enabled`).value).toBe(
+            expected
+          );
+        } finally {
+          globalThis.AppConstants.NIGHTLY_BUILD = wasNightly;
+        }
+      }
+    );
   });
   describe("privacy widget defaults", () => {
     const AVAILABLE_PREF = "widgets.system.privacy.enabled";
@@ -785,7 +770,21 @@ describe("ActivityStream", () => {
       }
     );
   });
-  describe("market gating off by default", () => {
+  describe("market gating on by default", () => {
+    it("should make widgets available when nothing sets the pref", () => {
+      services.prefs.getBoolPref = argsStub(
+        (_pref, defaultValue) => defaultValue
+      );
+      services.prefs.getStringPref = argsStub(
+        (_pref, defaultValue) => defaultValue
+      );
+      region.home = "CZ";
+      as._updateDynamicPrefs();
+      expect(PREFS_CONFIG.get("widgets.marketGate.enabled").value).toBe(true);
+      expect(PREFS_CONFIG.get("widgets.system.lists.enabled").value).toBe(true);
+    });
+  });
+  describe("market gating turned off", () => {
     const SYSTEM_PREFS = [
       "widgets.system.enabled",
       "widgets.system.lists.enabled",
@@ -802,8 +801,10 @@ describe("ActivityStream", () => {
       "widgets.pictureOfTheDay.enabled",
       "widgets.privacy.enabled",
       "widgets.crossword.enabled",
-      "widgets.stocks.enabled",
       "widgets.recentSearches.enabled",
+      "widgets.horoscopes.enabled",
+      "widgets.travel.enabled",
+      "widgets.solitaire.enabled",
     ];
     beforeEach(() => {
       services.locale.appLocaleAsBCP47 = "en-US";
@@ -813,6 +814,9 @@ describe("ActivityStream", () => {
       services.prefs.getBoolPref = argsStub(
         (_pref, defaultValue) => defaultValue
       );
+      services.prefs.getBoolPref
+        .whenCalledWith(MARKET_GATE_PREF)
+        .returns(false);
       region.home = "US";
     });
     it.each([false, true])(
@@ -915,20 +919,11 @@ describe("ActivityStream", () => {
     });
     it("should let a pref that exists win over the fallback", () => {
       getStringPrefStub
-        .whenCalledWith(`${BRANCH}widgets.lists.region-block`)
+        .whenCalledWith(`${BRANCH}widgets.system.lists.region-block`)
         .returns("");
-      region.home = "US";
+      region.home = "PL";
       as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get("widgets.lists.enabled").value).toBe(true);
-    });
-  });
-  describe("stocks widget defaults", () => {
-    it("should be off everywhere by default", () => {
-      as._updateDynamicPrefs();
-      expect(PREFS_CONFIG.get("widgets.stocks.enabled").value).toBe(false);
-      expect(PREFS_CONFIG.get("widgets.system.stocks.enabled").value).toBe(
-        false
-      );
+      expect(PREFS_CONFIG.get("widgets.system.lists.enabled").value).toBe(true);
     });
   });
   describe("recent searches widget defaults", () => {
@@ -940,6 +935,33 @@ describe("ActivityStream", () => {
       expect(
         PREFS_CONFIG.get("widgets.system.recentSearches.enabled").value
       ).toBe(false);
+    });
+  });
+  describe("horoscopes widget defaults", () => {
+    it("should be off everywhere by default", () => {
+      as._updateDynamicPrefs();
+      expect(PREFS_CONFIG.get("widgets.horoscopes.enabled").value).toBe(false);
+      expect(PREFS_CONFIG.get("widgets.system.horoscopes.enabled").value).toBe(
+        false
+      );
+    });
+  });
+  describe("travel widget defaults", () => {
+    it("should be off everywhere by default", () => {
+      as._updateDynamicPrefs();
+      expect(PREFS_CONFIG.get("widgets.travel.enabled").value).toBe(false);
+      expect(PREFS_CONFIG.get("widgets.system.travel.enabled").value).toBe(
+        false
+      );
+    });
+  });
+  describe("solitaire widget defaults", () => {
+    it("should be off everywhere by default", () => {
+      as._updateDynamicPrefs();
+      expect(PREFS_CONFIG.get("widgets.solitaire.enabled").value).toBe(false);
+      expect(PREFS_CONFIG.get("widgets.system.solitaire.enabled").value).toBe(
+        false
+      );
     });
   });
   describe("getWeatherWidgetSize", () => {

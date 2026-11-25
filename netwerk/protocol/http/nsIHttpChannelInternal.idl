@@ -16,7 +16,6 @@ namespace mozilla {
 class TimeStamp;
 namespace net {
 class nsHttpConnectionInfo;
-class WebSocketConnectionBase;
 class EarlyHintConnectArgs;
 }
 namespace dom {
@@ -28,7 +27,6 @@ enum class RequestMode : uint8_t;
 [ptr] native StringArray(nsTArray<nsCString>);
 [ref] native CStringArrayRef(const nsTArray<nsCString>);
 [ref] native securityMessagesArray(nsCOMArray<nsISecurityConsoleMessage>);
-[ptr] native WebSocketConnectionBase(mozilla::net::WebSocketConnectionBase);
 
 native TimeStamp(mozilla::TimeStamp);
 native RequestMode(mozilla::dom::RequestMode);
@@ -55,8 +53,6 @@ interface nsIHttpUpgradeListener : nsISupports
                                          in nsIAsyncOutputStream aSocketOut);
 
     [must_use] void onUpgradeFailed(in nsresult aErrorCode);
-
-    [noscript] void onWebSocketConnectionAvailable(in WebSocketConnectionBase aConnection);
 };
 
 /**
@@ -301,11 +297,6 @@ interface nsIHttpChannelInternal : nsISupports
     [must_use] readonly attribute nsITRRSkipReason_value trrSkipReason;
 
     /**
-     * True if channel is loaded by socket process.
-     */
-    [must_use] readonly attribute boolean isLoadedBySocketProcess;
-
-    /**
      * Set to true if the channel is an OCSP check.
      * Channels with this flag set will skip TRR in mode3 (because the circular
      * dependency with checking OCSP for the TRR server will cause a failure)
@@ -494,6 +485,24 @@ interface nsIHttpChannelInternal : nsISupports
      * This attribute indicates if the channel was loaded via Proxy.
      */
     [must_use] readonly attribute boolean isProxyUsed;
+
+    /**
+     * The type of proxy the channel was loaded through.
+     */
+    cenum ProxyType : 8 {
+      PROXY_TYPE_DIRECT = 0,
+      PROXY_TYPE_HTTP = 1,
+      PROXY_TYPE_HTTPS = 2,
+      PROXY_TYPE_SOCKS4 = 3,
+      PROXY_TYPE_SOCKS4A = 4,
+      PROXY_TYPE_SOCKS5 = 5,
+      PROXY_TYPE_SOCKS5H = 6,
+      // A MASQUE proxy reached over HTTP/3. When the connection to the proxy
+      // falls back to HTTP/2 or HTTP/1.1, the type is PROXY_TYPE_HTTPS.
+      PROXY_TYPE_MASQUE = 7,
+      PROXY_TYPE_UNKNOWN = 8,
+    };
+    [must_use] readonly attribute nsIHttpChannelInternal_ProxyType proxyType;
 
     /**
      * Set mWebTransportSessionEventListener.

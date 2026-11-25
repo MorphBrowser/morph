@@ -220,7 +220,7 @@ nsresult nsINIParser::SetString(const char* aSection, const char* aKey,
 
   mSections.WithEntryHandle(aSection, [&](auto&& entry) {
     if (!entry) {
-      entry.Insert(MakeUnique<INIValue>(aKey, aValue));
+      entry.Insert(std::make_unique<INIValue>(aKey, aValue));
       return;
     }
 
@@ -234,7 +234,7 @@ nsresult nsINIParser::SetString(const char* aSection, const char* aKey,
         break;
       }
       if (!v->next) {
-        v->next = MakeUnique<INIValue>(aKey, aValue);
+        v->next = std::make_unique<INIValue>(aKey, aValue);
         break;
       }
       v = v->next.get();
@@ -332,7 +332,7 @@ nsresult nsINIParser::WriteToFile(nsIFile* aFile) {
 void nsINIParser::WriteToString(nsACString& aOutput) {
   for (const auto& entry : mSections) {
     aOutput.AppendPrintf("[%s]\n", entry.GetKey());
-    INIValue* val = entry.GetWeak();
+    INIValue* val = entry.GetRawPtr();
     while (val) {
       aOutput.AppendPrintf("%s=%s\n", val->key, val->value);
       val = val->next.get();

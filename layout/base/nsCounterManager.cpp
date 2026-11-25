@@ -56,7 +56,9 @@ void nsCounterUseNode::Calc(nsCounterList* aList, bool aNotify) {
   if (mText) {
     nsAutoString contentString;
     GetText(contentString);
-    mText->SetText(contentString, aNotify);
+    if (!mText->DataBuffer().Equals(contentString)) {
+      mText->SetText(contentString, aNotify);
+    }
   }
 }
 
@@ -556,7 +558,7 @@ void nsCounterManager::Dump() const {
   for (const auto& entry : mNames) {
     printf("Counter named \"%s\":\n", nsAtomCString(entry.GetKey()).get());
 
-    nsCounterList* list = entry.GetWeak();
+    nsCounterList* list = entry.GetRawPtr();
     list->Dump();
   }
   printf("\n\n");

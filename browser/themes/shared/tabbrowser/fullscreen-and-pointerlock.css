@@ -29,16 +29,9 @@
   display: none;
 }
 
-/* Keep the vertical tabs out from under the toolbox while the macOS menubar
- * holds it shifted down over them. */
-:root[inFullscreen] #vertical-tabs {
-  padding-block-start: var(--fullscreen-menubar-shift, 0);
-}
-
 #fullscr-toggler {
   top: 0;
-  left: 0;
-  right: 0;
+  inset-inline: 0;
   height: 1px;
   position: fixed;
   z-index: 2147483647;

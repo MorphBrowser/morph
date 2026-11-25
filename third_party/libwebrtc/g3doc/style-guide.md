@@ -221,6 +221,16 @@ Kbytes (for Android Arm64).
 
 Use static_cast and take your own steps to ensure type safety.
 
+### Type casting and conversions
+
+Prefer braced initialization `Type{value}` (e.g. `int{kMaxTemporalStreams}`)
+over `static_cast<Type>(value)` when casting constants or values where narrowing
+is not intended.
+
+Braced initialization prevents accidental narrowing conversions at compile time
+and is more concise. Reserve `static_cast` for cases where explicit value
+conversions (such as narrowing or pointer conversions) are intended.
+
 ## C
 
 There's a substantial chunk of legacy C code in WebRTC, and a lot of it is old
@@ -276,7 +286,7 @@ configuration, only use the following [GN templates][gn-templ].
 | `shared_library` | `rtc_shared_library`                                                                 |
 | `source_set`     | `rtc_library` (for header only libraries you may use `rtc_source_set`)               |
 | `static_library` | `rtc_static_library` (use `rtc_library` unless you really need `rtc_static_library`) |
-| `test`           | `rtc_test`                                                                           |
+| `test`           | `rtc_cc_test`                                                                        |
 
 ### Target visibility and the native API
 

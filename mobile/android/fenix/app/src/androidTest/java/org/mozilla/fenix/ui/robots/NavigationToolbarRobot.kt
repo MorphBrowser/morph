@@ -9,7 +9,6 @@ package org.mozilla.fenix.ui.robots
 import android.net.Uri
 import android.util.Log
 import android.view.KeyEvent
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertAny
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
@@ -34,7 +33,6 @@ import androidx.test.espresso.action.ViewActions.pressImeActionButton
 import androidx.test.espresso.assertion.PositionAssertions.isCompletelyAbove
 import androidx.test.espresso.assertion.PositionAssertions.isPartiallyBelow
 import androidx.test.espresso.assertion.ViewAssertions.matches
-import androidx.test.espresso.matcher.ViewMatchers.hasDescendant
 import androidx.test.espresso.matcher.ViewMatchers.isRoot
 import androidx.test.espresso.matcher.ViewMatchers.withId
 import androidx.test.espresso.matcher.ViewMatchers.withText
@@ -42,7 +40,6 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.By.textContains
 import androidx.test.uiautomator.UiSelector
 import androidx.test.uiautomator.Until
-import mozilla.components.browser.menu.R as menuR
 import mozilla.components.browser.toolbar.R as toolbarR
 import mozilla.components.compose.browser.toolbar.concept.BrowserToolbarTestTags.ADDRESSBAR_SEARCH_BOX
 import mozilla.components.compose.browser.toolbar.concept.BrowserToolbarTestTags.ADDRESSBAR_URL_BOX
@@ -69,7 +66,6 @@ import org.mozilla.fenix.helpers.TestHelper.mDevice
 import org.mozilla.fenix.helpers.TestHelper.packageName
 import org.mozilla.fenix.helpers.TestHelper.waitForAppWindowToBeUpdated
 import org.mozilla.fenix.helpers.ext.waitNotNull
-import org.mozilla.fenix.helpers.matchers.hasItemsCount
 
 /** Implementation of Robot Pattern for the URL toolbar. */
 class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
@@ -87,26 +83,10 @@ class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "verifyTabButtonShortcutMenuItems: Verified tab counter shortcut options")
     }
 
-    fun verifyTabButtonShortcutMenuItemsForNormalHomescreen() {
-        Log.i(TAG, "verifyTabButtonShortcutMenuItemsForNormalHomescreen: Trying to verify tab counter shortcut options")
-        onView(withId(menuR.id.mozac_browser_menu_recyclerView))
-            .check(matches(hasItemsCount(2)))
-            .check(matches(hasDescendant(withText("New tab"))))
-            .check(matches(hasDescendant(withText("New private tab"))))
-        Log.i(TAG, "verifyTabButtonShortcutMenuItemsForNormalHomescreen: Verified tab counter shortcut options")
-    }
-
-    fun verifyTabButtonShortcutMenuItemsForPrivateHomescreen() {
-        Log.i(
-            TAG,
-            "verifyTabButtonShortcutMenuItemsForPrivateHomescreen: Trying to verify tab counter shortcut options",
-        )
-        onView(withId(menuR.id.mozac_browser_menu_recyclerView))
-            .check(matches(hasItemsCount(2)))
-            .check(matches(hasDescendant(withText("New tab"))))
-            .check(matches(hasDescendant(withText("New private tab"))))
-        Log.i(TAG, "verifyTabButtonShortcutMenuItemsForPrivateHomescreen: Verified tab counter shortcut options")
-    }
+    /** Matches the reader view toolbar button, whose label also offers Listen to Page when that is turned on. */
+    private fun readerViewToolbarButtonMatcher() =
+        hasContentDescription(getStringResource(R.string.browser_menu_read)) or
+            hasContentDescription(getStringResource(R.string.browser_menu_read_or_listen))
 
     fun verifyReaderViewToolbarButton(isDisplayed: Boolean = false) {
         waitForAppWindowToBeUpdated()
@@ -115,24 +95,14 @@ class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
                 TAG,
                 "verifyReaderViewToolbarButton: Trying to verify that the reader view toolbar button is displayed",
             )
-            composeTestRule
-                .onNodeWithContentDescription(
-                    getStringResource(R.string.browser_menu_read),
-                    useUnmergedTree = true,
-                )
-                .assertIsDisplayed()
+            composeTestRule.onNode(readerViewToolbarButtonMatcher(), useUnmergedTree = true).assertIsDisplayed()
             Log.i(TAG, "verifyReaderViewToolbarButton: Verified that the reader view toolbar button is displayed")
         } else {
             Log.i(
                 TAG,
                 "verifyReaderViewToolbarButton: Trying to verify that the reader view toolbar button is not displayed",
             )
-            composeTestRule
-                .onNodeWithContentDescription(
-                    getStringResource(R.string.browser_menu_read),
-                    useUnmergedTree = true,
-                )
-                .assertIsNotDisplayed()
+            composeTestRule.onNode(readerViewToolbarButtonMatcher(), useUnmergedTree = true).assertIsNotDisplayed()
             Log.i(TAG, "verifyReaderViewToolbarButton: Verified that the reader view toolbar button is not displayed")
         }
     }
@@ -149,12 +119,7 @@ class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
             Log.i(TAG, "clickReaderViewToolbarButton: Clicked the \"Close reader view\" toolbar button")
         } else {
             Log.i(TAG, "clickReaderViewToolbarButton: Trying to click the \"Reader view\" toolbar button")
-            composeTestRule
-                .onNodeWithContentDescription(
-                    getStringResource(R.string.browser_menu_read),
-                    useUnmergedTree = true,
-                )
-                .performClick()
+            composeTestRule.onNode(readerViewToolbarButtonMatcher(), useUnmergedTree = true).performClick()
             Log.i(TAG, "clickReaderViewToolbarButton: Clicked the \"Reader view\" toolbar button")
         }
         waitForAppWindowToBeUpdated()
@@ -570,7 +535,6 @@ class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
     class Transition(private val composeTestRule: ComposeTestRule) {
         private lateinit var sessionLoadedIdlingResource: SessionLoadedIdlingResource
 
-        @OptIn(ExperimentalTestApi::class)
         fun enterURLAndEnterToBrowser(
             url: Uri,
             interact: BrowserRobot.() -> Unit,
@@ -714,7 +678,6 @@ class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
             return SearchRobot.Transition(composeTestRule)
         }
 
-        @OptIn(ExperimentalTestApi::class)
         fun clickURLBar(interact: SearchRobot.() -> Unit): SearchRobot.Transition {
             Log.i(TAG, "clickURLBar: Waiting for $waitingTime until the URL bar to exist")
             composeTestRule.waitUntilAtLeastOneExists(hasTestTag(ADDRESSBAR_URL_BOX), waitingTime)
@@ -737,7 +700,6 @@ class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
             return SearchRobot.Transition(composeTestRule)
         }
 
-        @OptIn(ExperimentalTestApi::class)
         fun clickTranslateButton(
             isPageTranslated: Boolean = false,
             originalLanguage: String = "",
@@ -765,7 +727,6 @@ class NavigationToolbarRobot(private val composeTestRule: ComposeTestRule) {
         }
 
         // New navbar design home screen search button
-        @OptIn(ExperimentalTestApi::class)
         fun clickHomeScreenSearchButton(interact: SearchRobot.() -> Unit): SearchRobot.Transition {
             Log.i(TAG, "clickHomeScreenSearchButton: Waiting for $waitingTime ms for the search button to exist.")
             composeTestRule.waitUntilAtLeastOneExists(hasContentDescription("Search or enter address"))

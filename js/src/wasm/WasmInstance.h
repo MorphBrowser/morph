@@ -41,8 +41,6 @@ class WasmGcObject;
 class WasmStructObject;
 class WasmArrayObject;
 
-struct AllocationMetadataBuilder;
-
 namespace gc {
 class StoreBuffer;
 }  // namespace gc
@@ -234,7 +232,7 @@ class alignas(16) Instance {
 #ifdef JS_GC_ZEAL
   const void* addressOfGCZealModeBits_;
 #endif
-  const js::AllocationMetadataBuilder* allocationMetadataBuilder_;
+  uint32_t hasAllocationMetadataBuilder_;
 
   // A copy of the runtime's addressOfLastBufferedWholeCell, used for whole-cell
   // store buffer entries.
@@ -344,8 +342,8 @@ class alignas(16) Instance {
   static constexpr size_t offsetOfAllocSites() {
     return offsetof(Instance, allocSites_);
   }
-  static constexpr size_t offsetOfAllocationMetadataBuilder() {
-    return offsetof(Instance, allocationMetadataBuilder_);
+  static constexpr size_t offsetOfHasAllocationMetadataBuilder() {
+    return offsetof(Instance, hasAllocationMetadataBuilder_);
   }
   static constexpr size_t offsetOfAddressOfLastBufferedWholeCell() {
     return offsetof(Instance, addressOfLastBufferedWholeCell_);
@@ -423,9 +421,8 @@ class alignas(16) Instance {
   bool isInterrupted() const;
   void resetInterrupt();
 
-  void setAllocationMetadataBuilder(
-      const js::AllocationMetadataBuilder* allocationMetadataBuilder) {
-    allocationMetadataBuilder_ = allocationMetadataBuilder;
+  void setHasAllocationMetadataBuilder(bool hasBuilder) {
+    hasAllocationMetadataBuilder_ = hasBuilder;
   }
 
   int32_t computeInitialHotnessCounter(uint32_t funcIndex,
@@ -433,6 +430,11 @@ class alignas(16) Instance {
   void resetHotnessCounter(uint32_t funcIndex);
   int32_t readHotnessCounter(uint32_t funcIndex) const;
   void submitCallRefHints(uint32_t funcIndex);
+
+  // Reset this instance's pretenured allocation sites so that they allocate in
+  // the nursery again. Compiled code checks the site state on every
+  // allocation, so no code needs to be invalidated.
+  void resetPretenuredAllocSites();
 
   bool debugFilter(uint32_t funcIndex) const;
   void setDebugFilter(uint32_t funcIndex, bool value);

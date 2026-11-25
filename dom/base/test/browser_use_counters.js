@@ -8,6 +8,7 @@ add_setup(async function test_initialize() {
       ["layout.css.use-counters.enabled", true],
       ["layout.css.use-counters-unimplemented.enabled", true],
       ["dom.speculation_rules.enabled", true],
+      ["dom.html_fragment_fast_path.enabled", true],
     ],
   });
 });
@@ -267,6 +268,70 @@ add_task(async function test_page_counters() {
         {
           name: "SpeculationRulesTag",
           glean: ["", "speculationRulesTag"],
+        },
+        {
+          name: "SpeculationRulesHeader",
+          glean: ["", "speculationRulesHeader"],
+          value: 0,
+        },
+      ],
+    },
+
+    // Check that use counters are incremented for rule sets from the
+    // Speculation-Rules header.
+    {
+      type: "direct",
+      filename: "file_use_counter_speculationrules_header.html",
+      waitForExplicitFinish: true,
+      counters: [
+        {
+          name: "SpeculationRulesHeader",
+          glean: ["", "speculationRulesHeader"],
+        },
+        {
+          name: "SpeculationRulesPrefetch",
+          glean: ["", "speculationRulesPrefetch"],
+        },
+        {
+          name: "SpeculationRulesListSource",
+          glean: ["", "speculationRulesListSource"],
+        },
+        {
+          name: "SpeculationRulesEagernessImmediate",
+          glean: ["", "speculationRulesEagernessImmediate"],
+        },
+        {
+          name: "SpeculationRulesScriptTag",
+          glean: ["", "speculationRulesScriptTag"],
+          value: 0,
+        },
+      ],
+    },
+
+    // DOMParser markup that the fast path parses, and markup that it leaves
+    // to the full parser.
+    {
+      type: "direct",
+      filename: "file_use_counter_domparser_fast_path.html",
+      counters: [
+        { name: "DOMParserFastPath", glean: ["", "domparserFastPath"] },
+        {
+          name: "DOMParserFastPathRejected",
+          glean: ["", "domparserFastPathRejected"],
+        },
+      ],
+    },
+
+    // innerHTML markup that the fast path parses, and markup that it leaves to
+    // the full parser.
+    {
+      type: "direct",
+      filename: "file_use_counter_innerhtml_fast_path.html",
+      counters: [
+        { name: "InnerHtmlFastPath", glean: ["", "innerHtmlFastPath"] },
+        {
+          name: "InnerHtmlFastPathRejected",
+          glean: ["", "innerHtmlFastPathRejected"],
         },
       ],
     },

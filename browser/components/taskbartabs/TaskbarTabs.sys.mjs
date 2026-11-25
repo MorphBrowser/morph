@@ -24,7 +24,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", () => {
   return console.createInstance({
-    prefix: "TaskbarTabs",
+    logModule: "TaskbarTabs",
     maxLogLevel: "Warn",
   });
 });
@@ -62,6 +62,25 @@ export const TaskbarTabs = new (class {
   }
 
   /**
+   * Gets the data needed to build the window title of a Taskbar Tab.
+   *
+   * @param {string} aId - The ID of the Taskbar Tab.
+   * @returns {Promise<{name: string, userContextId: number}>} The name and
+   * container of the Taskbar Tab.
+   * @throws {Error} If `aId` is not a valid Taskbar Tabs ID.
+   */
+  async getTaskbarTabTitleInfo(aId) {
+    let taskbarTab = await this.getTaskbarTab(aId);
+    if (!taskbarTab) {
+      throw new Error(`Taskbar Tab Id ${aId} is invalid.`);
+    }
+    return {
+      name: taskbarTab.name,
+      userContextId: taskbarTab.userContextId,
+    };
+  }
+
+  /**
    * Finds an existing Taskbar Tab that matches aUrl within aUserContextId. If
    * one does not exist, it is created.
    *
@@ -80,6 +99,9 @@ export const TaskbarTabs = new (class {
    * attempted even if the Taskbar Tab already exists.
    * @param {DOMWindow?} [aDetails.window] - The window to associate any UI
    * with, if applicable.
+   * @returns {Promise<{created: boolean, taskbarTab: TaskbarTab,
+   * pin: ?Promise<{rejected: boolean}>}>} `pin` settles once the pin attempt,
+   * including any OS prompt, completes, or is null if no pin was attempted.
    */
   async findOrCreateTaskbarTab(aUrl, aUserContextId, aDetails = {}) {
     if (aDetails.manifest) {
@@ -103,16 +125,19 @@ export const TaskbarTabs = new (class {
       aDetails
     );
 
+    let pin = null;
     if (result.created || aDetails.ensurePinned) {
       // Don't wait for the pinning to complete.
-      this.#pinTaskbarTab(result.taskbarTab, result.icon, {
+      pin = this.#pinTaskbarTab(result.taskbarTab, result.icon, {
         window: aDetails.window ?? null,
       });
+      this.#applyWindowClass(result.taskbarTab, pin);
     }
 
     return {
       created: result.created,
       taskbarTab: result.taskbarTab,
+      pin,
     };
   }
 
@@ -152,9 +177,27 @@ export const TaskbarTabs = new (class {
       aDetails
     );
     this.#registry.patchTaskbarTab(aTaskbarTab, {
-      shortcutRelativePath: result,
+      shortcutRelativePath: result.shortcut,
     });
     return result;
+  }
+
+  /**
+   * On Linux, gives the windows of a Taskbar Tab their own window class once
+   * pinning has created its desktop entry. See
+   * TaskbarTabsWindowManager.applyWindowClass.
+   *
+   * @param {TaskbarTab} aTaskbarTab - The Taskbar Tab being pinned.
+   * @param {Promise<{shortcut: ?string}>} aPin - The pin of the Taskbar Tab.
+   */
+  async #applyWindowClass(aTaskbarTab, aPin) {
+    let { shortcut } = await aPin;
+    if (shortcut) {
+      this.#windowManager.applyWindowClass(
+        aTaskbarTab,
+        () => this.#registry.getTaskbarTab(aTaskbarTab.id) !== null
+      );
+    }
   }
 
   async findTaskbarTab(...args) {
@@ -210,7 +253,8 @@ export const TaskbarTabs = new (class {
     if (created) {
       // Don't wait for pinning to complete. (This is separate so we can call
       // it with the newly-created window.)
-      this.#pinTaskbarTab(taskbarTab, icon, win);
+      let pin = this.#pinTaskbarTab(taskbarTab, icon, { window: win });
+      this.#applyWindowClass(taskbarTab, pin);
     }
 
     return {

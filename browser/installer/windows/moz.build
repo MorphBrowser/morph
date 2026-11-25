@@ -33,16 +33,25 @@ if CONFIG["MAKENSISU"]:
     nsis_locale_files = [
         f"/browser/locales/en-US/installer/{f}"
         for f in [
-            "custom.properties",
-            "mui.properties",
-            "nsisstrings.properties",
-            "override.properties",
+            "custom.ftl",
+            "mui.ftl",
+            "nsisstrings.ftl",
+            "override.ftl",
         ]
     ]
 
     nsis_preprocess_locale = (
         "/toolkit/mozapps/installer/windows/nsis/preprocess-locale.py"
     )
+
+    ab_cd = CONFIG["MOZ_UI_LOCALE"]
+    en_us_installer_dir = f"{TOPSRCDIR}/browser/locales/en-US/installer"
+    nsis_locale_args = [f"--locale-arg={en_us_installer_dir}"]
+    if ab_cd != "en-US":
+        nsis_locale_args = [
+            f"--locale-arg=--l10n-dir={CONFIG['L10NBASEDIR']}/{ab_cd}/browser/installer",
+            f"--locale-arg=--l10n-dir={en_us_installer_dir}",
+        ]
 
     GeneratedFile(
         "nsis-stage.stamp",
@@ -56,7 +65,9 @@ if CONFIG["MAKENSISU"]:
         flags=[
             f"--config-dir={nsis_config_dir}",
             f"--spec-out={OBJDIR}/nsis-stage.json",
+            # Localized repacks stage their locale through `l10n_repackage`.
             "--repack-l10n-dir=browser/installer",
+            f"--repack-locale-arg={en_us_installer_dir}",
         ]
         + [f"--install={SRCDIR}/{f}" for f in CONFIG["NSIS_INSTALLER_FILES"]]
         + [f"--install={TOPSRCDIR}{f}" for f in nsis_topsrcdir_files]
@@ -65,18 +76,19 @@ if CONFIG["MAKENSISU"]:
             f"--defines-out={nsis_config_dir}/defines.nsi",
             f"--topsrcdir={TOPSRCDIR}",
             f"--preprocess-locale-script={TOPSRCDIR}{nsis_preprocess_locale}",
-            # Localized repacks stage their locale through `l10n_repackage`.
-            f"--locale-arg={TOPSRCDIR}/browser/locales/en-US/installer",
-            "--ab-cd=en-US",
+        ]
+        + nsis_locale_args
+        + [
+            f"--ab-cd={ab_cd}",
             "--preprocess-locale",
             "--single-file",
-            "nsisstrings.properties",
+            "nsisstrings.ftl",
             "nsisstrings.nlf",
             "--convert-utf8",
             f"{SRCDIR}/nsis/extensionsLocale.nsh",
             f"{nsis_config_dir}/extensionsLocale.nsh",
             f"--defines-string={CONFIG['NSIS_INSTALLER_DEFINES']}",
-            "-DAB_CD=en-US",
+            f"-DAB_CD={ab_cd}",
             f"-DTOPOBJDIR={TOPOBJDIR}",
         ],
     )
@@ -115,3 +127,17 @@ if CONFIG["MAKENSISU"]:
             + ["--nsi=test_stub.nsi", f"--buildid-header={TOPOBJDIR}/buildid.h"],
         )
         FINAL_TARGET_FILES += ["!test_stub_installer.exe"]
+
+# NSIS is under the zlib license, which appreciates but does not require an
+# acknowledgment in the product documentation.
+LICENSES += ["nsis"]
+LICENSES["nsis"].title = "NSIS License"
+LICENSES["nsis"].text = "nsis-license.txt"
+LICENSES["nsis"].notice = """
+<p>This license applies to the Nullsoft Scriptable Install System code in the
+Windows installer.</p>
+"""
+LICENSES["nsis"].acknowledgement = (
+    'The <a href="http://nsis.sourceforge.net/">Nullsoft Scriptable Install System</a> '
+    "(Amir Szekely and team)"
+)

@@ -231,6 +231,40 @@ add_task(async function test_js_sources_external_scripts() {
 });
 
 /**
+ * Test that non-ASCII characters in UTF-8 external scripts are decoded
+ * correctly rather than interpreted as Latin-1.
+ */
+add_task(async function test_js_sources_utf8_external_script() {
+  await ProfilerTestUtils.assertProfilerInactive();
+
+  await ProfilerTestUtils.startProfiler({ features: ["js", "jssources"] });
+  const url = BASE_URL + "page_with_utf8_external_js.html";
+  await BrowserTestUtils.withNewTab(url, async () => {
+    Services.profiler.Pause();
+    const profileData =
+      await Services.profiler.getProfileDataAsGzippedArrayBuffer();
+    await Services.profiler.StopProfiler();
+
+    const sources = profileData.additionalInformation.jsSources;
+    const sourceText = Object.values(sources).find(source =>
+      source?.url?.endsWith("/utf8_external_script.js")
+    )?.sourceText;
+
+    Assert.ok(!!sourceText, "Should find the UTF-8 external script source");
+    Assert.ok(
+      sourceText.includes(
+        "// Non-ASCII characters: \u00e9\u00e9\u00e9\u00e9\n"
+      ),
+      "Comment should contain correctly decoded non-ASCII characters"
+    );
+    Assert.ok(
+      sourceText.includes('"\u00fcn\u00efc\u00f6d\u00e9\u6f22"'),
+      "String literal should contain correctly decoded characters beyond Latin-1"
+    );
+  });
+});
+
+/**
  * Test that unavailable JS sources are omitted from jsSources rather than
  * included with a placeholder value. When the "jssources" feature is not
  * enabled, all sources have unavailable data and should not appear in jsSources.
@@ -274,6 +308,56 @@ add_task(async function test_js_sources_unavailable_are_omitted() {
       Object.keys(sources).length,
       0,
       "jsSources should be empty when the jssources feature is not enabled"
+    );
+  });
+});
+
+/**
+ * Test that source text and source map URLs big enough to be sent through
+ * shared memory instead of inline in the IPC message arrive intact in the
+ * parent process.
+ */
+add_task(async function test_js_sources_large_source_text() {
+  await ProfilerTestUtils.assertProfilerInactive();
+
+  const url = BASE_URL + "simple.html";
+  await BrowserTestUtils.withNewTab(url, async contentBrowser => {
+    await ProfilerTestUtils.startProfiler({ features: ["js", "jssources"] });
+    const { largeSources, largeSourceMapURL } = await SpecialPowers.spawn(
+      contentBrowser,
+      [],
+      () => {
+        const sourceMapURL = `data:application/json;base64,${"A".repeat(100001)}`;
+        // Use lengths that aren't a multiple of 4, so that the source texts
+        // packed after these ones in the buffer don't start at aligned offsets.
+        const largeSources = [
+          `var largeAsciiSource = 1; // ${"a".repeat(100001)}`,
+          `var largeNonAsciiSource = 2; // ${"漢".repeat(50001)}`,
+          `var largeSourceMapSource = 3;\n//# sourceMappingURL=${sourceMapURL}`,
+        ];
+        for (const source of largeSources) {
+          content.window.eval(source);
+        }
+        return { largeSources, largeSourceMapURL: sourceMapURL };
+      }
+    );
+
+    Services.profiler.Pause();
+    const profileData =
+      await Services.profiler.getProfileDataAsGzippedArrayBuffer();
+    await Services.profiler.StopProfiler();
+
+    const sources = Object.values(profileData.additionalInformation.jsSources);
+    const sourceTexts = sources.map(source => source?.sourceText);
+    for (const expectedSource of largeSources) {
+      Assert.ok(
+        sourceTexts.includes(expectedSource),
+        `Should find the intact source text of ${expectedSource.slice(0, 30)}`
+      );
+    }
+    Assert.ok(
+      sources.some(source => source?.sourceMapURL === largeSourceMapURL),
+      "Should find the intact source map URL"
     );
   });
 });

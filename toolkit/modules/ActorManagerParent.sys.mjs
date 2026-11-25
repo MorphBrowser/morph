@@ -32,19 +32,23 @@ let JSPROCESSACTORS = {
   ContentAnalysisWasm: {
     remoteTypes: ["privilegedabout"],
     parent: {
-      esModuleURI: "resource://gre/modules/ContentAnalysisWasmParent.sys.mjs",
+      esModuleURI:
+        "moz-src:///toolkit/components/contentanalysis/ContentAnalysisWasmParent.sys.mjs",
     },
     child: {
-      esModuleURI: "resource://gre/modules/ContentAnalysisWasmChild.sys.mjs",
+      esModuleURI:
+        "moz-src:///toolkit/components/contentanalysis/ContentAnalysisWasmChild.sys.mjs",
     },
   },
 
   ContentPrefs: {
     parent: {
-      esModuleURI: "resource://gre/modules/ContentPrefServiceParent.sys.mjs",
+      esModuleURI:
+        "moz-src:///toolkit/components/contentprefs/ContentPrefServiceParent.sys.mjs",
     },
     child: {
-      esModuleURI: "resource://gre/modules/ContentPrefServiceChild.sys.mjs",
+      esModuleURI:
+        "moz-src:///toolkit/components/contentprefs/ContentPrefServiceChild.sys.mjs",
     },
     safeForUntrustedWebProcess: true,
   },
@@ -507,6 +511,7 @@ let JSWINDOWACTORS = {
       "moz-extension://*",
       "data:text/html,*",
       "about:reader?*",
+      "about:smartpage?*",
     ],
     messageManagerGroups: ["browsers", "headless-browsers"],
     safeForUntrustedWebProcess: true,
@@ -839,6 +844,23 @@ if (AppConstants.platform != "android") {
       events: {
         MozOpenColorPicker: {},
         MozCloseColorPicker: {},
+      },
+    },
+
+    includeChrome: true,
+    allFrames: true,
+    safeForUntrustedWebProcess: true,
+  };
+
+  JSWINDOWACTORS.EyeDropper = {
+    parent: {
+      esModuleURI: "moz-src:///toolkit/actors/EyeDropperParent.sys.mjs",
+    },
+
+    child: {
+      esModuleURI: "moz-src:///toolkit/actors/EyeDropperChild.sys.mjs",
+      events: {
+        MozOpenEyeDropper: {},
       },
     },
 

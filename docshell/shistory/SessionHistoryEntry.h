@@ -32,9 +32,20 @@ struct ParamTraits;
 namespace mozilla {
 namespace dom {
 
+class Document;
 struct LoadingSessionHistoryInfo;
 class SessionHistoryEntry;
 class SHEntrySharedParentState;
+
+// What a content process says about shared state it created, so that the parent
+// can create its own. The parent takes the principals from the document.
+struct NewSessionHistorySharedState {
+  // The SHEntrySharedState id, a process-specific id minted by the content
+  // process (SHEntrySharedState::GenerateId).
+  uint64_t mId = 0;
+  nsCOMPtr<nsIPolicyContainer> mPolicyContainer;
+  nsCString mContentType;
+};
 
 // SessionHistoryInfo stores session history data for a load. It can be sent
 // over IPC and is used in both the parent and the child processes.
@@ -53,7 +64,7 @@ class SessionHistoryInfo {
                      nsIPrincipal* aPartitionedPrincipalToInherit,
                      nsIPolicyContainer* aPolicyContainer);
 
-  bool operator==(const SessionHistoryInfo& aInfo) const {
+  bool operator==(const SessionHistoryInfo& /*aInfo*/) const {
     return false;  // FIXME
   }
 
@@ -131,6 +142,13 @@ class SessionHistoryInfo {
 
   uint64_t SharedId() const;
 
+  // In a content process, what the parent needs to create its own copy of this
+  // info's shared state, if this process created that state.
+  Maybe<NewSessionHistorySharedState> NewSharedStateRequest() const;
+
+  // Parent process only.
+  void SetSharedState(SHEntrySharedParentState* aState);
+
   nsILayoutHistoryState* GetLayoutHistoryState();
   void SetLayoutHistoryState(nsILayoutHistoryState* aState);
 
@@ -168,7 +186,7 @@ class SessionHistoryInfo {
   nsIStructuredCloneContainer* GetNavigationAPIState() const;
   void SetNavigationAPIState(nsIStructuredCloneContainer* aState);
 
-  already_AddRefed<nsIURI> GetURIOrInheritedForAboutBlank() const;
+  already_AddRefed<nsIURI> GetURIOrInheritedForAboutBlankOrSrcdoc() const;
 
  private:
   friend class SessionHistoryEntry;
@@ -266,9 +284,15 @@ class PreviousSessionHistoryInfo {
   // Prepare a session history info that is validated to be a previous entry for
   // a Navigation API navigation.
   static Maybe<PreviousSessionHistoryInfo> CreateValidatedPreviousEntry(
-      const SessionHistoryInfo& aCurrentEntry,
-      const Maybe<SessionHistoryInfo>& aPreviousEntryForActivation,
-      Maybe<NavigationType> aNavigationType);
+      SessionHistoryEntry* aCurrentEntry,
+      SessionHistoryEntry* aPreviousEntryForActivation,
+      Maybe<NavigationType> aNavigationType,
+      nsIPrincipal* aPreviousDocumentPrincipal);
+
+  // Prepare the previous entry for a replacement between two live documents.
+  static Maybe<PreviousSessionHistoryInfo> CreateValidatedPreviousEntry(
+      const Document& aCurrentDocument, const Document& aPreviousDocument,
+      const SessionHistoryInfo* aPreviousEntryForActivation);
 
   Maybe<SessionHistoryInfo> mSameOriginSessionHistoryInfo;
 };
@@ -276,7 +300,7 @@ class PreviousSessionHistoryInfo {
 struct LoadingSessionHistoryInfo {
   LoadingSessionHistoryInfo() = default;
   explicit LoadingSessionHistoryInfo(SessionHistoryEntry* aEntry);
-  // Initializes mInfo using aEntry and otherwise copies the values from aInfo.
+  // Initializes mInfo using aEntry and copies load metadata from aInfo.
   LoadingSessionHistoryInfo(SessionHistoryEntry* aEntry,
                             const LoadingSessionHistoryInfo* aInfo);
   // For about:blank only.
@@ -315,6 +339,10 @@ struct LoadingSessionHistoryInfo {
   // other cases mForceMaybeResetName.isSome() will be false and the child
   // process should be able to make that determination itself.
   Maybe<bool> mForceMaybeResetName;
+
+  // If true, the load replaces the active entry in place instead of adding a
+  // new one. Not serialized.
+  bool mReplacesActiveEntry = false;
 };
 
 // HistoryEntryCounterForBrowsingContext is used to count the number of entries
@@ -453,6 +481,7 @@ class SessionHistoryEntry : public nsISHEntry, public nsSupportsWeakReference {
   already_AddRefed<SessionHistoryEntry> GetParent();
 
   void SetInfo(SessionHistoryInfo* aInfo);
+  void ReplaceInfo(SessionHistoryInfo* aInfo);
 
   bool ForInitialLoad() { return mForInitialLoad; }
   void SetForInitialLoad(bool aForInitialLoad) {
@@ -492,7 +521,7 @@ class SessionHistoryEntry : public nsISHEntry, public nsSupportsWeakReference {
 
   const nsTArray<RefPtr<SessionHistoryEntry>>& Children() { return mChildren; }
 
-  already_AddRefed<nsIURI> GetURIOrInheritedForAboutBlank() const;
+  already_AddRefed<nsIURI> GetURIOrInheritedForAboutBlankOrSrcdoc() const;
 
   void SetNavigationAPIState(nsIStructuredCloneContainer* aState) {
     mInfo->SetNavigationAPIState(aState);
@@ -543,6 +572,16 @@ struct ParamTraits<mozilla::dom::PreviousSessionHistoryInfo> {
                     const mozilla::dom::PreviousSessionHistoryInfo& aParam);
   static bool Read(IPC::MessageReader* aReader,
                    mozilla::dom::PreviousSessionHistoryInfo* aResult);
+};
+
+// Allow sending NewSessionHistorySharedState objects over IPC.
+template <>
+struct ParamTraits<mozilla::dom::NewSessionHistorySharedState> {
+  typedef mozilla::dom::NewSessionHistorySharedState paramType;
+  static void Write(IPC::MessageWriter* aWriter,
+                    const mozilla::dom::NewSessionHistorySharedState& aParam);
+  static bool Read(IPC::MessageReader* aReader,
+                   mozilla::dom::NewSessionHistorySharedState* aResult);
 };
 
 // Allow sending LoadingSessionHistoryInfo objects over IPC.

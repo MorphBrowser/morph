@@ -282,6 +282,8 @@ class JUnitTestRunner(MochitestDesktop):
         for [key, value] in [p.split("=", 1) for p in self.options.add_env]:
             env[key] = value
 
+        env.update(self.device.target_ccov_env)
+
         for env_count, (env_key, env_val) in enumerate(env.items()):
             cmd = cmd + " -e env%d %s=%s" % (env_count, env_key, env_val)
         # runner
@@ -450,6 +452,8 @@ class JUnitTestRunner(MochitestDesktop):
                 )
         finally:
             self.log.suite_end()
+
+        self.device.pull_ccov()
 
         if self.check_for_crashes():
             self.fail_count = 1

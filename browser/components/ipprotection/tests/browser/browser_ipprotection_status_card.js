@@ -77,10 +77,7 @@ add_task(async function test_status_card_disconnected() {
   Assert.ok(statusBoxEl, "Status box should be present");
   await checkStatusBoxAriaLabel(statusBoxEl);
 
-  const bandwidthEl = statusBoxEl.shadowRoot
-    .querySelector(`slot[name="bandwidth"]`)
-    .assignedElements()[0];
-  checkBandwidth(bandwidthEl, mockBandwidthUsage);
+  checkBandwidth(content.bandwidthUsageEl, mockBandwidthUsage);
 
   const turnOnButtonEl = statusCard.actionButtonEl;
   Assert.ok(turnOnButtonEl, "Button to turn on VPN should be present");
@@ -113,10 +110,7 @@ add_task(async function test_status_card_connected() {
   Assert.ok(statusBoxEl, "Status box should be present");
   await checkStatusBoxAriaLabel(statusBoxEl);
 
-  const bandwidthEl = statusBoxEl.shadowRoot
-    .querySelector(`slot[name="bandwidth"]`)
-    .assignedElements()[0];
-  checkBandwidth(bandwidthEl, mockBandwidthUsage);
+  checkBandwidth(content.bandwidthUsageEl, mockBandwidthUsage);
 
   const turnOffVPNButtonEl = statusCard.actionButtonEl;
   Assert.ok(turnOffVPNButtonEl, "Button to turn off VPN should be present");
@@ -232,6 +226,9 @@ add_task(async function test_ipprotection_events_on_toggle() {
  * Tests the excluded site state UI.
  */
 add_task(async function test_status_card_excluded() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ipProtection.features.siteInclusions", false]],
+  });
   let sandbox = sinon.createSandbox();
   sandbox
     .stub(IPPSiteRuleManager, "getRule")
@@ -263,15 +260,60 @@ add_task(async function test_status_card_excluded() {
     "Status box should have excluded type"
   );
 
-  const bandwidthEl = statusBoxEl.shadowRoot
-    .querySelector(`slot[name="bandwidth"]`)
-    .assignedElements()[0];
-  checkBandwidth(bandwidthEl, mockBandwidthUsage);
+  checkBandwidth(content.bandwidthUsageEl, mockBandwidthUsage);
 
   const turnOffVPNButtonEl = statusCard.actionButtonEl;
   Assert.ok(turnOffVPNButtonEl, "Button to turn off VPN should be present");
 
   await closePanel();
+  await cleanupStatusCardTest();
+  sandbox.restore();
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Tests that an excluded site shows the connected state when site inclusions
+ * are enabled.
+ */
+add_task(async function test_status_card_excluded_site_inclusions_enabled() {
+  let sandbox = sinon.createSandbox();
+  sandbox
+    .stub(IPPSiteRuleManager, "getRule")
+    .returns(IPPPrincipalRules.EXCLUDED);
+
+  await setupStatusCardTest();
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ipProtection.features.siteInclusions", true]],
+  });
+
+  let content = await openPanel({
+    location: mockLocation,
+    isProtectionEnabled: true,
+    bandwidthUsage: mockBandwidthUsage,
+  });
+
+  let statusBoxEl = content.statusCardEl.statusBoxEl;
+  Assert.ok(statusBoxEl, "Status box should be present");
+  await checkStatusBoxAriaLabel(statusBoxEl);
+
+  Assert.equal(
+    statusBoxEl.type,
+    "connected",
+    "Status box should have connected type"
+  );
+  Assert.equal(
+    statusBoxEl.headerL10nId,
+    "ipprotection-connection-status-connected-1",
+    "Status box should show the connected header"
+  );
+  Assert.equal(
+    content.statusCardEl.actionButtonEl.dataset.l10nId,
+    "ipprotection-button-turn-vpn-off-1",
+    "Button should use the regular turn off label"
+  );
+
+  await closePanel();
+  await SpecialPowers.popPrefEnv();
   await cleanupStatusCardTest();
   sandbox.restore();
 });
@@ -307,10 +349,7 @@ add_task(async function test_status_card_connecting() {
     "Status box should have connecting type"
   );
 
-  const bandwidthEl = statusBoxEl.shadowRoot
-    .querySelector(`slot[name="bandwidth"]`)
-    .assignedElements()[0];
-  checkBandwidth(bandwidthEl, mockBandwidthUsage);
+  checkBandwidth(content.bandwidthUsageEl, mockBandwidthUsage);
 
   const button = statusCard.actionButtonEl;
   Assert.ok(
@@ -318,7 +357,7 @@ add_task(async function test_status_card_connecting() {
     "Button in connecting state should be present and disabled"
   );
 
-  const locationButton = statusCard.locationButtonEl;
+  const locationButton = content.locationButtonEl;
   Assert.ok(
     locationButton?.disabled,
     "Location button in connecting state should be present and disabled"
@@ -346,7 +385,7 @@ add_task(async function test_buttons_stable_across_state_transitions() {
     statusCard.actionButtonEl.getBoundingClientRect().top
   );
   let disconnectedLocationTop = Math.round(
-    statusCard.locationButtonEl.getBoundingClientRect().top
+    content.locationButtonEl.getBoundingClientRect().top
   );
 
   await setPanelState({
@@ -363,7 +402,7 @@ add_task(async function test_buttons_stable_across_state_transitions() {
     "Action button should not shift when transitioning to connecting"
   );
   Assert.equal(
-    Math.round(statusCard.locationButtonEl.getBoundingClientRect().top),
+    Math.round(content.locationButtonEl.getBoundingClientRect().top),
     disconnectedLocationTop,
     "Location button should not shift when transitioning to connecting"
   );
@@ -382,7 +421,7 @@ add_task(async function test_buttons_stable_across_state_transitions() {
     "Action button should not shift when transitioning to connected"
   );
   Assert.equal(
-    Math.round(statusCard.locationButtonEl.getBoundingClientRect().top),
+    Math.round(content.locationButtonEl.getBoundingClientRect().top),
     disconnectedLocationTop,
     "Location button should not shift when transitioning to connected"
   );
@@ -476,10 +515,7 @@ add_task(async function test_bandwidth_states() {
     let statusBoxEl = statusCard.statusBoxEl;
     Assert.ok(statusBoxEl, "Status box should be present");
 
-    const bandwidthEl = statusBoxEl.shadowRoot
-      .querySelector(`slot[name="bandwidth"]`)
-      .assignedElements()[0];
-    checkBandwidth(bandwidthEl, mockUsage);
+    checkBandwidth(content.bandwidthUsageEl, mockUsage);
 
     const turnOffVPNButtonEl = statusCard.actionButtonEl;
     Assert.ok(turnOffVPNButtonEl, "Button to turn off VPN should be present");
@@ -487,68 +523,6 @@ add_task(async function test_bandwidth_states() {
     await closePanel();
     await cleanupStatusCardTest();
   }
-});
-
-/**
- * Tests that the "new" badge is visible when showLocationButtonBadge is true.
- */
-add_task(async function test_location_button_badge_visible() {
-  await setupStatusCardTest();
-
-  let content = await openPanel({
-    location: mockLocation,
-    isProtectionEnabled: true,
-    bandwidthUsage: mockBandwidthUsage,
-    showLocationButtonBadge: true,
-  });
-
-  let statusCard = content.statusCardEl;
-  Assert.ok(statusCard, "ipprotection-status-card should be present");
-
-  let locationButton = statusCard.locationButtonEl;
-  Assert.ok(locationButton, "Location selection button should be present");
-
-  let badge = locationButton.querySelector("moz-badge[type='new']");
-  Assert.ok(
-    badge,
-    "Badge should be present when showLocationButtonBadge is true"
-  );
-  Assert.ok(
-    BrowserTestUtils.isVisible(badge),
-    "Badge should be visible when showLocationButtonBadge is true"
-  );
-
-  await closePanel();
-  await cleanupStatusCardTest();
-});
-
-/**
- * Tests that the "new" badge is absent when showLocationButtonBadge is false.
- */
-add_task(async function test_location_button_badge_hidden() {
-  await setupStatusCardTest();
-
-  let content = await openPanel({
-    location: mockLocation,
-    isProtectionEnabled: true,
-    bandwidthUsage: mockBandwidthUsage,
-    showLocationButtonBadge: false,
-  });
-
-  let statusCard = content.statusCardEl;
-  Assert.ok(statusCard, "ipprotection-status-card should be present");
-
-  let locationButton = statusCard.locationButtonEl;
-  Assert.ok(locationButton, "Location selection button should be present");
-
-  let badge = locationButton.querySelector("moz-badge[type='new']");
-  Assert.ok(
-    !badge,
-    "Badge should not be present when showLocationButtonBadge is false"
-  );
-
-  await closePanel();
-  await cleanupStatusCardTest();
 });
 
 /**
@@ -564,10 +538,7 @@ add_task(async function test_location_button_click_dispatches_event() {
     bandwidthUsage: mockBandwidthUsage,
   });
 
-  let statusCard = content.statusCardEl;
-  Assert.ok(statusCard, "ipprotection-status-card should be present");
-
-  let locationButton = statusCard.locationButtonEl;
+  let locationButton = content.locationButtonEl;
   Assert.ok(locationButton, "Location selection button should be present");
 
   let showLocationsEventPromise = BrowserTestUtils.waitForEvent(
@@ -596,7 +567,7 @@ add_task(async function test_location_button_label_shows_country() {
     bandwidthUsage: mockBandwidthUsage,
   });
 
-  let locationButton = content.statusCardEl.locationButtonEl;
+  let locationButton = content.locationButtonEl;
   let label = locationButton.querySelector("[data-l10n-id]");
 
   Assert.equal(
@@ -631,7 +602,7 @@ add_task(async function test_location_button_label_recommended_fallback() {
     bandwidthUsage: mockBandwidthUsage,
   });
 
-  let locationButton = content.statusCardEl.locationButtonEl;
+  let locationButton = content.locationButtonEl;
   let label = locationButton.querySelector("[data-l10n-id]");
 
   Assert.equal(
@@ -644,31 +615,49 @@ add_task(async function test_location_button_label_recommended_fallback() {
   await cleanupStatusCardTest();
 });
 
+function getBandwidthElement(content) {
+  return content.shadowRoot.querySelector(
+    "bandwidth-usage, .unlimited-bandwidth"
+  );
+}
+
 /**
- * Tests that the recommended location description is shown when location is "REC".
+ * Tests that the promo string with the promo end date is shown when the user
+ * has unlimited bandwidth without a Mozilla VPN subscription.
  */
-add_task(async function test_recommended_location_message_for_REC_location() {
+add_task(async function test_unlimited_bandwidth_promo() {
   await setupStatusCardTest();
 
   let content = await openPanel({
-    location: "REC",
+    location: mockLocation,
     isProtectionEnabled: true,
-    bandwidthUsage: mockBandwidthUsage,
+    bandwidthUsage: null,
+    bandwidthUnlimited: true,
+    hasUpgraded: false,
   });
 
-  let statusCard = content.statusCardEl;
-  let descEl = statusCard.shadowRoot.querySelector(
-    '[slot="content"].location-message'
-  );
+  let bandwidthEl = getBandwidthElement(content);
 
-  Assert.ok(
-    descEl,
-    "Location message element should be present when location is REC"
+  Assert.ok(bandwidthEl, "Bandwidth element should be rendered");
+  Assert.notEqual(
+    bandwidthEl.localName,
+    "bandwidth-usage",
+    "bandwidth-usage should not be rendered"
   );
   Assert.equal(
-    descEl.getAttribute("data-l10n-id"),
-    "ipprotection-recommended-location-description",
-    "Location message should have the correct l10n id"
+    bandwidthEl.getAttribute("data-l10n-id"),
+    "ipprotection-unlimited-bandwidth-promo",
+    "Promo string should be shown"
+  );
+  Assert.deepEqual(
+    JSON.parse(bandwidthEl.getAttribute("data-l10n-args")),
+    { endDate: new Date(2027, 0, 31).getTime() },
+    "Promo end date should be passed as a timestamp"
+  );
+
+  await TestUtils.waitForCondition(
+    () => bandwidthEl.textContent,
+    "Waiting for the promo string to be localized"
   );
 
   await closePanel();
@@ -676,30 +665,31 @@ add_task(async function test_recommended_location_message_for_REC_location() {
 });
 
 /**
- * Tests that the recommended location description is shown when location is null.
+ * Tests that the upgraded string is shown when the user has unlimited
+ * bandwidth from a Mozilla VPN subscription.
  */
-add_task(async function test_recommended_location_message_for_null_location() {
+add_task(async function test_unlimited_bandwidth_upgraded() {
   await setupStatusCardTest();
 
   let content = await openPanel({
-    location: null,
+    location: mockLocation,
     isProtectionEnabled: true,
-    bandwidthUsage: mockBandwidthUsage,
+    bandwidthUsage: null,
+    bandwidthUnlimited: true,
+    hasUpgraded: true,
   });
 
-  let statusCard = content.statusCardEl;
-  let descEl = statusCard.shadowRoot.querySelector(
-    '[slot="content"].location-message'
-  );
+  let bandwidthEl = getBandwidthElement(content);
 
-  Assert.ok(
-    descEl,
-    "Location message element should be present when location is null"
-  );
+  Assert.ok(bandwidthEl, "Bandwidth element should be rendered");
   Assert.equal(
-    descEl.getAttribute("data-l10n-id"),
-    "ipprotection-recommended-location-description",
-    "Location message should have the correct l10n id"
+    bandwidthEl.getAttribute("data-l10n-id"),
+    "ipprotection-unlimited-bandwidth-upgraded",
+    "Upgraded string should be shown"
+  );
+  Assert.ok(
+    !bandwidthEl.hasAttribute("data-l10n-args"),
+    "Upgraded string should not have l10n args"
   );
 
   await closePanel();
@@ -707,26 +697,23 @@ add_task(async function test_recommended_location_message_for_null_location() {
 });
 
 /**
- * Tests that the recommended location description is absent when a specific
- * country is selected.
+ * Tests that no bandwidth element is rendered when there is no usage
+ * data and the user does not have unlimited bandwidth.
  */
-add_task(async function test_location_message_hidden_for_country() {
+add_task(async function test_no_bandwidth_usage_not_unlimited() {
   await setupStatusCardTest();
 
   let content = await openPanel({
-    location: "CA",
+    location: mockLocation,
     isProtectionEnabled: true,
-    bandwidthUsage: mockBandwidthUsage,
+    bandwidthUsage: null,
+    bandwidthUnlimited: false,
+    hasUpgraded: false,
   });
 
-  let statusCard = content.statusCardEl;
-  let descEl = statusCard.shadowRoot.querySelector(
-    '[slot="content"].location-message'
-  );
-
   Assert.ok(
-    !descEl,
-    "Location message element should not be present for a country code"
+    !getBandwidthElement(content),
+    "No bandwidth element should be rendered"
   );
 
   await closePanel();

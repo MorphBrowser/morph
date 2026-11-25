@@ -24,6 +24,8 @@ mod blob;
 #[cfg(target_os = "windows")]
 mod composite;
 mod egl;
+#[cfg(not(target_os = "windows"))]
+mod null_compositor;
 mod parse_function;
 mod perf;
 mod png;
@@ -39,6 +41,8 @@ mod yaml_helper;
 
 #[cfg(target_os = "windows")]
 use composite::WrCompositor;
+#[cfg(not(target_os = "windows"))]
+use null_compositor::NullLayerCompositor;
 use gleam::gl;
 #[cfg(feature = "software")]
 use gleam::gl::Gl;
@@ -65,7 +69,7 @@ use std::rc::Rc;
 #[cfg(feature = "software")]
 use std::slice;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use webrender::{DebugFlags, LayerCompositor};
+use webrender::{DebugFlags, Compositor};
 use webrender::api::*;
 use webrender::render_api::*;
 use webrender::api::units::*;
@@ -350,13 +354,13 @@ impl WindowWrapper {
     }
 
     #[cfg(target_os = "windows")]
-    pub fn create_compositor(&self) -> Option<Box<dyn LayerCompositor>> {
-        Some(Box::new(WrCompositor::new(self)) as Box<dyn LayerCompositor>)
+    pub fn create_compositor(&self) -> Option<Box<dyn Compositor>> {
+        Some(Box::new(WrCompositor::new(self)) as Box<dyn Compositor>)
     }
 
     #[cfg(not(target_os = "windows"))]
-    pub fn create_compositor(&self) -> Option<Box<dyn LayerCompositor>> {
-        None
+    pub fn create_compositor(&self) -> Option<Box<dyn Compositor>> {
+        Some(Box::new(NullLayerCompositor) as Box<dyn Compositor>)
     }
 }
 
@@ -676,6 +680,7 @@ struct WrenchApp {
     vsync: bool,
     angle: bool,
     software: bool,
+    sw_compositor: bool,
     using_compositor: bool,
     gl_request: GlApiRequest,
     headless: bool,
@@ -849,6 +854,7 @@ impl ApplicationHandler for WrenchApp {
             self.dump_shader_source.clone(),
             notifier,
             layer_compositor,
+            self.sw_compositor,
             self.compositor_clips,
         );
 
@@ -1206,6 +1212,10 @@ fn build_app(args: clap::ArgMatches, proxy: Option<EventLoopProxy<()>>) -> Wrenc
     let headless = args.is_present("headless");
     let angle = args.is_present("angle");
     let software = args.is_present("software");
+    let sw_compositor = args.is_present("sw_compositor");
+    if sw_compositor && !software {
+        panic!("--sw-compositor requires --software");
+    }
     let vsync = args.is_present("vsync");
     let using_compositor = args.is_present("compositor");
     let use_optimized_shaders = !args.is_present("use_unoptimized_shaders");
@@ -1337,7 +1347,7 @@ fn build_app(args: clap::ArgMatches, proxy: Option<EventLoopProxy<()>>) -> Wrenc
     };
 
     WrenchApp {
-        size, vsync, angle, software, using_compositor, gl_request, headless,
+        size, vsync, angle, software, sw_compositor, using_compositor, gl_request, headless,
         res_path, use_optimized_shaders, rebuild, no_subpixel_aa, verbose,
         no_scissor, no_batch_global, color_target_init, precache, dump_shader_source, profiler_ui,
         subcommand, compositor_clips, reftest_specific, reftest_fuzz,
@@ -1442,6 +1452,12 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
         (None, None)
     };
 
+    let layer_compositor = if app.using_compositor {
+        window.create_compositor()
+    } else {
+        None
+    };
+
     let dim = window.get_inner_size();
     let mut wrench = Wrench::new(
         &mut window,
@@ -1458,7 +1474,8 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
         app.precache,
         app.dump_shader_source.clone(),
         notifier,
-        None,
+        layer_compositor,
+        app.sw_compositor,
         app.compositor_clips,
     );
 

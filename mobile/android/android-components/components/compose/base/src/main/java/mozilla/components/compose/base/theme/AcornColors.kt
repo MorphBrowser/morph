@@ -17,13 +17,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import mozilla.components.ui.colors.NovaColors
-import mozilla.components.ui.colors.PhotonColors
 
 /** A custom Color Palette for Mozilla Firefox for Android (Fenix). */
 @Suppress("LongParameterList")
 @Stable
 class AcornColors(
-    formDefault: Color,
     information: Color,
     onInformation: Color,
     informationContainer: Color,
@@ -43,10 +41,6 @@ class AcornColors(
     iconPrivate: Color,
     sheetOutline: Color,
 ) {
-    // Checkbox default, Radio button default
-    var formDefault by mutableStateOf(formDefault)
-        private set
-
     /*
      * M3 color scheme extensions that do not have a mapped value from Acorn
      */
@@ -125,7 +119,6 @@ class AcornColors(
 
     /** Updates the existing colors with the provided [AcornColors]. */
     fun update(other: AcornColors) {
-        formDefault = other.formDefault
         information = other.information
         onInformation = other.onInformation
         informationContainer = other.informationContainer
@@ -148,7 +141,6 @@ class AcornColors(
 
     /** Return a copy of this [AcornColors] and optionally overriding any of the provided values. */
     fun copy(
-        formDefault: Color = this.formDefault,
         information: Color = this.information,
         onInformation: Color = this.onInformation,
         informationContainer: Color = this.informationContainer,
@@ -169,7 +161,6 @@ class AcornColors(
         sheetOutline: Color = this.sheetOutline,
     ): AcornColors =
         AcornColors(
-            formDefault = formDefault,
             information = information,
             onInformation = onInformation,
             informationContainer = informationContainer,
@@ -193,7 +184,6 @@ class AcornColors(
 
 val darkColorPalette =
     AcornColors(
-        formDefault = PhotonColors.LightGrey05,
         information = NovaColors.Blue30,
         onInformation = NovaColors.Gray80,
         informationContainer = NovaColors.Blue70,
@@ -216,7 +206,6 @@ val darkColorPalette =
 
 val lightColorPalette =
     AcornColors(
-        formDefault = PhotonColors.DarkGrey90,
         information = NovaColors.Blue50,
         onInformation = NovaColors.White,
         informationContainer = NovaColors.Blue10,
@@ -254,7 +243,7 @@ val oledColorPalette =
         warningContainer = NovaColors.Yellow80,
         onWarningContainer = NovaColors.Gray20,
         surfaceDimVariant = NovaColors.Gray90,
-        surfaceContainerSelected = NovaColors.Gray65,
+        surfaceContainerSelected = NovaColors.Gray60,
         autofillText = NovaColors.VioletDesaturated60,
         selectedText = NovaColors.Gray60,
         sheetOutline = NovaColors.Gray65,
@@ -400,13 +389,12 @@ fun acornOledColorScheme(): ColorScheme =
             onSurfaceVariant = NovaColors.Gray40,
             errorContainer = NovaColors.Red80,
             onErrorContainer = NovaColors.Gray20,
-            outline = NovaColors.Gray50,
             outlineVariant = NovaColors.Gray65,
-            surfaceBright = NovaColors.Gray80,
+            surfaceBright = NovaColors.Gray75,
             surfaceDim = NovaColors.Black,
             surfaceContainer = NovaColors.Black,
             surfaceContainerHigh = NovaColors.Gray90,
-            surfaceContainerHighest = NovaColors.Gray80,
+            surfaceContainerHighest = NovaColors.Gray75,
             surfaceContainerLow = NovaColors.Gray90,
             surfaceContainerLowest = NovaColors.Black,
         )

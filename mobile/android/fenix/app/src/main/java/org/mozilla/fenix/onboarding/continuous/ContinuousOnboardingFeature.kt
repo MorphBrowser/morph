@@ -27,6 +27,7 @@ import org.mozilla.fenix.R
 import org.mozilla.fenix.ext.components
 import org.mozilla.fenix.ipprotection.store.IPProtectionOnboardingPrompt
 import org.mozilla.fenix.ipprotection.store.IPProtectionPromptRepository
+import org.mozilla.fenix.ipprotection.store.IPProtectionPromptState.PromptDetails
 import org.mozilla.fenix.onboarding.DismissedMethod
 import org.mozilla.fenix.onboarding.OnboardingTelemetryRecorder
 import org.mozilla.fenix.onboarding.OnboardingTelemetryRecorder.Companion.ET_CARD_CLOSE_BUTTON
@@ -46,7 +47,7 @@ import org.mozilla.fenix.utils.Settings
 class IPProtectionOnboardingConfig(
     val store: IPProtectionStore,
     val promptRepository: IPProtectionPromptRepository,
-    val navigateToIpProtection: () -> Unit,
+    val navigateToIpProtection: (PromptDetails) -> Unit,
 )
 
 /**
@@ -81,11 +82,13 @@ class ContinuousOnboardingFeature(
     private val ipProtectionBinding =
         IPProtectionOnboardingPrompt(
             repository = ipProtectionOnboardingConfig.promptRepository,
+            crashReporter = activity.components.analytics.crashReporter,
             mainDispatcher = ipProtectionMainDispatcher,
             store = ipProtectionOnboardingConfig.store,
-            onShowOnboarding = {
-                logger.info("Showing IP Protection onboarding prompt.")
-                ipProtectionOnboardingConfig.navigateToIpProtection()
+            onShowOnboarding = { promptDetails ->
+                logger.info("Showing IP Protection onboarding prompt: $promptDetails")
+                // Invalid Nimbus config: skip the prompt but still complete the stage.
+                promptDetails?.let { ipProtectionOnboardingConfig.navigateToIpProtection(it) }
                 completeDaySeven()
             },
             onIneligible = {
@@ -317,7 +320,7 @@ class ContinuousOnboardingFeature(
                 markStageCompleted(stage)
 
                 telemetryRecorder.onSkipTurnOnNotificationsClick(
-                    sequenceId = OnboardingPageUiData.Type.NOTIFICATION_PERMISSION.telemetryId,
+                    sequenceId = NOTIFICATION_SEQUENCE_ID,
                     sequencePosition = "0",
                     elementType = ET_CARD_CLOSE_BUTTON,
                 )
@@ -349,7 +352,7 @@ class ContinuousOnboardingFeature(
                         markStageCompleted(stage)
 
                         telemetryRecorder.onNotificationPermissionClick(
-                            sequenceId = OnboardingPageUiData.Type.NOTIFICATION_PERMISSION.telemetryId,
+                            sequenceId = NOTIFICATION_SEQUENCE_ID,
                             sequencePosition = "0",
                         )
                     },
@@ -362,15 +365,14 @@ class ContinuousOnboardingFeature(
                         markStageCompleted(stage)
 
                         telemetryRecorder.onSkipTurnOnNotificationsClick(
-                            sequenceId = OnboardingPageUiData.Type.NOTIFICATION_PERMISSION.telemetryId,
+                            sequenceId = NOTIFICATION_SEQUENCE_ID,
                             sequencePosition = "0",
                         )
                     },
                 ),
             onRecordImpressionEvent = {
-                telemetryRecorder.onImpression(
-                    sequenceId = OnboardingPageUiData.Type.NOTIFICATION_PERMISSION.telemetryId,
-                    pageType = OnboardingPageUiData.Type.NOTIFICATION_PERMISSION,
+                telemetryRecorder.onNotificationCardImpression(
+                    sequenceId = NOTIFICATION_SEQUENCE_ID,
                     sequencePosition = "0",
                 )
             },
@@ -431,6 +433,7 @@ class ContinuousOnboardingFeature(
 
     companion object {
         private const val CONTINUOUS_ONBOARDING_DIALOG_TAG = "continuous_onboarding_dialog"
+        private const val NOTIFICATION_SEQUENCE_ID = "notification"
         private const val IP_PROTECTION_SEQUENCE_ID = "ip_protection"
 
         /**
@@ -442,7 +445,7 @@ class ContinuousOnboardingFeature(
          * @param launcher The [ActivityResultLauncher] used to request system roles.
          * @param telemetryRecorder Used to record onboarding telemetry.
          * @param navigateToSyncSignIn Invoked when the user chooses to sign in to Firefox Sync.
-         * @param navigateToIpProtection Invoked when the IP Protection onboarding prompt should be shown.
+         * @param navigateToIpProtection Invoked with the IP Protection onboarding prompt details.
          */
         fun register(
             fragment: Fragment,
@@ -450,7 +453,7 @@ class ContinuousOnboardingFeature(
             launcher: ActivityResultLauncher<Intent>,
             telemetryRecorder: OnboardingTelemetryRecorder,
             navigateToSyncSignIn: () -> Unit,
-            navigateToIpProtection: () -> Unit,
+            navigateToIpProtection: (PromptDetails) -> Unit,
         ) {
             val components = fragment.requireContext().components
             val settings = components.settings

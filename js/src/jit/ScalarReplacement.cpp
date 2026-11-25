@@ -264,6 +264,8 @@ static bool IsObjectEscaped(MDefinition* ins, MInstruction* newObject,
     return true;
   }
 
+  MOZ_RELEASE_ASSERT(!shape->isDictionary());
+
   // Check if the object is escaped. If the object is not the first argument
   // of either a known Store / Load, then we consider it as escaped. This is a
   // cheap and conservative escape analysis.
@@ -4087,8 +4089,8 @@ void WasmStructMemoryView::visitResumePoint(MResumePoint* rp) {}
 
 void WasmStructMemoryView::visitWasmStoreField(MWasmStoreField* ins) {
   // Skip stores made on other structs.
-  MDefinition* base = ins->base();
-  if (base != struct_) {
+  MDefinition* object = ins->wasmObject();
+  if (object != struct_) {
     return;
   }
 
@@ -4108,8 +4110,8 @@ void WasmStructMemoryView::visitWasmStoreField(MWasmStoreField* ins) {
 
 void WasmStructMemoryView::visitWasmStoreFieldRef(MWasmStoreFieldRef* ins) {
   // Skip stores made on other structs.
-  MDefinition* base = ins->base();
-  if (base != struct_) {
+  MDefinition* object = ins->wasmObject();
+  if (object != struct_) {
     return;
   }
 
@@ -4129,8 +4131,8 @@ void WasmStructMemoryView::visitWasmStoreFieldRef(MWasmStoreFieldRef* ins) {
 
 void WasmStructMemoryView::visitWasmLoadField(MWasmLoadField* ins) {
   // Skip loads made on other structs.
-  MDefinition* base = ins->base();
-  if (base != struct_) {
+  MDefinition* object = ins->wasmObject();
+  if (object != struct_) {
     return;
   }
 

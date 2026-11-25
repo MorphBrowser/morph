@@ -13,7 +13,7 @@ const lazy = {};
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", () =>
   console.createInstance({
-    prefix: "IPP_Serverlist",
+    logModule: "IPP_Serverlist",
     maxLogLevel: Services.prefs.getBoolPref("browser.ipProtection.log", false)
       ? "Debug"
       : "Warn",
@@ -36,6 +36,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
  * user-facing `countries` enumeration.
  */
 export const RECOMMENDED_COUNTRY_CODE = "REC";
+
+const EGRESS_LOCATION_PREF = "browser.ipProtection.egressLocation";
 
 /**
  * Event dispatched by `IPProtectionServerlistBase` instances whenever the
@@ -216,9 +218,9 @@ class Country {
  */
 export class IPProtectionServerlistBase extends EventTarget {
   /**
-   * @type {Country[] | null}
+   * @type {Country[]}
    */
-  __list = null;
+  __list = [];
 
   constructor() {
     super();
@@ -238,12 +240,22 @@ export class IPProtectionServerlistBase extends EventTarget {
     );
   }
   #handleEvent(_event) {
-    if (lazy.IPProtectionService.state === lazy.IPProtectionStates.READY) {
+    this.#refreshWhenReady();
+  }
+
+  async initOnStartupCompleted() {
+    this.#refreshWhenReady();
+  }
+
+  // Not before startup has completed: the source may not be readable yet.
+  #refreshWhenReady() {
+    if (
+      lazy.IPPStartupCache.isStartupCompleted &&
+      lazy.IPProtectionService.state === lazy.IPProtectionStates.READY
+    ) {
       this.maybeFetchList(true);
     }
   }
-
-  async initOnStartupCompleted() {}
 
   /**
    * Tries to refresh the list from the underlining source.
@@ -307,6 +319,31 @@ export class IPProtectionServerlistBase extends EventTarget {
   }
 
   /**
+   * Resolves the egress location the user picked to the country to route
+   * through. Locked countries are refused unless the user is premium.
+   *
+   * @param {(() => Promise<boolean>) | null} [isPremium]
+   *   Whether the user may use locked countries. When omitted, they may not.
+   * @returns {Promise<string|undefined>} - The country code, or undefined for
+   *   the recommended location.
+   */
+  async resolveEgressCountry(isPremium) {
+    const country =
+      Services.prefs.getStringPref(EGRESS_LOCATION_PREF, "") || undefined;
+    if (!country || !this.getLocation(country)?.country.locked) {
+      return country;
+    }
+    try {
+      if (await isPremium?.()) {
+        return country;
+      }
+    } catch (e) {
+      lazy.logConsole.error("Premium check failed:", e);
+    }
+    return undefined;
+  }
+
+  /**
    * Given a city, it selects an available server.
    *
    * @param {City?} city
@@ -349,13 +386,6 @@ export class RemoteSettingsServerlist extends IPProtectionServerlistBase {
   #bucket = null;
   #runningPromise = null;
 
-  constructor() {
-    super();
-    this.__list = IPProtectionServerlistBase.dataToList(
-      lazy.IPPStartupCache.locationList
-    );
-  }
-
   async initOnStartupCompleted() {
     super.initOnStartupCompleted();
     this.bucket.on("sync", async () => {
@@ -377,7 +407,6 @@ export class RemoteSettingsServerlist extends IPProtectionServerlistBase {
         await this.bucket.get()
       );
 
-      lazy.IPPStartupCache.storeLocationList(this.__list);
       this.dispatchEvent(new Event(LIST_CHANGED_EVENT));
       return true;
     };

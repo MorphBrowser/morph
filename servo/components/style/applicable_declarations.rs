@@ -5,7 +5,7 @@
 //! Applicable declarations management.
 
 use crate::derives::*;
-use crate::rule_tree::{CascadeLevel, RuleCascadeFlags, StyleSourceBorrow};
+use crate::rule_tree::{CascadeLevel, CascadeOrigin, RuleCascadeFlags, StyleSourceBorrow};
 use crate::stylesheets::layer_rule::LayerOrder;
 use smallvec::SmallVec;
 
@@ -93,8 +93,36 @@ pub enum RevertKind {
 }
 
 impl CascadePriority {
+    /// The transitions cascade priority. There's only one transition, and it's unassociated with any layer or so.
+    pub const TRANSITIONS: Self = Self::new(
+        CascadeLevel::new(CascadeOrigin::Transitions),
+        LayerOrder::root(),
+        RuleCascadeFlags::empty(),
+    );
+
+    /// Same but for animations.
+    pub const ANIMATIONS: Self = Self::new(
+        CascadeLevel::new(CascadeOrigin::Animations),
+        LayerOrder::root(),
+        RuleCascadeFlags::empty(),
+    );
+
+    /// Same but for SMIL.
+    pub const SMIL: Self = Self::new(
+        CascadeLevel::new(CascadeOrigin::SMILOverride),
+        LayerOrder::root(),
+        RuleCascadeFlags::empty(),
+    );
+
+    /// Same but for pres hints.
+    pub const PRES_HINTS: Self = Self::new(
+        CascadeLevel::new(CascadeOrigin::PresHints),
+        LayerOrder::root(),
+        RuleCascadeFlags::empty(),
+    );
+
     /// Construct a new CascadePriority for a given (level, order, flags) triple.
-    pub fn new(
+    pub const fn new(
         cascade_level: CascadeLevel,
         layer_order: LayerOrder,
         flags: RuleCascadeFlags,
@@ -153,6 +181,12 @@ impl CascadePriority {
             flags: self.flags,
             layer_order: self.layer_order,
         }
+    }
+
+    /// Whether this cascade priority is important or not.
+    #[inline]
+    pub fn is_important(&self) -> bool {
+        self.cascade_level.is_important()
     }
 
     /// Convert this priority from "non-important" to "important", if needed.

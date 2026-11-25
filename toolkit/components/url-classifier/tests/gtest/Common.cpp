@@ -113,7 +113,7 @@ nsresult PrefixArrayToPrefixStringMap(const _PrefixArray& aPrefixArray,
     uint32_t size = entry.GetKey();
     uint32_t count = entry.GetData()->Length();
 
-    auto str = MakeUnique<_Prefix>();
+    auto str = std::make_unique<_Prefix>();
     str->SetLength(size * count);
 
     char* dst = str->BeginWriting();
@@ -172,7 +172,7 @@ void CheckContent(LookupCacheV4* aCache, const _PrefixArray& aPrefixArray) {
 
   for (const auto& entry : vlPSetMap) {
     nsCString* expectedPrefix = expected.Get(entry.GetKey());
-    nsCString* resultPrefix = entry.GetWeak();
+    nsCString* resultPrefix = entry.GetRawPtr();
 
     ASSERT_TRUE(resultPrefix->Equals(*expectedPrefix));
   }

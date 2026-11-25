@@ -14,7 +14,8 @@ using namespace mozilla::dom;
 
 void CoalescedMouseData::Coalesce(const WidgetMouseEvent& aMouseOrPointerEvent,
                                   const ScrollableLayerGuid& aGuid,
-                                  const uint64_t& aInputBlockId) {
+                                  const uint64_t& aInputBlockId,
+                                  const nsID& aUUID) {
   MOZ_ASSERT_IF(aMouseOrPointerEvent.AsPointerEvent(),
                 aMouseOrPointerEvent.mMessage == eContextMenu);
   MOZ_ASSERT(!aMouseOrPointerEvent.AsDragEvent());
@@ -22,12 +23,12 @@ void CoalescedMouseData::Coalesce(const WidgetMouseEvent& aMouseOrPointerEvent,
     mCoalescedInputEvent = [&]() -> UniquePtr<WidgetMouseEvent> {
       if (aMouseOrPointerEvent.mClass == ePointerEventClass) {
         MOZ_DIAGNOSTIC_ASSERT(aMouseOrPointerEvent.AsPointerEvent());
-        return MakeUnique<WidgetPointerEvent>(
+        return std::make_unique<WidgetPointerEvent>(
             static_cast<const WidgetPointerEvent&>(
                 *aMouseOrPointerEvent.AsPointerEvent()));
       }
       MOZ_DIAGNOSTIC_ASSERT(!aMouseOrPointerEvent.AsPointerEvent());
-      return MakeUnique<WidgetMouseEvent>(aMouseOrPointerEvent);
+      return std::make_unique<WidgetMouseEvent>(aMouseOrPointerEvent);
     }();
     mCoalescedInputEvent->mCallbackId = aMouseOrPointerEvent.mCallbackId;
     mGuid = aGuid;
@@ -75,6 +76,11 @@ void CoalescedMouseData::Coalesce(const WidgetMouseEvent& aMouseOrPointerEvent,
     event->mFlags.mBubbles = false;
     event->mFlags.mCancelable = false;
   }
+
+  if (aUUID != nsID{}) {
+    MOZ_ASSERT(mUUID == nsID{}, "Should only coalesce one event with a UUID.");
+    mUUID = aUUID;
+  }
 }
 
 bool CoalescedMouseData::CanCoalesce(const WidgetMouseEvent& aMouseMoveEvent,
@@ -112,8 +118,9 @@ CoalescedMouseMoveFlusher::CoalescedMouseMoveFlusher(
 
 void CoalescedMouseMoveFlusher::WillRefresh(mozilla::TimeStamp aTime) {
   MOZ_ASSERT(mRefreshDriver);
-  mBrowserChild->FlushAllCoalescedMouseData();
-  mBrowserChild->ProcessPendingCoalescedMouseDataAndDispatchEvents();
+  RefPtr<BrowserChild> browserChild(mBrowserChild);
+  browserChild->FlushAllCoalescedMouseData();
+  browserChild->ProcessPendingCoalescedMouseDataAndDispatchEvents();
 }
 
 CoalescedMouseMoveFlusher::~CoalescedMouseMoveFlusher() { RemoveObserver(); }

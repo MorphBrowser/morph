@@ -43,6 +43,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.fenix.BuildConfig
+import org.mozilla.fenix.GleanMetrics.GoogleLens
 import org.mozilla.fenix.R
 import org.mozilla.fenix.components.AppStore
 import org.mozilla.fenix.components.LensImageUploader
@@ -67,6 +68,7 @@ class LensCameraActivityTest {
     private lateinit var settings: Settings
     private val uploader: LensImageUploader = mockk()
     private val pickedImageUri = Uri.parse("content://test/picked_image.jpg")
+    private val capturedImageUri = Uri.parse("content://test/lens_capture.jpg")
     private val pickedImage = Bitmap.createBitmap(80, 40, Bitmap.Config.ARGB_8888)
 
     @Before
@@ -132,6 +134,46 @@ class LensCameraActivityTest {
         val activity = Robolectric.buildActivity(LensCameraActivity::class.java, intent).create().get()
 
         assertEquals(CameraMode.QR, activity.resolveInitialMode())
+    }
+
+    @Test
+    fun `GIVEN a context WHEN newQrScannerIntent is called THEN the intent targets LensCameraActivity in QR only mode`() {
+        val intent = LensCameraActivity.newQrScannerIntent(testContext)
+
+        assertEquals(LensCameraActivity::class.java.name, intent.component?.className)
+        assertTrue(intent.getBooleanExtra(LensCameraActivity.EXTRA_QR_ONLY, false))
+        assertFalse(intent.hasExtra(LensCameraActivity.EXTRA_IS_PRIVATE))
+        assertFalse(intent.hasExtra(LensCameraActivity.EXTRA_INITIAL_MODE))
+    }
+
+    @Test
+    fun `GIVEN a context WHEN newIntent is called THEN the intent is not QR only`() {
+        val intent = LensCameraActivity.newIntent(testContext, isPrivate = false, initialMode = CameraMode.QR)
+
+        assertFalse(intent.hasExtra(LensCameraActivity.EXTRA_QR_ONLY))
+    }
+
+    @Test
+    fun `GIVEN a QR scanner intent with a LENS initial mode extra WHEN resolveInitialMode is called THEN QR is returned`() {
+        val intent =
+            LensCameraActivity.newQrScannerIntent(testContext)
+                .putExtra(LensCameraActivity.EXTRA_INITIAL_MODE, CameraMode.LENS.name)
+        val activity = Robolectric.buildActivity(LensCameraActivity::class.java, intent).create().get()
+
+        assertEquals(CameraMode.QR, activity.resolveInitialMode())
+    }
+
+    @Test
+    fun `GIVEN QR only WHEN the camera fragment is added THEN it is told to open QR only in QR mode`() {
+        val intent = LensCameraActivity.newQrScannerIntent(testContext)
+        val activity = Robolectric.buildActivity(LensCameraActivity::class.java, intent).create().get()
+
+        activity.handlePermissionResult(isGranted = true)
+        activity.supportFragmentManager.executePendingTransactions()
+
+        val fragment = activity.supportFragmentManager.findFragmentById(R.id.lens_fragment_container_view)
+        assertTrue(fragment?.arguments?.getBoolean(LensCameraFragment.ARG_QR_ONLY) == true)
+        assertEquals("QR", fragment?.arguments?.getString(LensCameraFragment.ARG_INITIAL_MODE))
     }
 
     @Test
@@ -336,25 +378,67 @@ class LensCameraActivityTest {
     }
 
     @Test
-    fun `WHEN the fragment result carries a captured image URI THEN the activity returns RESULT_OK tagged as the camera source`() {
-        val controller = Robolectric.buildActivity(LensCameraActivity::class.java).setup()
-        val activity = controller.get()
-        val imageUri = Uri.parse("content://test/lens_capture.jpg")
+    fun `WHEN the camera returns a captured image THEN the camera gives way to the upload screen and the activity stays open`() {
+        coEvery { uploader.decodeImage(capturedImageUri) } returns pickedImage
+        coEvery { uploader.uploadImage(any(), any()) } coAnswers
+            {
+                CompletableDeferred<LensImageUploader.UploadResult>().await()
+            }
+        val activity = cameraActivityController().get()
 
-        activity.supportFragmentManager.setFragmentResult(
-            LensCameraFragment.RESULT_REQUEST_KEY,
-            Bundle().apply { putParcelable(LensCameraFragment.RESULT_IMAGE_URI, imageUri) },
-        )
-        activity.supportFragmentManager.executePendingTransactions()
+        returnCapturedImage(activity)
+
+        assertNull(activity.supportFragmentManager.findFragmentById(R.id.lens_fragment_container_view))
+        assertTrue(activity.findViewById<ComposeView>(R.id.lens_upload_overlay).isVisible)
+        assertFalse(activity.isFinishing)
+    }
+
+    @Test
+    fun `GIVEN a captured image WHEN the upload succeeds THEN the activity returns the Lens result URL and records a camera search`() {
+        coEvery { uploader.decodeImage(capturedImageUri) } returns pickedImage
+        coEvery { uploader.uploadImage(any(), any()) } returns
+            LensImageUploader.UploadResult(resultUrl = LENS_RESULT_URL, httpStatusCode = 200)
+        val activity = cameraActivityController(isPrivate = true).get()
+
+        returnCapturedImage(activity)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
 
         val shadow = Shadows.shadowOf(activity)
         assertEquals(Activity.RESULT_OK, shadow.resultCode)
-        assertEquals(imageUri, shadow.resultIntent.data)
-        assertEquals(
-            LensCameraActivity.IMAGE_SOURCE_CAMERA,
-            shadow.resultIntent.getStringExtra(LensCameraActivity.EXTRA_IMAGE_SOURCE),
-        )
+        assertEquals(LENS_RESULT_URL, shadow.resultIntent.getStringExtra(LensCameraActivity.EXTRA_LENS_RESULT_URL))
+        assertTrue(shadow.resultIntent.getBooleanExtra(LensCameraActivity.EXTRA_IS_PRIVATE, false))
+        assertNull(shadow.resultIntent.data)
         assertTrue(activity.isFinishing)
+        coVerify { uploader.uploadImage(pickedImage, isPrivate = true) }
+        val events = assertNotNull(GoogleLens.searchCompleted.testGetValue())
+        assertEquals(LensCameraActivity.IMAGE_SOURCE_CAMERA, events.single().extra?.get("source"))
+    }
+
+    @Test
+    fun `GIVEN a captured image WHEN the upload fails and Try again is tapped THEN the camera comes back and the capture is uploaded again as a camera search`() {
+        coEvery { uploader.decodeImage(capturedImageUri) } returns pickedImage
+        coEvery { uploader.uploadImage(any(), any()) } returns
+            LensImageUploader.UploadResult(resultUrl = null, httpStatusCode = 500) andThen
+            LensImageUploader.UploadResult(resultUrl = LENS_RESULT_URL, httpStatusCode = 200)
+        val activity = cameraActivityController().get()
+        returnCapturedImage(activity)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+
+        assertIs<LensCameraFragment>(
+            activity.supportFragmentManager.findFragmentById(R.id.lens_fragment_container_view)
+        )
+        assertFalse(activity.isFinishing)
+
+        assertNotNull(activity.uploadOverlay.failureSnackbarState?.action).onClick()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue(activity.isFinishing)
+        coVerify(exactly = 2) { uploader.decodeImage(capturedImageUri) }
+        val events = assertNotNull(GoogleLens.searchCompleted.testGetValue())
+        assertEquals(
+            listOf(LensCameraActivity.IMAGE_SOURCE_CAMERA, LensCameraActivity.IMAGE_SOURCE_CAMERA),
+            events.map { it.extra?.get("source") },
+        )
     }
 
     @Test
@@ -421,7 +505,7 @@ class LensCameraActivityTest {
         Shadows.shadowOf(Looper.getMainLooper()).idle()
 
         val snackbarState = assertNotNull(activity.uploadOverlay.failureSnackbarState)
-        assertEquals(testContext.getString(R.string.lens_camera_image_load_failed), snackbarState.message)
+        assertEquals(testContext.getString(R.string.lens_camera_image_load_failed_v2), snackbarState.message)
         assertNull(snackbarState.action)
         assertTrue(activity.uploadOverlay.failureSnackbar?.isShownOrQueued == true)
         assertFalse(activity.findViewById<ComposeView>(R.id.lens_upload_overlay).isVisible)
@@ -547,6 +631,53 @@ class LensCameraActivityTest {
         assertFalse(activity.findViewById<ComposeView>(R.id.lens_upload_overlay).isVisible)
     }
 
+    @Test
+    fun `GIVEN QR only WHEN a photo picker image is returned THEN it is not uploaded`() {
+        uploadNeverFinishes()
+        val activity = cameraActivityController(qrOnly = true).get()
+
+        activity.handleGalleryResult(pickedImageUri)
+
+        assertIs<LensCameraFragment>(
+            activity.supportFragmentManager.findFragmentById(R.id.lens_fragment_container_view)
+        )
+        assertFalse(activity.findViewById<ComposeView>(R.id.lens_upload_overlay).isVisible)
+    }
+
+    @Test
+    fun `GIVEN QR only WHEN the camera fragment returns a captured image THEN it is not uploaded and the activity finishes canceled`() {
+        val activity = cameraActivityController(qrOnly = true).get()
+
+        returnCapturedImage(activity)
+
+        assertFalse(activity.findViewById<ComposeView>(R.id.lens_upload_overlay).isVisible)
+        assertEquals(Activity.RESULT_CANCELED, Shadows.shadowOf(activity).resultCode)
+        assertTrue(activity.isFinishing)
+    }
+
+    @Test
+    fun `GIVEN QR only WHEN the camera fragment requests the Lens gallery THEN no picker is launched and the activity finishes canceled`() {
+        val activity = cameraActivityController(qrOnly = true).get()
+
+        activity.supportFragmentManager.setFragmentResult(
+            LensCameraFragment.RESULT_REQUEST_KEY,
+            Bundle().apply { putBoolean(LensCameraFragment.RESULT_GALLERY_REQUEST, true) },
+        )
+        activity.supportFragmentManager.executePendingTransactions()
+
+        assertNull(Shadows.shadowOf(activity).nextStartedActivityForResult)
+        assertEquals(Activity.RESULT_CANCELED, Shadows.shadowOf(activity).resultCode)
+        assertTrue(activity.isFinishing)
+    }
+
+    private fun returnCapturedImage(activity: LensCameraActivity) {
+        activity.supportFragmentManager.setFragmentResult(
+            LensCameraFragment.RESULT_REQUEST_KEY,
+            Bundle().apply { putParcelable(LensCameraFragment.RESULT_IMAGE_URI, capturedImageUri) },
+        )
+        activity.supportFragmentManager.executePendingTransactions()
+    }
+
     private fun uploadNeverFinishes() {
         coEvery { uploader.decodeImage(pickedImageUri) } returns pickedImage
         coEvery { uploader.uploadImage(any(), any()) } coAnswers
@@ -563,14 +694,17 @@ class LensCameraActivityTest {
     private fun cameraActivityController(
         isPrivate: Boolean = false,
         savedState: Bundle? = null,
+        qrOnly: Boolean = false,
     ): ActivityController<LensCameraActivity> {
         Shadows.shadowOf(ApplicationProvider.getApplicationContext<Application>())
             .grantPermissions(Manifest.permission.CAMERA)
-        val controller =
-            Robolectric.buildActivity(
-                LensCameraActivity::class.java,
-                LensCameraActivity.newIntent(testContext, isPrivate),
-            )
+        val intent =
+            if (qrOnly) {
+                LensCameraActivity.newQrScannerIntent(testContext)
+            } else {
+                LensCameraActivity.newIntent(testContext, isPrivate)
+            }
+        val controller = Robolectric.buildActivity(LensCameraActivity::class.java, intent)
         controller.get().uploadViewModelFactory =
             LensUploadViewModel.Factory(
                 uploaderProvider = { uploader },
@@ -593,6 +727,24 @@ class LensCameraActivityTest {
 
         assertNotNull(activity.supportFragmentManager.findFragmentByTag(GoogleLensOptOutBottomSheetFragment.TAG))
         assertNull(activity.supportFragmentManager.findFragmentById(R.id.lens_fragment_container_view))
+    }
+
+    @Test
+    fun `GIVEN QR only and the opt-out sheet has not been acknowledged WHEN the activity reaches onResume THEN no sheet or backdrop is shown and the camera fragment is added`() {
+        every { settings.hasAcceptedGoogleLensFirstRun } returns false
+        val shadowApp = Shadows.shadowOf(ApplicationProvider.getApplicationContext<Application>())
+        shadowApp.grantPermissions(Manifest.permission.CAMERA)
+        val intent = LensCameraActivity.newQrScannerIntent(testContext)
+
+        val activity = Robolectric.buildActivity(LensCameraActivity::class.java, intent).setup().get()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        activity.supportFragmentManager.executePendingTransactions()
+
+        assertNull(activity.supportFragmentManager.findFragmentByTag(GoogleLensOptOutBottomSheetFragment.TAG))
+        assertFalse(activity.findViewById<ComposeView>(R.id.lens_opt_out_backdrop).isVisible)
+        assertIs<LensCameraFragment>(
+            activity.supportFragmentManager.findFragmentById(R.id.lens_fragment_container_view)
+        )
     }
 
     @Test

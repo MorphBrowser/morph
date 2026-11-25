@@ -68,8 +68,10 @@ add_setup(async function () {
     ],
   });
 
+  UrlbarTestUtils.stubLocale("en-US");
   registerCleanupFunction(() => {
     UrlbarTestUtils.stubNowZonedDateTime(null);
+    UrlbarTestUtils.stubLocale(null);
   });
 });
 
@@ -710,8 +712,8 @@ add_task(async function resultMenu() {
   Assert.deepEqual(
     [...menuitems].map(m => document.l10n.getAttributes(m).id),
     [
-      "urlbar-result-menu-show-less-frequently2",
-      "urlbar-result-menu-dont-show-sports2",
+      "urlbar-result-menu-show-less-frequently3",
+      "urlbar-result-menu-dont-show-sports",
       "urlbar-result-menu-manage-firefox-suggest2",
       "urlbar-result-menu-learn-more2",
       "urlbar-view-context-menu-skip-menu-with-tab",

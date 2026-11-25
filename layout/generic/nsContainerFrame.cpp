@@ -77,6 +77,41 @@ void nsContainerFrame::SetInitialChildList(ChildListID aListID,
   }
 }
 
+static bool IsNonFloatPlaceholder(const nsIFrame* aFrame) {
+  return aFrame->IsPlaceholderFrame() &&
+         !aFrame->HasAnyStateBits(PLACEHOLDER_FOR_FLOAT);
+}
+
+/**
+ * Returns true if adding or removing a child of aParent can't affect the
+ * intrinsic sizes of aParent or its ancestors.
+ *
+ * That's the case for placeholders of absolutely/fixed positioned and top
+ * layer frames (but not floats), unless aParent is inline-level: a placeholder
+ * has no intrinsic size itself (see nsPlaceholderFrame::AddInlineMinISize),
+ * but an abspos placeholder in inline content introduces a line-break
+ * opportunity (see bug 1418472 in nsTextFrame.cpp), which can change the
+ * min-content size of the enclosing block.
+ */
+static bool ChildChangeKeepsIntrinsicSizes(const nsContainerFrame* aParent,
+                                           bool aIsNonFloatPlaceholder) {
+  return aIsNonFloatPlaceholder && !aParent->IsLineParticipant();
+}
+
+/**
+ * Returns the IntrinsicDirty value to use when aFrameList is added to
+ * aParent's principal child list.
+ */
+static IntrinsicDirty IntrinsicDirtyForChildListChange(
+    const nsContainerFrame* aParent, const nsFrameList& aFrameList) {
+  for (nsIFrame* f : aFrameList) {
+    if (!ChildChangeKeepsIntrinsicSizes(aParent, IsNonFloatPlaceholder(f))) {
+      return IntrinsicDirty::FrameAndAncestors;
+    }
+  }
+  return IntrinsicDirty::None;
+}
+
 void nsContainerFrame::AppendFrames(ChildListID aListID,
                                     nsFrameList&& aFrameList) {
   MOZ_ASSERT(aListID == FrameChildListID::Principal ||
@@ -87,11 +122,13 @@ void nsContainerFrame::AppendFrames(ChildListID aListID,
     return;
   }
 
+  const IntrinsicDirty intrinsicDirty =
+      IntrinsicDirtyForChildListChange(this, aFrameList);
   DrainSelfOverflowList();  // ensure the last frame is in mFrames
   mFrames.AppendFrames(this, std::move(aFrameList));
 
   if (aListID != FrameChildListID::NoReflowPrincipal) {
-    PresShell()->FrameNeedsReflow(this, IntrinsicDirty::FrameAndAncestors,
+    PresShell()->FrameNeedsReflow(this, intrinsicDirty,
                                   NS_FRAME_HAS_DIRTY_CHILDREN);
   }
 }
@@ -109,11 +146,13 @@ void nsContainerFrame::InsertFrames(ChildListID aListID, nsIFrame* aPrevFrame,
     return;
   }
 
+  const IntrinsicDirty intrinsicDirty =
+      IntrinsicDirtyForChildListChange(this, aFrameList);
   DrainSelfOverflowList();  // ensure aPrevFrame is in mFrames
   mFrames.InsertFrames(this, aPrevFrame, std::move(aFrameList));
 
   if (aListID != FrameChildListID::NoReflowPrincipal) {
-    PresShell()->FrameNeedsReflow(this, IntrinsicDirty::FrameAndAncestors,
+    PresShell()->FrameNeedsReflow(this, intrinsicDirty,
                                   NS_FRAME_HAS_DIRTY_CHILDREN);
   }
 }
@@ -142,6 +181,7 @@ void nsContainerFrame::RemoveFrame(DestroyContext& aContext,
   // told not to (FrameChildListID::NoReflowPrincipal).
   const bool generateReflowCommand =
       aListID != FrameChildListID::NoReflowPrincipal;
+  const bool isNonFloatPlaceholder = IsNonFloatPlaceholder(aOldFrame);
   for (nsIFrame* continuation : Reversed(continuations)) {
     nsContainerFrame* parent = continuation->GetParent();
 
@@ -151,8 +191,12 @@ void nsContainerFrame::RemoveFrame(DestroyContext& aContext,
     parent->StealFrame(continuation);
     continuation->Destroy(aContext);
     if (generateReflowCommand && parent != lastParent) {
-      presShell->FrameNeedsReflow(parent, IntrinsicDirty::FrameAndAncestors,
-                                  NS_FRAME_HAS_DIRTY_CHILDREN);
+      presShell->FrameNeedsReflow(
+          parent,
+          ChildChangeKeepsIntrinsicSizes(parent, isNonFloatPlaceholder)
+              ? IntrinsicDirty::None
+              : IntrinsicDirty::FrameAndAncestors,
+          NS_FRAME_HAS_DIRTY_CHILDREN);
       lastParent = parent;
     }
   }
@@ -181,7 +225,7 @@ void nsContainerFrame::SafelyDestroyFrameListProp(
       frame->Destroy(aContext);
     } else {
       (void)TakeProperty(aProp);
-      frameList->Delete(aPresShell);
+      frameList->Delete();
       return;
     }
   }
@@ -1037,7 +1081,7 @@ bool nsContainerFrame::TryRemoveFrame(FrameListPropertyDescriptor aProp,
     // aChildToRemove *may* have been removed from this list.
     if (list->IsEmpty()) {
       (void)TakeProperty(aProp);
-      list->Delete(PresShell());
+      list->Delete();
     }
     return true;
   }
@@ -1368,7 +1412,7 @@ void nsContainerFrame::NormalizeChildLists() {
   auto* prevInFlow = static_cast<nsContainerFrame*>(GetPrevInFlow());
   // Merge overflow frames from our prev-in-flow into our principal child list.
   if (prevInFlow) {
-    AutoFrameListPtr overflow(PresContext(), prevInFlow->StealOverflowFrames());
+    AutoFrameListPtr overflow(prevInFlow->StealOverflowFrames());
     if (overflow) {
       ReparentFrames(*overflow, prevInFlow, this);
       MergeSortedFrameLists(mFrames, *overflow, GetContent());
@@ -1583,8 +1627,7 @@ bool nsContainerFrame::MoveOverflowToChildList() {
   // Check for an overflow list with our prev-in-flow
   nsContainerFrame* prevInFlow = (nsContainerFrame*)GetPrevInFlow();
   if (nullptr != prevInFlow) {
-    AutoFrameListPtr prevOverflowFrames(PresContext(),
-                                        prevInFlow->StealOverflowFrames());
+    AutoFrameListPtr prevOverflowFrames(prevInFlow->StealOverflowFrames());
     if (prevOverflowFrames) {
       // Tables are special; they can have repeated header/footer
       // frames on mFrames at this point.
@@ -1730,8 +1773,7 @@ bool nsContainerFrame::MoveInlineOverflowToChildList(nsIFrame* aLineContainer) {
 
   // Check for an overflow list with our prev-in-flow
   if (auto prevInFlow = static_cast<nsContainerFrame*>(GetPrevInFlow())) {
-    AutoFrameListPtr prevOverflowFrames(PresContext(),
-                                        prevInFlow->StealOverflowFrames());
+    AutoFrameListPtr prevOverflowFrames(prevInFlow->StealOverflowFrames());
     if (prevOverflowFrames) {
       // We may need to reparent floats from prev-in-flow to our line
       // container if the container has prev continuation.
@@ -1750,7 +1792,7 @@ bool nsContainerFrame::MoveInlineOverflowToChildList(nsIFrame* aLineContainer) {
 }
 
 bool nsContainerFrame::DrainSelfOverflowList() {
-  AutoFrameListPtr overflowFrames(PresContext(), StealOverflowFrames());
+  AutoFrameListPtr overflowFrames(StealOverflowFrames());
   if (overflowFrames) {
     mFrames.AppendFrames(nullptr, std::move(*overflowFrames));
     return true;
@@ -1767,7 +1809,7 @@ bool nsContainerFrame::DrainAndMergeSelfOverflowList() {
   // content order.
   // NOTE: nsContainerFrame::AppendFrames/InsertFrames calls this method and
   // there are also direct calls from the fctor (FindAppendPrevSibling).
-  AutoFrameListPtr overflowFrames(PresContext(), StealOverflowFrames());
+  AutoFrameListPtr overflowFrames(StealOverflowFrames());
   if (overflowFrames) {
     MergeSortedFrameLists(mFrames, *overflowFrames, GetContent());
     // We set a frame bit to push them again in Reflow() to avoid creating
@@ -1786,8 +1828,7 @@ nsFrameList* nsContainerFrame::DrainExcessOverflowContainersList(
 
   // Drain excess overflow containers from our prev-in-flow.
   if (auto* prev = static_cast<nsContainerFrame*>(GetPrevInFlow())) {
-    AutoFrameListPtr excessFrames(PresContext(),
-                                  prev->StealExcessOverflowContainers());
+    AutoFrameListPtr excessFrames(prev->StealExcessOverflowContainers());
     if (excessFrames) {
       excessFrames->ApplySetParent(this);
       if (overflowContainers) {
@@ -1805,8 +1846,7 @@ nsFrameList* nsContainerFrame::DrainExcessOverflowContainersList(
   // present if our next-in-flow hasn't been reflown yet.  Move any children
   // from it that don't have a continuation in this frame to the
   // OverflowContainers list.
-  AutoFrameListPtr selfExcessOCFrames(PresContext(),
-                                      StealExcessOverflowContainers());
+  AutoFrameListPtr selfExcessOCFrames(StealExcessOverflowContainers());
   if (selfExcessOCFrames) {
     nsFrameList toMove;
     auto child = selfExcessOCFrames->FirstChild();
@@ -2322,15 +2362,11 @@ LogicalSize nsContainerFrame::ComputeSizeWithIntrinsicDimensions(
 
 nsRect nsContainerFrame::ComputeSimpleTightBounds(
     DrawTarget* aDrawTarget) const {
-  if (StyleOutline()->ShouldPaintOutline() || StyleBorder()->HasBorder() ||
-      !StyleBackground()->IsTransparent(this) ||
+  nsRect r;
+  if (StyleBorder()->HasBorder() || !StyleBackground()->IsTransparent(this) ||
       StyleDisplay()->HasNativeAppearance()) {
-    // Not necessarily tight, due to clipping, negative
-    // outline-offset, and lots of other issues, but that's OK
-    return InkOverflowRect();
+    r = GetRectRelativeToSelf();
   }
-
-  nsRect r(0, 0, 0, 0);
   for (const auto& childLists : ChildLists()) {
     for (nsIFrame* child : childLists.mList) {
       r.UnionRect(
@@ -2616,7 +2652,6 @@ nsresult nsOverflowContinuationTracker::Insert(nsIFrame* aOverflowCont,
 
   nsresult rv = NS_OK;
   bool reparented = false;
-  nsPresContext* presContext = aOverflowCont->PresContext();
   bool addToList = !mSentry || aOverflowCont != mSentry->GetNextInFlow();
 
   // If we have a list and aOverflowCont is already in it then don't try to
@@ -2645,7 +2680,7 @@ nsresult nsOverflowContinuationTracker::Insert(nsIFrame* aOverflowCont,
       // ExcessOverflowContainersProperty() because we are going to insert
       // aOverflowCont to mOverflowContList below, which guarantees an nonempty
       // list in ExcessOverflowContainersProperty().
-      mOverflowContList = new (presContext->PresShell()) nsFrameList();
+      mOverflowContList = new nsFrameList();
       mParent->SetProperty(nsContainerFrame::ExcessOverflowContainersProperty(),
                            mOverflowContList);
       SetUpListWalker();
@@ -2654,22 +2689,44 @@ nsresult nsOverflowContinuationTracker::Insert(nsIFrame* aOverflowCont,
       reparented = true;
     }
 
-    // If aOverflowCont has a prev/next-in-flow that might be in
+    // If any other continuation of aOverflowCont's frame is already in
     // mOverflowContList we need to find it and insert after/before it to
-    // maintain the order amongst next-in-flows in this list.
-    nsIFrame* pif = aOverflowCont->GetPrevInFlow();
-    nsIFrame* nif = aOverflowCont->GetNextInFlow();
-    if ((pif && pif->GetParent() == mParent && pif != mPrevOverflowCont) ||
-        (nif && nif->GetParent() == mParent && mPrevOverflowCont)) {
-      for (nsIFrame* f : *mOverflowContList) {
-        if (f == pif) {
-          mPrevOverflowCont = pif;
-          break;
+    // maintain the order amongst the continuations in this list.
+
+    // Return whether aFrame is found in aOverflowCont's prev-in-flow chain.
+    auto IsEarlierContinuation = [aOverflowCont](nsIFrame* aFrame) {
+      for (nsIFrame* f = aOverflowCont->GetPrevInFlow(); f;
+           f = f->GetPrevInFlow()) {
+        if (f == aFrame) {
+          return true;
         }
-        if (f == nif) {
-          mPrevOverflowCont = f->GetPrevSibling();
-          break;
+      }
+      return false;
+    };
+
+    // Return true if aFrame is found in aOverflowCont's next-in-flow chain.
+    auto IsLaterContinuation = [aOverflowCont](nsIFrame* aFrame) {
+      for (nsIFrame* f = aOverflowCont->GetNextInFlow(); f;
+           f = f->GetNextInFlow()) {
+        if (f == aFrame) {
+          return true;
         }
+      }
+      return false;
+    };
+
+    // Scan mOverflowContList, setting mPrevOverflowCont to the /last/ earlier
+    // continuation of aOverflowCont, or to the prev-sibling of the /first/
+    // later continuation.
+    for (nsIFrame* f : *mOverflowContList) {
+      if (IsEarlierContinuation(f)) {
+        mPrevOverflowCont = f;
+        // No `break`: keep looking for another continuation that is still in
+        // the prev-in-flow chain.
+      } else if (IsLaterContinuation(f)) {
+        mPrevOverflowCont = f->GetPrevSibling();
+        // Stop as soon as we find a later continuation.
+        break;
       }
     }
 

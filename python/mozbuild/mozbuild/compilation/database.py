@@ -13,9 +13,9 @@ from mozbuild.backend.common import CommonBackend
 from mozbuild.frontend.data import (
     ComputedFlags,
     DirectoryTraversal,
+    Headers,
     PerSourceFlag,
     Sources,
-    VariablePassthru,
 )
 from mozbuild.util import expand_variables
 
@@ -33,6 +33,8 @@ class CompileDBBackend(CommonBackend):
         self._envs = {}
         self._local_flags = defaultdict(dict)
         self._per_source_flags = defaultdict(list)
+        self._headers = []
+        self._source_suffixes = defaultdict(set)
 
     def _build_cmd(self, cmd, filename, unified):
         cmd = list(cmd)
@@ -67,10 +69,9 @@ class CompileDBBackend(CommonBackend):
                 self._build_db_line(
                     obj.objdir, obj.relsrcdir, obj.config, f, obj.canonical_suffix
                 )
-        elif isinstance(obj, VariablePassthru):
-            for var in ("MOZBUILD_CMFLAGS", "MOZBUILD_CMMFLAGS"):
-                if var in obj.variables:
-                    self._local_flags[obj.objdir][var] = obj.variables[var]
+
+        elif isinstance(obj, Headers):
+            self._headers.append(obj)
 
         elif isinstance(obj, PerSourceFlag):
             self._per_source_flags[obj.file_name].extend(obj.flags)
@@ -83,6 +84,22 @@ class CompileDBBackend(CommonBackend):
 
     def consume_finished(self):
         CommonBackend.consume_finished(self)
+
+        # The order is the priority used to pick a header's language.
+        header_suffixes = {
+            objdir: next(
+                (s for s in (".cpp", ".mm", ".m", ".c") if s in suffixes), ".h"
+            )
+            for objdir, suffixes in self._source_suffixes.items()
+        }
+        for obj in self._headers:
+            suffix = header_suffixes.get(obj.objdir, ".h")
+            # FIXME: Currently skip generated headers in obj.generated_files.
+            for f in obj.static_files:
+                db_line = self._build_db_line(
+                    obj.objdir, obj.relsrcdir, obj.config, f, suffix
+                )
+                db_line.append(f"-x{self.HEADER_LANGUAGES[suffix]}")
 
         db = []
 
@@ -124,10 +141,10 @@ class CompileDBBackend(CommonBackend):
             # encounter a lot of errors parsing some files.)
             c.insert(-1, "-ferror-limit=0")
 
-            # Header entries come from the static-analysis backend, which adds
-            # -xc++ to tell clang to treat the .h file as C++. On Windows,
-            # CXXFLAGS also contains -TP, clang-cl's own "treat as C++" flag.
-            # With both present, clang warns that -TP is unused, so drop it.
+            # C++ header entries add -xc++ to tell clang to treat the .h file
+            # as C++. On Windows, CXXFLAGS also contains -TP, clang-cl's own
+            # "treat as C++" flag. With both present, clang warns that -TP is
+            # unused, so drop it.
             if "-xc++" in c:
                 c = [arg for arg in c if arg != "-TP"]
 
@@ -217,6 +234,14 @@ class CompileDBBackend(CommonBackend):
         ".mm": "CXXFLAGS",
     }
 
+    HEADER_LANGUAGES = {
+        ".c": "c",
+        ".h": "c++",
+        ".cpp": "c++",
+        ".m": "objective-c",
+        ".mm": "objective-c++",
+    }
+
     def _get_compiler_args(self, cenv, canonical_suffix):
         if canonical_suffix not in self.COMPILERS:
             return None
@@ -228,25 +253,16 @@ class CompileDBBackend(CommonBackend):
         compiler_args = self._get_compiler_args(cenv, canonical_suffix)
         if compiler_args is None:
             return
+        self._source_suffixes[objdir].add(canonical_suffix)
         db = self._db.setdefault(
             (objdir, filename, unified),
             compiler_args + ["-o", "/dev/null", "-c"],
         )
         reldir = reldir or mozpath.relpath(objdir, cenv.topobjdir)
 
-        def append_var(name):
-            value = cenv.substs.get(name)
-            if not value:
-                return
-            if isinstance(value, str):
-                value = value.split()
-            db.extend(value)
-
         db.append("$(COMPUTED_%s)" % self.CFLAGS[canonical_suffix])
         if canonical_suffix == ".m":
-            append_var("OS_COMPILE_CMFLAGS")
-            db.append("$(MOZBUILD_CMFLAGS)")
+            db.append("$(COMPUTED_CMFLAGS)")
         elif canonical_suffix == ".mm":
-            append_var("OS_COMPILE_CMMFLAGS")
-            db.append("$(MOZBUILD_CMMFLAGS)")
+            db.append("$(COMPUTED_CMMFLAGS)")
         return db

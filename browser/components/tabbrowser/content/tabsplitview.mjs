@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-/* global gBrowser, isBlankPageURL, MozXULElement, XPCOMUtils */
+/* global gBrowser, isBlankPageURL, MozXULElement */
 
 const { Tabbrowser } = ChromeUtils.importESModule(
   "moz-src:///browser/components/tabbrowser/Tabbrowser.sys.mjs"
@@ -11,6 +11,9 @@ const { DeferredTask } = ChromeUtils.importESModule(
   "resource://gre/modules/DeferredTask.sys.mjs"
 );
 
+const { XPCOMUtils } = ChromeUtils.importESModule(
+  "resource://gre/modules/XPCOMUtils.sys.mjs"
+);
 const lazy = XPCOMUtils.declareLazy({
   hasUsedSplitView: { pref: "browser.tabs.splitview.hasUsed", default: false },
 });
@@ -60,6 +63,21 @@ export class MozTabSplitViewWrapper extends MozXULElement {
   #shouldMoveAllTabsAtOnce = true;
 
   #storedPanelWidths = new WeakMap();
+
+  /**
+   * The requested percentage pending the first Split View activation.
+   *
+   * @type {number|null}
+   */
+  #firstPanelInitialWidthPercent = null;
+
+  constructor() {
+    super();
+
+    // Assigned by the tab strip.
+    /** @type {number} */
+    this.elementIndex;
+  }
 
   /**
    * @returns {boolean}
@@ -151,6 +169,10 @@ export class MozTabSplitViewWrapper extends MozXULElement {
       this.#tabChangeObserver = new window.MutationObserver(mutations => {
         if (this.tabs.length) {
           this.hasActiveTab = this.tabs.some(tab => tab.selected);
+          this.toggleAttribute(
+            "hascontainertab",
+            this.tabs.some(tab => tab.hasAttribute("usercontextid"))
+          );
           this.tabs.forEach((tab, index) => {
             // Renumber tabs so that a11y tools can tell users that a given
             // tab is "1 of 2" in the split view, for example.
@@ -234,11 +256,36 @@ export class MozTabSplitViewWrapper extends MozXULElement {
   }
 
   /**
+   * Get the requested initial width of the first panel.
+   *
+   * @returns {number}
+   *   The width in CSS pixels, or zero if no initial width can be applied.
+   */
+  #getFirstPanelInitialWidthInPixels() {
+    const percent = this.#firstPanelInitialWidthPercent;
+    if (percent === null || this.#tabs.length !== 2) {
+      return 0;
+    }
+
+    return Math.round((gBrowser.tabpanels.clientWidth * percent) / 100);
+  }
+
+  /**
    * Show all Split View tabs in the content area.
    */
   #activate() {
+    const initialWidth = this.#getFirstPanelInitialWidthInPixels();
+
     updateUrlbarButton.arm();
     gBrowser.showSplitViewPanels(this.#tabs);
+
+    if (initialWidth > 0) {
+      const [firstPanel] = this.panels;
+      firstPanel.setAttribute("width", String(initialWidth));
+      firstPanel.style.width = `${initialWidth}px`;
+      this.#firstPanelInitialWidthPercent = null;
+    }
+
     this.container.dispatchEvent(
       new CustomEvent("TabSplitViewActivate", {
         detail: { tabs: this.#tabs, splitview: this },
@@ -327,10 +374,26 @@ export class MozTabSplitViewWrapper extends MozXULElement {
    *
    * @param {MozTabbrowserTab[]} tabs
    * @param {object} [options]
+   * @param {number|null} [options.firstPanelInitialWidthPercent]
+   *   The preferred percentage of the first panel on initial activation.
    * @param {boolean} [options.isSessionRestore]
    * @param {number} [options.indexOfReplacedTab] [optional] Used if replacing a tab in the split view
    */
-  addTabs(tabs, { isSessionRestore = false, indexOfReplacedTab = -1 } = {}) {
+  addTabs(
+    tabs,
+    {
+      firstPanelInitialWidthPercent,
+      isSessionRestore = false,
+      indexOfReplacedTab = -1,
+    } = {}
+  ) {
+    if (firstPanelInitialWidthPercent != null) {
+      this.#firstPanelInitialWidthPercent = Math.min(
+        80,
+        Math.max(20, firstPanelInitialWidthPercent)
+      );
+    }
+
     for (let tab of tabs) {
       if (tab.pinned) {
         return;
@@ -377,7 +440,7 @@ export class MozTabSplitViewWrapper extends MozXULElement {
    *
    * @param {string} [trigger]
    *   The trigger method for ending the split view. Used for telemetry.
-   *   Valid values: "menu_separate", "icon_separate", "icon_close", "tab_close", "footer_separate".
+   *   Valid values: "menu_separate", "icon_separate", "icon_close", "tab_close", "footer_separate", "mini_window".
    */
   unsplitTabs(trigger = null) {
     if (this.#isUnsplitting) {
@@ -474,7 +537,9 @@ export class MozTabSplitViewWrapper extends MozXULElement {
       });
     }
     this.#isClosing = true;
-    gBrowser.removeTabs(this.#tabs);
+    gBrowser.removeTabs(this.#tabs, {
+      animate: !gBrowser.tabContainer.verticalMode,
+    });
   }
 
   /**

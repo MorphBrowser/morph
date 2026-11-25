@@ -2,12 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const lazy = {};
-ChromeUtils.defineESModuleGetters(lazy, {
-  AIWindow:
-    "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
-  CustomizableUI:
-    "moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs",
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+
+const lazy = XPCOMUtils.declareLazy({
+  AIWindowToolbarButtons:
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindowToolbarButtons.sys.mjs",
+  MONITOR_WIDGET_ID:
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindowToolbarButtons.sys.mjs",
   MONITOR_AGENTS_CHANGED_TOPIC:
     "moz-src:///browser/components/aiwindow/models/agents/Monitor.sys.mjs",
   MonitorAgent:
@@ -19,15 +20,13 @@ ChromeUtils.defineESModuleGetters(lazy, {
   TabMetrics: "moz-src:///browser/components/tabbrowser/TabMetrics.sys.mjs",
   isAllowedWatchUrl:
     "moz-src:///browser/components/aiwindow/models/agents/Monitor.sys.mjs",
+  gBundle() {
+    return Services.strings.createBundle(
+      "chrome://browser/locale/browser.properties"
+    );
+  },
 });
 
-ChromeUtils.defineLazyGetter(lazy, "gBundle", function () {
-  return Services.strings.createBundle(
-    "chrome://browser/locale/browser.properties"
-  );
-});
-
-const BUTTON_ID = "smartwindow-monitor-button";
 const PANEL_ID = "smartwindow-monitor-panel";
 const TITLE_ID = "smartwindow-monitor-panel-title";
 const TASKS_PAGE_URL = "about:smartwindowtasks";
@@ -57,13 +56,28 @@ export const MonitorPanel = {
       return;
     }
 
-    const existing = doc.getElementById(PANEL_ID);
+    const existing = this._getOpenPanel(doc);
     if (existing) {
       existing.hidePopup();
       return;
     }
 
     this.showMonitorPanel(win);
+  },
+
+  /**
+   * Find opened panel.
+   *
+   * @param {Document} doc
+   * @returns {?XULElement}
+   */
+  _getOpenPanel(doc) {
+    const panel = doc.getElementById(PANEL_ID);
+    if (panel?.state === "closed") {
+      panel.remove();
+      return null;
+    }
+    return panel;
   },
 
   /**
@@ -77,7 +91,7 @@ export const MonitorPanel = {
       return;
     }
 
-    const existing = doc.getElementById(PANEL_ID);
+    const existing = this._getOpenPanel(doc);
     if (existing) {
       this._openCreateView(existing, win);
       return;
@@ -93,7 +107,7 @@ export const MonitorPanel = {
    */
   showMonitorPanel(win, { create = false } = {}) {
     const doc = win.document;
-    const button = doc.getElementById(BUTTON_ID);
+    const button = doc.getElementById(lazy.MONITOR_WIDGET_ID);
     const popupSet = doc.getElementById("mainPopupSet");
     if (!button || !popupSet) {
       return;
@@ -101,44 +115,52 @@ export const MonitorPanel = {
 
     // Opening the panel answers the attention dot. Taking the ids and
     // it only clears once the panel has committed to opening.
-    const attentionIds = lazy.AIWindow.takeMonitorAttentionIds();
+    const attentionIds = lazy.AIWindowToolbarButtons.takeMonitorAttentionIds();
 
     // Anchor to the overflow button rather than the button itself when the
     // widget has been moved into the overflow panel.
     const anchor =
-      lazy.CustomizableUI.getWidget(BUTTON_ID)?.forWindow(win)?.anchor ??
+      lazy.AIWindowToolbarButtons.getAnchor(win, lazy.MONITOR_WIDGET_ID) ??
       button;
 
     const panel = this._createPanel(win);
     panel._contents.attentionIds = attentionIds;
     const onMonitorsChanged = () => this._syncContents(panel);
+    let observingMonitors = false;
 
-    panel.addEventListener(
-      "popupshown",
-      () => {
-        button.setAttribute("aria-expanded", "true");
-        Services.obs.addObserver(
-          onMonitorsChanged,
-          lazy.MONITOR_AGENTS_CHANGED_TOPIC
-        );
-        if (create) {
-          this._openCreateView(panel, win);
-        }
-      },
-      { once: true }
-    );
-    panel.addEventListener(
-      "popuphidden",
-      () => {
-        button.setAttribute("aria-expanded", "false");
+    const onPopupShown = () => {
+      button.setAttribute("aria-expanded", "true");
+      observingMonitors = true;
+      Services.obs.addObserver(
+        onMonitorsChanged,
+        lazy.MONITOR_AGENTS_CHANGED_TOPIC
+      );
+      if (create) {
+        this._openCreateView(panel, win);
+      }
+    };
+    panel.addEventListener("popupshown", onPopupShown, { once: true });
+    const teardown = () => {
+      win.removeEventListener("unload", teardown);
+      // A window closed while the panel is still opening can get its
+      // popupshown after unload, which would add an observer nothing removes.
+      panel.removeEventListener("popupshown", onPopupShown);
+      button.setAttribute("aria-expanded", "false");
+      // A click landing while the panel is still opening hides it without it
+      // ever having been shown, so the observer may never have been added.
+      // Removing one that isn't registered throws, which used to leave the
+      // panel node behind and the button unable to open anything again.
+      if (observingMonitors) {
+        observingMonitors = false;
         Services.obs.removeObserver(
           onMonitorsChanged,
           lazy.MONITOR_AGENTS_CHANGED_TOPIC
         );
-        panel.remove();
-      },
-      { once: true }
-    );
+      }
+      panel.remove();
+    };
+    panel.addEventListener("popuphidden", teardown, { once: true });
+    win.addEventListener("unload", teardown, { once: true });
 
     popupSet.appendChild(panel);
     panel.openPopup(anchor, "bottomright topright", 0, 4, false, false);
@@ -185,6 +207,12 @@ export const MonitorPanel = {
     contents.addEventListener("agent-monitor-item:draft-change", event => {
       contents.draft = event.detail.draft;
     });
+    contents.addEventListener("agent-monitor-item:resolve-titles", event =>
+      lazy.MonitorUIUtils.answerResolveTitles(event)
+    );
+    contents.addEventListener("agent-monitor-item:request-suggestion", event =>
+      lazy.MonitorUIUtils.answerSuggestionRequest(event)
+    );
     contents.addEventListener("agent-monitor-panel:manage-tasks", () => {
       win.switchToTabHavingURI(TASKS_PAGE_URL, true);
       panel.hidePopup();

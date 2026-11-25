@@ -16,7 +16,6 @@ crashreporter/crashreporter/index
 internal-urls
 search/index
 ipprotection/index
-components/normandy/normandy/index
 components/nimbus/docs/index
 components/messaging-system/docs/index
 components/pictureinpicture/pictureinpicture/index
@@ -37,4 +36,5 @@ components/sessionstore/index
 actors/actors/picture-in-picture-child-video-wrapper-api
 components/captchadetection/captcha-detection/index
 components/contentrelevancy/index
+mozapps/pushnotificationhelper/index
 ```

@@ -31,7 +31,7 @@ namespace dom {
 /* static */
 already_AddRefed<RemoteWorkerController> RemoteWorkerController::Create(
     const RemoteWorkerData& aData, RemoteWorkerObserver* aObserver,
-    base::ProcessId aProcessId) {
+    GeckoChildID aChildID) {
   AssertIsInMainProcess();
   AssertIsOnBackgroundThread();
   MOZ_ASSERT(aObserver);
@@ -43,7 +43,7 @@ already_AddRefed<RemoteWorkerController> RemoteWorkerController::Create(
   MOZ_ASSERT(manager);
 
   // XXX: We do not check for failure here, should we?
-  manager->Launch(controller, aData, aProcessId);
+  manager->Launch(controller, aData, aChildID);
 
   return controller.forget();
 }
@@ -65,6 +65,7 @@ RemoteWorkerController::~RemoteWorkerController() {
 
 void RemoteWorkerController::SetWorkerActor(RemoteWorkerParent* aActor) {
   AssertIsOnBackgroundThread();
+  MOZ_ASSERT(!IsTerminated());
   MOZ_ASSERT(!mActor);
   MOZ_ASSERT(aActor);
 
@@ -228,8 +229,8 @@ void RemoteWorkerController::MaybeStartSharedWorkerOp(Args&&... aArgs) {
   AssertIsOnBackgroundThread();
   MOZ_ASSERT(!mIsServiceWorker);
 
-  UniquePtr<PendingSharedWorkerOp> op =
-      MakeUnique<PendingSharedWorkerOp>(std::forward<Args>(aArgs)...);
+  auto op =
+      std::make_unique<PendingSharedWorkerOp>(std::forward<Args>(aArgs)...);
 
   if (!op->MaybeStart(this)) {
     mPendingOps.AppendElement(std::move(op));
@@ -310,8 +311,7 @@ RefPtr<ServiceWorkerOpPromise> RemoteWorkerController::ExecServiceWorkerOp(
   RefPtr<ServiceWorkerOpPromise::Private> promise =
       new ServiceWorkerOpPromise::Private(__func__);
 
-  UniquePtr<PendingServiceWorkerOp> op =
-      MakeUnique<PendingServiceWorkerOp>(std::move(aArgs), promise);
+  auto op = std::make_unique<PendingServiceWorkerOp>(std::move(aArgs), promise);
 
   if (!op->MaybeStart(this)) {
     mPendingOps.AppendElement(std::move(op));
@@ -330,8 +330,8 @@ RemoteWorkerController::ExecServiceWorkerFetchEventOp(
   RefPtr<ServiceWorkerFetchEventOpPromise::Private> promise =
       new ServiceWorkerFetchEventOpPromise::Private(__func__);
 
-  UniquePtr<PendingSWFetchEventOp> op =
-      MakeUnique<PendingSWFetchEventOp>(aArgs, promise, std::move(aReal));
+  auto op =
+      std::make_unique<PendingSWFetchEventOp>(aArgs, promise, std::move(aReal));
 
   if (!op->MaybeStart(this)) {
     mPendingOps.AppendElement(std::move(op));

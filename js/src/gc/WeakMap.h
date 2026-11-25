@@ -41,6 +41,10 @@ namespace gc {
 // reference bitmap before it can escape to script.
 void MarkSymbolForWeakMapReadBarrier(JS::Zone* zone, JS::Symbol* sym);
 
+void ShouldWeakMappingEntryBeBlack(JSObject* map, Cell* key, Cell* delegate,
+                                   Cell* value, bool* keyShouldBeBlack,
+                                   bool* valueShouldBeBlack);
+
 #if defined(JS_GC_ZEAL) || defined(DEBUG)
 // Check whether a weak map / entry is marked correctly.
 bool CheckWeakMapMapMarking(const WeakMapBase* map);
@@ -169,6 +173,10 @@ class WeakMapBase : public SlimLinkedListElement<WeakMapBase> {
   // Trace all weak map bindings. Used by the cycle collector.
   static void traceAllMappings(WeakMapTracer* tracer);
 
+  // Unmark gray weak map keys and values that the cycle collector requires to
+  // be black. See js::FixWeakMappingGrayBits.
+  static void fixAllGrayMappings(JSRuntime* rt);
+
 #if defined(JS_GC_ZEAL)
   // Save information about which weak maps are marked for a zone.
   static bool saveZoneMarkedWeakMaps(JS::Zone* zone,
@@ -203,6 +211,10 @@ class WeakMapBase : public SlimLinkedListElement<WeakMapBase> {
   virtual bool traceNurseryEntriesOnMinorGC(JSTracer* trc) = 0;
   virtual bool sweepAfterMinorGC() = 0;
 
+  // Restore marking invariants after gray unmarking, which ignores weakmaps.
+  // Returns whether any marking changed.
+  virtual bool fixGrayMappings() = 0;
+
   // We have a key that, if it or its delegate is marked, may lead to a WeakMap
   // value getting marked. Insert the necessary edges into the appropriate
   // zone's gcEphemeronEdges or gcNurseryEphemeronEdges tables.
@@ -213,7 +225,9 @@ class WeakMapBase : public SlimLinkedListElement<WeakMapBase> {
   [[nodiscard]] bool addEphemeronEdge(gc::MarkColor color, gc::TenuredCell* src,
                                       gc::TenuredCell* dst);
 
-  gc::CellColor mapColor() const { return gc::CellColor(uint32_t(mapColor_)); }
+  gc::CellColor mapColor() const {
+    return static_cast<gc::CellColor>(mapColor_.load());
+  }
   void setMapColor(gc::CellColor newColor) { mapColor_ = uint32_t(newColor); }
 
   bool isMarked() const { return gc::IsMarked(mapColor()); }
@@ -609,6 +623,7 @@ class WeakMap : public WeakMapBase {
   // memberOf can be nullptr, which means that the map is not part of a
   // JSObject.
   void traceMappings(WeakMapTracer* tracer) override;
+  bool fixGrayMappings() override;
 
   bool traceNurseryEntriesOnMinorGC(JSTracer* trc) override;
   bool sweepAfterMinorGC() override;

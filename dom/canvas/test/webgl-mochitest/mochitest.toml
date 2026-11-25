@@ -50,6 +50,9 @@ fail-if = [
 ["ensure-exts/test_EXT_texture_filter_anisotropic.html"]
 
 ["ensure-exts/test_EXT_texture_norm16.html"]
+fail-if = [
+  "os == 'android'",
+]
 
 ["ensure-exts/test_OES_draw_buffers_indexed.html"]
 
@@ -178,12 +181,6 @@ fail-if = [
 ["test_no_arr_points.html"]
 
 ["test_noprog_draw.html"]
-
-["test_pixel_pack_buffer.html"]
-skip-if = [
-  "os == 'android' && os_version == '14'",
-  "os == 'mac' && os_version == '15.30' && arch == 'aarch64'",
-]
 
 ["test_privileged_exts.html"]
 

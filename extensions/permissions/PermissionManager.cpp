@@ -255,6 +255,33 @@ bool IsExpirablePermission(const nsACString& aType,
   return false;
 }
 
+static uint32_t GetOriginAttributesStripFlags(bool aForceStrip) {
+  uint32_t flags = 0;
+
+  if (aForceStrip || !StaticPrefs::permissions_isolateBy_privateBrowsing()) {
+    flags |= OriginAttributes::STRIP_PRIVATE_BROWSING_ID;
+  }
+
+  if (aForceStrip || !StaticPrefs::permissions_isolateBy_userContext()) {
+    flags |= OriginAttributes::STRIP_USER_CONTEXT_ID;
+  }
+
+  return flags;
+}
+
+// Reset the pattern fields that permissions are not isolated by, so that the
+// pattern matches stored permission keys.
+static void MaybeStripOriginAttributesPattern(
+    OriginAttributesPattern& aPattern) {
+  uint32_t flags = GetOriginAttributesStripFlags(false);
+  if (flags & OriginAttributes::STRIP_PRIVATE_BROWSING_ID) {
+    aPattern.mPrivateBrowsingId.Reset();
+  }
+  if (flags & OriginAttributes::STRIP_USER_CONTEXT_ID) {
+    aPattern.mUserContextId.Reset();
+  }
+}
+
 // Apply MaybeStripOriginAttributes to a raw origin string (parse OA suffix,
 // strip fields, rebuild).
 static bool StripOriginString(const nsACString& aOrigin, bool aForceStripOA,
@@ -644,7 +671,7 @@ bool IsExpandedPrincipal(nsIPrincipal* aPrincipal) {
 
 // We only want to persist permissions which don't have session or policy
 // expiration.
-bool IsPersistentExpire(uint32_t aExpire, const nsACString& aType) {
+bool IsPersistentExpire(uint32_t aExpire, const nsACString& /*aType*/) {
   bool res = (aExpire != nsIPermissionManager::EXPIRE_SESSION &&
               aExpire != nsIPermissionManager::EXPIRE_POLICY);
   return res;
@@ -2146,10 +2173,13 @@ nsresult PermissionManager::AddInternal(
       PermissionEntry oldPermissionEntry = entry->GetPermissions()[index];
       id = oldPermissionEntry.mID;
 
-      // If the type we want to remove is EXPIRE_POLICY, we need to reject
-      // attempts to change the permission.
-      if (entry->GetPermissions()[index].mExpireType == EXPIRE_POLICY) {
-        NS_WARNING("Attempting to remove EXPIRE_POLICY permission");
+      // EXPIRE_POLICY permissions can only be removed by a caller that passes
+      // EXPIRE_POLICY, which is what the enterprise policy engine does.
+      if (entry->GetPermissions()[index].mExpireType == EXPIRE_POLICY &&
+          aExpireType != EXPIRE_POLICY) {
+        NS_WARNING(
+            "Ignoring removal of EXPIRE_POLICY permission by a caller that "
+            "did not pass EXPIRE_POLICY");
         break;
       }
 
@@ -2385,6 +2415,86 @@ PermissionManager::RemovePermission(nsIPermission* aPerm) {
 }
 
 NS_IMETHODIMP
+PermissionManager::RemovePermissionsExceptDefaults(
+    const nsTArray<RefPtr<nsIPermission>>& aPerms) {
+  ENSURE_NOT_CHILD_PROCESS;
+
+  MonitorAutoLock lock{mMonitor};
+  EnsureReadCompleted();
+
+  // Keep removing the remaining permissions if one fails, and report the first
+  // failure.
+  nsresult firstError = NS_OK;
+  auto recordError = [&firstError](nsresult aRv) {
+    if (NS_SUCCEEDED(firstError)) {
+      firstError = aRv;
+    }
+  };
+
+  for (nsIPermission* perm : aPerms) {
+    if (!perm) {
+      continue;
+    }
+
+    nsCOMPtr<nsIPrincipal> principal;
+    nsresult rv = perm->GetPrincipal(getter_AddRefs(principal));
+    if (NS_FAILED(rv)) {
+      recordError(rv);
+      continue;
+    }
+
+    bool isValidPermissionPrincipal = false;
+    rv = ShouldHandlePrincipalForPermission(principal,
+                                            isValidPermissionPrincipal);
+    if (NS_FAILED(rv)) {
+      recordError(rv);
+      continue;
+    }
+    if (!isValidPermissionPrincipal) {
+      continue;
+    }
+
+    nsAutoCString type;
+    rv = perm->GetType(type);
+    if (NS_FAILED(rv)) {
+      recordError(rv);
+      continue;
+    }
+
+    int32_t typeIndex = GetTypeIndex(type, false);
+    if (typeIndex == -1) {
+      continue;
+    }
+
+    RefPtr<PermissionKey> key = PermissionKey::CreateFromPrincipal(
+        principal, IsOAForceStripPermission(type), IsSiteScopedPermission(type),
+        rv);
+    if (!key) {
+      recordError(NS_FAILED(rv) ? rv : NS_ERROR_FAILURE);
+      continue;
+    }
+
+    PermissionHashKey* entry = mPermissionTable.GetEntry(key);
+    if (!entry) {
+      continue;
+    }
+
+    int32_t index = entry->GetPermissionIndex(typeIndex);
+    if (index == -1 ||
+        entry->GetPermissions()[index].mID == cIDPermissionIsDefault) {
+      continue;
+    }
+
+    rv = RemoveFromPrincipalInternal(principal, type);
+    if (NS_FAILED(rv)) {
+      recordError(rv);
+    }
+  }
+
+  return firstError;
+}
+
+NS_IMETHODIMP
 PermissionManager::RemoveAll() {
   ENSURE_NOT_CHILD_PROCESS;
 
@@ -2487,7 +2597,7 @@ nsresult PermissionManager::RemovePermissionEntries(
     const std::function<bool(const PermissionEntry& aPermEntry)>& aCondition) {
   return RemovePermissionEntries(
       [&](const PermissionEntry& aPermEntry,
-          const nsCOMPtr<nsIPrincipal>& aPrincipal) {
+          const nsCOMPtr<nsIPrincipal>& /*aPrincipal*/) {
         return aCondition(aPermEntry);
       },
       false);
@@ -2870,7 +2980,7 @@ NS_IMETHODIMP PermissionManager::GetAll(
     nsTArray<RefPtr<nsIPermission>>& aResult) {
   MonitorAutoLock lock{mMonitor};
   return GetPermissionEntries(
-      [](const PermissionEntry& aPermEntry) { return true; }, aResult);
+      [](const PermissionEntry& /*aPermEntry*/) { return true; }, aResult);
 }
 
 NS_IMETHODIMP PermissionManager::GetAllByTypeSince(
@@ -2913,6 +3023,37 @@ NS_IMETHODIMP PermissionManager::GetAllByTypes(
         return aTypes.Contains(mTypeArray[aPermEntry.mType]);
       },
       aResult);
+}
+
+NS_IMETHODIMP PermissionManager::GetAllForOriginAttributesPattern(
+    const nsAString& aPattern, const nsTArray<nsCString>& aTypes,
+    nsTArray<RefPtr<nsIPermission>>& aResult) {
+  OriginAttributesPattern pattern;
+  if (!pattern.Init(aPattern)) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  MaybeStripOriginAttributesPattern(pattern);
+
+  {
+    MonitorAutoLock lock{mMonitor};
+    nsresult rv = GetPermissionEntries(
+        [&](const PermissionEntry& aPermEntry) MOZ_REQUIRES(mMonitor) {
+          return aTypes.IsEmpty() ||
+                 aTypes.Contains(mTypeArray[aPermEntry.mType]);
+        },
+        aResult);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  aResult.RemoveElementsBy([&](const RefPtr<nsIPermission>& aPermission) {
+    nsCOMPtr<nsIPrincipal> principal;
+    if (NS_FAILED(aPermission->GetPrincipal(getter_AddRefs(principal)))) {
+      return true;
+    }
+    return !pattern.Matches(principal->OriginAttributesRef());
+  });
+
+  return NS_OK;
 }
 
 nsresult PermissionManager::ShouldHandlePrincipalForPermission(
@@ -3109,7 +3250,7 @@ nsresult PermissionManager::RemoveAllModifiedSince(int64_t aModificationTime) {
 
 nsresult PermissionManager::RemoveAllForPrivateBrowsing() {
   ENSURE_NOT_CHILD_PROCESS;
-  return RemovePermissionEntries([](const PermissionEntry& aPermEntry,
+  return RemovePermissionEntries([](const PermissionEntry& /*aPermEntry*/,
                                     const nsCOMPtr<nsIPrincipal>& aPrincipal) {
     return aPrincipal->GetIsInPrivateBrowsing();
   });
@@ -3437,7 +3578,7 @@ void PermissionManager::NotifyObservers(
   }
 }
 
-nsresult PermissionManager::Read(const MonitorAutoLock& aProofOfLock) {
+nsresult PermissionManager::Read(const MonitorAutoLock& /*aProofOfLock*/) {
   ENSURE_NOT_CHILD_PROCESS;
 
   MOZ_ASSERT(!NS_IsMainThread());
@@ -3818,7 +3959,7 @@ nsresult PermissionManager::GetKeyForOrigin(const nsACString& aOrigin,
   nsCOMPtr<nsIPrincipal> dbgPrincipal;
   MOZ_ALWAYS_SUCCEEDS(GetPrincipalFromOrigin(aOrigin, aForceStripOA,
                                              getter_AddRefs(dbgPrincipal)));
-  MOZ_ASSERT(dbgPrincipal->SchemeIs("http") || dbgPrincipal->SchemeIs("https"));
+  MOZ_ASSERT(net::SchemeIsHttpOrHttps(dbgPrincipal));
   MOZ_ASSERT(dbgPrincipal->OriginAttributesRef() == attrs);
 #endif
 
@@ -4057,8 +4198,9 @@ void PermissionManager::ConsumeDefaultsInputStream(
           hostOrOrigin, type, permission, nsIPermissionManager::EXPIRE_NEVER, 0,
           0,
           [&](const nsACString& aOrigin, const nsCString& aType,
-              uint32_t aPermission, uint32_t aExpireType, int64_t aExpireTime,
-              int64_t aModificationTime) MOZ_REQUIRES(mMonitor) {
+              uint32_t aPermission, uint32_t /*aExpireType*/,
+              int64_t /*aExpireTime*/,
+              int64_t /*aModificationTime*/) MOZ_REQUIRES(mMonitor) {
             AddDefaultEntryForImport(aOrigin, aType, aPermission, aProofOfLock);
             return NS_OK;
           });
@@ -4073,7 +4215,7 @@ void PermissionManager::ConsumeDefaultsInputStream(
 
 void PermissionManager::AddDefaultEntryForImport(
     const nsACString& aOrigin, const nsCString& aType, uint32_t aPermission,
-    const MonitorAutoLock& aProofOfLock) {
+    const MonitorAutoLock& /*aProofOfLock*/) {
   DefaultEntry* entry = mDefaultEntriesForImport.AppendElement();
   MOZ_ASSERT(entry);
 
@@ -4193,7 +4335,8 @@ PermissionManager::CommonPrepareToTestPermission(
     (void)mDefaultPrefBranch->GetIntPref(PromiseFlatCString(aType).get(),
                                          &defaultPermission);
     if (defaultPermission < 0 ||
-        defaultPermission > nsIPermissionManager::MAX_VALID_ACTION) {
+        defaultPermission >
+            static_cast<int32_t>(nsIPermissionManager::MAX_VALID_ACTION)) {
       defaultPermission = nsIPermissionManager::UNKNOWN_ACTION;
     }
   }
@@ -4326,7 +4469,7 @@ NS_IMETHODIMP PermissionManager::GetName(nsAString& aName) {
 }
 
 NS_IMETHODIMP PermissionManager::BlockShutdown(
-    nsIAsyncShutdownClient* aClient) {
+    nsIAsyncShutdownClient* /*aClient*/) {
   {
     // From now on we do not allow to capture new references to our singleton.
     StaticMutexAutoLock lock(sCreationMutex);
@@ -4377,16 +4520,7 @@ nsCOMPtr<nsIAsyncShutdownClient> PermissionManager::GetAsyncShutdownBarrier()
 
 void PermissionManager::MaybeStripOriginAttributes(
     bool aForceStrip, OriginAttributes& aOriginAttributes) {
-  uint32_t flags = 0;
-
-  if (aForceStrip || !StaticPrefs::permissions_isolateBy_privateBrowsing()) {
-    flags |= OriginAttributes::STRIP_PRIVATE_BROWSING_ID;
-  }
-
-  if (aForceStrip || !StaticPrefs::permissions_isolateBy_userContext()) {
-    flags |= OriginAttributes::STRIP_USER_CONTEXT_ID;
-  }
-
+  uint32_t flags = GetOriginAttributesStripFlags(aForceStrip);
   if (flags != 0) {
     aOriginAttributes.StripAttributes(flags);
   }
@@ -4581,7 +4715,7 @@ nsresult PermissionManager::AddBrowserPermissionInternal(
   // Look up or create the map for this BC.
   UniquePtr<BrowserPermissionMap>& mapPtr =
       mBrowserPermissionTable.LookupOrInsert(
-          aBrowserId, MakeUnique<BrowserPermissionMap>());
+          aBrowserId, std::make_unique<BrowserPermissionMap>());
   BrowserPermissionMap* map = mapPtr.get();
 
   // If switching between DENY and non-DENY for the same type, remove old entry
@@ -5345,7 +5479,7 @@ PermissionManager::CopyBrowserPermissions(uint64_t aSrcBrowserId,
 
   UniquePtr<BrowserPermissionMap>& destMapPtr =
       mBrowserPermissionTable.LookupOrInsert(
-          aDestBrowserId, MakeUnique<BrowserPermissionMap>());
+          aDestBrowserId, std::make_unique<BrowserPermissionMap>());
   BrowserPermissionMap* destMap = destMapPtr.get();
 
   // Cancel any existing timers in the destination.

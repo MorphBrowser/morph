@@ -29,7 +29,8 @@
 #include "prenv.h"
 #ifdef MOZ_ENABLE_DBUS
 #  include <gio/gio.h>
-
+#endif
+#if defined(MOZ_ENABLE_DBUS) || defined(MOZ_WAYLAND)
 #  include "WidgetUtilsGtk.h"
 #endif
 #include "HeadlessScreenHelper.h"
@@ -40,6 +41,9 @@
 #include "mozilla/widget/ScreenManager.h"
 #include "nsAppRunner.h"
 #ifdef MOZ_WAYLAND
+#  include <dlfcn.h>
+
+#  include "nsGTKToolkit.h"
 #  include "nsWaylandDisplay.h"
 #endif
 
@@ -473,9 +477,9 @@ nsresult nsAppShell::Init() {
   if (XRE_IsParentProcess()) {
     ScreenManager& screenManager = ScreenManager::GetSingleton();
     if (gfxPlatform::IsHeadless()) {
-      screenManager.SetHelper(mozilla::MakeUnique<HeadlessScreenHelper>());
+      screenManager.SetHelper(std::make_unique<HeadlessScreenHelper>());
     } else {
-      screenManager.SetHelper(mozilla::MakeUnique<ScreenHelperGTK>());
+      screenManager.SetHelper(std::make_unique<ScreenHelperGTK>());
     }
 
     if (gtk_check_version(3, 16, 3) == nullptr) {
@@ -611,6 +615,26 @@ void nsAppShell::InitSessionRestore() {
 #endif
 }
 
+void nsAppShell::InitLaunchActivationToken(const nsACString& aToken) {
+#ifdef MOZ_WAYLAND
+  if (aToken.IsEmpty() || !WaylandDisplayGet()) {
+    return;
+  }
+  // GTK 3 activates the first toplevel it maps with the token, which during
+  // session restore is a restored window. nsWindow uses the token of
+  // nsGTKToolkit instead, see SetUserTimeAndStartupTokenForActivatedWindow().
+  static auto sSetStartupNotificationId =
+      (void (*)(GdkDisplay*, const char*))dlsym(
+          RTLD_DEFAULT, "gdk_wayland_display_set_startup_notification_id");
+  GdkDisplay* display = gdk_display_get_default();
+  if (!sSetStartupNotificationId || !display) {
+    return;
+  }
+  sSetStartupNotificationId(display, nullptr);
+  nsGTKToolkit::GetToolkit()->SetActivationToken(aToken);
+#endif
+}
+
 // We can't query widget_wayland_session_management_enabled_AtStartup()
 // from nsAppShell::Init() as it's too early and we don't have profile loaded.
 bool nsAppShell::IsSessionRestoreSupported() {
@@ -624,12 +648,6 @@ bool nsAppShell::IsSessionRestoreSupported() {
     }
     if (!StaticPrefs::widget_wayland_session_management_enabled_AtStartup()) {
       LOGW("nsAppShell::IsSessionRestoreSupported(): disabled by pref.");
-      return false;
-    }
-    if (IsGnomeDesktopEnvironment()) {
-      LOGW(
-          "nsAppShell::IsSessionRestoreSupported(): disabled due to Bug "
-          "2064100.");
       return false;
     }
 

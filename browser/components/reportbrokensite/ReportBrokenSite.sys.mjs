@@ -456,12 +456,6 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
       "onShowSendMoreInfoPrefChanged",
   };
 
-  constructor() {
-    for (const pref of Object.keys(this.#OBSERVED_PREFS)) {
-      Services.prefs.addObserver(pref, this);
-    }
-  }
-
   #windows = new Set();
 
   #onNewWindow(win) {
@@ -596,14 +590,14 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
     }
 
     for (const sendButton of state.sendButtons) {
-      sendButton.addEventListener("command", e => this.#sendButtonHandler(e));
+      sendButton.addEventListener("click", e => this.#sendButtonHandler(e));
     }
 
-    state.sendMoreInfoButton.addEventListener("command", e =>
+    state.sendMoreInfoButton.addEventListener("click", e =>
       this.#sendMoreInfoButtonHandler(e)
     );
 
-    state.previewButton.addEventListener("command", e =>
+    state.previewButton.addEventListener("click", e =>
       this.#previewButtonHandler(e)
     );
 
@@ -615,12 +609,12 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
       this.updateDescriptionValidity(e)
     );
 
-    state.okayButton.addEventListener("command", ({ target }) => {
+    state.okayButton.addEventListener("click", ({ target }) => {
       target.documentGlobal.CustomizableUI.hidePanelForNode(target);
     });
 
     for (const btn of state.cancelButtons) {
-      btn.addEventListener("command", e => this.#cancelButtonHandler(e));
+      btn.addEventListener("click", e => this.#cancelButtonHandler(e));
     }
 
     state.blockedTrackersToggle.addEventListener("toggle", ({ target }) => {
@@ -690,12 +684,20 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
     const prot = document.getElementById(
       "protections-popup-report-broken-site-button"
     );
+    const trustPanelButton = document.getElementById(
+      "trustpanel-report-broken-site-button"
+    );
+    if (trustPanelButton) {
+      trustPanelButton.hidden = !allowedByPolicy;
+    }
     if (canReportUrl) {
       cmd.removeAttribute("disabled");
       prot?.removeAttribute("disabled");
+      trustPanelButton?.removeAttribute("disabled");
     } else {
       cmd.setAttribute("disabled", "true");
       prot?.setAttribute("disabled", "true");
+      trustPanelButton?.setAttribute("disabled", "true");
     }
 
     // Changes to the "hidden" and "disabled" state of the command aren't reliably
@@ -833,7 +835,9 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
 
     state.detailsViewInstructions.setAttribute(
       "data-l10n-id",
-      `report-broken-site-panel-instructions-other${state.descriptionIsOptional ? "-optional" : ""}`
+      state.descriptionIsOptional
+        ? "report-broken-site-panel-instructions-optional"
+        : "report-broken-site-panel-instructions-other"
     );
 
     const multiview = target.closest("panelmultiview");
@@ -848,6 +852,10 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
       return;
     }
 
+    for (const sendButton of state.sendButtons) {
+      sendButton.disabled = true;
+    }
+
     const multiview = target.closest("panelmultiview");
     this.#recordGleanEvent("send", {
       sent_with_blocked_trackers: state.shouldSendBlockedTrackers,
@@ -859,6 +867,10 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
 
     multiview.showSubView("report-broken-site-popup-reportSentView");
     state.reset();
+
+    for (const sendButton of state.sendButtons) {
+      sendButton.disabled = false;
+    }
   }
 
   #learnMoreLinkHandler({ target }) {
@@ -925,6 +937,9 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
         break;
       case "protections-popup-multiView":
         source = "ETPShieldIconMenu";
+        break;
+      case "trustpanel-popup-multiView":
+        source = "trustPanel";
         break;
     }
 
@@ -1200,6 +1215,11 @@ export var ReportBrokenSite = new (class ReportBrokenSite {
         document
           .getElementById("protections-popup-multiView")
           .showSubView(ReportBrokenSite.MAIN_PANELVIEW_ID);
+        break;
+      case "trustpanel-report-broken-site-button":
+        document
+          .getElementById("trustpanel-popup-multiView")
+          .showSubView(ReportBrokenSite.MAIN_PANELVIEW_ID, target);
         break;
       // Open the "Report Broken Site" menu from the "Help and Report" subview.
       case "appMenu_help_reportBrokenSite":

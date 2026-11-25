@@ -17,44 +17,6 @@ namespace image {
 // Helpers
 ///////////////////////////////////////////////////////////////////////////////
 
-static void FinishPotentialVectorImage(Image* aImage) {
-  if (!aImage || aImage->GetType() != imgIContainer::TYPE_VECTOR) {
-    return;
-  }
-  // We only want to transition to or away from a part once it has reached
-  // load complete status, because if we don't then the progress tracker will
-  // send a fake load event with the lastpart bit set whenever an observer is
-  // removed without having the load complete progress. That fake load event
-  // with the lastpart bit set will get out of the multipart image and to the
-  // imgRequestProxy and further, which will make it look like we got the last
-  // part of the multipart image and confuse things. If we get here then we
-  // are still waiting for the load event for this image but we've gotten
-  // OnDataAvailable for the part after aImage. That means we must have
-  // gotten OnStopRequest for aImage; OnStopRequest calls
-  // OnImageDataComplete. For raster images that are part of a multipart
-  // image OnImageDataComplete will synchronously fire the load event
-  // because we synchronously perform the metadata decode in that function,
-  // because parts of multipart images have the transient flag set. So for
-  // raster images we are assured that the load event has happened by this
-  // point for aImage. For vector images there is no such luck because
-  // OnImageDataComplete needs to wait for the load event in the underlying
-  // svg document, which we can't force to happen synchronously. So we just
-  // send a fake load event for aImage. This shouldn't confuse anyone because
-  // the progress tracker won't send out another load event when the real load
-  // event comes because it's already in the progress. And nobody should be
-  // caring about load events on the current part of multipart images since
-  // they might be sent multiple times or might not be sent at all depending
-  // on timing. So this should be okay.
-
-  RefPtr<ProgressTracker> tracker = aImage->GetProgressTracker();
-  if (tracker && !(tracker->GetProgress() & FLAG_LOAD_COMPLETE)) {
-    Progress loadProgress =
-        LoadCompleteProgress(/* aLastPart = */ false, /* aError = */ false,
-                             /* aStatus = */ NS_OK);
-    tracker->SyncNotifyProgress(loadProgress | FLAG_SIZE_AVAILABLE);
-  }
-}
-
 class NextPartObserver : public IProgressObserver {
  public:
   MOZ_DECLARE_REFCOUNTED_TYPENAME(NextPartObserver)
@@ -73,26 +35,50 @@ class NextPartObserver : public IProgressObserver {
   }
 
   void BlockUntilDecodedAndFinishObserving() {
+    MOZ_ASSERT(mImage);
+    if (!mImage) {
+      return;
+    }
+
+    RefPtr<Image> image = mImage;
+
+    // A newer part has started, so OnImageDataComplete has been called for
+    // this part. For raster parts that synchronously completes the load,
+    // because parts of multipart images are transient and get a synchronous
+    // metadata decode. Vector parts have to wait for the load event of their
+    // SVG document, which we can't force to happen synchronously, and until
+    // then they have no size and can't draw. Rather than make such a part
+    // current, drop it and keep the current part until the newer part is
+    // ready.
+    if (image->GetType() == imgIContainer::TYPE_VECTOR) {
+      RefPtr<ProgressTracker> tracker = image->GetProgressTracker();
+      if (!(tracker->GetProgress() & FLAG_LOAD_COMPLETE)) {
+        DetachFromImage();
+        RefPtr<MultipartImage> owner = mOwner;
+        owner->DropNextPart();
+        return;
+      }
+    }
+
     // Use RequestDecodeForSize() to block until our image finishes decoding.
     // The size is ignored because we don't pass the FLAG_HIGH_QUALITY_SCALING
     // flag.
-    mImage->RequestDecodeForSize(gfx::IntSize(0, 0),
-                                 imgIContainer::FLAG_SYNC_DECODE);
-
-    // Vector images need special handling to make sure they are in a complete
-    // state.
-    FinishPotentialVectorImage(mImage);
+    image->RequestDecodeForSize(gfx::IntSize(0, 0),
+                                imgIContainer::FLAG_SYNC_DECODE);
+    if (mImage != image) {
+      return;
+    }
 
     // RequestDecodeForSize() should've sent synchronous notifications that
     // would have caused us to call FinishObserving() (and null out mImage)
     // already. If for some reason it didn't, we should do so here.
-    if (mImage) {
+    if (mImage == image) {
       FinishObserving();
     }
   }
 
   virtual void Notify(int32_t aType,
-                      const nsIntRect* aRect = nullptr) override {
+                      const nsIntRect* /*aRect*/ = nullptr) override {
     if (!mImage) {
       // We've already finished observing the last image we were given.
       return;
@@ -110,9 +96,8 @@ class NextPartObserver : public IProgressObserver {
         // complete). Whereas raster images can only send frame complete before
         // the load event if there has been something to trigger a decode, but
         // we do not request a decode. So we will ignore this for vector images
-        // so as to enforce the invariant described above in
-        // BlockUntilDecodedAndFinishObserving that the current part always has
-        // the load complete progress.
+        // so that only parts with the load complete progress (and therefore a
+        // size) become the current part.
         return;
       }
     }
@@ -120,7 +105,7 @@ class NextPartObserver : public IProgressObserver {
     FinishObserving();
   }
 
-  virtual void OnLoadComplete(bool aLastPart) override {
+  virtual void OnLoadComplete(bool /*aLastPart*/) override {
     if (!mImage) {
       // We've already finished observing the last image we were given.
       return;
@@ -133,9 +118,13 @@ class NextPartObserver : public IProgressObserver {
     mImage->GetHeight(&height);
 
     // Request decoding at the intrinsic size.
-    mImage->RequestDecodeForSize(IntSize(width, height),
-                                 imgIContainer::DECODE_FLAGS_DEFAULT |
-                                     imgIContainer::FLAG_HIGH_QUALITY_SCALING);
+    RefPtr<Image> image = mImage;
+    image->RequestDecodeForSize(IntSize(width, height),
+                                imgIContainer::DECODE_FLAGS_DEFAULT |
+                                    imgIContainer::FLAG_HIGH_QUALITY_SCALING);
+    if (mImage != image) {
+      return;
+    }
 
     // If there's already an error, we may never get a FRAME_COMPLETE
     // notification, so go ahead and notify our owner right away.
@@ -163,14 +152,19 @@ class NextPartObserver : public IProgressObserver {
  private:
   virtual ~NextPartObserver() = default;
 
-  void FinishObserving() {
+  void DetachFromImage() {
     MOZ_ASSERT(mImage);
 
-    RefPtr<ProgressTracker> tracker = mImage->GetProgressTracker();
-    tracker->RemoveObserver(this);
-    mImage = nullptr;
+    RefPtr<Image> image = std::move(mImage);
+    RefPtr<ProgressTracker> tracker = image->GetProgressTracker();
+    tracker->RemoveObserver(this, /* aEmulateRequestFinished = */ false);
+  }
 
-    mOwner->FinishTransition();
+  void FinishObserving() {
+    DetachFromImage();
+
+    RefPtr<MultipartImage> owner = mOwner;
+    owner->FinishTransition();
   }
 
   MultipartImage* mOwner;
@@ -207,6 +201,7 @@ void MultipartImage::BeginTransitionToPart(Image* aNextPart) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aNextPart);
 
+  RefPtr<MultipartImage> kungFuDeathGrip(this);
   if (mNextPart) {
     // Let the decoder catch up so we don't drop frames.
     mNextPartObserver->BlockUntilDecodedAndFinishObserving();
@@ -221,6 +216,12 @@ void MultipartImage::BeginTransitionToPart(Image* aNextPart) {
   mNextPart->IncrementAnimationConsumers();
 }
 
+void MultipartImage::DropNextPart() {
+  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_ASSERT(mNextPart, "Should have a next part here");
+  mNextPart = nullptr;
+}
+
 static Progress FilterProgress(Progress aProgress) {
   // Filter out onload blocking notifications, since we don't want to block
   // onload for multipart images.
@@ -233,39 +234,43 @@ void MultipartImage::FinishTransition() {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(mNextPart, "Should have a next part here");
 
-  RefPtr<ProgressTracker> newCurrentPartTracker =
-      mNextPart->GetProgressTracker();
-  if (newCurrentPartTracker->GetProgress() & FLAG_HAS_ERROR) {
-    // This frame has an error; drop it.
-    mNextPart = nullptr;
+  // NextPartObserver has stopped observing mNextPart, so clear it before
+  // anything below can call out and re-enter us.
+  RefPtr<Image> nextPart = std::move(mNextPart);
+  RefPtr<Image> outgoingPart = InnerImage();
 
-    // We still need to notify, though.
+  RefPtr<ProgressTracker> newCurrentPartTracker =
+      nextPart->GetProgressTracker();
+  if (newCurrentPartTracker->GetProgress() & FLAG_HAS_ERROR) {
+    // This frame has an error; drop it. We still need to notify, though.
     mTracker->ResetForNewRequest();
     RefPtr<ProgressTracker> currentPartTracker =
-        InnerImage()->GetProgressTracker();
+        outgoingPart->GetProgressTracker();
     mTracker->SyncNotifyProgress(
         FilterProgress(currentPartTracker->GetProgress()));
 
     return;
   }
 
-  // Vector images need special handling to make sure they are in a complete
-  // state. (Only the first part can require this, subsequent parts have
-  // FinishPotentialVectorImage called on them before they become the current
-  // part.)
-  FinishPotentialVectorImage(InnerImage());
-
-  // Stop observing the current part.
+  // Stop observing the current part. If it is a vector first part that hasn't
+  // loaded yet, its ProgressTracker would emulate a load complete with the last
+  // part bit set, which would make it look like the whole multipart image has
+  // finished.
   {
     RefPtr<ProgressTracker> currentPartTracker =
-        InnerImage()->GetProgressTracker();
-    currentPartTracker->RemoveObserver(this);
+        outgoingPart->GetProgressTracker();
+    currentPartTracker->RemoveObserver(this,
+                                       /* aEmulateRequestFinished = */ false);
+  }
+
+  // If a newer part became current while we were notifying, nextPart is stale.
+  if (InnerImage() != outgoingPart) {
+    return;
   }
 
   // Make the next part become the current part.
   mTracker->ResetForNewRequest();
-  SetInnerImage(mNextPart);
-  mNextPart = nullptr;
+  SetInnerImage(nextPart);
   newCurrentPartTracker->AddObserver(this);
 
   // Finally, send all the notifications for the new current part and send a
@@ -301,13 +306,9 @@ nsresult MultipartImage::OnImageDataAvailable(nsIRequest* aRequest,
   // Note that this method is special in that we forward it to the next part if
   // one exists, and *not* the current part.
 
-  // We may trigger notifications that will free mNextPart, so keep it alive.
-  RefPtr<Image> nextPart = mNextPart;
-  if (nextPart) {
-    nextPart->OnImageDataAvailable(aRequest, aInStr, aSourceOffset, aCount);
-  } else {
-    InnerImage()->OnImageDataAvailable(aRequest, aInStr, aSourceOffset, aCount);
-  }
+  // We may trigger notifications that will free the part, so keep it alive.
+  RefPtr<Image> part = mNextPart ? mNextPart.get() : InnerImage();
+  part->OnImageDataAvailable(aRequest, aInStr, aSourceOffset, aCount);
 
   return NS_OK;
 }
@@ -317,13 +318,9 @@ nsresult MultipartImage::OnImageDataComplete(nsIRequest* aRequest,
   // Note that this method is special in that we forward it to the next part if
   // one exists, and *not* the current part.
 
-  // We may trigger notifications that will free mNextPart, so keep it alive.
-  RefPtr<Image> nextPart = mNextPart;
-  if (nextPart) {
-    nextPart->OnImageDataComplete(aRequest, aStatus, aLastPart);
-  } else {
-    InnerImage()->OnImageDataComplete(aRequest, aStatus, aLastPart);
-  }
+  // We may trigger notifications that will free the part, so keep it alive.
+  RefPtr<Image> part = mNextPart ? mNextPart.get() : InnerImage();
+  part->OnImageDataComplete(aRequest, aStatus, aLastPart);
 
   return NS_OK;
 }

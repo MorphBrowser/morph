@@ -20,20 +20,28 @@ class CoalescedMouseData final : public CoalescedInputData<WidgetMouseEvent> {
   ~CoalescedMouseData() { MOZ_COUNT_DTOR(mozilla::dom::CoalescedMouseData); }
 
   void Coalesce(const WidgetMouseEvent& aMouseOrPointerEvent,
-                const ScrollableLayerGuid& aGuid,
-                const uint64_t& aInputBlockId);
+                const ScrollableLayerGuid& aGuid, const uint64_t& aInputBlockId,
+                const nsID& aUUID);
 
   bool CanCoalesce(const WidgetMouseEvent& aMouseMoveEvent,
                    const ScrollableLayerGuid& aGuid,
                    const uint64_t& aInputBlockId,
                    const nsRefreshDriver* aRefreshDriver);
+
+  nsID GetUUID() const { return mUUID; }
+
+ private:
+  // UUID used for parent process to track X1/X2 clicks, which we send back to
+  // the parent process through SendReplyMouseEvent so that it can do the
+  // default behavior.
+  nsID mUUID = {};
 };
 
 class CoalescedMouseMoveFlusher final : public CoalescedInputFlusher {
  public:
   explicit CoalescedMouseMoveFlusher(BrowserChild* aBrowserChild);
 
-  void WillRefresh(mozilla::TimeStamp aTime) override;
+  MOZ_CAN_RUN_SCRIPT void WillRefresh(mozilla::TimeStamp aTime) override;
 
  private:
   ~CoalescedMouseMoveFlusher() override;

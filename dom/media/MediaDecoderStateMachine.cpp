@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "AudioSegment.h"
@@ -2021,6 +2022,13 @@ class MediaDecoderStateMachine::AccurateSeekingState
                     MEDIA_PLAYBACK);
                 SLOG("OnSeekRejected wait promise resolved");
                 mWaitRequest.Complete();
+                // Reset the sought tracks in the reader again, as DoSeek() did,
+                // so that the retry does not find anything the reader started
+                // on them while waiting, such as recovery from a decoder error.
+                Reader()->ResetDecode(mSeekJob.mTarget->IsVideoOnly()
+                                          ? TrackSet(TrackInfo::kVideoTrack)
+                                          : TrackSet(TrackInfo::kAudioTrack,
+                                                     TrackInfo::kVideoTrack));
                 DemuxerSeek();
               },
               [this](const WaitForDataRejectValue& aRejection) {
@@ -2726,6 +2734,16 @@ class MediaDecoderStateMachine::CompletedState
   explicit CompletedState(Master* aPtr) : StateObject(aPtr) {}
 
   void Enter() {
+    bool hasNextFrame = (!mMaster->HasAudio() || !mMaster->mAudioCompleted) &&
+                        (!mMaster->HasVideo() || !mMaster->mVideoCompleted);
+
+    // Notify before dispatching to the reader, so that this reaches the main
+    // thread in the same task as the resolution of a seek ending here (see
+    // ConsistentOrdering in AbstractThread.h).
+    mMaster->mOnNextFrameStatus.Notify(
+        hasNextFrame ? MediaDecoderOwner::NEXT_FRAME_AVAILABLE
+                     : MediaDecoderOwner::NEXT_FRAME_UNAVAILABLE);
+
     // On Android, the life cycle of graphic buffer is equal to Android's codec,
     // we couldn't release it if we still need to render the frame.
 #ifndef MOZ_WIDGET_ANDROID
@@ -2735,12 +2753,6 @@ class MediaDecoderStateMachine::CompletedState
       Reader()->ReleaseResources();
     }
 #endif
-    bool hasNextFrame = (!mMaster->HasAudio() || !mMaster->mAudioCompleted) &&
-                        (!mMaster->HasVideo() || !mMaster->mVideoCompleted);
-
-    mMaster->mOnNextFrameStatus.Notify(
-        hasNextFrame ? MediaDecoderOwner::NEXT_FRAME_AVAILABLE
-                     : MediaDecoderOwner::NEXT_FRAME_UNAVAILABLE);
 
     Step();
   }
@@ -3533,8 +3545,8 @@ already_AddRefed<MediaSink> MediaDecoderStateMachine::CreateAudioSink() {
 
   auto audioSinkCreator = [s = RefPtr<MediaDecoderStateMachine>(this), this]() {
     MOZ_ASSERT(OnTaskQueue());
-    UniquePtr<AudioSink> audioSink{new AudioSink(
-        mTaskQueue, mAudioQueue, Info().mAudio, mShouldResistFingerprinting)};
+    auto audioSink = std::make_unique<AudioSink>(
+        mTaskQueue, mAudioQueue, Info().mAudio, mShouldResistFingerprinting);
     mAudibleListener.DisconnectIfExists();
     mAudibleListener = audioSink->AudibleEvent().Connect(
         mTaskQueue, this, &MediaDecoderStateMachine::AudioAudibleChanged);
@@ -4264,7 +4276,7 @@ void MediaDecoderStateMachine::EnqueueFirstFrameLoadedEvent() {
   MediaDecoderEventVisibility visibility =
       firstFrameBeenLoaded ? MediaDecoderEventVisibility::Suppressed
                            : MediaDecoderEventVisibility::Observable;
-  mFirstFrameLoadedEvent.Notify(UniquePtr<MediaInfo>(new MediaInfo(Info())),
+  mFirstFrameLoadedEvent.Notify(std::make_unique<MediaInfo>(Info()),
                                 visibility);
 }
 

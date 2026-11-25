@@ -143,6 +143,7 @@ bool CodeGeneratorShared::generatePrologue() {
   MOZ_ASSERT(masm.framePushed() == 0);
   MOZ_ASSERT(!gen->compilingWasm());
 
+  masm.indirectTarget(TargetKind::Call);
 #ifdef JS_USE_LINK_REGISTER
   // LR, then FP for frame prologue.
   masm.pushRegs(LinkRegister, FramePointer);
@@ -158,6 +159,14 @@ bool CodeGeneratorShared::generatePrologue() {
   // If profiling, save the current frame pointer to a per-thread global field.
   if (isProfilerInstrumentationEnabled()) {
     masm.profilerEnterFrame(FramePointer, CallTempReg0);
+  }
+
+  if (frameSize() > MAX_UNCHECKED_UNDERFLOW_SIZE) {
+    Label noUnderflow;
+    masm.branchStackPtr(Assembler::AboveOrEqual, Imm32(frameSize()),
+                        &noUnderflow);
+    masm.assumeUnreachable("stack underflow");
+    masm.bind(&noUnderflow);
   }
 
   // Note that this automatically sets MacroAssembler::framePushed().
@@ -230,6 +239,34 @@ bool CodeGeneratorShared::generateOutOfLineCode() {
   return !masm.oom();
 }
 
+void CodeGeneratorShared::emitBailoutOOL(LSnapshot* snapshot) {
+#ifdef JS_CODEGEN_ARM64
+  masm.move32(Imm32(snapshot->snapshotOffset()), BailoutSnapshotOffsetReg);
+#else
+  masm.push(Imm32(snapshot->snapshotOffset()));
+#endif
+  jumpToDeoptLabel();
+}
+
+#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64) || \
+    defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_ARM64)
+void CodeGeneratorShared::bailoutIf(Assembler::Condition condition,
+                                    LSnapshot* snapshot) {
+  encode(snapshot);
+
+  InlineScriptTree* tree = snapshot->mir()->block()->trackedTree();
+  auto* ool = new (alloc()) LambdaOutOfLineCode(
+      [=, this](OutOfLineCode& ool) { emitBailoutOOL(snapshot); });
+
+  // All bailout code is associated with the bytecodeSite of the block we are
+  // bailing out from.
+  addOutOfLineCode(ool,
+                   new (alloc()) BytecodeSite(tree, tree->script()->code()));
+
+  masm.j(condition, ool->entry());
+}
+#endif
+
 void CodeGeneratorShared::bailoutFrom(Label* label, LSnapshot* snapshot) {
   MOZ_ASSERT_IF(!masm.oom(), label->used());
   MOZ_ASSERT_IF(!masm.oom(), !label->bound());
@@ -237,10 +274,8 @@ void CodeGeneratorShared::bailoutFrom(Label* label, LSnapshot* snapshot) {
   encode(snapshot);
 
   InlineScriptTree* tree = snapshot->mir()->block()->trackedTree();
-  auto* ool = new (alloc()) LambdaOutOfLineCode([=, this](OutOfLineCode& ool) {
-    masm.push(Imm32(snapshot->snapshotOffset()));
-    jumpToDeoptLabel();
-  });
+  auto* ool = new (alloc()) LambdaOutOfLineCode(
+      [=, this](OutOfLineCode& ool) { emitBailoutOOL(snapshot); });
 
   // All bailout code is associated with the bytecodeSite of the block we are
   // bailing out from.
@@ -268,6 +303,9 @@ void CodeGeneratorShared::addOutOfLineCode(OutOfLineCode* code,
   code->setFramePushed(masm.framePushed());
   code->setBytecodeSite(site);
   outOfLineCode_.pushBack(code);
+#ifdef DEBUG
+  masm.propagateOOM(currentInstructionOols_.append(code));
+#endif
 }
 
 bool CodeGeneratorShared::addNativeToBytecodeEntry(const BytecodeSite* site) {
@@ -403,6 +441,13 @@ void CodeGeneratorShared::encodeAllocation(LSnapshot* snapshot,
                                            bool hasSideEffects) {
   if (mir->isBox()) {
     mir = mir->toBox()->getOperand(0);
+  }
+
+  if (mir->isNurseryObject()) {
+    uint32_t index = mir->toNurseryObject()->nurseryObjectIndex();
+    masm.propagateOOM(snapshots_.add(RValueAllocation::NurseryObject(index)));
+    *allocIndex += 1;
+    return;
   }
 
   MIRType type = mir->isRecoveredOnBailout() ? MIRType::None
@@ -961,8 +1006,7 @@ void CodeGeneratorShared::markSafepointAt(uint32_t offset, LInstruction* ins) {
     sp->setRecordedInSafepointIndices();
   }
 #endif
-  masm.propagateOOM(safepointIndices_.append(
-      CodegenSafepointIndex(offset, ins->safepoint())));
+  masm.propagateOOM(safepointIndices_.emplaceBack(offset, ins->safepoint()));
 }
 
 void CodeGeneratorShared::ensureOsiSpace() {
@@ -981,16 +1025,7 @@ void CodeGeneratorShared::ensureOsiSpace() {
   //
   // At points where we want to ensure that invalidation won't corrupt an
   // important instruction, we make sure to pad with nops.
-  if (masm.currentOffset() - lastOsiPointOffset_ <
-      Assembler::PatchWrite_NearCallSize()) {
-    int32_t paddingSize = Assembler::PatchWrite_NearCallSize();
-    paddingSize -= masm.currentOffset() - lastOsiPointOffset_;
-    for (int32_t i = 0; i < paddingSize; ++i) {
-      masm.nop();
-    }
-  }
-  MOZ_ASSERT_IF(!masm.oom(), masm.currentOffset() - lastOsiPointOffset_ >=
-                                 Assembler::PatchWrite_NearCallSize());
+  masm.ensureNearCallPatchSpace(lastOsiPointOffset_);
 }
 
 uint32_t CodeGeneratorShared::markOsiPoint(LOsiPoint* ins) {
@@ -999,7 +1034,7 @@ uint32_t CodeGeneratorShared::markOsiPoint(LOsiPoint* ins) {
 
   uint32_t offset = masm.currentOffset();
   SnapshotOffset so = ins->snapshot()->snapshotOffset();
-  masm.propagateOOM(osiIndices_.append(OsiIndex(offset, so)));
+  masm.propagateOOM(osiIndices_.emplaceBack(offset, so));
   lastOsiPointOffset_ = offset;
 
   return offset;
@@ -1093,14 +1128,6 @@ bool CodeGeneratorShared::omitOverRecursedStackCheck() const {
 
 bool CodeGeneratorShared::omitOverRecursedInterruptCheck() const {
   return !gen->needsOverrecursedCheck();
-}
-
-void CodeGeneratorShared::emitPreBarrier(Address address) {
-  masm.guardedCallPreBarrier(address, MIRType::Value);
-}
-
-void CodeGeneratorShared::emitPreBarrier(BaseObjectElementIndex address) {
-  masm.guardedCallPreBarrier(address, MIRType::Value);
 }
 
 void CodeGeneratorShared::jumpToBlock(MBasicBlock* mir) {

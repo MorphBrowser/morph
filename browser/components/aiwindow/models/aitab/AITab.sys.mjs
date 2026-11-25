@@ -9,18 +9,37 @@ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 import {
   expandUrlTokens,
   stripUnresolvedUrlTokens,
+  URL_REGEX,
   UrlTokenizer,
 } from "moz-src:///browser/components/aiwindow/ui/modules/UrlTokenizer.sys.mjs";
+import { componentTypeName } from "chrome://browser/content/aiwindow/modules/AITabUtils.mjs";
+import { sanitizeUntrustedContent } from "moz-src:///browser/components/aiwindow/models/ChatUtils.sys.mjs";
+import {
+  DEFAULT_AITAB_PAGE_TYPE,
+  getAITabPageType,
+  isAITabPageEditable,
+} from "moz-src:///browser/components/aiwindow/ui/modules/AITabPageTypes.sys.mjs";
 
-const lazy = {};
+import {
+  getSmartPageName,
+  isSmartPageURL,
+} from "chrome://browser/content/aiwindow/modules/TrustedInternalURLs.mjs";
 
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
+  A2UI: "moz-src:///browser/components/aiwindow/ui/modules/A2UI.sys.mjs",
+  AIWindow:
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   AITabStore:
     "moz-src:///browser/components/aiwindow/ui/modules/AITabStore.sys.mjs",
+  AuthProvider:
+    "moz-src:///browser/components/aiwindow/models/AuthProvider.sys.mjs",
   ConversationStore:
     "moz-src:///browser/components/aiwindow/ui/modules/ConversationStore.sys.mjs",
+  BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
   JsonSchema: "resource://gre/modules/JsonSchema.sys.mjs",
   GetPageContent: "moz-src:///browser/components/aiwindow/models/Tools.sys.mjs",
+  isAllowedURLProtocol:
+    "moz-src:///browser/components/aiwindow/models/SecurityProperties.sys.mjs",
   buildConversation:
     "moz-src:///browser/components/aiwindow/models/PromptLoader.sys.mjs",
   buildEngineForFeature:
@@ -32,47 +51,33 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs",
   parseVersion: "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs",
   renderPrompt: "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs",
-  openAIEngine:
-    "moz-src:///browser/components/aiwindow/models/openAIEngine.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+  console: () =>
+    console.createInstance({
+      logModule: "AITab",
+      maxLogLevelPref: "browser.smartwindow.conversation.logLevel",
+    }),
+  l10n: () => new Localization(["preview/aiWindow.ftl"], true),
+  // Dev override: when the pref holds a non-empty string, it is parsed as an
+  // A2UICatalog instead of the packaged component_schema.json, so the catalog
+  // can be iterated on without rebuilding.
+  overrideCatalog: {
+    pref: "browser.smartwindow.aitab.components",
+    transform: prefValue => {
+      const pref = prefValue.trim();
+      if (!pref) {
+        return null;
+      }
+      try {
+        return JSON.parse(pref);
+      } catch (e) {
+        throw new Error(
+          `failed to parse browser.smartwindow.aitab.components: ${e.message}`
+        );
+      }
+    },
+  },
 });
-
-ChromeUtils.defineLazyGetter(lazy, "console", () =>
-  console.createInstance({
-    prefix: "AITab",
-    maxLogLevelPref: "browser.smartwindow.conversation.logLevel",
-  })
-);
-
-ChromeUtils.defineLazyGetter(
-  lazy,
-  "l10n",
-  () => new Localization(["preview/aiWindow.ftl"], true)
-);
-
-// Dev override: when the pref holds a non-empty string, it is parsed as an
-// A2UICatalog instead of the packaged component_schema.json, so the catalog
-// can be iterated on without rebuilding.
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "overrideCatalog",
-  "browser.smartwindow.aitab.components",
-  "",
-  null,
-  prefValue => {
-    const pref = prefValue.trim();
-    if (!pref) {
-      return null;
-    }
-    try {
-      return JSON.parse(pref);
-    } catch (e) {
-      throw new Error(
-        `failed to parse browser.smartwindow.aitab.components: ${e.message}`
-      );
-    }
-  }
-);
 
 // Packaged A2UI component catalog (see models/aitab/jar.mn). The service
 // produces a validated surface only.
@@ -94,17 +99,24 @@ const ROOT_ID = "root";
 // JSON Schema dialect the per-component validators declare.
 const JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
 
-// Total budget (characters) for page text sent to the model, split evenly
-// across the requested tabs so multi-tab requests don't overflow the prompt.
-const SOURCE_TEXT_BUDGET = 10000;
 // Separator inserted between each page's text in the model prompt.
 const PAGE_BREAK = "\n\n<----- PAGE BREAK ---->\n\n";
 
-const MAX_AITAB_URLS = 20;
+export const MAX_AITAB_CONTEXT_TABS = 10;
 
 // Surface properties the browser navigates to or loads. The model may only
 // fill them with URL tokens it was given (see expandSurfaceUrlTokens).
-const LINK_FIELDS = new Set(["href", "image"]);
+const LINK_FIELDS = new Set(["href", "src"]);
+
+/**
+ * @param {string} url
+ * @returns {string|null} The form URLs are compared in when checking a link
+ *   against the ones a conversation has seen, or null when `url` is invalid.
+ */
+function linkKey(url) {
+  return URL.parse(String(url ?? ""))?.href ?? null;
+}
+
 // Nesting limit for walking model output in expandSurfaceUrlTokens. Surfaces
 // are flat adjacency lists, so real ones stay far below this.
 const MAX_EXPAND_RECURSION_DEPTH = 32;
@@ -139,6 +151,8 @@ const CANCELED_RESULT = Object.freeze({
 const AITAB_VIEWER_BASE = "about:smartpage?page=";
 
 const HISTORY_LIMIT_ERROR = "No more modifications are supported";
+
+const PAGE_NOT_EDITABLE_ERROR = "This page cannot be modified";
 
 /**
  * A JSON Schema object from the catalog: a component's property schema, one of
@@ -306,6 +320,11 @@ const HISTORY_LIMIT_ERROR = "No more modifications are supported";
  * @typedef {object} AITabMetadata
  * @property {string} id - Slug of `title` (see `#slugify`), or the slug being
  *   revised when this generation modified an existing page.
+ * @property {string} [convId] - Id of the chat that owns the page being
+ *   revised, which keeps it whichever chat asked for the revision. Absent for
+ *   a new page, which belongs to the chat that asked for it.
+ * @property {number} pageType - One of AITAB_PAGE_TYPES: the type asked
+ *   for, or the type of the page being revised.
  * @property {string} toolConvId - Id of the conversation the surface was
  *   composed in, in the ConversationStore. Stored alongside the page so a
  *   later modification can continue that exchange, and so deleting the page
@@ -318,9 +337,10 @@ const HISTORY_LIMIT_ERROR = "No more modifications are supported";
 
 /**
  * The result of a generation attempt: metadata plus the validated surface, or
- * a description of what went wrong.
+ * a description of what went wrong and its canonical error code (the one
+ * reported to telemetry).
  *
- * @typedef {{metadata: AITabMetadata, surface: A2UISurface} | {error: string}} AITabResult
+ * @typedef {{metadata: AITabMetadata, surface: A2UISurface} | {error: string, code: string}} AITabResult
  */
 
 /**
@@ -471,10 +491,8 @@ export class AITab {
       AITab.#checkBindings(AITab.#propsOf(comp), dataModel, comp.id, errors);
     }
 
-    // Bound-array item validation: when an array prop is a { path } binding, its
-    // items live in the data model — which the per-component (literal) schema
-    // can't reach — so resolve the array and validate each item against the
-    // array's item schema from the catalog.
+    // Bound values live in the data model, which the per-component schema
+    // can't reach. Validate bound objects and array items against the catalog.
     const itemCache = new Map();
     for (const comp of components) {
       const compSchema = comp && env.catalog.components[comp.component];
@@ -490,6 +508,34 @@ export class AITab {
         errors,
         itemCache
       );
+    }
+
+    const repeater = roots[0]?.children;
+    if (
+      repeater &&
+      !Array.isArray(repeater) &&
+      typeof repeater.path == "string" &&
+      repeater.path.startsWith("/")
+    ) {
+      const template = components.find(
+        comp => comp?.id === repeater.componentId
+      );
+      const schema = template && env.catalog.components[template.component];
+      const scopes = AITab.#resolvePath(dataModel, repeater.path);
+      if (schema && Array.isArray(scopes)) {
+        for (const [index, scope] of scopes.entries()) {
+          AITab.#checkBoundArrays(
+            schema,
+            AITab.#propsOf(template),
+            env.catalog,
+            dataModel,
+            `${template.id}[${index}]`,
+            errors,
+            itemCache,
+            scope
+          );
+        }
+      }
     }
 
     if (errors.length) {
@@ -687,7 +733,8 @@ export class AITab {
   }
 
   /**
-   * Compile + cache a validator for an array item schema (with catalog `$defs` in scope).
+   * Compile + cache a validator for a bound object or array item schema
+   * (with catalog `$defs` in scope).
    *
    * @param {A2UISchema} itemSchema - Schema each array element must satisfy.
    * @param {A2UICatalog} catalog - The catalog whose `$defs` the item schema may $ref.
@@ -716,6 +763,8 @@ export class AITab {
    * against the array's item schema. Recurses into object properties so nested
    * arrays (e.g. Header.references.items) are covered. Literal arrays are
    * already validated by the per-component validator, so they are skipped here.
+   * Bound objects are validated against the literal object branch.
+   * Relative bindings are validated when a repeater scope is provided.
    *
    * @param {A2UISchema} schema
    * @param {*} value
@@ -724,6 +773,7 @@ export class AITab {
    * @param {string} where
    * @param {ValidationError[]} errors
    * @param {Map<string, SchemaValidator>} cache
+   * @param {*} [scope] - Data for the current repeater item.
    */
   static #checkBoundArrays(
     schema,
@@ -732,21 +782,56 @@ export class AITab {
     dataModel,
     where,
     errors,
-    cache
+    cache,
+    scope = undefined
   ) {
     schema = AITab.#resolveDef(schema, catalog);
     if (!schema || value == null) {
       return;
     }
     if (Array.isArray(schema.oneOf)) {
+      const isBinding = AITab.#isBinding(value);
+      const isAbsolute = isBinding && value.path.startsWith("/");
+      if (scope !== undefined && isAbsolute) {
+        return;
+      }
+      const canResolveBinding =
+        isBinding && (isAbsolute || scope !== undefined);
+      const boundValue = canResolveBinding
+        ? AITab.#resolvePath(
+            isAbsolute ? dataModel : scope,
+            isAbsolute ? value.path : `/${value.path}`
+          )
+        : undefined;
+      if (canResolveBinding && !isAbsolute && boundValue === undefined) {
+        errors.push({
+          message: `${where}: binding path "${value.path}" not found in repeater item`,
+        });
+        return;
+      }
+      const objectBranch = schema.oneOf.find(
+        s =>
+          s?.$ref !== "#/$defs/DataBinding" &&
+          AITab.#resolveDef(s, catalog)?.type === "object"
+      );
+      if (objectBranch && canResolveBinding) {
+        if (boundValue !== undefined) {
+          const validator = AITab.#itemValidator(objectBranch, catalog, cache);
+          const { valid, errors: objectErrors } =
+            validator.validate(boundValue);
+          if (!valid) {
+            for (const error of objectErrors) {
+              errors.push({ ...error, dataPath: value.path });
+            }
+          }
+        }
+        return;
+      }
       const arrayBranch = schema.oneOf.find(
         s => s && s.type === "array" && s.items
       );
-      if (arrayBranch && AITab.#isBinding(value)) {
-        if (!value.path.startsWith("/")) {
-          return; // relative paths aren't resolvable from the root here
-        }
-        const arr = AITab.#resolvePath(dataModel, value.path);
+      if (arrayBranch && canResolveBinding) {
+        const arr = boundValue;
         if (arr === undefined) {
           return; // missing path already reported by #checkBindings
         }
@@ -779,7 +864,8 @@ export class AITab {
             dataModel,
             `${where}/${k}`,
             errors,
-            cache
+            cache,
+            scope
           );
         }
       }
@@ -796,6 +882,38 @@ export class AITab {
    */
   static buildViewerURL(slug) {
     return `${AITAB_VIEWER_BASE}${slug}`;
+  }
+
+  /**
+   * Selects up to MAX_AITAB_CONTEXT_TABS unique context urls (http, https
+   * or a smartpage) to build an AITab. Prioritizes candidate urls from
+   * open tabs (sorted by lastAccessed), followed by the remaining
+   * candidates as urls/mentions from the chat conversation.
+   *
+   * @param {string[]} candidateUrls - Candidate context urls.
+   * @returns {string[]}
+   */
+  static selectContextUrls(candidateUrls) {
+    if (!Array.isArray(candidateUrls)) {
+      return [];
+    }
+    const candidates = new Set(
+      candidateUrls.filter(
+        url => lazy.isAllowedURLProtocol(url) || isSmartPageURL(URL.parse(url))
+      )
+    );
+    const openTabUrls = new Set(
+      lazy.BrowserWindowTracker.orderedWindows
+        .filter(win => !win.closed && lazy.AIWindow.isAIWindowActive(win))
+        .flatMap(win => win.gBrowser.tabs)
+        .filter(tab => candidates.has(tab.linkedBrowser.currentURI.spec))
+        .sort((a, b) => b.lastAccessed - a.lastAccessed)
+        .map(tab => tab.linkedBrowser.currentURI.spec)
+    );
+    return Array.from(openTabUrls.union(candidates)).slice(
+      0,
+      MAX_AITAB_CONTEXT_TABS
+    );
   }
 
   /**
@@ -819,12 +937,15 @@ export class AITab {
    *   on. Cut to MAX_INSTRUCTION_CHARS.
    * @param {string} [options.rawContent] - Content supplied inline rather than
    *   fetched, appended to the source text as its own PAGE_BREAK section.
-   *   Shares the same source-text budget as the pages.
+   *   Shares the source-text budget with the pages.
    * @param {string} [options.modifySlug] - Slug of the stored page to revise.
    * @param {string} [options.modifyInstructions] - What to change about it.
    *   Cut to MAX_INSTRUCTION_CHARS.
+   * @param {number} [options.pageType] - One of AITAB_PAGE_TYPES, for a new
+   *   page. A revision keeps the type of the page it revises.
    * @param {string} [options.howInitiated] - How the generation was requested,
-   *   for telemetry: tab_list, tab_group, chat, chat_followup or refresh.
+   *   for telemetry: tab_list, tab_group, fxms, chat, chat_followup or
+   *   refresh.
    * @param {AbortSignal} [options.signal] - Cancels the generation. Checked at
    *   every await boundary here and in #generateStructuredSurface, and passed to
    *   the page extractions so they can be torn down early.
@@ -839,13 +960,22 @@ export class AITab {
       rawContent,
       modifySlug,
       modifyInstructions,
+      pageType = DEFAULT_AITAB_PAGE_TYPE,
       howInitiated = "chat",
       signal,
     } = {},
     conversation
   ) {
+    if (!getAITabPageType(pageType)) {
+      throw new Error(
+        `generateAITab() called with unknown page type ${pageType}`
+      );
+    }
+
     const urls = Array.isArray(urlList)
-      ? urlList.filter(url => typeof url == "string").slice(0, MAX_AITAB_URLS)
+      ? urlList
+          .filter(url => typeof url == "string")
+          .slice(0, MAX_AITAB_CONTEXT_TABS)
       : [];
     const rawText = typeof rawContent == "string" ? rawContent.trim() : "";
     const slug = typeof modifySlug == "string" ? modifySlug.trim() : "";
@@ -867,7 +997,16 @@ export class AITab {
     const startTime = ChromeUtils.now();
     const stats = { charsRead: 0, charsOut: 0 };
     const result = await AITab.#generate(
-      { urls, rawText, slug, focus, modifyInstructions, signal, stats },
+      {
+        urls,
+        rawText,
+        slug,
+        focus,
+        modifyInstructions,
+        pageType,
+        signal,
+        stats,
+      },
       conversation
     );
 
@@ -876,6 +1015,9 @@ export class AITab {
       components_used: result.surface
         ? AITab.#componentsUsed(result.surface)
         : "[]",
+      components_converted: JSON.stringify(
+        result.surface ? new lazy.A2UI(result.surface).conversions() : []
+      ),
       num_chars_read: stats.charsRead,
       num_chars_out: stats.charsOut,
       seconds_elapsed: Math.round((ChromeUtils.now() - startTime) / 1000),
@@ -889,7 +1031,7 @@ export class AITab {
       Glean.smartWindow.aitabCreateComplete.record(completeExtra);
     }
 
-    return result.error ? { error: result.error } : result;
+    return result.error ? { error: result.error, code: result.code } : result;
   }
 
   /**
@@ -901,6 +1043,8 @@ export class AITab {
    * @param {string} options.slug - Slug of the page to revise, or "".
    * @param {string} options.focus
    * @param {string} [options.modifyInstructions]
+   * @param {number} options.pageType - The type for a new page; ignored for a
+   *   revision.
    * @param {AbortSignal} [options.signal]
    * @param {{charsRead: number, charsOut: number}} options.stats - Filled in
    *   with the characters sent to and received from the model.
@@ -909,7 +1053,7 @@ export class AITab {
    *   `code` is the canonical error code reported to telemetry.
    */
   static async #generate(
-    { urls, rawText, slug, focus, modifyInstructions, signal, stats },
+    { urls, rawText, slug, focus, modifyInstructions, pageType, signal, stats },
     conversation
   ) {
     // A modification already has a page to work from, so it needs no material
@@ -940,9 +1084,11 @@ export class AITab {
       }
     }
 
+    const effectivePageType = prior ? prior.page.pageType : pageType;
     const sources = await AITab.#collectSources({
       urls,
       rawText,
+      sourceTextBudget: getAITabPageType(effectivePageType).sourceTextBudget,
       conversation,
       signal,
     });
@@ -950,7 +1096,7 @@ export class AITab {
     if (sources.error) {
       return sources;
     }
-    const { urlsUsed, sourceText } = sources;
+    const { urlsUsed, readUrls, sourceText } = sources;
 
     const focusText = AITab.#capped(focus);
 
@@ -969,6 +1115,9 @@ export class AITab {
       focus: focusText,
       modifyInstructions: instructions,
       priorConversation: prior?.conversation,
+      allowedLinks: conversation?.securityProperties.untrustedInput
+        ? AITab.#allowedLinks({ conversation, readUrls, prior })
+        : null,
       signal,
       stats,
     });
@@ -1031,6 +1180,8 @@ export class AITab {
     /** @type {AITabMetadata} */
     const metadata = {
       id: prior ? prior.page.slug : AITab.#slugify(title),
+      convId: prior?.page.convId,
+      pageType: effectivePageType,
       toolConvId: toolConversation.id,
       title,
       howCreated: "chat",
@@ -1044,6 +1195,53 @@ export class AITab {
     };
 
     return { metadata, surface: structured.surface };
+  }
+
+  /**
+   * The URLs a generated page may link to: those the chat has seen, its
+   * search results and @mentions, the pages read for this turn, and, for a
+   * revision, the links already on the page.
+   *
+   * @param {object} options
+   * @param {ChatConversation} options.conversation - The chat asking for the
+   *   page.
+   * @param {string[]} options.readUrls - Pages read for this turn.
+   * @param {{page: object, conversation: Conversation}|null} options.prior -
+   *   The page being revised, from #loadPageToModify.
+   * @returns {Set<string>} Normalized URLs (see linkKey).
+   */
+  static #allowedLinks({ conversation, readUrls, prior }) {
+    const urls = [
+      ...(conversation?.seenUrls ?? []),
+      ...(conversation?.serpUrlsForAnonymousFetch ?? []),
+      ...(conversation?.getAllMentionURLs() ?? []),
+      ...readUrls,
+      ...AITab.#linkedUrls(prior?.page.components?.surface),
+    ];
+    return new Set(urls.map(linkKey).filter(Boolean));
+  }
+
+  /**
+   * The `href` values in a surface, including those in its data model.
+   *
+   * @param {any} value - A surface, or a value nested in one.
+   * @param {number} [recursionDepth] - Nesting level of `value`; callers
+   *   leave it unset.
+   * @returns {string[]}
+   */
+  static #linkedUrls(value, recursionDepth = 0) {
+    if (
+      !value ||
+      typeof value != "object" ||
+      recursionDepth > MAX_EXPAND_RECURSION_DEPTH
+    ) {
+      return [];
+    }
+    return Object.entries(value).flatMap(([key, sub]) =>
+      key == "href" && typeof sub == "string"
+        ? [sub]
+        : AITab.#linkedUrls(sub, recursionDepth + 1)
+    );
   }
 
   /**
@@ -1061,6 +1259,74 @@ export class AITab {
   }
 
   /**
+   * The longest prefix of `text` that fits in `budget` once its URLs are
+   * tokenized. Never ends inside a URL, which would hand the model a token
+   * for a URL that doesn't exist.
+   *
+   * @param {string} text
+   * @param {number} budget
+   * @returns {string}
+   */
+  static #truncateToBudget(text, budget) {
+    // Measures token lengths only. The prompt is tokenized separately, so
+    // nothing registered here can resolve a link in the model's output.
+    const urlTokenizer = new UrlTokenizer();
+    let length = 0;
+    let end = 0;
+    for (const match of text.matchAll(URL_REGEX)) {
+      const gap = match.index - end;
+      if (length + gap >= budget) {
+        break;
+      }
+      length += gap + urlTokenizer.tokenizeText(match[0]).length;
+      if (length > budget) {
+        return text.slice(0, match.index);
+      }
+      end = match.index + match[0].length;
+    }
+    return text.slice(0, end + Math.max(0, budget - length));
+  }
+
+  /**
+   * The length of `text` once its URLs are tokenized, which is the length the
+   * source-text budget is measured in.
+   *
+   * @param {string} text
+   * @returns {number}
+   */
+  static #tokenizedLength(text) {
+    // Measures token lengths only, as in #truncateToBudget.
+    return new UrlTokenizer().tokenizeText(text).length;
+  }
+
+  /**
+   * Share `budget` among sections of the given lengths. A section shorter
+   * than an even share keeps all of its text, and what it leaves over is
+   * shared among the longer ones, so a short or unreadable page doesn't hold
+   * budget that a long page is cut for.
+   *
+   * @param {number[]} lengths - Each section's length, in the order the
+   *   sections are sent.
+   * @param {number} budget
+   * @returns {number[]} Each section's share, in the same order.
+   */
+  static shareBudget(lengths, budget) {
+    const shares = new Array(lengths.length).fill(0);
+    const shortestFirst = lengths
+      .map((_, index) => index)
+      .sort((a, b) => lengths[a] - lengths[b]);
+    let remaining = budget;
+    for (const [position, index] of shortestFirst.entries()) {
+      const evenShare = Math.floor(
+        remaining / (shortestFirst.length - position)
+      );
+      shares[index] = Math.min(lengths[index], evenShare);
+      remaining -= shares[index];
+    }
+    return shares;
+  }
+
+  /**
    * Read the material a surface is composed from: the readable text of each
    * requested URL, plus any content handed over inline, laid out as the
    * prompt's source sections and separated by PAGE_BREAK.
@@ -1068,14 +1334,24 @@ export class AITab {
    * @param {object} options
    * @param {string[]} options.urls - URLs to read, in the requested order.
    * @param {string} options.rawText - Content supplied inline, or "".
+   * @param {number} options.sourceTextBudget - Total characters of source
+   *   text, measured after URL tokenization since URLs only reach the model as
+   *   tokens.
    * @param {ChatConversation} options.conversation - Gates each URL's access
    *   check, so a page the chat may not read contributes nothing.
    * @param {AbortSignal} [options.signal] - Cancels the extractions.
-   * @returns {Promise<{urlsUsed: AITabSource[], sourceText: string}
-   *   |{error: string}>} The sources in the order requested and the text for
-   *   the prompt, or a description of why there is nothing to build from.
+   * @returns {Promise<{urlsUsed: AITabSource[], readUrls: string[],
+   *   sourceText: string}|{error: string}>} The sources in the order
+   *   requested, the URLs among them that could be read, and the text for the
+   *   prompt, or a description of why there is nothing to build from.
    */
-  static async #collectSources({ urls, rawText, conversation, signal }) {
+  static async #collectSources({
+    urls,
+    rawText,
+    sourceTextBudget,
+    conversation,
+    signal,
+  }) {
     // Pull the readable content for each requested URL (order-aligned with
     // urls). Structured results, so a refusal is distinguishable from page
     // text rather than being composed into the page as if it were content.
@@ -1090,10 +1366,11 @@ export class AITab {
         return CANCELED_RESULT;
       }
 
-      // Nothing readable: report it instead of generating a page whose only
-      // source material is the refusal. A partial read still generates, from
-      // whichever URLs were allowed.
-      if (!contents.some(result => result.ok)) {
+      // Nothing readable and no inline content: report it instead of
+      // generating a page whose only source material is the refusal. A
+      // partial read, or inline content alongside unreadable pages, still
+      // generates from what is there.
+      if (!rawText && !contents.some(result => result.ok)) {
         return {
           error: "none of the requested pages could be read",
           code: "pages_unreadable",
@@ -1101,12 +1378,17 @@ export class AITab {
       }
     }
 
-    // Split the source-text budget evenly across the sections the prompt will
-    // carry — one per requested tab, plus one for inline content — so the model
-    // prompt stays bounded no matter how many tabs are included. A modification
-    // can bring neither, in which case there is nothing to budget.
-    const sections = urls.length + (rawText ? 1 : 0);
-    const perTabBudget = Math.floor(SOURCE_TEXT_BUDGET / (sections || 1));
+    // Share the source-text budget among the sections the prompt will carry —
+    // one per requested tab, plus one for inline content — so the model prompt
+    // stays bounded no matter how many tabs are included. A modification can
+    // bring neither, in which case there is nothing to budget.
+    const texts = urls.map((url, index) => contents[index]?.content ?? "");
+    const budgets = AITab.shareBudget(
+      [...texts, ...(rawText ? [rawText] : [])].map(text =>
+        AITab.#tokenizedLength(text)
+      ),
+      sourceTextBudget
+    );
 
     /** @type {AITabSource[]} */
     const urlsUsed = [];
@@ -1115,7 +1397,7 @@ export class AITab {
       // Prefer the open tab's title for the heading; fall back to the URL.
       const tab = lazy.GetPageContent.getTabWithURL(url);
       const heading = tab?.label || url;
-      const text = contents[index]?.content ?? "";
+      const text = texts[index];
       // Best-effort og:image lookup ("" when none cached), gated on the same
       // access-control decision as the page text so a refused URL leaks no
       // image either.
@@ -1132,8 +1414,7 @@ export class AITab {
 
       // Trim each page's text to its share of the budget before sending to the
       // model.
-      const budgetedText =
-        text.length > perTabBudget ? text.slice(0, perTabBudget) : text;
+      const budgetedText = AITab.#truncateToBudget(text, budgets[index]);
       const headLines = [`## ${heading}`, `URL: ${url}`];
       // Omit the Image: line when absent so the model never echoes an empty
       // value.
@@ -1149,11 +1430,15 @@ export class AITab {
 
     if (rawText) {
       sourceParts.push(
-        `${RAW_CONTENT_HEADING}\n\n${rawText.slice(0, perTabBudget)}`
+        `${RAW_CONTENT_HEADING}\n\n${AITab.#truncateToBudget(rawText, budgets.at(-1))}`
       );
     }
 
-    return { urlsUsed, sourceText: sourceParts.join(PAGE_BREAK) };
+    return {
+      urlsUsed,
+      readUrls: urls.filter((url, index) => contents[index]?.ok),
+      sourceText: sourceParts.join(PAGE_BREAK),
+    };
   }
 
   /**
@@ -1161,13 +1446,16 @@ export class AITab {
    * composed it. The stored conversation carries its messages, URL ledgers and
    * security flags but no engine; #resolvePromptSet attaches one.
    *
-   * Only a page belonging to `conversation` can be loaded: slugs are visible in
-   * page URLs, so without that check a model could be talked into rewriting a
-   * page from an unrelated chat. Keying the lookup on the chat conversation
-   * would also file the new version under the wrong slug.
+   * Only a page belonging to `conversation`, or one the user referenced in it
+   * (the current tab or an @mention), can be loaded: slugs are visible in page
+   * URLs, so without that check a model could be talked into rewriting a page
+   * from an unrelated chat. URLs the conversation merely came across, such as
+   * open tabs or links in fetched pages, do not count. Keying the lookup on
+   * the chat conversation would also file the new version under the wrong
+   * slug.
    *
    * @param {string} slug
-   * @param {ChatConversation} conversation - The chat that owns the page.
+   * @param {ChatConversation} conversation - The chat asking for the revision.
    * @returns {Promise<{page: object, conversation: Conversation}
    *   |{error: string}>}
    */
@@ -1189,10 +1477,20 @@ export class AITab {
       };
     }
 
-    if (!page || page.convId !== conversation?.id) {
+    const referencedByUser = [
+      ...(conversation?.getAllMentionURLs() ?? []),
+    ].some(url => getSmartPageName(URL.parse(url)) === slug);
+    if (!page || (page.convId !== conversation?.id && !referencedByUser)) {
       return {
         error: `this conversation has no page with the slug "${slug}"`,
         code: "page_not_found",
+      };
+    }
+
+    if (!isAITabPageEditable(page.pageType)) {
+      return {
+        error: PAGE_NOT_EDITABLE_ERROR,
+        code: "page_not_editable",
       };
     }
 
@@ -1259,7 +1557,8 @@ export class AITab {
    * The component types a validated surface uses, for telemetry: a
    * JSON-encoded array in render order, walking from the root through each
    * component's header then children. A component carrying a `layout` is
-   * listed as `component_layout`.
+   * listed as `component_layout`. These are the types that the model sent;
+   * components_converted lists the ones that render as a different type.
    *
    * @param {A2UISurface} surface
    * @returns {string}
@@ -1274,11 +1573,7 @@ export class AITab {
         return;
       }
       visited.add(id);
-      used.push(
-        typeof comp.layout == "string"
-          ? `${comp.component}_${comp.layout}`
-          : comp.component
-      );
+      used.push(componentTypeName(comp));
       for (const ref of [comp.header, comp.children].flat()) {
         visit(typeof ref == "string" ? ref : ref?.componentId);
       }
@@ -1433,18 +1728,31 @@ export class AITab {
   /**
    * Expand the URL tokens in a parsed model surface back into full URLs.
    * Tokens inside free text are expanded, or removed when hallucinated. Link
-   * fields (see LINK_FIELDS) must hold exactly one known token; an item whose
-   * `href` does not is dropped, and any other invalid link field is removed,
+   * fields (see LINK_FIELDS) must hold exactly one known token; an object whose
+   * `href` or `src` does not is dropped,
    * so a URL the model was never given can't become a link or image.
+   *
+   * When `allowedLinks` is given, an `href` must also be one of them.
    *
    * @param {any} value - A parsed surface, or a value nested in one.
    * @param {UrlTokenizer} urlTokenizer - The tokenizer used for the prompt.
+   * @param {Set<string>|null} [allowedLinks] - Normalized URLs (see
+   *   linkKey) an `href` may point to; an item linking anywhere else is
+   *   dropped. Null allows any URL the prompt contained.
    * @param {number} [recursionDepth] - Nesting level of `value`; callers
    *   leave it unset.
+   * @param {WeakMap<object, object>} [expandedObjects] - Original objects
+   *   mapped to their filtered copies; callers leave it unset.
    * @returns {any} A detokenized copy, or undefined when `value` is dropped or
    *   nested deeper than MAX_EXPAND_RECURSION_DEPTH.
    */
-  static expandSurfaceUrlTokens(value, urlTokenizer, recursionDepth = 0) {
+  static expandSurfaceUrlTokens(
+    value,
+    urlTokenizer,
+    allowedLinks = null,
+    recursionDepth = 0,
+    expandedObjects = new WeakMap()
+  ) {
     if (typeof value == "string") {
       return stripUnresolvedUrlTokens(
         expandUrlTokens(value, urlTokenizer.tokenToUrl)
@@ -1454,11 +1762,19 @@ export class AITab {
       return undefined;
     }
     if (Array.isArray(value)) {
-      return value
+      const result = value
         .map(item =>
-          AITab.expandSurfaceUrlTokens(item, urlTokenizer, recursionDepth + 1)
+          AITab.expandSurfaceUrlTokens(
+            item,
+            urlTokenizer,
+            allowedLinks,
+            recursionDepth + 1,
+            expandedObjects
+          )
         )
         .filter(item => item !== undefined);
+      expandedObjects.set(value, result);
+      return result;
     }
     if (!value || typeof value != "object") {
       return value;
@@ -1467,9 +1783,18 @@ export class AITab {
     for (const [key, sub] of Object.entries(value)) {
       if (LINK_FIELDS.has(key)) {
         const url = urlTokenizer.resolveExactToken(sub);
+        if (
+          key == "href" &&
+          url &&
+          allowedLinks &&
+          !allowedLinks.has(linkKey(url))
+        ) {
+          lazy.console.warn("dropping item with unseen link", url);
+          return undefined;
+        }
         if (url) {
           result[key] = url;
-        } else if (key == "href") {
+        } else {
           lazy.console.warn("dropping item with unknown link", sub);
           return undefined;
         }
@@ -1478,13 +1803,269 @@ export class AITab {
       const expanded = AITab.expandSurfaceUrlTokens(
         sub,
         urlTokenizer,
-        recursionDepth + 1
+        allowedLinks,
+        recursionDepth + 1,
+        expandedObjects
       );
       if (expanded !== undefined) {
         result[key] = expanded;
       }
     }
+
+    expandedObjects.set(value, result);
+
+    if (recursionDepth === 0 && Array.isArray(result.components)) {
+      AITab.#removeFilteredBindings(value, result, expandedObjects);
+    }
+
     return result;
+  }
+
+  /**
+   * Rewrite shapes models commonly emit that the catalog rejects but whose
+   * meaning is unambiguous, so buildSurface can accept the page.
+   *
+   * @param {A2UISurface} surface - Modified in place.
+   * @returns {A2UISurface} `surface`.
+   */
+  static repairValidations(surface) {
+    return AITab.inlineListGroupItems(surface);
+  }
+
+  /**
+   * Replace each List group's `items` binding with a copy of the array it
+   * points to, whether the groups are literal or bound into the data model.
+   * Models carry the catalog's preference for bindings into ListGroup.items,
+   * the one content array the catalog requires to be literal. A binding that
+   * does not resolve to an array is left for validation to reject.
+   *
+   * @param {A2UISurface} surface - Modified in place.
+   * @returns {A2UISurface} `surface`.
+   */
+  static inlineListGroupItems(surface) {
+    const components = surface?.components;
+    if (!Array.isArray(components)) {
+      return surface;
+    }
+    const dataModel = surface.dataModel ?? {};
+    for (const comp of components) {
+      if (comp?.component != "List") {
+        continue;
+      }
+      let groups = comp.groups;
+      if (AITab.#isBinding(groups) && groups.path.startsWith("/")) {
+        groups = AITab.#resolvePath(dataModel, groups.path);
+      }
+      if (!Array.isArray(groups)) {
+        continue;
+      }
+      for (const group of groups) {
+        const items = group?.items;
+        if (!AITab.#isBinding(items) || !items.path.startsWith("/")) {
+          continue;
+        }
+        const resolved = AITab.#resolvePath(dataModel, items.path);
+        if (Array.isArray(resolved)) {
+          lazy.console.warn(
+            `inlining List "${comp.id}" group items bound to "${items.path}"`
+          );
+          group.items = structuredClone(resolved);
+        }
+      }
+    }
+    return surface;
+  }
+
+  /**
+   * Remove bindings whose targets existed before filtering and disappeared
+   * because they, or an ancestor object, contained an unresolved URL token
+   * or a link outside the allowed set.
+   *
+   * @param {A2UISurface} original
+   * @param {A2UISurface} surface - Filtered surface, updated in place.
+   * @param {WeakMap<object, object>} expandedObjects
+   */
+  static #removeFilteredBindings(original, surface, expandedObjects) {
+    surface.components = surface.components.map(
+      component =>
+        AITab.#cleanFilteredBindings(
+          component,
+          original.dataModel,
+          surface.dataModel
+        ).value
+    );
+
+    const root = surface.components.find(
+      component => component?.id === ROOT_ID
+    );
+    const repeater = root?.children;
+    const hasAbsoluteRepeaterPath =
+      repeater &&
+      !Array.isArray(repeater) &&
+      typeof repeater.path == "string" &&
+      repeater.path.startsWith("/");
+
+    if (!hasAbsoluteRepeaterPath) {
+      return;
+    }
+
+    const template = surface.components.find(
+      component => component?.id === repeater.componentId
+    );
+    const originalScopes = AITab.#resolvePath(
+      original.dataModel,
+      repeater.path
+    );
+    const filteredScopes = AITab.#resolvePath(surface.dataModel, repeater.path);
+    const canCompareRepeaterScopes =
+      template !== undefined &&
+      Array.isArray(originalScopes) &&
+      Array.isArray(filteredScopes);
+
+    if (!canCompareRepeaterScopes) {
+      return;
+    }
+
+    // Filtering can remove whole repeater items, so pair scopes by identity.
+    const originalByFiltered = new Map(
+      originalScopes.map(scope => [expandedObjects.get(scope) ?? scope, scope])
+    );
+
+    const cleanedInstances = filteredScopes.map((scope, index) =>
+      AITab.#cleanFilteredBindings(
+        template,
+        original.dataModel,
+        surface.dataModel,
+        {
+          original: originalByFiltered.get(scope),
+          filtered: scope,
+          path: `${repeater.path}/${index}`,
+        }
+      )
+    );
+    const hasFilteredRelativeBindings = cleanedInstances.some(
+      instance => instance.removedBinding
+    );
+
+    if (!hasFilteredRelativeBindings) {
+      return;
+    }
+
+    AITab.#replaceRepeaterWithInstances(
+      surface,
+      root,
+      template,
+      cleanedInstances.map(instance => instance.value)
+    );
+  }
+
+  /**
+   * Copy component properties, removing bindings whose targets were filtered.
+   * Scoped relative bindings become absolute so each copy can stand alone.
+   *
+   * @param {*} value
+   * @param {A2UIDataModel} originalDataModel
+   * @param {A2UIDataModel} filteredDataModel
+   * @param {{ original: *, filtered: *, path: string } | null} [scope]
+   * @returns {{ value: *, removedBinding: boolean }}
+   */
+  static #cleanFilteredBindings(
+    value,
+    originalDataModel,
+    filteredDataModel,
+    scope = null
+  ) {
+    if (AITab.#isBinding(value)) {
+      const absolute = value.path.startsWith("/");
+      const canResolveBinding = absolute || scope !== null;
+
+      if (!canResolveBinding) {
+        return { value, removedBinding: false };
+      }
+
+      const path = absolute ? value.path : `/${value.path}`;
+      const before = AITab.#resolvePath(
+        absolute ? originalDataModel : scope.original,
+        path
+      );
+      const after = AITab.#resolvePath(
+        absolute ? filteredDataModel : scope.filtered,
+        path
+      );
+      const targetWasFiltered = before !== undefined && after === undefined;
+
+      if (targetWasFiltered) {
+        return { value: undefined, removedBinding: true };
+      }
+
+      return {
+        value: absolute ? value : { path: `${scope.path}/${value.path}` },
+        removedBinding: false,
+      };
+    }
+
+    const hasNestedProperties = value !== null && typeof value == "object";
+
+    if (!hasNestedProperties) {
+      return { value, removedBinding: false };
+    }
+
+    const entries = [];
+    let removedBinding = false;
+
+    for (const [key, sub] of Object.entries(value)) {
+      const cleaned = AITab.#cleanFilteredBindings(
+        sub,
+        originalDataModel,
+        filteredDataModel,
+        scope
+      );
+
+      removedBinding ||= cleaned.removedBinding;
+
+      if (cleaned.value !== undefined) {
+        entries.push([key, cleaned.value]);
+      }
+    }
+
+    return {
+      value: Array.isArray(value)
+        ? entries.map(([, item]) => item)
+        : Object.fromEntries(entries),
+      removedBinding,
+    };
+  }
+
+  /**
+   * Replace a shared repeater template with independently bound components.
+   *
+   * @param {A2UISurface} surface
+   * @param {A2UIComponent} root
+   * @param {A2UIComponent} template
+   * @param {A2UIComponent[]} instances
+   */
+  static #replaceRepeaterWithInstances(surface, root, template, instances) {
+    const ids = new Set(surface.components.map(component => component?.id));
+
+    for (const [index, instance] of instances.entries()) {
+      if (index === 0) {
+        continue;
+      }
+
+      let id = `${template.id}-${index}`;
+
+      while (ids.has(id)) {
+        id += "-";
+      }
+
+      ids.add(id);
+      instance.id = id;
+    }
+
+    root.children = instances.map(instance => instance.id);
+    surface.components = surface.components.flatMap(component =>
+      component === template ? instances : [component]
+    );
   }
 
   /**
@@ -1569,6 +2150,8 @@ export class AITab {
    *   surface `priorConversation` already produced.
    * @param {Conversation} [options.priorConversation] The conversation to
    *   continue; a fresh one is built when there is none.
+   * @param {Set<string>|null} options.allowedLinks URLs the surface may link
+   *   to, as expandSurfaceUrlTokens takes them.
    * @param {AbortSignal} [options.signal] - Cancels the generation.
    * @param {{charsRead: number, charsOut: number}} options.stats - Filled in
    *   with the characters sent to and received from the model.
@@ -1580,6 +2163,7 @@ export class AITab {
     focus,
     modifyInstructions,
     priorConversation,
+    allowedLinks,
     signal,
     stats,
   }) {
@@ -1643,12 +2227,15 @@ export class AITab {
       }
 
       stats.charsRead = charsRead;
-      // The signal is deliberately not forwarded to run(): an AbortSignal
-      // cannot be structured-cloned to the engine actor, so the model call can
-      // only be abandoned once it resolves.
+      // An AbortSignal cannot be structured-cloned to the engine actor.
+      // We pass it between functions in the calling process to identify
+      // when it's aborted. When that happens, the engine sends a
+      // cancellation message with a request ID so the backend
+      // aborts the HTTP request to the model.
       const response = await conversation.run({
         args,
-        fxAccountToken: await lazy.openAIEngine.getFxAccountToken(),
+        token: await lazy.AuthProvider.getToken(),
+        signal,
       });
 
       if (signal?.aborted) {
@@ -1676,7 +2263,18 @@ export class AITab {
           code: "invalid_json",
         };
       }
-      const surface = AITab.expandSurfaceUrlTokens(parsed, urlTokenizer);
+
+      if (parsed.error && typeof parsed.error == "string") {
+        lazy.console.warn("Model returned response error", parsed.error);
+        return {
+          error: sanitizeUntrustedContent(parsed.error),
+          code: "content_related",
+        };
+      }
+
+      const surface = AITab.repairValidations(
+        AITab.expandSurfaceUrlTokens(parsed, urlTokenizer, allowedLinks)
+      );
 
       const result = AITab.buildSurface(surface, env);
       if (!result.ok) {
@@ -1696,6 +2294,9 @@ export class AITab {
       lazy.console.debug("structured surface validated successfully");
       return { surface: result.surface, conversation };
     } catch (error) {
+      if (signal?.aborted) {
+        return CANCELED_RESULT;
+      }
       lazy.console.error("structured generation failed", error);
       return {
         error: `page generation failed: ${error?.message ?? error}`,
@@ -1782,17 +2383,19 @@ export class AITab {
   }
 
   /**
-   * Turn a title into a lowercase snake_case slug.
+   * Turn a title into a lowercase kebab-case slug.
    *
    * @param {string} title
    * @returns {string}
    */
   static #slugify(title) {
     const slug = title
+      .slice(0, 60)
       .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .slice(0, 60);
+      .normalize("NFD")
+      .replace(/\p{M}/gu, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
     // A title with no ASCII alphanumerics at all (e.g. one written in Japanese)
     // slugs to the empty string, which is not a usable identifier.
     return slug || "aitab";

@@ -49,6 +49,9 @@ document.addEventListener(
         case "context-openlinkinsplitview":
           gContextMenu.openLinkInSplitView(event);
           break;
+        case "context-openlinkminiwindow":
+          gContextMenu.openLinkInMiniWindow();
+          break;
         case "context-openlinkprivate":
           gContextMenu.openLinkInPrivateWindow();
           break;
@@ -214,6 +217,9 @@ document.addEventListener(
         }
         case "context-translate-selection":
           gContextMenu.openSelectTranslationsPanel(event);
+          break;
+        case "context-turn-on-highlight-menu":
+          gContextMenu.turnOnHighlightMenu();
           break;
         case "context-create-aitab":
           gContextMenu.createAITab();

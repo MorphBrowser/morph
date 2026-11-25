@@ -47,8 +47,6 @@ linux64-cctools-port:
     run:
         script: build-cctools-port.sh
         resources:
-            - taskcluster/scripts/misc/cctools-ld64-dead-strip-compiler-builtins.patch
-            - taskcluster/scripts/misc/cctools-llvm-c-headers.patch
             - taskcluster/scripts/misc/libdispatch-unused-but-set-global.patch
             - taskcluster/scripts/misc/libtapi.patch
         toolchain-artifact: public/build/cctools.tar.zst
@@ -96,6 +94,48 @@ linux64-libdmg:
         toolchain:
             - linux64-clang-toolchain
             - linux64-toolchain-sysroot
+
+macosx64-libdmg:
+    description: "libdmg-hfsplus toolchain build"
+    attributes:
+        local-toolchain: true
+    treeherder:
+        symbol: TM(libdmg-hfs+)
+    run:
+        script: build-dmg-hfsplus-macosx.sh
+        arguments: ['x86_64-apple-darwin']
+        resources:
+            - 'taskcluster/scripts/misc/macos-setup.sh'
+        toolchain-artifact: public/build/dmg.tar.zst
+        toolchain-alias: macosx64-dmg
+    fetches:
+        fetch:
+            - libdmg-hfsplus
+            - xz
+        toolchain:
+            - linux64-clang-toolchain
+            - macosx64-sdk-toolchain
+
+macosx64-aarch64-libdmg:
+    description: "libdmg-hfsplus toolchain build"
+    attributes:
+        local-toolchain: true
+    treeherder:
+        symbol: TMA64(libdmg-hfs+)
+    run:
+        script: build-dmg-hfsplus-macosx.sh
+        arguments: ['aarch64-apple-darwin']
+        resources:
+            - 'taskcluster/scripts/misc/macos-setup.sh'
+        toolchain-artifact: public/build/dmg.tar.zst
+        toolchain-alias: macosx64-aarch64-dmg
+    fetches:
+        fetch:
+            - libdmg-hfsplus
+            - xz
+        toolchain:
+            - linux64-clang-toolchain
+            - macosx64-sdk-toolchain
 
 linux64-mkbom:
     description: "mkbom toolchain build"
@@ -208,7 +248,7 @@ linux64-marannon:
     fetches:
         toolchain:
             - linux64-clang-toolchain
-            - linux64-rust
+            - linux64-rust-toolchain
             - sysroot-x86_64-linux-gnu
     run:
         script: build-rust-based-toolchain.sh
@@ -700,8 +740,6 @@ win64-cmake:
 
 talos-pdfs:
     description: "Gathers all the PDFs needed for the pdfpaint test"
-    attributes:
-        local-toolchain: true
     treeherder:
         symbol: TL(talos-pdfs)
     worker:
@@ -711,7 +749,8 @@ talos-pdfs:
         sparse-profile: null
         resources:
             - 'taskcluster/scripts/misc/fetch-talos-pdfs.py'
-        toolchain-artifact: public/build/talos-pdfs.tar.zst
+        toolchain-artifact: project/gecko/talos-pdfs/talos-pdfs.tar.zst
     fetches:
         fetch:
             - mozilla-pdf.js
+            - mozilla-pdf.js.pdfs

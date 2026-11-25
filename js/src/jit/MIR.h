@@ -2566,12 +2566,14 @@ class MCallClassHook : public MCallBase {
   const JSNative target_;
   bool constructing_ : 1;
   bool ignoresReturnValue_ : 1;
+  bool maybeCrossRealm_ : 1;
 
   MCallClassHook(JSNative target, bool constructing)
       : MCallBase(classOpcode),
         target_(target),
         constructing_(constructing),
-        ignoresReturnValue_(false) {
+        ignoresReturnValue_(false),
+        maybeCrossRealm_(true) {
     setResultType(MIRType::Value);
   }
 
@@ -2589,7 +2591,8 @@ class MCallClassHook : public MCallBase {
     return numStackArgs() - thisAndNewTarget;
   }
 
-  bool maybeCrossRealm() const { return true; }
+  bool maybeCrossRealm() const { return maybeCrossRealm_; }
+  void setNotCrossRealm() { maybeCrossRealm_ = false; }
 
   bool ignoresReturnValue() const { return ignoresReturnValue_; }
   void setIgnoresReturnValue() { ignoresReturnValue_ = true; }
@@ -3745,7 +3748,9 @@ class MToNumberInt32 : public MUnaryInstruction, public ToInt32Policy::Data {
 
   bool congruentTo(const MDefinition* ins) const override {
     if (!ins->isToNumberInt32() ||
-        ins->toToNumberInt32()->conversion() != conversion()) {
+        ins->toToNumberInt32()->conversion() != conversion() ||
+        ins->toToNumberInt32()->needsNegativeZeroCheck() !=
+            needsNegativeZeroCheck()) {
       return false;
     }
     return congruentIfOperandsEqual(ins);
@@ -5433,7 +5438,63 @@ class MBigIntMod : public MBigIntBinaryArithInstruction {
       CompactBufferWriter& writer) const override;
   bool canRecoverOnBailout() const override { return !canBeDivideByZero(); }
 
+  MDefinition* foldsTo(TempAllocator& alloc) override;
+
   ALLOW_CLONE(MBigIntMod)
+};
+
+// `(lhs * rhs) % modulus`, without allocating the product.
+class MBigIntMulMod : public MTernaryInstruction, public NoTypePolicy::Data {
+  bool canBeDivideByZero_;
+
+  MBigIntMulMod(MDefinition* lhs, MDefinition* rhs, MDefinition* modulus)
+      : MTernaryInstruction(classOpcode, lhs, rhs, modulus) {
+    setResultType(MIRType::BigInt);
+    setMovable();
+    canBeDivideByZero_ =
+        !modulus->isConstant() || modulus->toConstant()->toBigInt()->isZero();
+
+    // Throws when the modulus is zero.
+    if (canBeDivideByZero_) {
+      setGuard();
+      setNotMovable();
+    }
+  }
+
+ public:
+  INSTRUCTION_HEADER(BigIntMulMod)
+  TRIVIAL_NEW_WRAPPERS
+  NAMED_OPERANDS((0, lhs), (1, rhs), (2, modulus))
+
+  bool canBeDivideByZero() const { return canBeDivideByZero_; }
+
+  HashNumber valueHash() const override;
+  bool congruentTo(const MDefinition* ins) const override {
+    if (congruentIfOperandsEqual(ins)) {
+      return true;
+    }
+    if (!ins->isBigIntMulMod() || isEffectful() || ins->isEffectful()) {
+      return false;
+    }
+    const MBigIntMulMod* other = ins->toBigIntMulMod();
+    return lhs() == other->rhs() && rhs() == other->lhs() &&
+           modulus() == other->modulus();
+  }
+
+  AliasSet getAliasSet() const override {
+    if (canBeDivideByZero()) {
+      return AliasSet::Store(AliasSet::ExceptionState);
+    }
+    return AliasSet::None();
+  }
+
+  bool possiblyCalls() const override { return true; }
+
+  [[nodiscard]] bool writeRecoverData(
+      CompactBufferWriter& writer) const override;
+  bool canRecoverOnBailout() const override { return !canBeDivideByZero(); }
+
+  ALLOW_CLONE(MBigIntMulMod)
 };
 
 class MBigIntPow : public MBigIntBinaryArithInstruction {
@@ -6349,6 +6410,8 @@ class MLexicalCheck : public MUnaryInstruction, public BoxPolicy<0>::Data {
   TRIVIAL_NEW_WRAPPERS
 
   AliasSet getAliasSet() const override { return AliasSet::None(); }
+
+  MDefinition* foldsTo(TempAllocator& alloc) override;
 
   bool congruentTo(const MDefinition* ins) const override {
     return congruentIfOperandsEqual(ins);

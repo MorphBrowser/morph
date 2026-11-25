@@ -563,10 +563,12 @@ class ReportBrokenSiteHelper {
     await Promise.all(promises);
   }
 
-  clickSend() {
-    const promise = this.waitForViewToShow(this.sentView);
-    this.sendButton.click();
-    return promise;
+  async clickSend() {
+    const { sendButton, sentView } = this;
+    const promise = this.waitForViewToShow(sentView);
+    sendButton.click();
+    await promise;
+    await isNotDisabled(sendButton, "send button should not be disabled");
   }
 
   clickCancel() {
@@ -1106,6 +1108,49 @@ class ProtectionsPanelHelper extends MenuHelper {
   }
 }
 
+class TrustPanelHelper extends MenuHelper {
+  menuDescription = "Trust Panel";
+
+  get reportBrokenSite() {
+    return this.win.document.getElementById(
+      "trustpanel-report-broken-site-button"
+    );
+  }
+
+  get popup() {
+    return this.win.document.getElementById("trustpanel-popup");
+  }
+
+  async open() {
+    const promise = waitForEvent(
+      this.win,
+      "popupshown",
+      true,
+      e => e.target.id == "trustpanel-popup",
+      `opening Report Broken Site on ${this.menuDescription} and waiting for it to show`
+    );
+    this.win.gTrustPanelHandler.showPopup();
+    await promise;
+
+    // The report row is in the "Fix site issue" subview.
+    const view = this.win.document.getElementById("trustpanel-siteIssueView");
+    const shown = BrowserTestUtils.waitForEvent(view, "ViewShown");
+    this.win.document
+      .getElementById("trustpanel-fix-site-issue-button")
+      .doCommand();
+    await shown;
+  }
+
+  async close() {
+    if (this.opened) {
+      const popup = this.popup;
+      const promise = BrowserTestUtils.waitForPopupEvent(popup, "hidden");
+      PanelMultiView.hidePopup(popup, false);
+      await promise;
+    }
+  }
+}
+
 function AppMenu(win = window) {
   return new AppMenuHelper(win);
 }
@@ -1116,6 +1161,10 @@ function HelpMenu(win = window) {
 
 function ProtectionsPanel(win = window) {
   return new ProtectionsPanelHelper(win);
+}
+
+function TrustPanel(win = window) {
+  return new TrustPanelHelper(win);
 }
 
 function filterFrameworkDetectorFails(ping, expected) {
@@ -1130,10 +1179,17 @@ function filterFrameworkDetectorFails(ping, expected) {
   }
 }
 
+async function setupBuiltInTestTrackers() {
+  await UrlClassifierTestUtils.addBuiltInTestTrackers();
+  registerCleanupFunction(async () => {
+    await UrlClassifierTestUtils.cleanupTestTrackers();
+  });
+}
+
 async function setupStrictETP() {
   await UrlClassifierTestUtils.addTestTrackers();
-  registerCleanupFunction(() => {
-    UrlClassifierTestUtils.cleanupTestTrackers();
+  registerCleanupFunction(async () => {
+    await UrlClassifierTestUtils.cleanupTestTrackers();
   });
 
   await SpecialPowers.pushPrefEnv({

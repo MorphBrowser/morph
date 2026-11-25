@@ -2,8 +2,7 @@
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
 /**
- * Checks the local shortcut rows in the engines list of the search pane
- * with the settings redesign enabled.
+ * Checks the local shortcut rows in the engines list of the search pane.
  */
 
 "use strict";
@@ -29,7 +28,14 @@ add_task(async function test_visible_rows() {
   );
 
   for (let row of engineList.children) {
+    await row.updateComplete;
     let rowElem = row.children[0];
+    // Engine rows get their label and shortcuts once their async config
+    // (which waits for the engine icon) resolves and the setting changes.
+    if (!rowElem.label) {
+      await waitForSettingChange(row.setting);
+      await row.updateComplete;
+    }
     Assert.ok(rowElem.description, "Row shortcut is present");
     Assert.ok(rowElem.label, "l10n label is present");
   }

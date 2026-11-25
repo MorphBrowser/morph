@@ -18,6 +18,8 @@ import org.mozilla.gecko.util.ThreadUtils;
  */
 @ExperimentalGeckoViewApi
 public class PdfViewerController {
+  /** Public constructor for PdfViewerController. */
+  public PdfViewerController() {}
 
   /** The session editor contains functions related to editing a PDF, such as adding a signature. */
   @ExperimentalGeckoViewApi
@@ -67,6 +69,7 @@ public class PdfViewerController {
    * a document.
    */
   public static class PdfViewerException extends Exception {
+    private static final long serialVersionUID = 1L;
 
     /**
      * Construct a [PdfViewerException]

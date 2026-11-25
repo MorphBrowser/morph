@@ -25,6 +25,8 @@ const {
   getRemoteClient,
   checkMajorVersion,
   FEATURE_MAJOR_VERSIONS,
+  _setRemoteClientForTesting,
+  _clearRemoteClientForTesting,
 } = ChromeUtils.importESModule(
   "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs"
 );
@@ -64,7 +66,11 @@ add_setup(async function read_real_config_records() {
     record =>
       !record.kind &&
       record.feature === MODEL_FEATURES.TITLE_GENERATION &&
-      record.is_default
+      record.is_default &&
+      checkMajorVersion(
+        record.version,
+        FEATURE_MAJOR_VERSIONS[MODEL_FEATURES.TITLE_GENERATION]
+      )
   );
 
   const memoriesFeature = MODEL_FEATURES.MEMORIES_INITIAL_GENERATION_SYSTEM;
@@ -111,6 +117,45 @@ add_task(async function test_buildConversation_uses_chat_params() {
     Assert.equal(conversation.engine.model, expectedParams.model);
   } finally {
     await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_buildConversation_sends_inference_model() {
+  const inferenceModel = "qwen3-235b-a22b-instruct-2507-maas";
+  _setRemoteClientForTesting({
+    get: async () => [
+      {
+        id: "chat--params--auto--v1",
+        kind: "params",
+        feature: MODEL_FEATURES.CHAT,
+        model: "auto",
+        inference_model: inferenceModel,
+        model_choice_id: "4",
+        version: `${FEATURE_MAJOR_VERSIONS[MODEL_FEATURES.CHAT]}.0`,
+        parameters: { temperature: 0.5 },
+      },
+    ],
+  });
+  const createEngineSpy = sinon.spy(openAIEngine, "_createEngine");
+  await SpecialPowers.pushPrefEnv({
+    set: [[PREF_MODEL_CHOICE, "4"]],
+    clear: [[PREF_MODEL], [PREF_ENDPOINT], [PREF_CUSTOM_ENDPOINT]],
+  });
+
+  try {
+    const conversation = await buildConversation(MODEL_FEATURES.CHAT);
+
+    Assert.equal(conversation.engine.model, inferenceModel);
+    Assert.equal(
+      createEngineSpy.lastCall.args[0].modelId,
+      inferenceModel,
+      "The endpoint gets inference_model, not the record's model"
+    );
+    Assert.deepEqual(conversation.parameters, { temperature: 0.5 });
+  } finally {
+    await SpecialPowers.popPrefEnv();
+    createEngineSpy.restore();
+    _clearRemoteClientForTesting();
   }
 });
 
@@ -270,5 +315,282 @@ add_task(async function test_buildConversation_reports_missing_major_version() {
     );
   } finally {
     await SpecialPowers.popPrefEnv();
+  }
+});
+
+/**
+ * A params record as Remote Settings serves it, for the feature's current
+ * major version.
+ *
+ * @param {string} feature
+ * @param {string} model
+ * @param {object} [extra]
+ * @returns {object}
+ */
+function paramsRecord(feature, model, extra = {}) {
+  return {
+    id: `${feature}--params--${model}`,
+    kind: "params",
+    feature,
+    model,
+    version: `${FEATURE_MAJOR_VERSIONS[feature]}.0`,
+    is_default: true,
+    parameters: {},
+    modules: [],
+    ...extra,
+  };
+}
+
+const CHAT_RECORD = paramsRecord(MODEL_FEATURES.CHAT, "test-chat-model", {
+  is_default: false,
+  model_choice_id: "1",
+});
+const SETUP_RECORD = paramsRecord(
+  MODEL_FEATURES.AGENT_MONITOR_SETUP,
+  "generic",
+  { service_type: SERVICE_TYPES.AGENT, purpose: PURPOSES.MONITOR }
+);
+
+/**
+ * @param {string} feature
+ * @param {object[]} records - What Remote Settings holds
+ * @returns {Promise<string>} The model the feature's engine is built for
+ */
+async function modelFor(feature, records) {
+  _setRemoteClientForTesting({ get: async () => records });
+  try {
+    return (await buildConversation(feature)).engine.model;
+  } finally {
+    _clearRemoteClientForTesting();
+  }
+}
+
+add_task(async function test_monitor_setup_uses_the_monitor_model() {
+  const monitorModel = "test-monitor-model-a";
+  _setRemoteClientForTesting({
+    get: async () => [
+      CHAT_RECORD,
+      SETUP_RECORD,
+      paramsRecord(MODEL_FEATURES.AGENT_MONITOR, monitorModel, {
+        service_type: SERVICE_TYPES.AGENT,
+        purpose: PURPOSES.MONITOR,
+      }),
+    ],
+  });
+  // Engine creation is spied on, not stubbed, so this also goes through the ML
+  // engine's own validation of the feature id.
+  const createEngineSpy = sinon.spy(openAIEngine, "_createEngine");
+  await SpecialPowers.pushPrefEnv({
+    set: [[PREF_MODEL_CHOICE, "1"]],
+    clear: [[PREF_MODEL], [PREF_ENDPOINT], [PREF_CUSTOM_ENDPOINT]],
+  });
+
+  try {
+    const monitor = await buildConversation(MODEL_FEATURES.AGENT_MONITOR);
+    const monitorOptions = createEngineSpy.lastCall.args[0];
+    const setup = await buildConversation(MODEL_FEATURES.AGENT_MONITOR_SETUP);
+    const setupOptions = createEngineSpy.lastCall.args[0];
+
+    Assert.equal(monitor.engine.model, monitorModel, "Monitor has a model");
+    Assert.equal(
+      setup.engine.model,
+      monitorModel,
+      "Monitor setup runs on the model the monitor agent resolves to"
+    );
+    Assert.equal(
+      setupOptions.modelId,
+      monitorOptions.modelId,
+      "and that is the model the engine is created for"
+    );
+    Assert.equal(setupOptions.featureId, MODEL_FEATURES.AGENT_MONITOR_SETUP);
+    Assert.equal(setupOptions.serviceType, SERVICE_TYPES.AGENT);
+    Assert.equal(setupOptions.purpose, PURPOSES.MONITOR);
+    Assert.notEqual(
+      setupOptions.engineId,
+      monitorOptions.engineId,
+      "Monitor setup never shares an engine with a monitor check"
+    );
+    Assert.deepEqual(setup.parameters, parametersOf(SETUP_RECORD));
+  } finally {
+    await SpecialPowers.popPrefEnv();
+    createEngineSpy.restore();
+    _clearRemoteClientForTesting();
+  }
+});
+
+add_task(async function test_monitor_setup_follows_the_monitor_default() {
+  await SpecialPowers.pushPrefEnv({
+    set: [[PREF_MODEL_CHOICE, "1"]],
+    clear: [[PREF_MODEL], [PREF_ENDPOINT], [PREF_CUSTOM_ENDPOINT]],
+  });
+  const setup = MODEL_FEATURES.AGENT_MONITOR_SETUP;
+  const monitor = MODEL_FEATURES.AGENT_MONITOR;
+
+  try {
+    Assert.equal(
+      await modelFor(setup, [
+        CHAT_RECORD,
+        SETUP_RECORD,
+        paramsRecord(monitor, "test-monitor-model-a"),
+      ]),
+      "test-monitor-model-a",
+      "Monitor setup takes the monitor agent's default model"
+    );
+    Assert.equal(
+      await modelFor(setup, [
+        CHAT_RECORD,
+        SETUP_RECORD,
+        paramsRecord(monitor, "test-monitor-model-a", { is_default: false }),
+        paramsRecord(monitor, "test-monitor-model-b"),
+      ]),
+      "test-monitor-model-b",
+      "and follows when the monitor agent's default changes"
+    );
+    Assert.equal(
+      await modelFor(setup, [
+        CHAT_RECORD,
+        SETUP_RECORD,
+        paramsRecord(monitor, "test-monitor-model-a", {
+          inference_model: "test-monitor-inference-model",
+        }),
+      ]),
+      "test-monitor-inference-model",
+      "down to the monitor agent's inference model"
+    );
+    Assert.equal(
+      await modelFor(setup, [
+        CHAT_RECORD,
+        SETUP_RECORD,
+        paramsRecord(monitor, "generic"),
+      ]),
+      "test-chat-model",
+      "A generic monitor record sends both to the chat model"
+    );
+    Assert.equal(
+      await modelFor(setup, [
+        CHAT_RECORD,
+        paramsRecord(setup, "test-setup-model"),
+        paramsRecord(monitor, "test-monitor-model-a"),
+      ]),
+      "test-setup-model",
+      "A setup record that names a model keeps it"
+    );
+  } finally {
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_monitor_setup_custom_model_wins() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      [PREF_MODEL_CHOICE, "0"],
+      [PREF_CUSTOM_ENDPOINT, CUSTOM_ENDPOINT],
+      [PREF_MODEL, CUSTOM_MODEL],
+    ],
+  });
+
+  try {
+    Assert.equal(
+      await modelFor(MODEL_FEATURES.AGENT_MONITOR_SETUP, [
+        CHAT_RECORD,
+        SETUP_RECORD,
+        paramsRecord(MODEL_FEATURES.AGENT_MONITOR, "test-monitor-model-a"),
+      ]),
+      CUSTOM_MODEL,
+      "A custom model user keeps their own model for monitor setup"
+    );
+  } finally {
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_model_source_leaves_other_features_alone() {
+  await SpecialPowers.pushPrefEnv({
+    set: [[PREF_MODEL_CHOICE, "1"]],
+    clear: [[PREF_MODEL], [PREF_ENDPOINT], [PREF_CUSTOM_ENDPOINT]],
+  });
+  const monitor = MODEL_FEATURES.AGENT_MONITOR;
+  const records = [
+    CHAT_RECORD,
+    SETUP_RECORD,
+    paramsRecord(monitor, "test-monitor-model-a"),
+    paramsRecord(MODEL_FEATURES.AITAB, "generic"),
+    paramsRecord(MODEL_FEATURES.TITLE_GENERATION, "generic"),
+  ];
+
+  try {
+    Assert.equal(
+      await modelFor(monitor, records),
+      "test-monitor-model-a",
+      "The monitor agent's own model does not depend on monitor setup"
+    );
+    Assert.equal(
+      await modelFor(monitor, [CHAT_RECORD, paramsRecord(monitor, "generic")]),
+      "test-chat-model",
+      "A generic monitor record still falls back to the chat model"
+    );
+    Assert.equal(
+      await modelFor(MODEL_FEATURES.AITAB, records),
+      "test-chat-model",
+      "Another chat fallback feature still gets the chat model"
+    );
+    Assert.equal(
+      await modelFor(MODEL_FEATURES.TITLE_GENERATION, records),
+      "generic",
+      "A feature without a model source keeps its record's model"
+    );
+    Assert.equal(
+      await modelFor(MODEL_FEATURES.CHAT, records),
+      "test-chat-model",
+      "Chat keeps its own model"
+    );
+  } finally {
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_buildConversation_on_device_options() {
+  const feature = MODEL_FEATURES.MEMORIES_INITIAL_GENERATION_SYSTEM;
+  /** @type {Partial<PipelineOptions>} */
+  const onDeviceOptions = {
+    backend: "llama.cpp",
+    modelId: "Mozilla/test-model",
+    modelFile: "model.gguf",
+  };
+  const run = sinon.stub().resolves({ finalOutput: "" });
+  const createEngineStub = sinon
+    .stub(openAIEngine, "_createEngine")
+    .resolves({ run, engineStatus: "ready" });
+  try {
+    const conversation = await buildConversation(feature, {
+      onDeviceOptions,
+      flowId: "local-flow",
+    });
+    Assert.ok(conversation.isReady, "A conversation is ready to run");
+    await conversation.run({ inferenceParams: { max_tokens: 8 } });
+    const [options] = createEngineStub.firstCall.args;
+    Assert.equal(options.backend, "llama.cpp");
+    Assert.equal(options.modelId, onDeviceOptions.modelId);
+    Assert.equal(options.flowId, "local-flow");
+    Assert.equal(options.featureId, feature);
+    Assert.ok(!("apiKey" in options), "Cloud credentials stay out");
+    Assert.equal(run.firstCall.args[0].inferenceParams.max_tokens, 8);
+    Assert.ok(
+      options.engineId.endsWith(`-${onDeviceOptions.modelId}`),
+      "The engine id names the on-device model"
+    );
+
+    const unauthorized = Object.assign(new Error("401 status code"), {
+      status: 401,
+    });
+    run.rejects(unauthorized);
+    await Assert.rejects(
+      conversation.run({}),
+      error => error === unauthorized,
+      "A 401 on device is not retried"
+    );
+    Assert.ok(createEngineStub.calledOnce, "The engine is not recreated");
+  } finally {
+    createEngineStub.restore();
   }
 });

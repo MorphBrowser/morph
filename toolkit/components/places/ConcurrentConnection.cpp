@@ -103,6 +103,44 @@ class CallbackOnComplete final : public mozIStorageCompletionCallback {
 
 NS_IMPL_ISUPPORTS(CallbackOnComplete, mozIStorageCompletionCallback)
 
+/**
+ * Forwards notifications to the consumer's callback, and notifies the target
+ * when the statement completed.
+ */
+class DispatchedStatementCallback final : public AsyncStatementCallback {
+  using Method = void (ConcurrentConnection::*)(mozIStoragePendingStatement*);
+
+ public:
+  DispatchedStatementCallback(ConcurrentConnection* aTarget, Method aMethod,
+                              PendingStatementCallback* aCallback)
+      : mMethod(aMethod), mTarget(aTarget), mCallback(aCallback) {}
+
+  void SetPendingStatement(mozIStoragePendingStatement* aStatement) {
+    mPendingStatement = aStatement;
+  }
+
+  NS_IMETHOD HandleResult(mozIStorageResultSet* aResultSet) override {
+    return mCallback->HandleResult(aResultSet);
+  }
+
+  NS_IMETHOD HandleError(mozIStorageError* aError) override {
+    return mCallback->HandleError(aError);
+  }
+
+  NS_IMETHOD HandleCompletion(uint16_t aReason) override {
+    nsCOMPtr<mozIStoragePendingStatement> statement =
+        mPendingStatement.forget();
+    (mTarget->*mMethod)(statement);
+    return mCallback->HandleCompletion(aReason);
+  }
+
+ private:
+  Method mMethod;
+  RefPtr<ConcurrentConnection> mTarget;
+  RefPtr<PendingStatementCallback> mCallback;
+  nsCOMPtr<mozIStoragePendingStatement> mPendingStatement;
+};
+
 }  // anonymous namespace
 
 NS_IMPL_ISUPPORTS(ConcurrentConnection, nsIObserver, nsISupportsWeakReference,
@@ -160,9 +198,10 @@ void ConcurrentConnection::InitializeOnMainThread() {
   }
 
   mState = AWAITING_DATABASE_READY;
-  // Opening concurrently with EnsureConnection() may cause WAL-mode lock
-  // contention, returning SQLITE_LOCKED or SQLITE_IOERR depending on the
-  // filesystem (busy_timeout does not apply to same-process conflicts).
+  // Opening concurrently with EnsureConnection() may cause lock contention
+  // while the main connection sets up the database (for example changing its
+  // journal mode), returning SQLITE_BUSY or SQLITE_IOERR depending on the
+  // filesystem.
   // Defer our open until TOPIC_PLACES_INIT_COMPLETE, which fires only after
   // EnsureConnection() has succeeded and the main connection is established.
   // If the connection is already open (CC started after Places initialized),
@@ -246,11 +285,17 @@ ConcurrentConnection::BlockShutdown(nsIAsyncShutdownClient* aBarrierClient) {
   // Start closing the connection, then call aBarrierClient.RemoveBlocker(this)
   // once done.
   if (mConn) {
+    // Interrupt only stops the running statement, and AsyncClose runs all
+    // the queued statements before closing, so cancel them.
+    for (const auto& statement : mDispatchedStatements) {
+      (void)statement->Cancel();
+    }
     (void)mConn->Interrupt();
     CloseConnection();
-  } else {
+  } else if (!mIsOpening && !mIsClosing) {
     Shutdown();
   }
+  // Otherwise Complete() or CloseConnectionComplete() will unblock shutdown.
   return NS_OK;
 }
 
@@ -269,14 +314,16 @@ ConcurrentConnection::Complete(nsresult aRv, nsISupports* aData) {
   }
 #endif
 
-  // It's possible we got shutdown while the connection was being opened. We
-  // don't even assign the connection, just try to close it.
-  if (mIsShuttingDown && aData) {
-    nsCOMPtr<mozIStorageAsyncConnection> conn = do_QueryInterface(aData);
-    if (conn) {
-      (void)conn->AsyncClose(nullptr);
-    }
+  // It's possible we got shutdown while the connection was being opened. Close
+  // it before unblocking shutdown.
+  if (mIsShuttingDown) {
     mIsOpening = false;
+    mConn = do_QueryInterface(aData);
+    if (mConn) {
+      CloseConnection();
+    } else {
+      Shutdown();
+    }
     return NS_OK;
   }
 
@@ -294,14 +341,6 @@ ConcurrentConnection::Complete(nsresult aRv, nsISupports* aData) {
   // Assign and setup connection.
   mConn = do_QueryInterface(aData);
   mIsOpening = false;
-
-  // In some rare conditions WAL may return SQLITE_BUSY when the same database
-  // is used across multiple threads, we must handle that.
-  nsAutoCString busyTimeoutPragma("PRAGMA busy_timeout = ");
-  busyTimeoutPragma.AppendInt(DATABASE_BUSY_TIMEOUT_MS);
-  nsCOMPtr<mozIStoragePendingStatement> busyPs;
-  (void)mConn->ExecuteSimpleSQLAsync(busyTimeoutPragma, nullptr,
-                                     getter_AddRefs(busyPs));
 
   // Verify the schema version. If outdated, wait for Places to finish
   // initializing.
@@ -384,6 +423,11 @@ void ConcurrentConnection::CloseConnection() {
     mIsConnectionReady = false;
     conn = mConn.forget();
   }
+  // The connection may already have been closed, for example by a statement
+  // error notified after shutdown started.
+  if (!conn) {
+    return;
+  }
 
   if (mAsyncStatements) {
     mAsyncStatements->FinalizeStatements();
@@ -401,13 +445,16 @@ void ConcurrentConnection::CloseConnection() {
   nsCOMPtr<mozIStorageCompletionCallback> cb =
       MakeAndAddRef<CallbackOnComplete>(
           this, &ConcurrentConnection::CloseConnectionComplete);
+  mIsClosing = true;
   if (NS_FAILED(conn->AsyncClose(cb))) {
+    mIsClosing = false;
     Shutdown();
   }
 }
 
 void ConcurrentConnection::CloseConnectionComplete(nsresult rv) {
   AssertIsOnMainThread();
+  mIsClosing = false;
   if (mIsShuttingDown || NS_FAILED(rv)) {
     Shutdown();
     return;
@@ -445,8 +492,8 @@ void ConcurrentConnection::SetupConnection() {
     MutexAutoLock lock(mConnectionReadyMutex.Lock());
     mConnectionReadyMutex.NoteExclusiveAccess();
     // Create the statements caches.
-    mAsyncStatements = MakeUnique<AsyncStatementCache>(mConn);
-    mHelperThreadStatements = MakeUnique<StatementCache>(mConn);
+    mAsyncStatements = std::make_unique<AsyncStatementCache>(mConn);
+    mHelperThreadStatements = std::make_unique<StatementCache>(mConn);
     mIsConnectionReady = true;
   }
 
@@ -591,10 +638,21 @@ void ConcurrentConnection::TryToConsumeQueues() {
     if (NS_WARN_IF(NS_FAILED(rv))) continue;
     rv = stmt->BindParameters(paramsArray);
     if (NS_WARN_IF(NS_FAILED(rv))) continue;
+    RefPtr<DispatchedStatementCallback> cb =
+        MakeAndAddRef<DispatchedStatementCallback>(
+            this, &ConcurrentConnection::StatementCompleted, query->mCallback);
     nsCOMPtr<mozIStoragePendingStatement> ps;
-    rv = stmt->ExecuteAsync(query->mCallback, getter_AddRefs(ps));
+    rv = stmt->ExecuteAsync(cb, getter_AddRefs(ps));
     if (NS_WARN_IF(NS_FAILED(rv))) continue;
+    cb->SetPendingStatement(ps);
+    mDispatchedStatements.AppendElement(ps);
   }
+}
+
+void ConcurrentConnection::StatementCompleted(
+    mozIStoragePendingStatement* aStatement) {
+  AssertIsOnMainThread();
+  mDispatchedStatements.RemoveElement(aStatement);
 }
 
 void ConcurrentConnection::TryToOpenConnection() {
@@ -602,7 +660,10 @@ void ConcurrentConnection::TryToOpenConnection() {
   mConnectionReadyMutex.NoteOnMainThread();
   // Avoid re-entering as this may be invoked multiple times. mIsOpening is
   // used until mConn is assigned.
-  if (mIsShuttingDown || mIsOpening || mConn) {
+  // Places notifies TOPIC_PLACES_INIT_COMPLETE again when shutdown starts, so
+  // check for shutdown too, as it's too late to open the connection.
+  if (mIsShuttingDown || mIsOpening || mConn ||
+      AppShutdown::IsInOrBeyond(ShutdownPhase::AppShutdownConfirmed)) {
     return;
   }
 
@@ -646,6 +707,9 @@ void ConcurrentConnection::PlacesInitFallbackTimerCallback(nsITimer*,
 }
 
 void ConcurrentConnection::Shutdown() {
+  if (mState == CLOSED) {
+    return;
+  }
   // Keep a strong reference: nulling sCCInstance below drops the singleton's
   // RefPtr, which could be the last one, destroying us mid-method.
 #ifdef DEBUG
@@ -677,6 +741,7 @@ void ConcurrentConnection::Shutdown() {
   // Clear the queues, as we can't handle them anymore.
   mPendingQueries.Erase();
   mPendingRunnables.Erase();
+  mDispatchedStatements.Clear();
 
   // Stop blocking shutdown.
   if (mShutdownBarrierClient) {

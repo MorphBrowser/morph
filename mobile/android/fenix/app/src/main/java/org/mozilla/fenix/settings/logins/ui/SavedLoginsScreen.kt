@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -248,7 +247,6 @@ private fun EmptyList(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 @Suppress("LongMethod", "CognitiveComplexMethod")
 private fun LoginsListTopBar(
@@ -336,7 +334,7 @@ private fun LoginsListTopBar(
                         contentDescription = stringResource(R.string.passwords_import_menu_button),
                     ) {
                         Icon(
-                            painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
+                            painter = painterResource(iconsR.drawable.mozac_ic_more_vertical_round_24),
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurface,
                         )
@@ -446,7 +444,7 @@ private fun ImportPasswordsOverflowMenu(store: LoginsStore) {
         listOf(
             MenuItem.TextItem(
                 text = Text.Resource(R.string.passwords_import_menu_button),
-                onClick = { store.dispatch(ImportFileClicked) },
+                onClick = { store.dispatch(ImportAction.ImportFileClicked) },
             )
         )
 

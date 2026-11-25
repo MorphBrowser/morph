@@ -25,6 +25,7 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/DebugOnly.h"
+#include "mozilla/DisplayListArenaObjectId.h"
 #include "mozilla/EffectCompositor.h"
 #include "mozilla/EnumSet.h"
 #include "mozilla/Logging.h"
@@ -94,13 +95,6 @@ namespace dom {
 class RemoteBrowser;
 class Selection;
 }  // namespace dom
-
-enum class DisplayListArenaObjectId {
-#define DISPLAY_LIST_ARENA_OBJECT(name_) name_,
-#include "nsDisplayListArenaTypes.inc"
-#undef DISPLAY_LIST_ARENA_OBJECT
-  COUNT
-};
 
 /**
  * Return type of nsDisplayItem::CreateWebRenderCommands. The error case
@@ -639,7 +633,7 @@ class nsDisplayListBuilder {
     return mCurrentOffsetToReferenceFrame;
   }
 
-  void Check() { mPool.Check(); }
+  void Check() { DisplayListArena::Check(); }
 
   /*
    * Get the paint sequence number of the current paint.
@@ -946,41 +940,6 @@ class nsDisplayListBuilder {
    * Invalidates the caret frames from previous paints, if they have changed.
    */
   void InvalidateCaretFramesIfNeeded();
-
-  /**
-   * Allocate memory in our arena. It will only be freed when this display list
-   * builder is destroyed. This memory holds nsDisplayItems and
-   * DisplayItemClipChain objects.
-   *
-   * Destructors are called as soon as the item is no longer used.
-   */
-  void* Allocate(size_t aSize, DisplayListArenaObjectId aId) {
-    return mPool.Allocate(aId, aSize);
-  }
-  void* Allocate(size_t aSize, DisplayItemType aType) {
-#define DECLARE_DISPLAY_ITEM_TYPE(name_, ...)                \
-  static_assert(size_t(DisplayItemType::TYPE_##name_) ==     \
-                    size_t(DisplayListArenaObjectId::name_), \
-                "");
-#include "nsDisplayItemTypesList.inc"
-    static_assert(size_t(DisplayItemType::TYPE_MAX) ==
-                      size_t(DisplayListArenaObjectId::CLIPCHAIN),
-                  "");
-    static_assert(size_t(DisplayItemType::TYPE_MAX) + 1 ==
-                      size_t(DisplayListArenaObjectId::LISTNODE),
-                  "");
-#undef DECLARE_DISPLAY_ITEM_TYPE
-    return Allocate(aSize, DisplayListArenaObjectId(size_t(aType)));
-  }
-
-  void Destroy(DisplayListArenaObjectId aId, void* aPtr) {
-    if (!mIsDestroying) {
-      mPool.Free(aId, aPtr);
-    }
-  }
-  void Destroy(DisplayItemType aType, void* aPtr) {
-    Destroy(DisplayListArenaObjectId(size_t(aType)), aPtr);
-  }
 
   /**
    * Get an existing or allocate a new ActiveScrolledRoot in the arena. Will be
@@ -1513,6 +1472,10 @@ class nsDisplayListBuilder {
     void CheckASR(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame);
 #endif
 
+    // Computes the visible rect and the dirty rect aOutDirtyRect of the
+    // out-of-flow frame aFrame. Both are relative to aFrame.
+    //
+    // Note: aVisibleRect and aDirtyRect are relative to aFrame's parent.
     static nsRect ComputeVisibleRectForFrame(nsDisplayListBuilder* aBuilder,
                                              nsIFrame* aFrame,
                                              const nsRect& aVisibleRect,
@@ -1692,14 +1655,16 @@ class nsDisplayListBuilder {
    * WeakFrames are used to track whether a rect still belongs to the region.
    * Modified frames and rects are removed and re-added to the region if needed.
    */
+  template <typename RegionType>
   struct WeakFrameRegion {
+    using RectType = typename RegionType::RectType;
+
     nsTHashSet<void*> mFrameSet;
     // WeakFrame does not store the frame pointer after the frame has been
     // deleted, so keep the raw pointer around to remove it from mFrameSet.
     nsTArray<std::pair<WeakFrame, void*>> mFrames;
-    nsTArray<pixman_box32_t> mRects;
+    nsTArray<RectType> mRects;
 
-    template <typename RectType>
     void Add(nsIFrame* aFrame, const RectType& aRect) {
       if (mFrameSet.Contains(aFrame)) {
         return;
@@ -1707,7 +1672,7 @@ class nsDisplayListBuilder {
 
       mFrameSet.Insert(aFrame);
       mFrames.EmplaceBack(aFrame, aFrame);
-      mRects.AppendElement(nsRegion::RectToBox(aRect));
+      mRects.AppendElement(aRect);
     }
 
     void Clear() {
@@ -1720,12 +1685,8 @@ class nsDisplayListBuilder {
 
     size_t SizeOfExcludingThis(MallocSizeOf) const;
 
-    typedef gfx::ArrayView<pixman_box32_t> BoxArrayView;
-
-    nsRegion ToRegion() const { return nsRegion(BoxArrayView(mRects)); }
-
-    LayoutDeviceIntRegion ToLayoutDeviceIntRegion() const {
-      return LayoutDeviceIntRegion(BoxArrayView(mRects));
+    RegionType ToRegion() const {
+      return RegionType(gfx::ArrayView<RectType>(mRects));
     }
   };
 
@@ -1746,6 +1707,7 @@ class nsDisplayListBuilder {
       if (mBuilderToReset) {
         mBuilderToReset->mLinkURI.Truncate(0);
         mBuilderToReset->mLinkDest.Truncate(0);
+        mBuilderToReset->mLinkReferenceFrame = nullptr;
       }
     }
 
@@ -1793,9 +1755,6 @@ class nsDisplayListBuilder {
    * display list builder state.
    */
   void ReuseDisplayItem(nsDisplayItem* aItem);
-
-  void SetIsDestroying() { mIsDestroying = true; }
-  bool IsDestroying() const { return mIsDestroying; }
 
   nsTHashMap<nsPtrHashKey<const nsIFrame>, bool>&
   AsyncScrollsWithAnchorHashmap() {
@@ -1872,6 +1831,11 @@ class nsDisplayListBuilder {
   const ActiveScrolledRoot* mFilterASR;
   nsCString mLinkURI;   // URI of link currently being emitted, if any.
   nsCString mLinkDest;  // Local destination name of link, if any.
+  // Bounds of the frame for the link currently being emitted, relative to
+  // mLinkReferenceFrame.
+  nsRect mLinkBounds;
+  // Reference frame for mLinkBounds.
+  const nsIFrame* mLinkReferenceFrame = nullptr;
 
   // Optimized versions for non-retained display list.
   LayoutDeviceIntRegion mWindowDraggingRegion;
@@ -1891,11 +1855,11 @@ class nsDisplayListBuilder {
   AutoTArray<RefPtr<nsCaret>, 1> mPaintedCarets;
 
   // Tracked regions used for retained display list.
-  WeakFrameRegion mRetainedWindowDraggingRegion;
-  WeakFrameRegion mRetainedWindowNoDraggingRegion;
+  WeakFrameRegion<LayoutDeviceIntRegion> mRetainedWindowDraggingRegion;
+  WeakFrameRegion<LayoutDeviceIntRegion> mRetainedWindowNoDraggingRegion;
 
   // Window opaque region is calculated during layer building.
-  WeakFrameRegion mRetainedWindowOpaqueRegion;
+  WeakFrameRegion<nsRegion> mRetainedWindowOpaqueRegion;
 
   std::unordered_set<const DisplayItemClipChain*, DisplayItemClipChainHasher,
                      DisplayItemClipChainEqualer>
@@ -1905,10 +1869,6 @@ class nsDisplayListBuilder {
   AutoTArray<nsIFrame*, 20> mFramesWithOOFData;
   AutoTArray<nsIFrame*, 40> mFramesMarkedForDisplayIfVisible;
   AutoTArray<PresShellState, 8> mPresShellStates;
-
-  using Arena = nsPresArena<32768, DisplayListArenaObjectId,
-                            size_t(DisplayListArenaObjectId::COUNT)>;
-  Arena mPool;
 
   AutoTArray<nsIFrame*, 400> mFramesMarkedForDisplay;
 
@@ -1987,7 +1947,6 @@ class nsDisplayListBuilder {
   bool mAlwaysLayerizeScrollbars;
 
   bool mIsReusingStackingContextItems;
-  bool mIsDestroying;
   // We need to build display items for the same frame in a bunch of situations
   // in paged mode:
   //  * When building overflow from a previous page.
@@ -2011,7 +1970,7 @@ class nsDisplayListBuilder {
                                                                              \
  private:                                                                    \
   void* operator new(size_t aSize, nsDisplayListBuilder* aBuilder) {         \
-    return aBuilder->Allocate(aSize, DisplayItemType::e);                    \
+    return DisplayListArena::Allocate(DisplayItemType::e, aSize);            \
   }                                                                          \
                                                                              \
   template <typename T, typename F, typename... Args>                        \
@@ -2197,7 +2156,7 @@ class nsDisplayItem {
     RemoveDisplayItemFromFrame(aBuilder, mFrame);
 
     this->~nsDisplayItem();
-    aBuilder->Destroy(type, this);
+    DisplayListArena::Free(type, this);
   }
 
   /**
@@ -2628,14 +2587,6 @@ class nsDisplayItem {
     return nsRegion();
   }
   /**
-   * @return Some(nscolor) if the item is guaranteed to paint every pixel in its
-   * bounds with the same (possibly translucent) color
-   */
-  virtual Maybe<nscolor> IsUniform(nsDisplayListBuilder* aBuilder) const {
-    return Nothing();
-  }
-
-  /**
    * Returns true if all layers that can be active should be forced to be
    * active. Requires setting the pref layers.force-active=true.
    */
@@ -2945,8 +2896,10 @@ class nsDisplayItem {
   RefPtr<const ActiveScrolledRoot> mActiveScrolledRoot;
   RefPtr<const DisplayItemClipChain> mClipChain;
 
-#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
  public:
+  nsDisplayItem* mNext = nullptr;
+
+#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
   bool IsMergedItem() const {
     return mItemFlags.contains(ItemFlag::MergedItem);
   }
@@ -3025,45 +2978,93 @@ class nsPaintedDisplayItem : public nsDisplayItem {
   HitTestInfo mHitTestInfo;
 };
 
-template <typename T>
-struct MOZ_HEAP_CLASS LinkedListNode {
-  explicit LinkedListNode(T aValue) : mNext(nullptr), mValue(aValue) {}
-  LinkedListNode* mNext;
-  T mValue;
-};
-
-template <typename T>
-struct LinkedListIterator {
+class nsDisplayListIterator {
+ public:
   using iterator_category = std::forward_iterator_tag;
   using difference_type = std::ptrdiff_t;
-  using value_type = T;
-  using pointer = T*;
-  using reference = T&;
-  using Node = LinkedListNode<T>;
+  using value_type = nsDisplayItem*;
 
-  explicit LinkedListIterator(Node* aNode = nullptr) : mNode(aNode) {}
+  explicit nsDisplayListIterator(nsDisplayItem* aNode = nullptr)
+      : mNode(aNode) {}
 
-  bool HasNext() const { return mNode != nullptr; }
-
-  LinkedListIterator<T>& operator++() {
+  nsDisplayListIterator& operator++() {
     MOZ_ASSERT(mNode);
     mNode = mNode->mNext;
     return *this;
   }
 
-  bool operator==(const LinkedListIterator<T>&) const = default;
+  bool operator==(const nsDisplayListIterator&) const = default;
 
-  const T operator*() const {
+  const nsDisplayItem* operator*() const {
     MOZ_ASSERT(mNode);
-    return mNode->mValue;
+    return mNode;
   }
 
-  T operator*() {
+  nsDisplayItem* operator*() {
     MOZ_ASSERT(mNode);
-    return mNode->mValue;
+    return mNode;
   }
 
-  Node* mNode;
+ private:
+  nsDisplayItem* mNode;
+};
+
+/**
+ * Iterator over items taken out of an nsDisplayList, see
+ * nsDisplayList::TakeItems(). Each item is unlinked when reached, so it can be
+ * destroyed or appended to another list. Must be consumed entirely.
+ */
+class MOZ_STACK_CLASS nsDisplayListUnlinkingIterator {
+ public:
+  explicit nsDisplayListUnlinkingIterator(nsDisplayItem* aNode) : mNode(aNode) {
+    Unlink();
+  }
+
+  nsDisplayListUnlinkingIterator(nsDisplayListUnlinkingIterator&& aOther)
+      : mNode(std::exchange(aOther.mNode, nullptr)),
+        mNext(std::exchange(aOther.mNext, nullptr)) {}
+
+  nsDisplayListUnlinkingIterator(const nsDisplayListUnlinkingIterator&) =
+      delete;
+  nsDisplayListUnlinkingIterator& operator=(
+      const nsDisplayListUnlinkingIterator&) = delete;
+  nsDisplayListUnlinkingIterator& operator=(nsDisplayListUnlinkingIterator&&) =
+      delete;
+
+  nsDisplayListUnlinkingIterator() = default;
+
+  ~nsDisplayListUnlinkingIterator() {
+    MOZ_ASSERT(!mNode, "Taken display items left unconsumed");
+  }
+
+  nsDisplayListUnlinkingIterator begin() { return std::move(*this); }
+  nsDisplayListUnlinkingIterator end() const {
+    return nsDisplayListUnlinkingIterator();
+  }
+
+  nsDisplayListUnlinkingIterator& operator++() {
+    MOZ_ASSERT(mNode);
+    mNode = mNext;
+    Unlink();
+    return *this;
+  }
+
+  bool operator==(const nsDisplayListUnlinkingIterator& aOther) const {
+    return mNode == aOther.mNode;
+  }
+
+  nsDisplayItem* operator*() const {
+    MOZ_ASSERT(mNode);
+    return mNode;
+  }
+
+ private:
+  void Unlink() {
+    mNext = mNode ? std::exchange(mNode->mNext, nullptr) : nullptr;
+  }
+
+  nsDisplayItem* mNode = nullptr;
+  nsDisplayItem* mNext = nullptr;
 };
 
 /**
@@ -3075,13 +3076,10 @@ struct LinkedListIterator {
  * the items while they do the downward traversal, so overall they're still
  * linear time. We have optimized for efficient AppendToTop() of both
  * items and lists, with minimal codesize.
- *
- * Internal linked list nodes are allocated using arena allocator.
  * */
 class nsDisplayList {
  public:
-  using Node = LinkedListNode<nsDisplayItem*>;
-  using iterator = LinkedListIterator<nsDisplayItem*>;
+  using iterator = nsDisplayListIterator;
   using const_iterator = iterator;
 
   iterator begin() { return iterator(mBottom); }
@@ -3089,33 +3087,20 @@ class nsDisplayList {
   const_iterator begin() const { return iterator(mBottom); }
   const_iterator end() const { return iterator(nullptr); }
 
-  explicit nsDisplayList(nsDisplayListBuilder* aBuilder) : mBuilder(aBuilder) {}
-
-  nsDisplayList() = delete;
+  nsDisplayList() = default;
   nsDisplayList(const nsDisplayList&) = delete;
   nsDisplayList& operator=(const nsDisplayList&) = delete;
 
   virtual ~nsDisplayList() {
-#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
-    if (!mAllowNonEmptyDestruction) {
-      MOZ_RELEASE_ASSERT(IsEmpty(), "Nonempty list left over?");
-    }
-#endif
-
-    DeallocateNodes();
+    MOZ_DIAGNOSTIC_ASSERT(IsEmpty(), "Nonempty list left over?");
   }
 
   nsDisplayList(nsDisplayList&& aOther)
-      : mBottom(aOther.mBottom),
-        mTop(aOther.mTop),
-        mLength(aOther.mLength),
-        mBuilder(aOther.mBuilder) {
+      : mBottom(aOther.mBottom), mTop(aOther.mTop), mLength(aOther.mLength) {
     aOther.SetEmpty();
   }
 
   nsDisplayList& operator=(nsDisplayList&& aOther) {
-    MOZ_RELEASE_ASSERT(mBuilder == aOther.mBuilder);
-
     if (this != &aOther) {
       MOZ_RELEASE_ASSERT(IsEmpty());
       mBottom = std::move(aOther.mBottom);
@@ -3133,16 +3118,13 @@ class nsDisplayList {
     if (!aItem) {
       return;
     }
-
-    auto* next = Allocate(aItem);
-    MOZ_ASSERT(next);
+    MOZ_ASSERT(!aItem->mNext, "Item is already in a list");
 
     if (IsEmpty()) {
-      mBottom = next;
-      mTop = next;
+      mBottom = mTop = aItem;
     } else {
-      mTop->mNext = next;
-      mTop = next;
+      mTop->mNext = aItem;
+      mTop = aItem;
     }
 
     mLength++;
@@ -3171,8 +3153,6 @@ class nsDisplayList {
    */
   void AppendToTop(nsDisplayList* aList) {
     MOZ_ASSERT(aList != this);
-    MOZ_RELEASE_ASSERT(mBuilder == aList->mBuilder);
-
     if (aList->IsEmpty()) {
       return;
     }
@@ -3183,35 +3163,16 @@ class nsDisplayList {
       std::swap(mLength, aList->mLength);
     } else {
       MOZ_ASSERT(mTop && mTop->mNext == nullptr);
-      mTop->mNext = aList->mBottom;
-      mTop = aList->mTop;
-      mLength += aList->mLength;
-
-      aList->SetEmpty();
-    }
-  }
-
-  /**
-   * Clears the display list.
-   */
-  void Clear() {
-    DeallocateNodes();
-    SetEmpty();
-  }
-
-  /**
-   * Creates a shallow copy of this display list to |aDestination|.
-   */
-  void CopyTo(nsDisplayList* aDestination) const {
-    for (auto* item : *this) {
-      aDestination->AppendToTop(item);
+      mTop->mNext = std::exchange(aList->mBottom, nullptr);
+      mTop = std::exchange(aList->mTop, nullptr);
+      mLength += std::exchange(aList->mLength, 0);
     }
   }
 
   /**
    * Calls the function |aFn| for each display item in the display list.
    */
-  void ForEach(const std::function<void(nsDisplayItem*)>& aFn) {
+  void ForEach(const FunctionRef<void(nsDisplayItem*)>& aFn) {
     for (auto* item : *this) {
       aFn(item);
     }
@@ -3224,14 +3185,12 @@ class nsDisplayList {
   /**
    * @return the item at the bottom of the list, or null if the list is empty
    */
-  nsDisplayItem* GetBottom() const {
-    return mBottom ? mBottom->mValue : nullptr;
-  }
+  nsDisplayItem* GetBottom() const { return mBottom; }
 
   /**
    * @return the item at the top of the list, or null if the list is empty
    */
-  nsDisplayItem* GetTop() const { return mTop ? mTop->mValue : nullptr; }
+  nsDisplayItem* GetTop() const { return mTop; }
 
   bool IsEmpty() const { return mBottom == nullptr; }
 
@@ -3287,13 +3246,14 @@ class nsDisplayList {
     }
   }
 
-  nsDisplayList TakeItems() {
-    // This std::move makes this a defined empty list, see assignment operator.
-    nsDisplayList list = std::move(*this);
-#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
-    list.mAllowNonEmptyDestruction = true;
-#endif
-    return list;
+  /**
+   * Empties the list, returning an iterator over its former items, meant to be
+   * used in a range-based for loop.
+   */
+  nsDisplayListUnlinkingIterator TakeItems() {
+    nsDisplayItem* bottom = mBottom;
+    SetEmpty();
+    return nsDisplayListUnlinkingIterator(bottom);
   }
 
   nsDisplayItem* RemoveBottom() {
@@ -3301,11 +3261,8 @@ class nsDisplayList {
       return nullptr;
     }
 
-    nsDisplayItem* bottom = mBottom->mValue;
-
-    auto next = mBottom->mNext;
-    Deallocate(mBottom);
-    mBottom = next;
+    nsDisplayItem* bottom = mBottom;
+    mBottom = std::exchange(bottom->mNext, nullptr);
 
     if (!mBottom) {
       // No bottom item means no items at all.
@@ -3415,43 +3372,15 @@ class nsDisplayList {
   nsRect GetBuildingRect() const;
 
  private:
-  inline Node* Allocate(nsDisplayItem* aItem) {
-    void* ptr =
-        mBuilder->Allocate(sizeof(Node), DisplayListArenaObjectId::LISTNODE);
-    return new (ptr) Node(aItem);
-  }
-
-  inline void Deallocate(Node* aNode) {
-    aNode->~Node();
-    mBuilder->Destroy(DisplayListArenaObjectId::LISTNODE, aNode);
-  }
-
-  void DeallocateNodes() {
-    Node* current = mBottom;
-    Node* next = nullptr;
-
-    while (current) {
-      next = current->mNext;
-      Deallocate(current);
-      current = next;
-    }
-  }
-
-  inline void SetEmpty() {
+  void SetEmpty() {
     mBottom = nullptr;
     mTop = nullptr;
     mLength = 0;
   }
 
-  Node* mBottom = nullptr;
-  Node* mTop = nullptr;
+  nsDisplayItem* mBottom = nullptr;
+  nsDisplayItem* mTop = nullptr;
   size_t mLength = 0;
-  nsDisplayListBuilder* mBuilder = nullptr;
-
-#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
-  // This checks that the invariant of display lists owning their items is held.
-  bool mAllowNonEmptyDestruction = false;
-#endif
 };
 
 /**
@@ -3493,16 +3422,6 @@ class nsDisplayListSet {
    * @return a list where one should place all other content
    */
   nsDisplayList* Content() const { return mLists[5]; }
-
-  /**
-   * Clears all the display lists in the set.
-   */
-  void Clear() {
-    for (auto* list : mLists) {
-      MOZ_ASSERT(list);
-      list->Clear();
-    }
-  }
 
   /**
    * Deletes all the display items in the set.
@@ -3547,16 +3466,11 @@ class nsDisplayListSet {
   /**
    * Calls the function |aFn| for each display item in the display list set.
    */
-  void ForEach(const std::function<void(nsDisplayItem*)>& aFn) const {
+  void ForEach(const FunctionRef<void(nsDisplayItem*)>& aFn) const {
     for (auto* list : mLists) {
       list->ForEach(aFn);
     }
   }
-
-  /**
-   * Creates a shallow copy of this display list set to |aDestination|.
-   */
-  void CopyTo(const nsDisplayListSet& aDestination) const;
 
   /**
    * Move all display items in our lists to top of the corresponding lists in
@@ -3583,10 +3497,7 @@ class nsDisplayListSet {
 struct nsDisplayListCollection : public nsDisplayListSet {
   explicit nsDisplayListCollection(nsDisplayListBuilder* aBuilder)
       : nsDisplayListSet(&mLists[0], &mLists[1], &mLists[2], &mLists[3],
-                         &mLists[4], &mLists[5]),
-        mLists{nsDisplayList{aBuilder}, nsDisplayList{aBuilder},
-               nsDisplayList{aBuilder}, nsDisplayList{aBuilder},
-               nsDisplayList{aBuilder}, nsDisplayList{aBuilder}} {}
+                         &mLists[4], &mLists[5]) {}
 
   /**
    * Sort all lists by content order.
@@ -3606,11 +3517,11 @@ struct nsDisplayListCollection : public nsDisplayListSet {
   void SerializeWithCorrectZOrder(nsDisplayList* aOutResultList,
                                   nsIContent* aContent);
 
- private:
   // This class is only used on stack, so we don't have to worry about leaking
   // it.  Don't let us be heap-allocated!
-  void* operator new(size_t sz) noexcept(true);
+  void* operator new(size_t sz) noexcept(true) = delete;
 
+ private:
   // Self contained allocation of the memory for our lists, which we pass
   // pointers to to our nsDisplayListSet base class for it to store in it's
   // `mLists` std::array.
@@ -3628,8 +3539,7 @@ struct nsDisplayListCollection : public nsDisplayListSet {
  */
 class RetainedDisplayList : public nsDisplayList {
  public:
-  explicit RetainedDisplayList(nsDisplayListBuilder* aBuilder)
-      : nsDisplayList(aBuilder) {}
+  RetainedDisplayList() = default;
 
   RetainedDisplayList(RetainedDisplayList&& aOther)
       : nsDisplayList(std::move(aOther)), mDAG(std::move(aOther.mDAG)) {}
@@ -3708,10 +3618,6 @@ class nsDisplayContainer final : public nsDisplayItem {
 
   nsRegion GetOpaqueRegion(nsDisplayListBuilder* aBuilder,
                            bool* aSnap) const override;
-
-  Maybe<nscolor> IsUniform(nsDisplayListBuilder* aBuilder) const override {
-    return Nothing();
-  }
 
   RetainedDisplayList* GetChildren() const override { return &mChildren; }
   RetainedDisplayList* GetSameCoordinateSystemChildren() const override {
@@ -3824,12 +3730,12 @@ class nsDisplayGeneric final : public nsPaintedDisplayItem {
     }
 
     this->~nsDisplayGeneric();
-    aBuilder->Destroy(DisplayItemType::TYPE_GENERIC, this);
+    DisplayListArena::Free(DisplayItemType::TYPE_GENERIC, this);
   }
 
  protected:
   void* operator new(size_t aSize, nsDisplayListBuilder* aBuilder) {
-    return aBuilder->Allocate(aSize, DisplayItemType::TYPE_GENERIC);
+    return DisplayListArena::Allocate(DisplayItemType::TYPE_GENERIC, aSize);
   }
 
   template <typename T, typename F, typename... Args>
@@ -3965,6 +3871,9 @@ class nsDisplayBorder : public nsPaintedDisplayItem {
   }
 
  protected:
+  // Inflates the frame rect by nsCSSRendering::BorderShapePaintOverflow.
+  nsRect CalculateBorderShapeBounds() const;
+
   template <typename T>
   T CalculateBounds(const nsStyleBorder& aStyleBorder) const {
     nsRect borderBounds(ToReferenceFrame(), mFrame->GetSize());
@@ -3973,7 +3882,12 @@ class nsDisplayBorder : public nsPaintedDisplayItem {
       return borderBounds;
     }
 
+    if (!aStyleBorder.mBorderShape.IsNone()) {
+      return T(CalculateBorderShapeBounds());
+    }
+
     nsMargin border = aStyleBorder.GetComputedBorder();
+
     T result;
     if (border.top > 0) {
       result = nsRect(borderBounds.X(), borderBounds.Y(), borderBounds.Width(),
@@ -4059,10 +3973,6 @@ class nsDisplaySolidColor final : public nsPaintedDisplayItem {
       result = GetBounds(aBuilder, aSnap);
     }
     return result;
-  }
-
-  Maybe<nscolor> IsUniform(nsDisplayListBuilder* aBuilder) const override {
-    return Some(mColor);
   }
 
   nsDisplaySolidColor(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
@@ -4231,7 +4141,6 @@ class nsDisplayBackgroundImage : public nsPaintedDisplayItem {
                HitTestState* aState, nsTArray<nsIFrame*>* aOutFrames) override;
   nsRegion GetOpaqueRegion(nsDisplayListBuilder* aBuilder,
                            bool* aSnap) const override;
-  Maybe<nscolor> IsUniform(nsDisplayListBuilder* aBuilder) const override;
 
   bool CanApplyOpacity(WebRenderLayerManager* aManager,
                        nsDisplayListBuilder* aBuilder) const override;
@@ -4383,7 +4292,6 @@ class nsDisplayThemedBackground : public nsPaintedDisplayItem {
                HitTestState* aState, nsTArray<nsIFrame*>* aOutFrames) override;
   nsRegion GetOpaqueRegion(nsDisplayListBuilder* aBuilder,
                            bool* aSnap) const override;
-  Maybe<nscolor> IsUniform(nsDisplayListBuilder* aBuilder) const override;
   WebRenderCommandsResult CreateWebRenderCommands(
       wr::DisplayListBuilder& aBuilder, wr::IpcResourceUpdateQueue& aResources,
       const StackingContextHelper& aSc,
@@ -4504,7 +4412,6 @@ class nsDisplayBackgroundColor : public nsPaintedDisplayItem {
       nsDisplayListBuilder* aDisplayListBuilder) override;
   nsRegion GetOpaqueRegion(nsDisplayListBuilder* aBuilder,
                            bool* aSnap) const override;
-  Maybe<nscolor> IsUniform(nsDisplayListBuilder* aBuilder) const override;
   void HitTest(nsDisplayListBuilder* aBuilder, const nsRect& aRect,
                HitTestState* aState, nsTArray<nsIFrame*>* aOutFrames) override;
   bool CanApplyOpacity(WebRenderLayerManager* aManager,
@@ -4523,6 +4430,10 @@ class nsDisplayBackgroundColor : public nsPaintedDisplayItem {
     }
 
     if (mBottomLayerClip == StyleBackgroundClip::BorderArea) {
+      return false;
+    }
+
+    if (!mFrame->StyleBorder()->mBorderShape.IsNone()) {
       return false;
     }
 
@@ -4840,7 +4751,6 @@ class nsDisplayWrapList : public nsPaintedDisplayItem {
 
   nsDisplayWrapList(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame)
       : nsPaintedDisplayItem(aBuilder, aFrame),
-        mList(aBuilder),
         mOverrideZIndex(0),
         mHasZIndexOverride(false) {
     MOZ_COUNT_CTOR(nsDisplayWrapList);
@@ -4859,7 +4769,6 @@ class nsDisplayWrapList : public nsPaintedDisplayItem {
   nsDisplayWrapList(nsDisplayListBuilder* aBuilder,
                     const nsDisplayWrapList& aOther)
       : nsPaintedDisplayItem(aBuilder, aOther),
-        mList(aBuilder),
         mListPtr(&mList),
         mMergedFrames(aOther.mMergedFrames.Clone()),
         mBounds(aOther.mBounds),
@@ -4931,7 +4840,6 @@ class nsDisplayWrapList : public nsPaintedDisplayItem {
   nsRect GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap) const override;
   nsRegion GetOpaqueRegion(nsDisplayListBuilder* aBuilder,
                            bool* aSnap) const override;
-  Maybe<nscolor> IsUniform(nsDisplayListBuilder* aBuilder) const override;
 
   /**
    * Try to merge with the other item (which is below us in the display
@@ -5079,33 +4987,6 @@ class nsDisplayWrapper final : public nsDisplayWrapList {
   NS_DISPLAY_ALLOW_CLONING()
   friend class nsDisplayListBuilder;
   friend class nsDisplayWrapList;
-};
-
-/**
- * We call WrapDisplayList on the in-flow lists: BorderBackground(),
- * BlockBorderBackgrounds() and Content().
- * We call WrapDisplayItem on each item of Outlines(), PositionedDescendants(),
- * and Floats(). This is done to support special wrapping processing for frames
- * that may not be in-flow descendants of the current frame.
- */
-class nsDisplayItemWrapper {
- public:
-  // This is never instantiated directly (it has pure virtual methods), so no
-  // need to count constructors and destructors.
-
-  bool WrapBorderBackground() { return true; }
-  virtual nsDisplayItem* WrapList(nsDisplayListBuilder* aBuilder,
-                                  nsIFrame* aFrame, nsDisplayList* aList) = 0;
-  virtual nsDisplayItem* WrapItem(nsDisplayListBuilder* aBuilder,
-                                  nsDisplayItem* aItem) = 0;
-
-  nsresult WrapLists(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
-                     const nsDisplayListSet& aIn, const nsDisplayListSet& aOut);
-  nsresult WrapListsInPlace(nsDisplayListBuilder* aBuilder, nsIFrame* aFrame,
-                            const nsDisplayListSet& aLists);
-
- protected:
-  nsDisplayItemWrapper() = default;
 };
 
 /**
@@ -5711,25 +5592,49 @@ class nsDisplayStickyPosition final : public nsDisplayOwnLayer {
 
 class nsDisplayViewTransitionCapture final : public nsDisplayOwnLayer {
  public:
+  enum class Kind : uint8_t {
+    // An element with a view-transition-name, other than the document element.
+    Element,
+    // The document element, whose capture covers the snapshot containing
+    // block. It's built by the root scroll frame.
+    Root,
+    // Unlike the other two, not one of the transition's captures: the contents
+    // of an in-process subdocument, captured from its nsSubDocumentFrame in a
+    // paint of its own, so that the embedder can paint the image in place of
+    // the subdocument while its rendering is suppressed. See
+    // ViewTransition::CaptureSubdocumentSnapshotIfNeeded.
+    Subdocument,
+  };
+
   nsDisplayViewTransitionCapture(nsDisplayListBuilder* aBuilder,
                                  nsIFrame* aFrame, nsDisplayList* aList,
-                                 const ActiveScrolledRoot* aASR, bool aIsRoot)
+                                 const ActiveScrolledRoot* aASR, Kind aKind)
       : nsDisplayOwnLayer(aBuilder, aFrame, aList, aASR,
                           ContainerASRType::Constant),
-        mIsRoot(aIsRoot) {
+        mKind(aKind) {
     MOZ_COUNT_CTOR(nsDisplayViewTransitionCapture);
-    // aASR should always be null so ContainerASRType::Constant is correct.
-    MOZ_ASSERT(aASR == nullptr);
+    // aASR is null for element and root captures, so ContainerASRType::Constant
+    // is correct. A subdocument capture uses the ASR its frame is in, which is
+    // correct too since nothing in a subdocument can have an ASR outside it.
+    MOZ_ASSERT(aASR == nullptr || aKind == Kind::Subdocument);
   }
 
   nsDisplayViewTransitionCapture(nsDisplayListBuilder* aBuilder,
                                  const nsDisplayViewTransitionCapture& aOther)
-      : nsDisplayOwnLayer(aBuilder, aOther) {
+      : nsDisplayOwnLayer(aBuilder, aOther), mKind(aOther.mKind) {
     MOZ_COUNT_CTOR(nsDisplayViewTransitionCapture);
   }
 
   MOZ_COUNTED_DTOR_FINAL(nsDisplayViewTransitionCapture)
   NS_DISPLAY_DECL_NAME("VTCapture", TYPE_VT_CAPTURE)
+
+  Kind GetKind() const { return mKind; }
+
+  // Fragments of the same captured inline get merged into a single capture.
+  bool CanMerge(const nsDisplayItem* aItem) const override {
+    return mKind == Kind::Element && HasDifferentFrame(aItem) &&
+           HasSameTypeAndClip(aItem) && HasSameContent(aItem);
+  }
 
   void Paint(nsDisplayListBuilder* aBuilder, gfxContext* aCtx) override {
     GetChildren()->Paint(aBuilder, aCtx,
@@ -5744,7 +5649,40 @@ class nsDisplayViewTransitionCapture final : public nsDisplayOwnLayer {
 
  private:
   NS_DISPLAY_ALLOW_CLONING()
-  bool mIsRoot = false;
+  Kind mKind = Kind::Element;
+};
+
+/**
+ * Paints the snapshot of an in-process subdocument in place of the
+ * subdocument, while the subdocument's rendering is suppressed for a view
+ * transition. Only built when painting with WebRender.
+ */
+class nsDisplayViewTransitionSubdocumentSnapshot final
+    : public nsPaintedDisplayItem {
+ public:
+  // aRect is relative to aFrame.
+  nsDisplayViewTransitionSubdocumentSnapshot(nsDisplayListBuilder* aBuilder,
+                                             nsSubDocumentFrame* aFrame,
+                                             const nsRect& aRect);
+
+  MOZ_COUNTED_DTOR_FINAL(nsDisplayViewTransitionSubdocumentSnapshot)
+  NS_DISPLAY_DECL_NAME("VTSubdocumentSnapshot", TYPE_VT_SUBDOCUMENT_SNAPSHOT)
+
+  nsRect GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap) const override {
+    *aSnap = false;
+    return mRect + ToReferenceFrame();
+  }
+
+  void Paint(nsDisplayListBuilder* aBuilder, gfxContext* aCtx) override {}
+
+  WebRenderCommandsResult CreateWebRenderCommands(
+      wr::DisplayListBuilder& aBuilder, wr::IpcResourceUpdateQueue& aResources,
+      const StackingContextHelper& aSc,
+      layers::RenderRootStateManager* aManager,
+      nsDisplayListBuilder* aDisplayListBuilder) override;
+
+ private:
+  nsRect mRect;
 };
 
 class nsDisplayFixedPosition : public nsDisplayOwnLayer {

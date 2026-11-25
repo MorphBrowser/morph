@@ -18,9 +18,83 @@ const {
   GET_USER_MEMORIES,
   GET_NAVIGATION_INFO,
   SEARCH_THE_WEB,
+  GENERATE_AITAB,
 } = ChromeUtils.importESModule(
   "moz-src:///browser/components/aiwindow/models/Tools.sys.mjs"
 );
+
+add_task(function test_aitab_pending_creation_without_modify_slug() {
+  const cfg = getActionLogConfigForTool(GENERATE_AITAB, { pending: true }, {});
+
+  Assert.equal(cfg.label.l10nId, "smartwindow-aitab-creating");
+  Assert.equal(cfg.pendingLabel.l10nId, "smartwindow-aitab-creating");
+});
+
+add_task(function test_aitab_pending_creation_with_empty_modify_slug() {
+  const cfg = getActionLogConfigForTool(
+    GENERATE_AITAB,
+    { pending: true },
+    { modify_slug: "" }
+  );
+
+  Assert.equal(cfg.label.l10nId, "smartwindow-aitab-creating");
+  Assert.equal(cfg.pendingLabel.l10nId, "smartwindow-aitab-creating");
+});
+
+add_task(function test_aitab_pending_creation_with_blank_modify_slug() {
+  const cfg = getActionLogConfigForTool(
+    GENERATE_AITAB,
+    { pending: true },
+    { modify_slug: "   " }
+  );
+
+  Assert.equal(cfg.label.l10nId, "smartwindow-aitab-creating");
+  Assert.equal(cfg.pendingLabel.l10nId, "smartwindow-aitab-creating");
+});
+
+add_task(function test_aitab_pending_creation_with_non_string_modify_slug() {
+  const cfg = getActionLogConfigForTool(
+    GENERATE_AITAB,
+    { pending: true },
+    { modify_slug: 42 }
+  );
+
+  Assert.equal(cfg.label.l10nId, "smartwindow-aitab-creating");
+  Assert.equal(cfg.pendingLabel.l10nId, "smartwindow-aitab-creating");
+});
+
+add_task(function test_aitab_pending_update_with_existing_page() {
+  const cfg = getActionLogConfigForTool(
+    GENERATE_AITAB,
+    { pending: true },
+    { modify_slug: "existing-page" }
+  );
+
+  Assert.equal(cfg.label.l10nId, "smartwindow-aitab-updating");
+  Assert.equal(cfg.pendingLabel.l10nId, "smartwindow-aitab-updating");
+});
+
+add_task(function test_aitab_completed_creation_labels() {
+  const cfg = getActionLogConfigForTool(
+    GENERATE_AITAB,
+    { page: { slug: "new-page" } },
+    {}
+  );
+
+  Assert.equal(cfg.label.l10nId, "smartwindow-aitab-created-an-aitab");
+  Assert.equal(cfg.pendingLabel.l10nId, "smartwindow-aitab-creating");
+});
+
+add_task(function test_aitab_completed_update_labels() {
+  const cfg = getActionLogConfigForTool(
+    GENERATE_AITAB,
+    { page: { slug: "existing-page" } },
+    { modify_slug: "existing-page" }
+  );
+
+  Assert.equal(cfg.label.l10nId, "smartwindow-aitab-updated-an-aitab");
+  Assert.equal(cfg.pendingLabel.l10nId, "smartwindow-aitab-updating");
+});
 
 add_task(function test_getActionLogConfigForTool_visible_tools() {
   Assert.withSoftAssertions(function (soft) {
@@ -108,6 +182,48 @@ add_task(
   }
 );
 
+add_task(function test_search_the_web_direct_answer_label() {
+  const searchOnly = getActionLogConfigForTool(SEARCH_THE_WEB, {});
+  const answered = getActionLogConfigForTool(SEARCH_THE_WEB, {
+    directAnswer: true,
+    read_urls: ["https://example.com/"],
+    requiresSearchHandoff: false,
+  });
+
+  Assert.notEqual(
+    answered.label?.l10nId,
+    searchOnly.label?.l10nId,
+    "A reply written by Exa gets its own label"
+  );
+  Assert.deepEqual(
+    answered.link,
+    searchOnly.link,
+    "The answered label keeps the Exa support link"
+  );
+  Assert.deepEqual(
+    answered.pendingLabel,
+    searchOnly.pendingLabel,
+    "The in-progress label is unchanged"
+  );
+
+  Assert.withSoftAssertions(function (soft) {
+    for (const [description, body] of [
+      ["fast path results", { results: [], requiresSearchHandoff: false }],
+      [
+        "answers path failure",
+        { read_urls: [], error: "failed", requiresSearchHandoff: false },
+      ],
+      ["search handoff", { requiresSearchHandoff: true }],
+    ]) {
+      soft.equal(
+        getActionLogConfigForTool(SEARCH_THE_WEB, body).label?.l10nId,
+        searchOnly.label?.l10nId,
+        `${description} keeps the search-only label`
+      );
+    }
+  });
+});
+
 add_task(function test_getActionLogConfigForTool_no_link_by_default() {
   const cfg = getActionLogConfigForTool(GET_OPEN_TABS, []);
   Assert.strictEqual(cfg.link, null, "Tools without a link config return null");
@@ -140,6 +256,20 @@ add_task(function test_getActionLogChipsForTool_get_open_tabs() {
       label: "Firefox",
     });
   });
+});
+
+add_task(function test_getActionLogChipsForTool_get_open_tabs_object_body() {
+  const body = {
+    totalTabCount: 5,
+    windows: [{ windowId: "w1", isSmartWindow: true, tabCount: 5 }],
+    tabs: [{ url: "https://example.com/", title: "Example", lastAccessed: 1 }],
+  };
+
+  Assert.deepEqual(
+    getActionLogChipsForTool(GET_OPEN_TABS, body),
+    [{ url: "https://example.com/", label: "Example" }],
+    "Chips come from the tabs of an object body"
+  );
 });
 
 add_task(function test_getActionLogChipsForTool_get_open_tabs_empty() {

@@ -63,9 +63,9 @@ Expression ranks:
    - nova
    - privateBrowsing
    - remote_async
+   - repeat
    - snapshot
-   - socketprocess_e10s
-   - socketprocess_networking
+   - standalone
    - swgl
    - trainhop
    - vertical_tab
@@ -78,7 +78,6 @@ Expression ranks:
    - crashreporter
    - datareporting
    - devedition
-   - early_beta_or_earlier
    - false (*deprecated*)
    - gecko_profiler
    - isolated_process

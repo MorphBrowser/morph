@@ -40,6 +40,11 @@ GetYCbCrToRGBDestFormatAndSize(const layers::PlanarYCbCrData& aData,
   bool prescale = aSuggestedSize.width > 0 && aSuggestedSize.height > 0 &&
                   aSuggestedSize != aData.mPictureRect.Size();
 
+  // The RGB565 functions don't support Y8.
+  if (aSuggestedFormat == SurfaceFormat::R5G6B5_UINT16 && yuvtype == Y8) {
+    aSuggestedFormat = SurfaceFormat::B8G8R8X8;
+  }
+
   if (aSuggestedFormat == SurfaceFormat::R5G6B5_UINT16) {
 #if defined(HAVE_YCBCR_TO_RGB565)
     if (prescale &&
@@ -108,7 +113,20 @@ ConvertYCbCr16to8Line(uint8_t* aDst,
 }
 
 struct YUV8BitData {
-  nsresult Init(const layers::PlanarYCbCrData& aData) {
+  // aNeedAlpha is whether the caller writes the alpha plane to its output;
+  // without it, the alpha plane is neither checked nor narrowed.
+  nsresult Init(const layers::PlanarYCbCrData& aData, bool aNeedAlpha) {
+    const auto sizes = aData.GetPlaneSizes();
+    if (!sizes) {
+      return NS_ERROR_INVALID_ARG;
+    }
+
+    if (aNeedAlpha && aData.mAlpha &&
+        !IntRect(IntPoint(), aData.mAlpha->mSize)
+             .Contains(IntRect(IntPoint(), sizes->mY))) {
+      return NS_ERROR_INVALID_ARG;
+    }
+
     if (aData.mColorDepth == ColorDepth::COLOR_8) {
       mData = aData;
       return NS_OK;
@@ -118,8 +136,8 @@ struct YUV8BitData {
 
     // We align the destination stride to 32 bytes, so that libyuv can use
     // SSE optimised code.
-    auto ySize = aData.YDataSize();
-    auto cbcrSize = aData.CbCrDataSize();
+    const auto& ySize = sizes->mY;
+    const auto& cbcrSize = sizes->mCbCr;
     mData.mYStride = (ySize.width + 31) & ~31;
     mData.mCbCrStride = (cbcrSize.width + 31) & ~31;
     mData.mYUVColorSpace = aData.mYUVColorSpace;
@@ -135,7 +153,7 @@ struct YUV8BitData {
                             "CbCr without Y makes no sense");
       return NS_ERROR_INVALID_ARG;
     }
-    mYChannel = MakeUnique<uint8_t[]>(yMemorySize.value());
+    mYChannel = std::make_unique<uint8_t[]>(yMemorySize.value());
     if (!mYChannel) {
       return NS_ERROR_OUT_OF_MEMORY;
     }
@@ -150,11 +168,11 @@ struct YUV8BitData {
                           bitDepth);
 
     if (cbcrMemorySize.isSome()) {
-      mCbChannel = MakeUnique<uint8_t[]>(cbcrMemorySize.value());
+      mCbChannel = std::make_unique<uint8_t[]>(cbcrMemorySize.value());
       if (!mCbChannel) {
         return NS_ERROR_OUT_OF_MEMORY;
       }
-      mCrChannel = MakeUnique<uint8_t[]>(cbcrMemorySize.value());
+      mCrChannel = std::make_unique<uint8_t[]>(cbcrMemorySize.value());
       if (!mCrChannel) {
         return NS_ERROR_OUT_OF_MEMORY;
       }
@@ -172,28 +190,21 @@ struct YUV8BitData {
                             aData.mCbCrStride / 2, cbcrSize.width,
                             cbcrSize.height, bitDepth);
     }
-    if (aData.mAlpha) {
-      int32_t alphaStride8bpp = (aData.mAlpha->mSize.width + 31) & ~31;
-      auto alphaSize =
-          GetAlignedStride<1>(alphaStride8bpp, aData.mAlpha->mSize.height);
-      if (alphaSize.isNothing()) {
-        return NS_ERROR_INVALID_ARG;
-      }
-      mAlphaChannel = MakeUnique<uint8_t[]>(alphaSize.value());
+    if (aNeedAlpha && aData.mAlpha) {
+      mAlphaChannel = std::make_unique<uint8_t[]>(yMemorySize.value());
       if (!mAlphaChannel) {
         return NS_ERROR_OUT_OF_MEMORY;
       }
 
       mData.mAlpha.emplace();
       mData.mAlpha->mPremultiplied = aData.mAlpha->mPremultiplied;
-      mData.mAlpha->mSize = aData.mAlpha->mSize;
+      mData.mAlpha->mSize = ySize;
       mData.mAlpha->mChannel = mAlphaChannel.get();
 
-      ConvertYCbCr16to8Line(mData.mAlpha->mChannel, alphaStride8bpp,
+      ConvertYCbCr16to8Line(mData.mAlpha->mChannel, mData.mYStride,
                             reinterpret_cast<uint16_t*>(aData.mAlpha->mChannel),
-                            aData.mYStride / 2, aData.mAlpha->mSize.width,
-                            aData.mAlpha->mSize.height,
-                            BitDepthForColorDepth(aData.mColorDepth));
+                            aData.mYStride / 2, ySize.width, ySize.height,
+                            bitDepth);
     }
     return NS_OK;
   }
@@ -298,7 +309,7 @@ nsresult ConvertYCbCrToRGB(const layers::PlanarYCbCrData& aData,
   YUVType yuvtype = GetYUVType(aData);
 
   YUV8BitData data;
-  nsresult result = data.Init(aData);
+  nsresult result = data.Init(aData, /* aNeedAlpha */ false);
   if (NS_FAILED(result)) {
     return result;
   }
@@ -330,15 +341,16 @@ nsresult ConvertYCbCrToRGB(const layers::PlanarYCbCrData& aData,
 }
 
 void FillAlphaToRGBA(const uint8_t* aAlpha, const int32_t aAlphaStride,
-                     uint8_t* aBuffer, const int32_t aWidth,
-                     const int32_t aHeight, const gfx::SurfaceFormat& aFormat) {
+                     uint8_t* aBuffer, const int32_t aBufferStride,
+                     const int32_t aWidth, const int32_t aHeight,
+                     const gfx::SurfaceFormat& aFormat) {
   MOZ_ASSERT(aAlphaStride >= aWidth);
   // required for SurfaceFormatBit::OS_A
   MOZ_ASSERT(aFormat == SurfaceFormat::B8G8R8A8 ||
              aFormat == SurfaceFormat::R8G8B8A8);
 
   const int bpp = BytesPerPixel(aFormat);
-  const size_t rgbaStride = aWidth * bpp;
+  MOZ_ASSERT(aBufferStride >= aWidth * bpp);
   const uint8_t* src = aAlpha;
   for (int32_t h = 0; h < aHeight; ++h) {
     size_t offset = static_cast<size_t>(SurfaceFormatBit::OS_A) / 8;
@@ -347,7 +359,7 @@ void FillAlphaToRGBA(const uint8_t* aAlpha, const int32_t aAlphaStride,
       offset += bpp;
     }
     src += aAlphaStride;
-    aBuffer += rgbaStride;
+    aBuffer += aBufferStride;
   }
 }
 
@@ -360,10 +372,13 @@ nsresult ConvertYCbCrToRGB32(const layers::PlanarYCbCrData& aData,
              aDestFormat == SurfaceFormat::R8G8B8A8 ||
              aDestFormat == SurfaceFormat::R8G8B8X8);
 
+  const bool needAlpha = aDestFormat == SurfaceFormat::B8G8R8A8 ||
+                         aDestFormat == SurfaceFormat::R8G8B8A8;
+
   YUVType yuvtype = GetYUVType(aData);
 
   YUV8BitData data8pp;
-  nsresult result = data8pp.Init(aData);
+  nsresult result = data8pp.Init(aData, needAlpha);
   if (NS_FAILED(result)) {
     return result;
   }
@@ -382,12 +397,13 @@ nsresult ConvertYCbCrToRGB32(const layers::PlanarYCbCrData& aData,
     return result;
   }
 
-  bool needAlpha = aDestFormat == SurfaceFormat::B8G8R8A8 ||
-                   aDestFormat == SurfaceFormat::R8G8B8A8;
   if (data.mAlpha && needAlpha) {
     // Alpha stride should be same as the Y stride.
-    FillAlphaToRGBA(data.mAlpha->mChannel, data.mYStride, aDestBuffer,
-                    data.mPictureRect.width, aData.mPictureRect.height,
+    const uint8_t* alpha = data.mAlpha->mChannel +
+                           data.mPictureRect.y * data.mYStride +
+                           data.mPictureRect.x;
+    FillAlphaToRGBA(alpha, data.mYStride, aDestBuffer, aStride,
+                    data.mPictureRect.width, data.mPictureRect.height,
                     aDestFormat);
 
     if (premultiplyAlphaOp) {

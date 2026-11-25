@@ -27,6 +27,23 @@ struct BidirectionalStream {
   nullable DataPipeSender outStream;
 };
 
+struct IncomingDatagram {
+  uint8_t[] data;
+  // When the parent received this datagram. Per-datagram rather than
+  // per-message because incomingMaxAge is applied to each one individually.
+  TimeStamp receivedTime;
+};
+
+struct OutgoingDatagram {
+  uint8_t[] data;
+  // When the content process created this datagram (for outgoingMaxAge
+  // calculation). Per-datagram rather than per-message for the same reason
+  // as IncomingDatagram.receivedTime.
+  TimeStamp timestamp;
+  uint64_t sendGroupId;
+  int64_t sendOrder;
+};
+
 struct WebTransportDatagramStatsData {
   uint64_t droppedIncoming;
   uint64_t expiredIncoming;
@@ -55,12 +72,13 @@ union BidirectionalStreamResponse {
   BidirectionalStream;
 };
 
+// errorCode is null when the peer sent no application error code.
 struct ResetError {
-  nsresult error;
+  uint32_t? errorCode;
 };
 
 struct StopSendingError {
-  nsresult error;
+  uint32_t? errorCode;
 };
 
 union StreamResetOrStopSendingError {
@@ -88,15 +106,25 @@ async protocol PWebTransport
   async CreateSendGroup(uint64_t groupId);
 
   /**
-  * IPC for sending webtransport datagrams
-  * @param data represents the datagram to be transferred
-  * @param expirationTime time at which the datagram expires
-  * @param sendGroupId optional send group ID for prioritization (0 = null/default group)
-  * @param sendOrder send order for prioritization
+  * IPC for sending webtransport datagrams.
+  *
+  * Datagrams are batched: the first one queued posts a runnable to the
+  * current thread, and everything queued before it runs goes out in one
+  * message, or earlier once the batch reaches 64KB.  Unlike
+  * IncomingDatagrams, there is no per-datagram task-posting concern here:
+  * nothing on the egress path needs a microtask checkpoint between datagrams.
+  *
+  * @param datagrams the datagrams to send, oldest first
   */
-  async OutgoingDatagram(uint8_t[] data, TimeStamp expirationTime,
-                         uint64_t sendGroupId, int64_t sendOrder)
-    returns(nsresult response);
+  async OutgoingDatagrams(OutgoingDatagram[] datagrams);
+
+  /**
+  * Update datagram queue parameters
+  * @param outgoingMaxBufferedDatagrams queue depth before backpressure kicks in
+  * @param outgoingMaxAge maximum age in milliseconds; Infinity for no limit,
+  *   NaN for null (use the implementation-defined default)
+  */
+  async UpdateDatagramQueueParams(uint32_t outgoingMaxBufferedDatagrams, double outgoingMaxAge);
 
   /**
   * Get the maximum supported datagram size from necko stack
@@ -123,10 +151,21 @@ async protocol PWebTransport
   async SetSendGroup(uint64_t streamId, uint64_t groupId);
 
   /**
+  * Set anticipated concurrent incoming unidirectional streams
+  */
+  async SetAnticipatedConcurrentIncomingUnidirectionalStreams(uint16_t? value);
+
+  /**
+  * Set anticipated concurrent incoming bidirectional streams
+  */
+  async SetAnticipatedConcurrentIncomingBidirectionalStreams(uint16_t? value);
+
+  /**
   * Export keying material for the WebTransport session
   */
-  async ExportKeyingMaterial(uint8_t[] label, uint8_t[]? context)
-    returns(uint8_t[] keyingMaterial);
+  async ExportKeyingMaterial(uint8_t[] label, uint8_t[] context,
+                             uint32_t outputLength)
+    returns(uint8_t[]? keyingMaterial);
 
   /**
   * Get connection statistics
@@ -140,16 +179,56 @@ async protocol PWebTransport
   async IncomingBidirectionalStream(uint64_t streamId, nullable DataPipeReceiver receive, nullable DataPipeSender send);
 
   /**
-  * IPC for receiving webtransport datagrams
-  * @param receivedTime is the time at which the parent received the datagram
-  * @param data is the datagram received
+  * IPC for receiving webtransport datagrams.
+  *
+  * Datagrams are batched because a burst arrives entirely within one
+  * socket-thread turn, and one message each costs far more than the batching
+  * delays the first of them. The child must still hand them to the DOM one
+  * task at a time; see RecvIncomingDatagrams().
+  *
+  * @param datagrams are the datagrams received, oldest first
   */
-  async IncomingDatagram(uint8_t[] data, TimeStamp receivedTime);
+  async IncomingDatagrams(IncomingDatagram[] datagrams);
 
   /**
-  * Notify child of the negotiated protocol
+  * Aggregated outgoing-datagram feedback, sent after the parent forwards a
+  * batch to neqo. Datagrams are sent untracked -- nothing here identifies
+  * an individual one -- so write() promises are paced by cumulativeDatagrams/
+  * cumulativeBytes instead of a per-datagram round trip, and the sent/
+  * expired/dropped deltas feed the child's own running counters instead of
+  * per-datagram outcomes.
+  *
+  * cumulativeDatagrams/cumulativeBytes are MAX_DATA-style: cumulative
+  * counts of datagrams/bytes the child may now consider paced-through since
+  * the session began, not deltas, so a message processed late relative to
+  * another is still correct -- the child only ever raises its limits.
+  *
+  * sentDelta/expiredDelta/droppedDelta are true deltas since the last
+  * DatagramCapacity, added to running totals -- safe because a single
+  * actor's IPC messages are ordered and reliable up to actor death, which
+  * is itself handled separately (see WebTransportChild::ActorDestroy).
+  * expiredDelta covers both expiry sites: neqo's own outgoingMaxAge queue
+  * and the parent's own arrival-staleness drop, which neqo cannot see.
+  *
+  * @param cumulativeDatagrams cumulative number of datagrams paced-through
+  * @param cumulativeBytes cumulative bytes across those datagrams
+  * @param sentDelta datagrams handed to the QUIC layer since the last message
+  * @param expiredDelta datagrams dropped for exceeding outgoingMaxAge
+  * @param droppedDelta datagrams evicted for queue room, or refused at the
+  *   QUIC layer for another reason (e.g. exceeding the connection's
+  *   datagram size limit)
+  * @param datagramPrefixBytes per-datagram bytes neqo's queue charges on top
+  *   of the payload and its fixed overhead (see DatagramPrefixBytes())
   */
-  async NegotiatedProtocol(nsCString subprotocol);
+  async DatagramCapacity(uint64_t cumulativeDatagrams, uint64_t cumulativeBytes,
+                         uint64_t sentDelta, uint64_t expiredDelta,
+                         uint64_t droppedDelta, uint64_t datagramPrefixBytes);
+
+  /**
+  * Notify child of the negotiated protocol and HTTP response headers
+  */
+  async NegotiatedProtocolAndHeaders(nsCString subprotocol,
+                                     WebTransportHeader[] headers);
 
   async Draining();
 

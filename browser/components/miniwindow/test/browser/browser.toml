@@ -11,13 +11,26 @@ prefs = [
 
 ["browser_chooser_panel.js"]
 
+["browser_context_menu_badge.js"]
+
 ["browser_cropped_navigation.js"]
 
 ["browser_framing.js"]
 
+["browser_framing_resize.js"]
+
 ["browser_last_tab.js"]
 
+["browser_move_resize.js"]
+skip-if = [
+  "os == 'linux' && os_version == '22.04' && arch == 'x86_64' && display == 'wayland'", # Wayland doesn't let windows resize themselves
+]
+
 ["browser_open_close.js"]
+
+["browser_open_link_unsupported_windows.js"]
+
+["browser_open_url.js"]
 
 ["browser_origin_close.js"]
 
@@ -29,6 +42,8 @@ skip-if = [
 
 ["browser_placement.js"]
 
+["browser_pop_tab.js"]
+
 ["browser_region_entry.js"]
 
 ["browser_restore_vs_close.js"]
@@ -37,6 +52,11 @@ skip-if = [
 
 ["browser_sessionstore.js"]
 
+["browser_sessionstore_taskbartabs.js"]
+run-if = [
+  "os == 'win'",
+]
+
 ["browser_sidebar.js"]
 
 ["browser_telemetry.js"]
@@ -44,3 +64,5 @@ skip-if = [
 ["browser_toolbar.js"]
 
 ["browser_toolbar_button.js"]
+
+["browser_zoom.js"]

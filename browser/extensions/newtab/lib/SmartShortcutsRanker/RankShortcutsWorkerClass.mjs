@@ -13,7 +13,7 @@ import { thompsonSampleSort } from "resource://newtab/lib/SmartShortcutsRanker/T
  */
 export function interpolateWrappedHistogram(hist, t) {
   if (!hist.length) {
-    return hist;
+    return 0;
   }
   const n = hist.length;
   const lo = Math.floor(t) % n;
@@ -96,7 +96,7 @@ export function sumNorm(vec) {
  *
  * @param {number[]} vals scores to normalize
  * @param {object} input_normobj Dictionary of storing info for running mean var
- * @returns {[number, object]} normalized features and the updated object
+ * @returns {[number[], object]} normalized features and the updated object
  */
 export function normUpdate(vals, input_normobj) {
   if (!vals.length) {
@@ -132,8 +132,8 @@ export function normUpdate(vals, input_normobj) {
  * Normalize a dictionary of {key: hist[]} using squared values and column-wise normalization.
  * Returns {key: normedHist[]} where each hist[j] is divided by sum_k hist_k[j]^2.
  *
- * @param {{[key: string]: number}} dict - A dictionary mapping keys to arrays of P(t|s) values.
- * @returns {{[key: string]: number}} New dictionary with normalized histograms (P(s|t)).
+ * @param {{[key: string]: number[]}} dict - A dictionary mapping keys to arrays of P(t|s) values.
+ * @returns {{[key: string]: number[]}} New dictionary with normalized histograms (P(s|t)).
  */
 export function normHistDict(dict) {
   const keys = Object.keys(dict);
@@ -158,6 +158,7 @@ export function normHistDict(dict) {
   }
 
   // normalize
+  /** @type {{[key: string]: number[]}} */
   const normalized = {};
   for (const [key, row] of Object.entries(squared)) {
     normalized[key] = row.map((val, j) => (colSums[j] ? val / colSums[j] : 0));
@@ -169,8 +170,8 @@ export function normHistDict(dict) {
 /**
  * Compute linear combination of scores, weighted
  *
- * @param {object[]} scores Dictionary of scores
- * @param {object[]} weights Dictionary of weights
+ * @param {object} scores Dictionary of scores
+ * @param {object} weights Dictionary of weights
  * @returns {number} Linear combination of scores*weights
  */
 export function computeLinearScore(scores, weights) {
@@ -252,7 +253,7 @@ const TYPE_SCORE = {
  * @param {object} visitCounts guid -> {visit.type, visit.time}
  * @param {object} visitCounts guid -> total visit count
  * @param {object} opts options for controlling calc
- * @returns {Promise<{pvec: number[]|null, hists: any}>}
+ * @returns {Promise<{[feature in "refre" | "rece" | "freq" | "unid"]: {[guid: string]: number}}>}
  */
 export async function buildFrecencyFeatures(
   visitsByGuid,
@@ -345,6 +346,7 @@ export async function weightedSampleTopSites(input) {
     freq: () => _projectByGuid(input.guid, input.freq_scores),
     refre: () => _projectByGuid(input.guid, input.refre_scores),
     unid: () => _projectByGuid(input.guid, input.unid_scores),
+    ctr2: () => input.ctr2_scores,
   };
 
   // 1) Simple vector features
@@ -446,20 +448,45 @@ export async function weightedSampleTopSites(input) {
     });
   }
 
-  // 7) Final score
+  // 7) Training and ranking scores
+  const trainingWeights = Object.fromEntries(
+    (input.training_features ?? input.features).map(feature => [
+      feature,
+      (input.training_weights ?? input.weights)[feature] ?? 0,
+    ])
+  );
+  const rankingWeights = Object.fromEntries(
+    (input.ranking_features ?? input.features).map(feature => [
+      feature,
+      input.weights[feature] ?? 0,
+    ])
+  );
   for (const g of input.guid) {
-    score_map[g].final = computeLinearScore(score_map[g], input.weights);
+    // Cached prediction used by the next weight update to learn from later interactions.
+    score_map[g].training = computeLinearScore(score_map[g], trainingWeights);
+    // Score used to sort shortcuts for the current ranking.
+    score_map[g].ranking = computeLinearScore(score_map[g], rankingWeights);
   }
 
   return { score_map, norms: updated_norms };
 }
 
-export function clampWeights(weights, maxNorm = 100) {
-  const norm = Math.hypot(...Object.values(weights));
+export function clampWeights(
+  weights,
+  maxNorm = 100,
+  features = Object.keys(weights)
+) {
+  const selectedFeatures = new Set(features);
+  const norm = Math.hypot(
+    ...[...selectedFeatures].map(key => weights[key] ?? 0)
+  );
   if (norm > maxNorm) {
     const scale = maxNorm / norm;
     return Object.fromEntries(
-      Object.entries(weights).map(([k, v]) => [k, v * scale])
+      Object.entries(weights).map(([k, v]) => [
+        k,
+        selectedFeatures.has(k) ? v * scale : v,
+      ])
     );
   }
   return weights;
@@ -474,7 +501,7 @@ export function clampWeights(weights, maxNorm = 100) {
  * @param {object} input.data
  *   Mapping guid -> { clicks: number, impressions: number }.
  * @param {object} input.scores
- *   Mapping guid -> { final: number, [feature]: number } (final = w·x).
+ *   Mapping guid -> { training: number, ranking: number, [feature]: number }.
  * @param {object} input.weights
  *   Current weight vector, keyed by feature
  * @param {number} input.eta
@@ -506,7 +533,7 @@ export function updateWeights(input, do_clamp = true) {
     if (
       score_map &&
       score_map[guid] &&
-      typeof score_map[guid].final === "number"
+      typeof score_map[guid].training === "number"
     ) {
       /* impressions without a click can happen for many reasons
       that are unrelated to the item. clicks are almost
@@ -521,7 +548,7 @@ export function updateWeights(input, do_clamp = true) {
         continue;
       }
 
-      const z = score_map[guid].final;
+      const z = score_map[guid].training;
       const p = 1 / (1 + Math.exp(-z)); // sigmoid
       const factor = clicks * (p - 1) + impressions * p;
 
@@ -541,7 +568,7 @@ export function updateWeights(input, do_clamp = true) {
     }
   }
   if (do_clamp) {
-    weights = clampWeights(weights);
+    weights = clampWeights(weights, 100, features);
   }
   return weights;
 }

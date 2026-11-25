@@ -10,17 +10,15 @@
 #include "OriginUpserter.h"
 #include "mozIStorageConnection.h"
 #include "mozIStorageStatement.h"
+#include "mozilla/MathAlgorithms.h"
 #include "mozilla/dom/quota/AssertionsImpl.h"
 #include "mozilla/dom/quota/QuotaCommon.h"
 #include "mozilla/dom/quota/ResultExtensions.h"
 #include "mozilla/dom/quota/UsageInfo.h"
+#include "mozilla/glean/DomQuotaMetrics.h"
 
-#if defined(NIGHTLY_BUILD) || defined(DEBUG)
-#  define CHECK_USAGE() \
-    CheckIfUsageIsConsistent("OriginInfo::"_ns + nsDependentCString(__func__))
-#else
-#  define CHECK_USAGE()
-#endif
+#define CHECK_USAGE() \
+  CheckIfUsageIsConsistent("OriginInfo::"_ns + nsDependentCString(__func__))
 
 namespace mozilla::dom::quota {
 
@@ -32,15 +30,17 @@ namespace mozilla::dom::quota {
 // resort to check the origin scheme instead to initialize mIsExtension.
 OriginInfo::OriginInfo(GroupInfo* aGroupInfo, const nsACString& aOrigin,
                        const nsACString& aStorageOrigin, bool aIsPrivate,
-                       const ClientUsageArray& aClientUsages, int64_t aUsage,
-                       int64_t aAccessTime, int32_t aMaintenanceDate,
-                       bool aPersisted, bool aDirectoryExists)
+                       bool aIsEncrypted, const ClientUsageArray& aClientUsages,
+                       int64_t aUsage, int64_t aAccessTime,
+                       int32_t aMaintenanceDate, bool aPersisted,
+                       bool aDirectoryExists)
     : mGroupInfo(aGroupInfo),
       mOrigin(aOrigin),
       mStorageOrigin(aStorageOrigin),
       mAccessTime(aAccessTime),
       mMaintenanceDate(aMaintenanceDate),
       mIsPrivate(aIsPrivate),
+      mIsEncrypted(aIsEncrypted),
       mAccessed(false),
       mPersisted(aPersisted),
       mIsExtension(StringBeginsWith(aOrigin, "moz-extension://"_ns)),
@@ -57,11 +57,9 @@ OriginInfo::OriginInfo(GroupInfo* aGroupInfo, const nsACString& aOrigin,
   MOZ_COUNT_CTOR(OriginInfo);
 }
 
-#if defined(NIGHTLY_BUILD) || defined(DEBUG)
 bool OriginInfo::CheckIfUsageIsConsistent(const nsACString& context) const {
   return CheckClientUsagesConsistency(mClientUsages, mUsage, context);
 }
-#endif  // defined(NIGHTLY_BUILD) || defined(DEBUG)
 
 int64_t OriginInfo::LockedUsage() const {
   AssertCurrentThreadOwnsQuotaMutex();
@@ -76,7 +74,8 @@ OriginMetadata OriginInfo::FlattenToOriginMetadata() const {
           mOrigin,
           mStorageOrigin,
           mIsPrivate,
-          mGroupInfo->mPersistenceType};
+          mGroupInfo->mPersistenceType,
+          mIsEncrypted};
 }
 
 OriginStateMetadata OriginInfo::LockedFlattenToOriginStateMetadata() const {
@@ -118,9 +117,9 @@ nsresult OriginInfo::LockedBindToStatement(
       aStatement->BindInt64ByName("last_access_time"_ns, mAccessTime)));
   QM_TRY(MOZ_TO_RESULT(aStatement->BindInt32ByName("last_maintenance_date"_ns,
                                                    mMaintenanceDate)));
-  OriginStateMetadata stateMetadata = LockedFlattenToOriginStateMetadata();
   QM_TRY(MOZ_TO_RESULT(aStatement->BindInt32ByName(
-      "metadata_flags"_ns, stateMetadata.ToMetadataFlags())));
+      "metadata_flags"_ns,
+      LockedFlattenToFullOriginMetadata().ToMetadataFlags())));
 
   return NS_OK;
 }
@@ -162,6 +161,8 @@ void OriginInfo::LockedDecreaseUsage(Client::Type aClientType, int64_t aSize,
   QM_ASSERT_NOT_NEGATIVE_2(
       mClientUsages[aClientType].value(),
       "mClientUsages["_ns + Client::TypeToText(aClientType) + "]"_ns);
+  LockedMaybeRecordUsageUnderflow(aClientType,
+                                  mClientUsages[aClientType].value(), __func__);
 
   mUsage -= aSize;
   QM_ASSERT_NOT_NEGATIVE(mUsage);
@@ -177,6 +178,7 @@ void OriginInfo::LockedDecreaseUsage(Client::Type aClientType, int64_t aSize,
 
   quotaManager->mTemporaryStorageUsage -= aSize;
   QM_ASSERT_NOT_NEGATIVE(quotaManager->mTemporaryStorageUsage);
+  quotaManager->LockedMaybeRecordTemporaryStorageUsageUnderflow(__func__);
 }
 
 void OriginInfo::LockedResetUsageForClient(
@@ -201,6 +203,7 @@ void OriginInfo::LockedResetUsageForClient(
 
   quotaManager->mTemporaryStorageUsage -= size;
   QM_ASSERT_NOT_NEGATIVE(quotaManager->mTemporaryStorageUsage);
+  quotaManager->LockedMaybeRecordTemporaryStorageUsageUnderflow(__func__);
 }
 
 UsageInfo OriginInfo::LockedGetUsageForClient(Client::Type aClientType) {
@@ -242,6 +245,7 @@ void OriginInfo::LockedTruncateUsages(Client::Type aClientType, int64_t aDelta,
 
   quotaManager->mTemporaryStorageUsage -= aDelta;
   QM_ASSERT_NOT_NEGATIVE(quotaManager->mTemporaryStorageUsage);
+  quotaManager->LockedMaybeRecordTemporaryStorageUsageUnderflow(__func__);
 
   if (!LockedPersisted()) {
     mGroupInfo->mUsage -= aDelta;
@@ -258,7 +262,29 @@ void OriginInfo::LockedTruncateUsages(Client::Type aClientType, int64_t aDelta,
   QM_ASSERT_NOT_NEGATIVE_2(
       mClientUsages[aClientType].value(),
       "mClientUsages["_ns + Client::TypeToText(aClientType) + "]"_ns);
-};
+  LockedMaybeRecordUsageUnderflow(aClientType,
+                                  mClientUsages[aClientType].value(), __func__);
+}
+
+void OriginInfo::LockedMaybeRecordUsageUnderflow(Client::Type aClientType,
+                                                 int64_t aUsage,
+                                                 StaticString aCallSite) {
+  AssertCurrentThreadOwnsQuotaMutex();
+
+  if (aUsage >= 0) {
+    return;
+  }
+
+  if (!ThrottleCounter(mUsageUnderflowCount[aClientType])) {
+    return;
+  }
+
+  glean::quotamanager::UsageUnderflowExtra extra;
+  extra.callSite.emplace(aCallSite);
+  extra.client.emplace(Client::TypeToText(aClientType));
+  extra.magnitude.emplace(FloorLog2(Abs(aUsage)));
+  glean::quotamanager::usage_underflow.Record(Some(extra));
+}
 
 Maybe<bool> OriginInfo::LockedUpdateUsages(
     Client::Type aClientType, int64_t aDelta,

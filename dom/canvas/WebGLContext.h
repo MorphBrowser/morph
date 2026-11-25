@@ -5,6 +5,7 @@
 #ifndef WEBGLCONTEXT_H_
 #define WEBGLCONTEXT_H_
 
+#include <array>
 #include <bitset>
 #include <memory>
 
@@ -123,51 +124,9 @@ struct UniformBlockInfo;
 struct VertAttribPointerDesc;
 }  // namespace webgl
 
-struct WebGLTexImageData {
-  TexImageTarget mTarget;
-  int32_t mRowLength;
-  uint32_t mWidth;
-  uint32_t mHeight;
-  uint32_t mDepth;
-  gfxAlphaType mSrcAlphaType;
-};
-
-struct WebGLTexPboOffset {
-  TexImageTarget mTarget;
-  uint32_t mWidth;
-  uint32_t mHeight;
-  uint32_t mDepth;
-  WebGLsizeiptr mPboOffset;
-  bool mHasExpectedImageSize;
-  GLsizei mExpectedImageSize;
-};
-
 WebGLTexelFormat GetWebGLTexelFormat(TexInternalFormat format);
 
 void AssertUintParamCorrect(gl::GLContext* gl, GLenum pname, GLuint shadow);
-
-// From WebGLContextUtils
-TexTarget TexImageTargetToTexTarget(TexImageTarget texImageTarget);
-
-struct WebGLIntOrFloat {
-  const enum { Int, Float, Uint } mType;
-
-  union {
-    GLint i;
-    GLfloat f;
-    GLuint u;
-  } mValue;
-
-  explicit WebGLIntOrFloat(GLint i) : mType(Int) { mValue.i = i; }
-  explicit WebGLIntOrFloat(GLfloat f) : mType(Float) { mValue.f = f; }
-
-  GLint AsInt() const {
-    return (mType == Int) ? mValue.i : NS_lroundf(mValue.f);
-  }
-  GLfloat AsFloat() const {
-    return (mType == Float) ? mValue.f : GLfloat(mValue.i);
-  }
-};
 
 ////////////////////////////////////
 
@@ -470,8 +429,6 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
 
   void ErrorInvalidEnumInfo(const char* info, GLenum enumValue) const;
   void ErrorInvalidEnumArg(const char* argName, GLenum val) const;
-
-  static const char* ErrorName(GLenum error);
 
   void JsWarning(const std::string& text) const;
 
@@ -823,8 +780,6 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
 
   void OnDataAllocCall() const { mDataAllocGLCallCount++; }
 
-  uint64_t GetNumGLDataAllocCalls() const { return mDataAllocGLCallCount; }
-
   void OnEndOfFrame();
 
   // -----------------------------------------------------------------------------
@@ -863,11 +818,11 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
   void TexStorage(GLenum texTarget, uint32_t levels, GLenum sizedFormat,
                   uvec3 size) const;
 
-  std::unique_ptr<webgl::TexUnpackBlob> ToTexUnpackBytes(
-      const WebGLTexImageData& imageData);
-
-  std::unique_ptr<webgl::TexUnpackBytes> ToTexUnpackBytes(
-      WebGLTexPboOffset& aPbo);
+  // Hint that the texture bound to texTarget will be used as a framebuffer
+  // attachment, so that ANGLE D3D allocates render target storage up front
+  // instead of converting the storage on first use. Must be called before
+  // TexStorage to have any effect. Only for internal use by DrawTargetWebgl.
+  void HintTexRenderTarget(GLenum texTarget) const;
 
   ////////////////////////////////////
   // WebGLTextureUpload.cpp
@@ -946,9 +901,6 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
   bool mForceResizeOnPresent = false;
   bool mVRReady = false;
 
-  template <typename WebGLObjectType>
-  void DeleteWebGLObjectsArray(nsTArray<WebGLObjectType>& array);
-
   GLuint mActiveTexture = 0;
   GLenum mDefaultFB_DrawBuffer0 = LOCAL_GL_BACK;
   GLenum mDefaultFB_ReadBuffer = LOCAL_GL_BACK;
@@ -966,8 +918,6 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
 
   uint32_t mGLMaxVertexTextureImageUnits = 0;
   uint32_t mGLMaxFragmentTextureImageUnits = 0;
-  uint32_t mGLMaxCombinedTextureImageUnits = 0;
-
   // ES3:
   uint32_t mGLMinProgramTexelOffset = 0;
   uint32_t mGLMaxProgramTexelOffset = 0;
@@ -1153,27 +1103,6 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
                     size_t dstTexelSize);
 
   //////
- public:
-  template <typename T>
-  bool ValidateObject(const char* const argName, const T& object) const {
-    // Todo: Remove all callers.
-    return true;
-  }
-
-  template <typename T>
-  bool ValidateObject(const char* const argName, const T* const object) const {
-    // Todo: Remove most (all?) callers.
-    if (!object) {
-      ErrorInvalidOperation(
-          "%s: Object argument cannot have been marked for"
-          " deletion.",
-          argName);
-      return false;
-    }
-    return true;
-  }
-
-  ////
 
  private:
   void LoseContextLruLocked(webgl::ContextLossReason reason)
@@ -1244,7 +1173,7 @@ class WebGLContext : public VRefCounted, public SupportsWeakPtr {
   GLuint mStencilValueMaskBack = 0;
   GLuint mStencilWriteMaskFront = 0;
   GLuint mStencilWriteMaskBack = 0;
-  uint8_t mColorWriteMask0 = 0xf;  // bitmask
+  std::array<uint8_t, webgl::kMaxDrawBuffers> mColorWriteMasks;  // bitmasks
   mutable uint8_t mDriverColorMask0 = 0xf;
   bool mDepthWriteMask = true;
   GLfloat mColorClearValue[4] = {0, 0, 0, 0};

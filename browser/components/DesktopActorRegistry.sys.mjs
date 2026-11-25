@@ -244,12 +244,15 @@ let JSWINDOWACTORS = {
         "AIChatContent:Ready": { wantUntrusted: true },
         "AIChatContent:DispatchAction": { wantUntrusted: true },
         "AIChatContent:OpenLink": { wantUntrusted: true },
+        "AIChatContent:OpenTabGroup": { wantUntrusted: true },
         "AIChatContent:DispatchNewChat": { wantUntrusted: true },
         "AIChatContent:AccountSignIn": { wantUntrusted: true },
         "AIChatContent:ToolUIUpdate": { wantUntrusted: true },
         "AIChatContent:RequestAssets": { wantUntrusted: true },
         "AIChatContent:HistoryGridRender": { wantUntrusted: true },
         "AIChatContent:HistoryGridItemClick": { wantUntrusted: true },
+        "AIChatContent:FirstCharacterDisplayed": { wantUntrusted: true },
+        "AIChatContent:FirstActionLogDisplayed": { wantUntrusted: true },
         "AIChatContent:ClientError": { wantUntrusted: true },
       },
     },
@@ -285,13 +288,34 @@ let JSWINDOWACTORS = {
         "moz-src:///browser/components/aiwindow/ui/actors/AITabChild.sys.mjs",
       events: {
         "AITab:GetPage": { wantUntrusted: true },
+        "AITab:GetHeadingFont": { wantUntrusted: true },
         "AITab:DeletePage": { wantUntrusted: true },
         "AITab:OpenLink": { wantUntrusted: true },
+        "AITab:RecordView": { wantUntrusted: true },
       },
     },
     matches: ["about:smartpage", "about:smartpage?*"],
     remoteTypes: ["privilegedabout"],
     enablePreference: "browser.smartwindow.aitab.enabled",
+  },
+
+  AgentMonitorItem: {
+    parent: {
+      esModuleURI:
+        "moz-src:///browser/components/aiwindow/ui/actors/AgentMonitorItemParent.sys.mjs",
+    },
+    child: {
+      esModuleURI:
+        "moz-src:///browser/components/aiwindow/ui/actors/AgentMonitorItemChild.sys.mjs",
+      events: {
+        "agent-monitor-item:resolve-titles": { wantUntrusted: true },
+        "agent-monitor-item:request-suggestion": { wantUntrusted: true },
+      },
+    },
+    allFrames: true,
+    matches: ["about:aichatcontent", "about:smartwindowtasks"],
+    remoteTypes: ["privilegedabout"],
+    enablePreference: "browser.smartwindow.enabled",
   },
 
   SmartWindowTasks: {
@@ -928,12 +952,14 @@ let JSWINDOWACTORS = {
     safeForUntrustedWebProcess: true,
   },
 
-  ShieldFrame: {
+  AboutStudies: {
     parent: {
-      esModuleURI: "resource://normandy-content/ShieldFrameParent.sys.mjs",
+      esModuleURI:
+        "moz-src:///browser/components/nimbus/AboutStudiesParent.sys.mjs",
     },
     child: {
-      esModuleURI: "resource://normandy-content/ShieldFrameChild.sys.mjs",
+      esModuleURI:
+        "moz-src:///browser/components/nimbus/AboutStudiesChild.sys.mjs",
       events: {
         pageshow: {},
         pagehide: {},
@@ -941,7 +967,7 @@ let JSWINDOWACTORS = {
       },
     },
     matches: ["about:studies*"],
-    safeForUntrustedWebProcess: true,
+    remoteTypes: ["privilegedabout"],
   },
 
   SmartFormFill: {

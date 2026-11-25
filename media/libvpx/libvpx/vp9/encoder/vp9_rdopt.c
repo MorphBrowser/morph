@@ -365,7 +365,7 @@ static int cost_coeffs(MACROBLOCK *x, int plane, int block, TX_SIZE tx_size,
   const int16_t *band_count = &band_counts[tx_size][1];
   const int eob = p->eobs[block];
   const tran_low_t *const qcoeff = BLOCK_OFFSET(p->qcoeff, block);
-  unsigned int(*token_costs)[2][COEFF_CONTEXTS][ENTROPY_TOKENS] =
+  unsigned int (*token_costs)[2][COEFF_CONTEXTS][ENTROPY_TOKENS] =
       x->token_costs[tx_size][type][is_inter_block(mi)];
   uint8_t token_cache[32 * 32];
   int cost;
@@ -422,7 +422,7 @@ static int cost_coeffs(MACROBLOCK *x, int plane, int block, TX_SIZE tx_size,
       // dc token
       int v = qcoeff[0];
       int16_t tok;
-      unsigned int(*tok_cost_ptr)[COEFF_CONTEXTS][ENTROPY_TOKENS];
+      unsigned int (*tok_cost_ptr)[COEFF_CONTEXTS][ENTROPY_TOKENS];
       cost = vp9_get_token_cost(v, &tok, cat6_high_cost);
       cost += (*token_costs)[0][pt][tok];
 
@@ -704,6 +704,7 @@ static void block_rd_txfm(int plane, int block, int blk_row, int blk_col,
   MODE_INFO *const mi = xd->mi[0];
   int64_t rd1, rd2, rd;
   int rate;
+  int trellis_rate = -1;
   int64_t dist = INT64_MAX;
   int64_t sse = INT64_MAX;
   const int coeff_ctx =
@@ -718,17 +719,29 @@ static void block_rd_txfm(int plane, int block, int blk_row, int blk_col,
   int sse_calc_done = 0;
 #if CONFIG_MISMATCH_DEBUG
   struct encode_b_args encode_b_arg = {
-    x,    enable_trellis_opt, trellis_opt_thresh, &sse_calc_done,
-    &sse, args->t_above,      args->t_left,       &mi->skip,
+    x,
+    enable_trellis_opt,
+    trellis_opt_thresh,
+    &sse_calc_done,
+    &sse,
+    args->t_above,
+    args->t_left,
+    &mi->skip,
+    &trellis_rate,
     0,  // mi_row
     0,  // mi_col
     0   // output_enabled
   };
 #else
-  struct encode_b_args encode_b_arg = {
-    x,    enable_trellis_opt, trellis_opt_thresh, &sse_calc_done,
-    &sse, args->t_above,      args->t_left,       &mi->skip
-  };
+  struct encode_b_args encode_b_arg = { x,
+                                        enable_trellis_opt,
+                                        trellis_opt_thresh,
+                                        &sse_calc_done,
+                                        &sse,
+                                        args->t_above,
+                                        args->t_left,
+                                        &mi->skip,
+                                        &trellis_rate };
 #endif
 
   if (args->exit_early) return;
@@ -790,7 +803,8 @@ static void block_rd_txfm(int plane, int block, int blk_row, int blk_col,
                          tx_size, &encode_b_arg);
       // full forward transform and quantization
       vp9_xform_quant(x, plane, block, blk_row, blk_col, plane_bsize, tx_size);
-      if (use_trellis_opt) vp9_optimize_b(x, plane, block, tx_size, coeff_ctx);
+      if (use_trellis_opt)
+        vp9_optimize_b(x, plane, block, tx_size, coeff_ctx, &trellis_rate);
       dist_block(args->cpi, x, plane, plane_bsize, block, blk_row, blk_col,
                  tx_size, &dist, &sse, recon, sse_calc_done);
     } else if (skip_txfm_flag == SKIP_TXFM_AC_ONLY) {
@@ -823,7 +837,14 @@ static void block_rd_txfm(int plane, int block, int blk_row, int blk_col,
     return;
   }
 
-  rate = rate_block(plane, block, tx_size, coeff_ctx, args);
+#ifndef NDEBUG
+  if (trellis_rate >= 0 && !args->use_fast_coef_costing) {
+    assert(trellis_rate == rate_block(plane, block, tx_size, coeff_ctx, args));
+  }
+#endif
+  rate = (trellis_rate >= 0 && !args->use_fast_coef_costing)
+             ? trellis_rate
+             : rate_block(plane, block, tx_size, coeff_ctx, args);
   args->t_above[blk_col] = (x->plane[plane].eobs[block] > 0) ? 1 : 0;
   args->t_left[blk_row] = (x->plane[plane].eobs[block] > 0) ? 1 : 0;
   rd1 = RDCOST(x->rdmult, x->rddiv, rate, dist);
@@ -1072,7 +1093,7 @@ static int64_t rd_pick_intra4x4block(VP9_COMP *cpi, MACROBLOCK *x, int row,
   const int src_stride = p->src.stride;
   const int dst_stride = pd->dst.stride;
   const uint8_t *src_init = &p->src.buf[row * 4 * src_stride + col * 4];
-  uint8_t *dst_init = &pd->dst.buf[row * 4 * src_stride + col * 4];
+  uint8_t *dst_init = &pd->dst.buf[row * 4 * dst_stride + col * 4];
   ENTROPY_CONTEXT ta[2], tempa[2];
   ENTROPY_CONTEXT tl[2], templ[2];
   const int num_4x4_blocks_wide = num_4x4_blocks_wide_lookup[bsize];
@@ -1420,38 +1441,35 @@ static int64_t rd_pick_intra_sby_mode(VP9_COMP *cpi, MACROBLOCK *x, int *rate,
 static int super_block_uvrd(const VP9_COMP *cpi, MACROBLOCK *x, int *rate,
                             int64_t *distortion, int *skippable, int64_t *sse,
                             BLOCK_SIZE bsize, int64_t ref_best_rd) {
-  MACROBLOCKD *const xd = &x->e_mbd;
-  MODE_INFO *const mi = xd->mi[0];
-  const TX_SIZE uv_tx_size = get_uv_tx_size(mi, &xd->plane[1]);
-  int plane;
-  int pnrate = 0, pnskip = 1;
-  int64_t pndist = 0, pnsse = 0;
-  int is_cost_valid = 1;
+  int is_cost_valid = ref_best_rd >= 0;
 
-  if (ref_best_rd < 0) is_cost_valid = 0;
+  if (is_cost_valid) {
+    MACROBLOCKD *const xd = &x->e_mbd;
+    MODE_INFO *const mi = xd->mi[0];
+    const TX_SIZE uv_tx_size = get_uv_tx_size(mi, &xd->plane[1]);
+    int plane;
+    int pnrate = 0, pnskip = 1;
+    int64_t pndist = 0, pnsse = 0;
 
-  if (is_inter_block(mi) && is_cost_valid) {
-    for (plane = 1; plane < MAX_MB_PLANE; ++plane)
-      vp9_subtract_plane(x, bsize, plane);
-  }
+    *rate = 0;
+    *distortion = 0;
+    *sse = 0;
+    *skippable = 1;
 
-  *rate = 0;
-  *distortion = 0;
-  *sse = 0;
-  *skippable = 1;
-
-  for (plane = 1; plane < MAX_MB_PLANE; ++plane) {
-    txfm_rd_in_plane(cpi, x, &pnrate, &pndist, &pnskip, &pnsse, ref_best_rd,
-                     plane, bsize, uv_tx_size, cpi->sf.use_fast_coef_costing,
-                     /*recon=*/NULL);
-    if (pnrate == INT_MAX) {
-      is_cost_valid = 0;
-      break;
+    for (plane = 1; plane < MAX_MB_PLANE; ++plane) {
+      if (is_inter_block(mi)) vp9_subtract_plane(x, bsize, plane);
+      txfm_rd_in_plane(cpi, x, &pnrate, &pndist, &pnskip, &pnsse, ref_best_rd,
+                       plane, bsize, uv_tx_size, cpi->sf.use_fast_coef_costing,
+                       /*recon=*/NULL);
+      if (pnrate == INT_MAX) {
+        is_cost_valid = 0;
+        break;
+      }
+      *rate += pnrate;
+      *distortion += pndist;
+      *sse += pnsse;
+      *skippable &= pnskip;
     }
-    *rate += pnrate;
-    *distortion += pndist;
-    *sse += pnsse;
-    *skippable &= pnskip;
   }
 
   if (!is_cost_valid) {

@@ -4,7 +4,6 @@
 
 include protocol PHttpChannel;
 include ClientIPCTypes;
-include URIParams;
 include IPCServiceWorkerDescriptor;
 include IPCStream;
 include PBackgroundSharedTypes;
@@ -105,14 +104,14 @@ struct PreferredAlternativeDataTypeParams
 
 struct RedirectHistoryEntryInfo
 {
-  PrincipalInfo       principalInfo;
-  URIParams?          referrerUri;
+  nsIPrincipal        principal;
+  nullable nsIURI     referrerUri;
   nsCString           remoteAddress;
 };
 
 struct InterceptionInfoArg
 {
-  PrincipalInfo?              triggeringPrincipalInfo;
+  nsIPrincipal                triggeringPrincipal;
   nsContentPolicyType         contentPolicyType;
   RedirectHistoryEntryInfo[]  redirectChain;
   bool                        fromThirdParty;
@@ -120,11 +119,12 @@ struct InterceptionInfoArg
 
 struct LoadInfoArgs
 {
-  PrincipalInfo?              requestingPrincipalInfo;
-  PrincipalInfo               triggeringPrincipalInfo;
-  PrincipalInfo?              principalToInheritInfo;
-  PrincipalInfo?              topLevelPrincipalInfo;
-  URIParams?                  resultPrincipalURI;
+  nullable nsIPrincipal       requestingPrincipal;
+  // TODO(Bug 2091749): Make this non-nullable.
+  nullable nsIPrincipal       triggeringPrincipal;
+  nullable nsIPrincipal       principalToInherit;
+  nullable nsIPrincipal       topLevelPrincipal;
+  nullable nsIURI             resultPrincipalURI;
   RemoteType                  triggeringRemoteType;
   nsID                        sandboxedNullPrincipalID;
   uint32_t                    securityFlags;
@@ -216,6 +216,8 @@ struct LoadInfoArgs
   RFPTargetSet?               overriddenFingerprintingSettings;
   bool                        isMetaRefresh;
   bool                        activatedFromNavigationalPrefetch;
+  bool                        navigationalPrefetchHadNetworkTransfer;
+  bool                        prefetchCandidateMatched;
   CrossOriginEmbedderPolicy   loadingEmbedderPolicy;
   bool                        originTrialCoepCredentiallessEnabledForTopLevel;
   nullable nsIURI             unstrippedURI;
@@ -224,7 +226,7 @@ struct LoadInfoArgs
   UserNavigationInvolvement   userNavigationInvolvement;
   PermissionsPolicyInfo?       containerPermissionsPolicyInfo;
   // https://html.spec.whatwg.org/#dom-location-ancestororigins
-  PrincipalInfo?[]             ancestorOrigins;
+  nullable nsIPrincipal[]     ancestorOrigins;
 };
 
 /**
@@ -408,7 +410,6 @@ struct HttpChannelOpenArgs
   RequestMode                 requestMode;
   bool                        forceValidateCacheContent;
   bool                        preferCacheLoadOverBypass;
-  bool                        forceMainDocumentChannel;
   uint8_t                     redirectionLimit;
   nsString                    classicScriptHintCharset;
   nsString                    documentCharacterSet;
@@ -441,41 +442,6 @@ struct ProxyInfoCloneArgs
   uint32_t resolveFlags;
   nsCString proxyAuthorizationHeader;
   nsCString connectionIsolationKey;
-};
-
-struct HttpConnectionInfoCloneArgs
-{
-  nsCString host;
-  int32_t port;
-  nsCString npnToken;
-  nsCString username;
-  OriginAttributes originAttributes;
-  bool endToEndSSL;
-  nsCString routedHost;
-  int32_t routedPort;
-  bool anonymous;
-  bool aPrivate; // use prefix to avoid code generation error
-  bool insecureScheme;
-  bool noSpdy;
-  bool beConservative;
-  bool bypassProxy;
-  bool anonymousAllowClientCert;
-  bool fallbackConnection;
-  uint32_t tlsFlags;
-  bool isolated;
-  bool isTrrServiceChannel;
-  uint8_t trrMode;
-  bool isIPv4Disabled;
-  bool isIPv6Disabled;
-  uint8_t http3Policy;
-  nsCString topWindowOrigin;
-  bool isHttp3;
-  bool webTransport;
-  uint64_t webTransportId;
-  bool hasIPHintAddress;
-  nsCString echConfig;
-  bool happyEyeballsEnabled;
-  ProxyInfoCloneArgs[] proxyInfo;
 };
 
 struct ConsoleReportCollected {
@@ -575,21 +541,6 @@ struct RedirectToRealChannelArgs {
   nullable ParentProcessChannelHandle channelHandle;
 };
 
-struct TimingStructArgs {
-  TimeStamp domainLookupStart;
-  TimeStamp domainLookupEnd;
-  TimeStamp connectStart;
-  TimeStamp tcpConnectEnd;
-  TimeStamp secureConnectionStart;
-  TimeStamp connectEnd;
-  TimeStamp requestStart;
-  TimeStamp responseStart;
-  TimeStamp firstInterimResponseStart;
-  TimeStamp finalResponseHeadersStart;
-  TimeStamp responseEnd;
-  TimeStamp transactionPending;
-};
-
 struct ResourceTimingStructArgs {
   TimeStamp domainLookupStart;
   TimeStamp domainLookupEnd;
@@ -618,68 +569,6 @@ struct ResourceTimingStructArgs {
   TimeStamp transactionPending;
 };
 
-struct HttpActivity
-{
-  nsCString host;
-  int32_t port;
-  bool endToEndSSL;
-};
-
-struct HttpConnectionActivity
-{
-  nsCString connInfoKey;
-  nsCString host;
-  int32_t port;
-  bool ssl;
-  bool hasECH;
-  bool isHttp3;
-};
-
-union HttpActivityArgs
-{
-  uint64_t;
-  HttpActivity;
-  HttpConnectionActivity;
-};
-
-struct TransactionObserverResult
-{
-  bool versionOk;
-  bool authOk;
-  nsresult closeReason;
-};
-
-struct SpeculativeConnectionOverriderArgs {
-  uint32_t parallelSpeculativeConnectLimit;
-  bool ignoreIdle;
-  bool allow1918;
-};
-
-//-----------------------------------------------------------------------------
-// GIO IPDL structs
-//-----------------------------------------------------------------------------
-
-struct GIOChannelOpenArgs
-{
-  URIParams                 uri;
-  uint64_t                  startPos;
-  nsCString                 entityID;
-  IPCStream?                uploadStream;
-  LoadInfoArgs              loadInfo;
-  uint32_t                  loadFlags;
-};
-
-struct GIOChannelConnectArgs
-{
-  uint32_t channelId;
-};
-
-union GIOChannelCreationArgs
-{
-  GIOChannelOpenArgs;      // For AsyncOpen: the common case.
-  GIOChannelConnectArgs;   // Used for redirected-to channels
-};
-
 //-----------------------------------------------------------------------------
 // File IPDL structs
 //-----------------------------------------------------------------------------
@@ -700,7 +589,7 @@ struct FileChannelInfo
 
 struct GeckoViewContentChannelOpenArgs
 {
-  URIParams uri;
+  nullable nsIURI uri;
   LoadInfoArgs loadInfo;
   uint32_t loadFlags;
 };

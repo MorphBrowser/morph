@@ -46,10 +46,14 @@ class WebRenderImageHost : public CompositableHost, public ImageComposite {
 
   void PushPendingRemoteTexture(const RemoteTextureId aTextureId,
                                 const RemoteTextureOwnerId aOwnerId,
-                                const base::ProcessId aForPid,
+                                const GeckoChildID aForChildID,
                                 const gfx::IntSize aSize,
                                 const TextureFlags aFlags);
   void UseRemoteTexture(bool aCalledInCallback);
+
+  // If a remote texture ready check is pending, wait for the texture to be
+  // ready and use it. Returns true if it did.
+  bool WaitForPendingRemoteTexture();
 
   TextureHost* GetAsTextureHostForComposite(
       AsyncImagePipelineManager* aAsyncImageManager);
@@ -79,6 +83,9 @@ class WebRenderImageHost : public CompositableHost, public ImageComposite {
 
   void SetCurrentTextureHost(TextureHost* aTexture);
 
+  // Drops the pending remote textures and any ready check waiting for them.
+  void ClearPendingRemoteTextures();
+
   std::unordered_map<uint64_t, RefPtr<WebRenderBridgeParentRef>> mWrBridges;
 
   AsyncImagePipelineManager* mCurrentAsyncImageManager;
@@ -87,6 +94,10 @@ class WebRenderImageHost : public CompositableHost, public ImageComposite {
 
   std::deque<CompositableTextureHostRef> mPendingRemoteTextureWrappers;
   bool mWaitingReadyCallback = false;
+  // Identifies the pending ready check, so that stale callbacks are ignored.
+  uint64_t mReadyCallbackGeneration = 0;
+  RemoteTextureOwnerId mReadyCallbackOwnerId;
+  GeckoChildID mReadyCallbackForChildID = kInvalidGeckoChildID;
   bool mWaitForRemoteTextureOwner = true;
 
   RefPtr<wr::RenderTextureHostUsageInfo> mRenderTextureHostUsageInfo;

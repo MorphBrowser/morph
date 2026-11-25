@@ -12,6 +12,7 @@
 #define MODULES_CONGESTION_CONTROLLER_SCREAM_SCREAM_V2_H_
 
 #include <algorithm>
+#include <optional>
 
 #include "api/environment/environment.h"
 #include "api/transport/network_types.h"
@@ -66,7 +67,7 @@ class ScreamV2 {
   DataSize ref_window() const { return ref_window_; }
 
   // Last inflection point where ref_window started to decrease.
-  DataSize ref_window_i() const { return ref_window_i_; }
+  std::optional<DataSize> ref_window_i() const { return ref_window_i_; }
 
   // Returns the maximum allowed reference window based on data in flight during
   // the last RTT.
@@ -110,13 +111,29 @@ class ScreamV2 {
   // when close to the last known inflection point.
   // (4.2.2.1)
   double ref_window_scale_factor_close_to_ref_window_i() const {
+    if (!ref_window_i_.has_value()) {
+      return 1.0;
+    }
     const double scale_factor =
         params_.backoff_scale_factor_close_to_ref_window_i.Get();
     double scl =
-        ref_window_ > ref_window_i_
-            ? scale_factor * (ref_window_ - ref_window_i_) / ref_window_i_
-            : scale_factor * (ref_window_i_ - ref_window_) / ref_window_i_;
-    return std::clamp(scl * scl, 0.1, 1.0);
+        ref_window_ > *ref_window_i_
+            ? scale_factor * (ref_window_ - *ref_window_i_) / *ref_window_i_
+            : scale_factor * (*ref_window_i_ - ref_window_) / *ref_window_i_;
+    if (params_.reduce_jitter.Get()) {
+      scl = std::clamp(scl * scl, 0.2, 1.0);
+      // Restrict `ref_window_` increase when `ref_window_` has grown past the
+      // last inflection point `ref_window_i_` (but is still close to it, i.e.
+      // `scl < 1.0`) and queue delay is increasing.
+      if (ref_window_ > *ref_window_i_ && scl < 1.0) {
+        scl = std::max(
+            0.2,
+            scl * delay_based_congestion_control_
+                      .ref_window_scale_factor_due_to_latency_difference());
+      }
+      return scl;
+    }
+    return std::clamp(scl * scl, 0.25, 1.0);
   }
 
   // Scale factor for reference window increase. (4.2.2.2)
@@ -132,8 +149,15 @@ class ScreamV2 {
   void UpdateL4SAlpha(const ScreamFeedback& parsed);
   void UpdateRefWindow(const ScreamFeedback& parsed);
   void UpdateFeedbackHoldTime(TimeDelta feedback_hold_time);
+  void UpdateFeedbackInterval(Timestamp feedback_time);
   void UpdateTargetRate(const ScreamFeedback& parsed);
   void UpdateReceiveRate(const ScreamFeedback& parsed);
+  // Minimum interval between congestion backoff reactions.
+  TimeDelta ReactionInterval() const;
+  // Scales `backoff` across the estimated number of reactions per RTT, and
+  // further attenuates it when `target_rate_` is below `acked_bitrate_margin *
+  // received_rate_` (Section 4.5.3).
+  double ScaleBackoff(double backoff, DataSize data_in_flight) const;
 
   const Environment env_;
   const ScreamV2Parameters params_;
@@ -148,10 +172,14 @@ class ScreamV2 {
   // Reference window inflection point. I.e, `ref_window_` when congestion was
   // noticed. Increase and decrease of `ref_window_` is scaled down around
   // `ref_window_i_`.
-  DataSize ref_window_i_ = DataSize::Bytes(1);
-  // `allow_ref_window_i_update_` is set to true if `ref_window_` has increased
-  // since `ref_window_i_` was last set.
-  bool allow_ref_window_i_update_ = true;
+  std::optional<DataSize> ref_window_i_;
+  // Lowest `ref_window_` observed on a reference window decrease
+  // (`ref_wnd_lowest` in 4.2.2.1). `ref_window_i_` is only updated when
+  // `ref_window_` before decrease has increased by >5% or >1 MSS above
+  // `ref_window_lowest_` or `ref_window_i_update_max_hold_rtts` has elapsed
+  // since `last_ref_window_i_update_time_`.
+  DataSize ref_window_lowest_ = DataSize::Zero();
+  Timestamp last_ref_window_i_update_time_ = Timestamp::MinusInfinity();
 
   double last_ref_window_increase_scale_factor_ = 1.0;
 
@@ -163,19 +191,22 @@ class ScreamV2 {
   LossEstimator loss_estimator_;
 
   TimeDelta feedback_hold_time_ = TimeDelta::Zero();
+  Timestamp last_feedback_time_ = Timestamp::MinusInfinity();
+  TimeDelta feedback_interval_ = TimeDelta::Zero();
 
   // Per-RTT stats
   Timestamp last_data_in_flight_update_ = Timestamp::MinusInfinity();
   DataSize max_data_in_flight_this_rtt_ = DataSize::Zero();
   DataSize max_data_in_flight_prev_rtt_ = DataSize::Zero();
+  bool allow_initial_ref_window_clamping_ = true;
   DataRate received_rate_ = DataRate::Zero();
   DataSize accumulated_received_bytes_ = DataSize::Zero();
   Timestamp last_window_receive_time_ = Timestamp::MinusInfinity();
 
-  // `last_reaction_to_congestion_time` is called
-  // `last_congestion_detected_time` in 4.2.2. Reference Window Update.
-  // Last received feedback that contained a congestion event that may have
-  // caused a reaction.
+  // `last_reaction_to_congestion_time_` tracks the last received feedback that
+  // contained a congestion event (`is_loss`, `is_ce`, or `is_virtual_ce`) that
+  // caused a reaction (corresponding to `last_reaction_to_congestion_time` and
+  // `last_congestion_detected_time` in 4.2.2).
   Timestamp last_reaction_to_congestion_time_ = Timestamp::MinusInfinity();
   // Last time the reference window decreased. This is not the same
   // as `last_reaction_to_congestion_time_` since a single CE mark does not
@@ -183,6 +214,9 @@ class ScreamV2 {
   Timestamp last_ref_window_decrease_time_ = Timestamp::MinusInfinity();
 
   Timestamp drain_queue_start_ = Timestamp::MinusInfinity();
+  TimeDelta queue_delay_avg_prev_ = TimeDelta::MinusInfinity();
+  DataSize data_in_flight_prev_ = DataSize::Zero();
+  Timestamp last_queue_delay_avg_check_time_ = Timestamp::MinusInfinity();
 
   DelayBasedCongestionControl delay_based_congestion_control_;
   bool first_feedback_processed_ = false;

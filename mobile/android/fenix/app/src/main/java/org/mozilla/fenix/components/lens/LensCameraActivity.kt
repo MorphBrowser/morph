@@ -47,8 +47,8 @@ internal const val LENS_IMAGES_DIR = "lens_images"
 
 /**
  * Activity that hosts [LensCameraFragment] for capturing images for Google Lens. Handles camera permission and gallery
- * picking. A captured image is returned as an image URI. A photo picker image is uploaded here by [LensUploadOverlay]
- * and returned as the Lens result URL, so a cancelled or failed upload can fall back to the camera.
+ * picking. A captured or photo picker image is uploaded here by [LensUploadOverlay] and returned as the Lens result
+ * URL, so a cancelled or failed upload can fall back to the camera.
  */
 class LensCameraActivity : AppCompatActivity() {
 
@@ -112,8 +112,12 @@ class LensCameraActivity : AppCompatActivity() {
 
     @VisibleForTesting
     internal fun handleGalleryResult(uri: Uri?) {
-        if (uri == null) return
-        uploadOverlay.start(uri, isPrivate = intent.getBooleanExtra(EXTRA_IS_PRIVATE, false))
+        if (uri == null || isQrOnly) return
+        uploadOverlay.start(
+            uri,
+            isPrivate = intent.getBooleanExtra(EXTRA_IS_PRIVATE, false),
+            source = IMAGE_SOURCE_PHOTO_PICKER,
+        )
     }
 
     private val qrGalleryLauncher =
@@ -127,7 +131,7 @@ class LensCameraActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_lens_camera)
         permissionRequested = savedInstanceState?.getBoolean(STATE_PERMISSION_REQUESTED, false) == true
-        if (savedInstanceState == null) {
+        if (savedInstanceState == null && !isQrOnly) {
             lifecycleScope.launch(Dispatchers.IO) { clearLensImageCache() }
         }
 
@@ -151,50 +155,55 @@ class LensCameraActivity : AppCompatActivity() {
             LensCameraFragment.RESULT_REQUEST_KEY,
             this,
         ) { _, bundle ->
-            // RESULT_QR_STRING must never be set to an empty string by the producer
-            // (LensCameraFragment.handleQrResult). An empty value falls through to the
-            // gallery/image branch below; downstream callers treat an empty extra as no scan.
-            val qrString = bundle.getString(LensCameraFragment.RESULT_QR_STRING)
-            if (!qrString.isNullOrEmpty()) {
+            handleCameraResult(bundle)
+        }
+
+        uploadOverlay.observe()
+    }
+
+    private fun handleCameraResult(bundle: Bundle) {
+        // RESULT_QR_STRING must never be set to an empty string by the producer
+        // (LensCameraFragment.handleQrResult). An empty value falls through to the
+        // gallery/image branch below; downstream callers treat an empty extra as no scan.
+        val qrString = bundle.getString(LensCameraFragment.RESULT_QR_STRING)
+        val imageUri: Uri? =
+            BundleCompat.getParcelable(
+                bundle,
+                LensCameraFragment.RESULT_IMAGE_URI,
+                Uri::class.java,
+            )
+        when {
+            !qrString.isNullOrEmpty() -> {
                 val resultIntent =
                     Intent().apply {
                         putExtra(EXTRA_SCAN_RESULT_DATA, qrString)
                     }
                 setResult(RESULT_OK, resultIntent)
                 finish()
-                return@setFragmentResultListener
             }
 
-            if (bundle.getBoolean(LensCameraFragment.RESULT_QR_GALLERY_REQUEST, false)) {
-                launchQrGalleryPicker()
-                return@setFragmentResultListener
-            }
+            bundle.getBoolean(LensCameraFragment.RESULT_QR_GALLERY_REQUEST, false) -> launchQrGalleryPicker()
 
-            if (bundle.getBoolean(LensCameraFragment.RESULT_GALLERY_REQUEST, false)) {
-                launchGalleryPicker()
-                return@setFragmentResultListener
-            }
-
-            val imageUri: Uri? =
-                BundleCompat.getParcelable(
-                    bundle,
-                    LensCameraFragment.RESULT_IMAGE_URI,
-                    Uri::class.java,
-                )
-            if (imageUri != null) {
-                val resultIntent =
-                    Intent().apply {
-                        data = imageUri
-                        putExtra(EXTRA_IMAGE_SOURCE, IMAGE_SOURCE_CAMERA)
-                    }
-                setResult(RESULT_OK, resultIntent)
-            } else {
+            // QR-only scans skip the Google Lens opt-out sheet, so nothing may be sent to Google.
+            isQrOnly -> {
                 setResult(RESULT_CANCELED)
+                finish()
             }
-            finish()
-        }
 
-        uploadOverlay.observe()
+            bundle.getBoolean(LensCameraFragment.RESULT_GALLERY_REQUEST, false) -> launchGalleryPicker()
+
+            imageUri != null ->
+                uploadOverlay.start(
+                    imageUri,
+                    isPrivate = intent.getBooleanExtra(EXTRA_IS_PRIVATE, false),
+                    source = IMAGE_SOURCE_CAMERA,
+                )
+
+            else -> {
+                setResult(RESULT_CANCELED)
+                finish()
+            }
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -209,8 +218,9 @@ class LensCameraActivity : AppCompatActivity() {
         if (isFinishing) return
 
         // The opt-out sheet gates everything else: while it is up neither the camera permission nor
-        // LensCameraFragment - and therefore the camera itself - is touched.
-        if (components.settings.hasAcceptedGoogleLensFirstRun) {
+        // LensCameraFragment - and therefore the camera itself - is touched. QR-only scans never reach
+        // Google, so they skip it.
+        if (isQrOnly || components.settings.hasAcceptedGoogleLensFirstRun) {
             // A granted permission brings the camera back even if it was requested here: an upload removes the camera
             // fragment, so an upload lost with the process leaves no fragment to restore.
             if (!permissionRequested || hasCameraPermission()) {
@@ -360,15 +370,27 @@ class LensCameraActivity : AppCompatActivity() {
             add(
                 R.id.lens_fragment_container_view,
                 LensCameraFragment::class.java,
-                Bundle().apply { putString(LensCameraFragment.ARG_INITIAL_MODE, resolveInitialMode().name) },
+                Bundle().apply {
+                    putString(LensCameraFragment.ARG_INITIAL_MODE, resolveInitialMode().name)
+                    putBoolean(LensCameraFragment.ARG_QR_ONLY, isQrOnly)
+                },
             )
         }
     }
 
-    /** The mode requested through [EXTRA_INITIAL_MODE], falling back to the one the user last selected. */
+    private val isQrOnly: Boolean
+        get() = intent.getBooleanExtra(EXTRA_QR_ONLY, false)
+
+    /**
+     * [CameraMode.QR] when launched with [EXTRA_QR_ONLY], otherwise the mode requested through [EXTRA_INITIAL_MODE],
+     * falling back to the one the user last selected.
+     */
     @VisibleForTesting
-    internal fun resolveInitialMode(): CameraMode =
-        CameraMode.fromNameOrNull(intent.getStringExtra(EXTRA_INITIAL_MODE)) ?: components.settings.lensCameraLastMode
+    internal fun resolveInitialMode(): CameraMode {
+        if (isQrOnly) return CameraMode.QR
+        return CameraMode.fromNameOrNull(intent.getStringExtra(EXTRA_INITIAL_MODE))
+            ?: components.settings.lensCameraLastMode
+    }
 
     private fun launchGalleryPicker() {
         galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
@@ -485,19 +507,13 @@ class LensCameraActivity : AppCompatActivity() {
 
         private const val STATE_PERMISSION_REQUESTED = "permission_requested"
 
-        /**
-         * Result intent extra naming the upload method that produced the image, read by `LensFeature` to attribute the
-         * Google Lens search telemetry.
-         */
-        internal const val EXTRA_IMAGE_SOURCE = "lens_image_source"
-
-        @VisibleForTesting internal const val IMAGE_SOURCE_CAMERA = "camera"
+        internal const val IMAGE_SOURCE_CAMERA = "camera"
 
         internal const val IMAGE_SOURCE_PHOTO_PICKER = "photo_picker"
 
         /**
-         * Result intent extra carrying the Lens results URL of an image this activity already uploaded. When present,
-         * the result carries no image URI and the search telemetry has already been recorded.
+         * Result intent extra carrying the Lens results URL of the image this activity uploaded. The search telemetry
+         * has already been recorded.
          */
         internal const val EXTRA_LENS_RESULT_URL = "lens_result_url"
 
@@ -508,6 +524,8 @@ class LensCameraActivity : AppCompatActivity() {
         internal const val EXTRA_IS_PRIVATE = "lens_is_private"
 
         @VisibleForTesting internal const val EXTRA_INITIAL_MODE = "lens_initial_mode"
+
+        @VisibleForTesting internal const val EXTRA_QR_ONLY = "lens_qr_only"
 
         /**
          * Creates an intent to launch [LensCameraActivity].
@@ -521,6 +539,16 @@ class LensCameraActivity : AppCompatActivity() {
                 putExtra(EXTRA_IS_PRIVATE, isPrivate)
                 initialMode?.let { putExtra(EXTRA_INITIAL_MODE, it.name) }
             }
+        }
+
+        /**
+         * Creates an intent to launch [LensCameraActivity] as a QR code scanner only: the camera opens in
+         * [CameraMode.QR], the mode toggle is hidden and the Google Lens opt-out sheet is skipped.
+         *
+         * @param context The context to launch the activity from.
+         */
+        fun newQrScannerIntent(context: Context): Intent {
+            return Intent(context, LensCameraActivity::class.java).putExtra(EXTRA_QR_ONLY, true)
         }
     }
 }

@@ -88,6 +88,8 @@ class BufferSurface {
   // no-op for surfaces which don't provide CPU-accessible memory (like DMABuf).
   virtual already_AddRefed<mozilla::gfx::DrawTarget> Lock() { return nullptr; }
   virtual void* GetImageData() { return nullptr; }
+  // Distance in bytes between rows of the plane.
+  int32_t GetStride(int aPlane = 0) const { return mStrides[aPlane]; }
 
   virtual bool CreateTextures(mozilla::gl::GLContext* aGLContext);
   // Surface memory may be recycled and hold a new frame while textures
@@ -201,6 +203,11 @@ class BufferSurface {
   bool CanRecycle() const { return mCanRecycle && mPID; }
   void DisableRecycle() { mCanRecycle = false; }
 
+  // YUV 4:2:0 surfaces need at least 2x2 pixels to be imported by EGL and
+  // Wayland compositors, smaller ones can't be used for direct composition.
+  bool HasValidYUVSize() const;
+  bool SupportsDirectComposition();
+
  protected:
   BufferSurface() = default;
   virtual ~BufferSurface();
@@ -252,7 +259,7 @@ class BufferSurface {
   // Set when underlying surface memory was changed.
   bool mTextureIsDirty = false;
 
-  mozilla::gfx::ColorRange mColorRange = mozilla::gfx::ColorRange::LIMITED;
+  mozilla::gfx::ColorRange mColorRange = mozilla::gfx::ColorRange::FULL;
   mozilla::gfx::YUVColorSpace mColorSpace =
       mozilla::gfx::YUVColorSpace::Default;
   mozilla::gfx::ColorSpace2 mColorPrimaries =

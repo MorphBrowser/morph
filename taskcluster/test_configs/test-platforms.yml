@@ -122,13 +122,13 @@ linux2404-64-artifact/debug:
     test-sets:
         - artifact-tests
 
-windows11-64-24h2-artifact/opt:
+windows11-64-25h2-artifact/opt:
     build-platform: win64-artifact/opt
     build-signing-label: build-signing-win64-artifact/opt
     test-sets:
         - artifact-tests
 
-windows11-64-24h2-artifact/debug:
+windows11-64-25h2-artifact/debug:
     build-platform: win64-artifact/debug
     build-signing-label: build-signing-win64-artifact/debug
     test-sets:
@@ -170,7 +170,7 @@ windows11-32-25h2/debug:
 windows11-32-25h2-mingwclang/debug:
     build-platform: win32-mingwclang/debug
     test-sets:
-        - mingwclang-win32-tests-debug
+        - mingwclang-tests-debug
 
 windows11-32-25h2-mingwclang/opt:
     build-platform: win32-mingwclang/opt
@@ -402,10 +402,11 @@ macosx1500-aarch64-shippable/opt:
     build-platform: macosx64-shippable/opt
     build-signing-label: repackage-macosx64-shippable/opt
     test-sets:
+        - browsertime
+        - browsertime-profiling
         - macosx1500-64-tests
-        - macosx1500-64-perftests
         - macosx1500-aarch64-tests
-        - awsy
+        - awsy-base
         - macosx64-talos
         - talos-profiling
         - web-platform-tests-backlog
@@ -429,8 +430,6 @@ macosx2700-aarch64-shippable/opt:
 macosx1470-64-shippable/opt:
     build-platform: macosx64-shippable/opt
     test-sets:
-        - browsertime
-        - browsertime-profiling
         - macosx1470-64-tests
         - webgpu
         - web-platform-tests-backlog
@@ -441,7 +440,6 @@ macosx1470-64/opt:
         - macosx1470-64-tests
         - web-platform-tests-backlog
         - webgpu
-        - browsertime
 
 macosx1470-64/debug:
     build-platform: macosx64/debug
@@ -534,6 +532,7 @@ android-hw-p6-13-0-aarch64-shippable/opt:
     test-sets:
         - android-hw-speedometer-tests
         - android-hw-power-tests
+        - android-hw-doh-tests
 
 android-hw-p6-13-0-aarch64-nightlyasrelease/opt:
     build-platform: android-aarch64-nightlyasrelease/opt
@@ -552,6 +551,7 @@ android-hw-a55-14-0-aarch64-nightlyasrelease/opt:
     build-platform: android-aarch64-nightlyasrelease/opt
     test-sets:
         - android-hw-speedometer3-nightlyasrelease
+        - android-hw-nav-bench-nightlyasrelease
 
 android-hw-a55-14-0-aarch64/opt:
     build-platform: android-aarch64/opt

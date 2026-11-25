@@ -150,10 +150,8 @@ RTCError JsepTransport::SetLocalJsepTransportDescription(
     dtls_srtp_transport->UpdateRecvEncryptedHeaderExtensionIds(
         jsep_description.encrypted_header_extension_ids);
     dtls_srtp_transport->UseCryptex(
-        (cryptex_policy_ != CryptoOptions::Srtp::CryptexPolicy::kDisabled) &&
-            (remote_description_ != nullptr &&
-             remote_description_->transport_desc.cryptex),
-        cryptex_policy_ == CryptoOptions::Srtp::CryptexPolicy::kRequire);
+        cryptex_policy_, remote_description_ != nullptr &&
+                             remote_description_->transport_desc.cryptex);
   }
   bool ice_restarting =
       local_description_ != nullptr &&
@@ -226,10 +224,8 @@ RTCError JsepTransport::SetRemoteJsepTransportDescription(
   if (auto* dtls_srtp_transport = rtp_transport_->AsDtlsSrtpTransport()) {
     dtls_srtp_transport->UpdateSendEncryptedHeaderExtensionIds(
         jsep_description.encrypted_header_extension_ids);
-    dtls_srtp_transport->UseCryptex(
-        (cryptex_policy_ != CryptoOptions::Srtp::CryptexPolicy::kDisabled) &&
-            jsep_description.transport_desc.cryptex,
-        cryptex_policy_ == CryptoOptions::Srtp::CryptexPolicy::kRequire);
+    dtls_srtp_transport->UseCryptex(cryptex_policy_,
+                                    jsep_description.transport_desc.cryptex);
   }
 
   remote_description_.reset(new JsepTransportDescription(jsep_description));
@@ -399,7 +395,10 @@ bool JsepTransport::SetRtcpMux(bool enable,
 void JsepTransport::ActivateRtcpMux() {
   RTC_DCHECK_RUN_ON(&transport_sequence_);
   // If the transport is a DtlsSrtpTransport, it needs to know that RTCP mux
-  // is active to clear its RTCP transport.
+  // is active to clear its RTCP transport. This must happen before the RTCP
+  // transport is cleared, otherwise the active SRTP sessions would be reset
+  // and set up again with the same keys.
+  rtp_transport_->SetRtcpMuxEnabled(true);
   if (auto* dtls_srtp_transport = rtp_transport_->AsDtlsSrtpTransport()) {
     dtls_srtp_transport->SetDtlsTransports(rtp_dtls_transport(),
                                            /*rtcp_dtls_transport=*/nullptr);
@@ -472,6 +471,21 @@ RTCError JsepTransport::NegotiateAndSetDtlsParameters(
       IceConfig rtcp_config = rtcp_dtls_transport()->ice_transport()->config();
       rtcp_config.dtls_handshake_in_stun = config.dtls_handshake_in_stun;
       rtcp_dtls_transport()->ice_transport()->SetIceConfig(rtcp_config);
+    }
+  }
+
+  // Negotiating either option lets DTLS start before ICE is writable without
+  // waiting for a piggybacked packet, since an answer only echoes an option
+  // that the peer supports.
+  bool dtls_in_stun_negotiated =
+      (local_description_->transport_desc.HasOption(ICE_OPTION_SPED) &&
+       remote_description_->transport_desc.HasOption(ICE_OPTION_SPED)) ||
+      (local_description_->transport_desc.HasOption(ICE_OPTION_GOOG_SPED_V1) &&
+       remote_description_->transport_desc.HasOption(ICE_OPTION_GOOG_SPED_V1));
+  if (dtls_in_stun_negotiated) {
+    rtp_dtls_transport()->MaybeStartDtlsInStun();
+    if (rtcp_dtls_transport()) {
+      rtcp_dtls_transport()->MaybeStartDtlsInStun();
     }
   }
 

@@ -57,8 +57,8 @@ RefPtr<GPUChild::InitPromiseType> GPUChild::Init() {
 
   nsTArray<LayerTreeIdMapping> mappings;
   LayerTreeOwnerTracker::Get()->Iterate(
-      [&](LayersId aLayersId, base::ProcessId aProcessId) {
-        mappings.AppendElement(LayerTreeIdMapping(aLayersId, aProcessId));
+      [&](LayersId aLayersId, GeckoChildID aChildID) {
+        mappings.AppendElement(LayerTreeIdMapping(aLayersId, aChildID));
       });
 
   nsCOMPtr<nsIGfxInfo> gfxInfo = components::GfxInfo::Service();
@@ -70,7 +70,8 @@ RefPtr<GPUChild::InitPromiseType> GPUChild::Init() {
 
   RefPtr<InitPromiseType> promise =
       SendInit(updates, devicePrefs, mappings, features,
-               GPUProcessManager::Get()->AllocateNamespace())
+               GPUProcessManager::Get()->AllocateNamespace(),
+               GPUProcessManager::Get()->IsDecodingVideoOnGpuProcess())
           ->Then(
               GetCurrentSerialEventTarget(), __func__,
               [self = RefPtr{this}](GPUDeviceData&& aData) {
@@ -290,7 +291,7 @@ bool GPUChild::SendRequestMemoryReport(const uint32_t& aGeneration,
                                        const bool& aAnonymize,
                                        const bool& aMinimizeMemoryUsage,
                                        const Maybe<FileDescriptor>& aDMDFile) {
-  mMemoryReportRequest = MakeUnique<MemoryReportRequestHost>(aGeneration);
+  mMemoryReportRequest = std::make_unique<MemoryReportRequestHost>(aGeneration);
 
   PGPUChild::SendRequestMemoryReport(aGeneration, aAnonymize,
                                      aMinimizeMemoryUsage, aDMDFile)
@@ -326,7 +327,8 @@ mozilla::ipc::IPCResult GPUChild::RecvAddMemoryReport(
 }
 
 void GPUChild::ActorDestroy(ActorDestroyReason aWhy) {
-  if (aWhy == AbnormalShutdown || mUnexpectedShutdown) {
+  if ((aWhy == AbnormalShutdown || mUnexpectedShutdown) &&
+      !mHost->WasKilledForTesting()) {
     nsAutoCString processType(
         XRE_GeckoProcessTypeToString(GeckoProcessType_GPU));
     glean::subprocess::abnormal_abort.Get(processType).Add(1);
@@ -352,6 +354,7 @@ void GPUChild::ActorDestroy(ActorDestroyReason aWhy) {
 
   gfxVars::RemoveReceiver(this);
   mHost->OnChannelClosed();
+  mHost = nullptr;
 }
 
 mozilla::ipc::IPCResult GPUChild::RecvUpdateFeature(
@@ -388,6 +391,7 @@ mozilla::ipc::IPCResult GPUChild::RecvUpdateMediaCodecsSupported(
     mozilla::TelemetryProbesReporter::ReportDeviceMediaCodecSupported(
         aSupported);
   }
+  MOZ_ASSERT(GPUProcessManager::Get()->IsDecodingVideoOnGpuProcess());
 #if defined(XP_WIN)
   // Do not propagate HEVC support if the pref is off
   media::MediaCodecsSupported trimedSupported = aSupported;

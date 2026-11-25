@@ -8,6 +8,7 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/Maybe.h"
+#include "mozilla/Span.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -309,6 +310,24 @@ inline EvalSharedContext* SharedContext::asEvalContext() {
 
 enum class HasHeritage { No, Yes };
 
+enum class InlinedFieldValueKind : uint8_t {
+  Number,
+  True,
+  False,
+  Null,
+  Undefined,
+  EmptyArray,
+  EmptyObject,
+};
+
+struct InlinedField {
+  TaggedParserAtomIndex name;
+  bool isPrivate;
+  InlinedFieldValueKind valueKind;
+  // Only meaningful when valueKind is Number.
+  double initialValue;
+};
+
 class SuspendableContext : public SharedContext {
  public:
   SuspendableContext(FrontendContext* fc, Kind kind,
@@ -378,6 +397,9 @@ class FunctionBox : public SuspendableContext {
   // This field is copied to ScriptStencil, and shouldn't be modified after the
   // copy.
   MemberInitializers memberInitializers_ = MemberInitializers::Invalid();
+
+  // See: MemberInitializers::hasInlinedFields
+  mozilla::Span<const InlinedField> inlinedFields_;
 
  public:
   // True if bytecode will be emitted for this function in the current
@@ -676,6 +698,13 @@ class FunctionBox : public SuspendableContext {
       copyUpdatedImmutableFlags();
       copyUpdatedMemberInitializers();
     }
+  }
+
+  mozilla::Span<const InlinedField> inlinedFields() const {
+    return inlinedFields_;
+  }
+  void setInlinedFields(mozilla::Span<const InlinedField> fields) {
+    inlinedFields_ = fields;
   }
 
   ScriptIndex index() const { return funcDataIndex_; }

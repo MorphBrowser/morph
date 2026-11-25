@@ -90,7 +90,7 @@ bool GMPProcessParent::Launch(int32_t aTimeoutMs) {
           mMonitor("GMPProcessParent::PrefSerializerRunnable::mMonitor") {}
 
     NS_IMETHOD Run() override {
-      auto prefSerializer = MakeUnique<ipc::SharedPreferenceSerializer>();
+      auto prefSerializer = std::make_unique<ipc::SharedPreferenceSerializer>();
       bool success =
           prefSerializer->SerializeToSharedMemory(GeckoProcessType_GMPlugin,
                                                   /* remoteType */ {});
@@ -236,32 +236,13 @@ bool GMPProcessParent::Launch(int32_t aTimeoutMs) {
       StaticPrefs::media_gmp_android_isolated_process());
 #endif
 
-  // We need to wait until OnChannelConnected to clear the pref serializer, but
-  // SyncLaunch will block until that is called, so we don't actually need to do
-  // any overriding, and it only lives on the stack.
-  bool launched = SyncLaunch(std::move(args), aTimeoutMs);
+  bool launched = LaunchAndWaitForProcessHandle(std::move(args), aTimeoutMs);
   if (launched) {
     nsFmtString name{u"GMPProcessParent {}", static_cast<void*>(this)};
     mShutdownBlocker = media::ShutdownBlockingTicket::Create(
         name, NS_LITERAL_STRING_FROM_CSTRING(__FILE__), __LINE__);
   }
   return launched;
-}
-
-void GMPProcessParent::Delete(nsCOMPtr<nsIRunnable> aCallback) {
-  mDeletedCallback = std::move(aCallback);
-  XRE_GetAsyncIOEventTarget()->Dispatch(NewNonOwningRunnableMethod(
-      "gmp::GMPProcessParent::DoDelete", this, &GMPProcessParent::DoDelete));
-}
-
-void GMPProcessParent::DoDelete() {
-  MOZ_ASSERT(XRE_GetAsyncIOEventTarget()->IsOnCurrentThread());
-
-  if (mDeletedCallback) {
-    mDeletedCallback->Run();
-  }
-
-  Destroy();
 }
 
 #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)

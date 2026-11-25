@@ -5,22 +5,22 @@
 // except according to those terms.
 
 use std::{
-    cmp::min,
+    cmp::{max, min},
     collections::VecDeque,
     fmt::{self, Display, Formatter},
     time::Instant,
 };
 
-use neqo_common::{Header, qdebug, qerror, qlog::Qlog, qtrace, to_u64};
+use neqo_common::{Header, to_u64};
 use neqo_transport::{Connection, Error as TransportError, StreamId};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use tracing::{debug, error, trace};
 
 use crate::{
     Error, Res, Settings,
     decoder_instructions::{DecoderInstruction, DecoderInstructionReader},
     encoder_instructions::EncoderInstruction,
     header_block::HeaderEncoder,
-    qlog,
     reader::ReceiverConnWrapper,
     stats::Stats,
     table::{ADDITIONAL_TABLE_ENTRY_SIZE, HeaderTable, LookupResult},
@@ -48,6 +48,8 @@ impl LocalStreamState {
 pub struct Encoder {
     table: HeaderTable,
     max_table_size: u64,
+    /// Maximum entry count derived from the decoder's advertised table capacity.
+    max_entries: u64,
     instruction_reader: DecoderInstructionReader,
     local_stream: LocalStreamState,
     max_blocked_streams: u16,
@@ -56,9 +58,9 @@ pub struct Encoder {
     max_tracked_streams: usize,
     // Remember header blocks that are referring to dynamic table.
     // There can be multiple header blocks in one stream, headers, trailer, push stream request,
-    // etc. This HashMap maps a stream ID to a list of header blocks. Each header block is a
-    // list of referenced dynamic table entries.
-    unacked_header_blocks: HashMap<StreamId, VecDeque<HashSet<u64>>>,
+    // etc. This HashMap maps a stream ID to a list of header blocks. Each header block is its
+    // Required Insert Count and a list of referenced dynamic table entries.
+    unacked_header_blocks: HashMap<StreamId, VecDeque<(u64, HashSet<u64>)>>,
     blocked_stream_cnt: u16,
     use_huffman: bool,
     next_capacity: Option<u64>,
@@ -72,6 +74,7 @@ impl Encoder {
         Self {
             table: HeaderTable::new(true),
             max_table_size: qpack_settings.max_table_size_encoder,
+            max_entries: 0,
             instruction_reader: DecoderInstructionReader::default(),
             local_stream: LocalStreamState::NoStream,
             max_blocked_streams: 0,
@@ -110,11 +113,17 @@ impl Encoder {
             return Err(Error::EncoderStream);
         }
 
+        // The decoder's maximum capacity, not the capacity we select, determines
+        // when table indices roll over. See RFC 9204, Section 4.5.1.1.
+        // Track this separately for when the decoder accepts a table
+        // larger than we are willing to use.
+        self.max_entries = cap / to_u64(ADDITIONAL_TABLE_ENTRY_SIZE);
+
         if cap == self.table.capacity() {
             return Ok(());
         }
 
-        qdebug!(
+        debug!(
             "[{self}] Set max capacity to new capacity:{cap} old:{} max_table_size={}",
             self.table.capacity(),
             self.max_table_size,
@@ -143,12 +152,12 @@ impl Encoder {
     ///
     /// May return: `ClosedCriticalStream` if stream has been closed or `DecoderStream`
     /// in case of any other transport error.
-    pub fn receive(&mut self, conn: &mut Connection, now: Instant) -> Res<()> {
-        self.read_instructions(conn, now).map_err(map_error)
+    pub fn receive(&mut self, conn: &mut Connection, _now: Instant) -> Res<()> {
+        self.read_instructions(conn).map_err(map_error)
     }
 
-    fn read_instructions(&mut self, conn: &mut Connection, now: Instant) -> Res<()> {
-        qdebug!("[{self}] read a new instruction");
+    fn read_instructions(&mut self, conn: &mut Connection) -> Res<()> {
+        debug!("[{self}] read a new instruction");
         let Some(stream_id) = self.recv_stream_id else {
             debug_assert!(false, "receive() before add_recv_stream()");
             return Err(Error::Internal);
@@ -156,7 +165,7 @@ impl Encoder {
         loop {
             let mut recv = ReceiverConnWrapper::new(conn, stream_id);
             match self.instruction_reader.read_instructions(&mut recv) {
-                Ok(instruction) => self.call_instruction(instruction, conn.qlog_mut(), now)?,
+                Ok(instruction) => self.call_instruction(instruction)?,
                 Err(Error::NeedMoreData) => break Ok(()),
                 Err(e) => break Err(e),
             }
@@ -172,7 +181,10 @@ impl Encoder {
         )]
         for hb_list in self.unacked_header_blocks.values_mut() {
             debug_assert!(!hb_list.is_empty());
-            if hb_list.iter().flatten().any(|e| *e >= acked_inserts_cnt) {
+            if hb_list
+                .iter()
+                .any(|(req_insert_cnt, _)| *req_insert_cnt > acked_inserts_cnt)
+            {
                 self.blocked_stream_cnt += 1;
             }
         }
@@ -199,17 +211,15 @@ impl Encoder {
             .get_mut(&stream_id)
             .ok_or(Error::DecoderStream)?;
         let mut new_acked = self.table.get_acked_inserts_cnt();
-        if let Some(ref_list) = hb_list.pop_back() {
+        if let Some((req_insert_cnt, ref_list)) = hb_list.pop_back() {
             #[expect(
                 clippy::iter_over_hash_type,
                 reason = "OK to loop over unACKed blocks in an undefined order."
             )]
             for iter in ref_list {
                 self.table.remove_ref(iter);
-                if iter >= new_acked {
-                    new_acked = iter + 1;
-                }
             }
+            new_acked = max(new_acked, req_insert_cnt);
         } else {
             debug_assert!(false, "We should have at least one header block");
         }
@@ -227,15 +237,15 @@ impl Encoder {
         let mut was_blocker = false;
         if let Some(mut hb_list) = self.unacked_header_blocks.remove(&stream_id) {
             debug_assert!(!hb_list.is_empty());
-            while let Some(ref_list) = hb_list.pop_front() {
+            while let Some((req_insert_cnt, ref_list)) = hb_list.pop_front() {
                 #[expect(
                     clippy::iter_over_hash_type,
                     reason = "OK to loop over unACKed blocks in an undefined order."
                 )]
                 for iter in ref_list {
                     self.table.remove_ref(iter);
-                    was_blocker = was_blocker || (iter >= self.table.get_acked_inserts_cnt());
                 }
+                was_blocker = was_blocker || req_insert_cnt > self.table.get_acked_inserts_cnt();
             }
         }
         if was_blocker {
@@ -244,13 +254,8 @@ impl Encoder {
         }
     }
 
-    fn call_instruction(
-        &mut self,
-        instruction: DecoderInstruction,
-        qlog: &mut Qlog,
-        now: Instant,
-    ) -> Res<()> {
-        qdebug!("[{self}] call instruction {instruction:?}");
+    fn call_instruction(&mut self, instruction: DecoderInstruction) -> Res<()> {
+        debug!("[{self}] call instruction {instruction:?}");
         match instruction {
             DecoderInstruction::InsertCountIncrement { increment } => {
                 // RFC 9204, Section 4.4.3: an Increment of zero is a connection error
@@ -259,12 +264,6 @@ impl Encoder {
                 if increment == 0 {
                     return Err(Error::DecoderStream);
                 }
-                qlog::qpack_read_insert_count_increment_instruction(
-                    qlog,
-                    increment,
-                    &increment.to_be_bytes(),
-                    now,
-                );
 
                 self.insert_count_instruction(increment)
             }
@@ -298,7 +297,7 @@ impl Encoder {
         name: &[u8],
         value: &[u8],
     ) -> Res<u64> {
-        qdebug!("[{self}] insert {name:?} {value:?}");
+        debug!("[{self}] insert {name:?} {value:?}");
 
         let entry_size = name.len() + value.len() + ADDITIONAL_TABLE_ENTRY_SIZE;
 
@@ -331,7 +330,7 @@ impl Encoder {
     }
 
     fn change_capacity(&mut self, value: u64) {
-        qdebug!("[{self}] change capacity: {value}");
+        debug!("[{self}] change capacity: {value}");
         self.next_capacity = Some(value);
     }
 
@@ -371,7 +370,7 @@ impl Encoder {
     pub fn send_encoder_updates(&mut self, conn: &mut Connection) -> Res<()> {
         match self.local_stream {
             LocalStreamState::NoStream => {
-                qerror!("Send call but there is no stream yet");
+                error!("Send call but there is no stream yet");
                 Ok(())
             }
             LocalStreamState::Uninitialized(stream_id) => {
@@ -396,8 +395,7 @@ impl Encoder {
                 debug_assert!(!hb_list.is_empty());
                 hb_list
                     .iter()
-                    .flatten()
-                    .any(|index| *index >= self.table.get_acked_inserts_cnt())
+                    .any(|(req_insert_cnt, _)| *req_insert_cnt > self.table.get_acked_inserts_cnt())
             })
     }
 
@@ -417,7 +415,7 @@ impl Encoder {
         h: &[Header],
         stream_id: StreamId,
     ) -> HeaderEncoder {
-        qdebug!("[{self}] encoding headers");
+        debug!("[{self}] encoding headers");
 
         // Try to send capacity instructions if present.
         // This code doesn't try to deal with errors, it just tries
@@ -431,11 +429,8 @@ impl Encoder {
         // by the main loop.
         let mut encoder_blocked = self.send_encoder_updates(conn).is_err();
 
-        let mut encoded_h = HeaderEncoder::new(
-            self.table.base(),
-            self.use_huffman,
-            self.table.capacity() / to_u64(ADDITIONAL_TABLE_ENTRY_SIZE),
-        );
+        let mut encoded_h =
+            HeaderEncoder::new(self.table.base(), self.use_huffman, self.max_entries);
 
         // Avoid the dynamic table unless we have space to track.
         let stream_was_blocking = self.is_stream_blocker(stream_id);
@@ -453,7 +448,7 @@ impl Encoder {
         for iter in h {
             let name = iter.name().as_bytes().to_vec();
             let value = iter.value();
-            qtrace!("encoding {name:x?} {value:x?}");
+            trace!("encoding {name:x?} {value:x?}");
 
             let found = if can_track {
                 self.table.lookup(&name, value, can_block)
@@ -466,7 +461,7 @@ impl Encoder {
                 value_matches,
             }) = found
             {
-                qtrace!(
+                trace!(
                     "[{self}] found a {} entry, value-match={value_matches}",
                     if static_table { "static" } else { "dynamic" }
                 );
@@ -514,21 +509,18 @@ impl Encoder {
 
         encoded_h.encode_header_block_prefix();
 
-        if !stream_was_blocking {
+        if let Some(max_ref) = ref_entries.iter().max() {
+            let req_insert_cnt = max_ref + 1;
             // The streams was not a blocker, check if the stream is a blocker now.
-            if let Some(max_ref) = ref_entries.iter().max()
-                && *max_ref >= self.table.get_acked_inserts_cnt()
-            {
+            if !stream_was_blocking && req_insert_cnt > self.table.get_acked_inserts_cnt() {
                 debug_assert!(self.blocked_stream_cnt <= self.max_blocked_streams);
                 self.blocked_stream_cnt += 1;
             }
-        }
 
-        if !ref_entries.is_empty() {
             self.unacked_header_blocks
                 .entry(stream_id)
                 .or_default()
-                .push_front(ref_entries);
+                .push_front((req_insert_cnt, ref_entries));
             self.stats.dynamic_table_references += 1;
         }
         #[cfg(feature = "build-fuzzing-corpus")]
@@ -601,7 +593,7 @@ mod tests {
     };
 
     use super::{Connection, Encoder, Error, Header, Res, map_error};
-    use crate::Settings;
+    use crate::{Decoder, Settings};
 
     struct TestEncoder {
         encoder: Encoder,
@@ -654,7 +646,7 @@ mod tests {
         }
     }
 
-    fn connect_generic(huffman: bool, max_data: Option<u64>) -> TestEncoder {
+    fn connect_generic(huffman: bool, max_data: Option<u64>, max_table_size: u64) -> TestEncoder {
         let mut conn = default_client();
         let mut peer_conn = max_data.map_or_else(default_server, |max| {
             new_server::<CountingConnectionIdGenerator, &str>(
@@ -674,7 +666,7 @@ mod tests {
         // create an encoder
         let mut encoder = Encoder::new(
             &Settings {
-                max_table_size_encoder: 1500,
+                max_table_size_encoder: max_table_size,
                 max_table_size_decoder: 0,
                 max_blocked_streams: 0,
                 max_tracked_streams: 4096,
@@ -694,11 +686,11 @@ mod tests {
     }
 
     fn connect(huffman: bool) -> TestEncoder {
-        connect_generic(huffman, None)
+        connect_generic(huffman, None, 1500)
     }
 
     fn connect_flow_control(max_data: u64) -> TestEncoder {
-        connect_generic(true, Some(max_data))
+        connect_generic(true, Some(max_data), 1500)
     }
 
     fn recv_instruction(encoder: &mut TestEncoder, decoder_instruction: &[u8], now: Instant) {
@@ -708,12 +700,7 @@ mod tests {
             .unwrap();
         let out = encoder.peer_conn.process_output(now);
         drop(encoder.conn.process(out.dgram(), now));
-        assert!(
-            encoder
-                .encoder
-                .read_instructions(&mut encoder.conn, now)
-                .is_ok()
-        );
+        assert!(encoder.encoder.read_instructions(&mut encoder.conn).is_ok());
     }
 
     const CAP_INSTRUCTION_200: &[u8] = &[0x02, 0x3f, 0xa9, 0x01];
@@ -1064,7 +1051,7 @@ mod tests {
         let out = encoder.peer_conn.process_output(now());
         encoder.conn.process_input(out.dgram().unwrap(), now());
         assert_eq!(
-            encoder.encoder.read_instructions(&mut encoder.conn, now()),
+            encoder.encoder.read_instructions(&mut encoder.conn),
             Err(Error::DecoderStream)
         );
     }
@@ -1084,7 +1071,7 @@ mod tests {
         let out = encoder.peer_conn.process_output(now());
         encoder.conn.process_input(out.dgram().unwrap(), now());
         assert_eq!(
-            encoder.encoder.read_instructions(&mut encoder.conn, now()),
+            encoder.encoder.read_instructions(&mut encoder.conn),
             Err(Error::DecoderStream)
         );
     }
@@ -1467,6 +1454,40 @@ mod tests {
         assert_eq!(encoder.encoder.blocked_stream_cnt(), 1);
     }
 
+    // Acknowledged inserts unblock a stream before its Section Acknowledgment arrives.
+    #[test]
+    fn max_block_streams_acked_inserts_not_blocking() {
+        let mut encoder = connect(false);
+        assert!(encoder.encoder.set_max_capacity(200).is_ok());
+        encoder.send_instructions(CAP_INSTRUCTION_200);
+        encoder.encoder.set_max_blocked_streams(1).unwrap();
+
+        let buf = encoder.encoder.encode_header_block(
+            &mut encoder.conn,
+            &[Header::new("name1", "value1")],
+            STREAM_1,
+        );
+        assert_is_index_to_dynamic_post(&buf);
+        recv_instruction(&mut encoder, &[0x01], now());
+        assert_eq!(encoder.encoder.blocked_stream_cnt(), 0);
+
+        let buf = encoder.encoder.encode_header_block(
+            &mut encoder.conn,
+            &[Header::new("name2", "value2")],
+            STREAM_2,
+        );
+        assert_is_index_to_dynamic_post(&buf);
+        assert_eq!(encoder.encoder.blocked_stream_cnt(), 1);
+
+        let buf = encoder.encoder.encode_header_block(
+            &mut encoder.conn,
+            &[Header::new("name3", "value3")],
+            STREAM_1,
+        );
+        assert_is_literal_value_literal_name(&buf);
+        assert_eq!(encoder.encoder.blocked_stream_cnt(), 1);
+    }
+
     #[test]
     fn dynamic_table_can_evict1() {
         let mut encoder = connect(false);
@@ -1706,6 +1727,130 @@ mod tests {
         // change capacity to 2000.
         assert!(encoder.encoder.set_max_capacity(2000).is_ok());
         encoder.send_instructions(CAP_INSTRUCTION_1500);
+        assert_eq!(encoder.encoder.table.capacity(), 1500);
+
+        // MaxEntries comes from the decoder's advertised capacity (2000), not the
+        // locally clamped table capacity (1500). Advance past the smaller modulus
+        // to make the encoded Required Insert Count distinguish the two values.
+        for i in 0..100 {
+            let value = i.to_string();
+            encoder
+                .encoder
+                .table
+                .insert(b"x", value.as_bytes())
+                .unwrap();
+            encoder.encoder.table.increment_acked(1).unwrap();
+        }
+        let block = encoder.encoder.encode_header_block(
+            &mut encoder.conn,
+            &[Header::new("x", "99")],
+            STREAM_1,
+        );
+        assert_eq!(block.as_ref(), &[0x65, 0x00, 0x80]);
+    }
+
+    #[test]
+    fn required_insert_count_uses_decoder_max_capacity() {
+        // Cover a smaller local limit, equal limits, a smaller peer limit, and a capacity
+        // reduction that leaves the peer's advertised maximum unchanged.
+        for (local_limit, reduce_capacity) in [(60, false), (128, false), (256, false), (128, true)]
+        {
+            let mut encoder = connect_generic(false, None, local_limit);
+            encoder.encoder.set_max_capacity(128).unwrap();
+            encoder.encoder.set_max_blocked_streams(1).unwrap();
+            encoder
+                .encoder
+                .send_encoder_updates(&mut encoder.conn)
+                .unwrap();
+
+            let mut decoder = Decoder::new(&Settings::default().max_table_size_decoder(128));
+            decoder.add_recv_stream(encoder.send_stream_id).unwrap();
+            decoder.add_send_stream(encoder.recv_stream_id).unwrap();
+            decoder.send(&mut encoder.peer_conn).unwrap();
+
+            let out = encoder.conn.process_output(now());
+            let out2 = encoder.peer_conn.process(out.dgram(), now());
+            drop(encoder.conn.process(out2.dgram(), now()));
+
+            let mut stream_type = [0];
+            assert_eq!(
+                encoder
+                    .peer_conn
+                    .stream_recv(encoder.send_stream_id, &mut stream_type),
+                Ok((1, false))
+            );
+            assert_eq!(stream_type, [0x02]);
+            assert_eq!(
+                encoder
+                    .conn
+                    .stream_recv(encoder.recv_stream_id, &mut stream_type),
+                Ok((1, false))
+            );
+            assert_eq!(stream_type, [0x03]);
+            assert!(decoder.receive(&mut encoder.peer_conn).unwrap().is_empty());
+
+            // The peer's maximum gives MaxEntries = 4 and FullRange = 8. Exercise two wraps.
+            for insert_count in 1_u8..=17 {
+                if reduce_capacity && insert_count == 9 {
+                    encoder.encoder.change_capacity(60);
+                    encoder
+                        .encoder
+                        .send_encoder_updates(&mut encoder.conn)
+                        .unwrap();
+                }
+                let headers = vec![Header::new("x", insert_count.to_string())];
+                encoder
+                    .encoder
+                    .send_and_insert(&mut encoder.conn, b"x", headers[0].value())
+                    .unwrap();
+                let buf =
+                    encoder
+                        .encoder
+                        .encode_header_block(&mut encoder.conn, &headers, STREAM_1);
+                let out = encoder.conn.process_output(now());
+                let out2 = encoder.peer_conn.process(out.dgram(), now());
+                drop(encoder.conn.process(out2.dgram(), now()));
+                assert!(decoder.receive(&mut encoder.peer_conn).unwrap().is_empty());
+                assert_eq!(
+                    decoder.decode_header_block(&buf, STREAM_1),
+                    Ok(Some(headers)),
+                    "local_limit={local_limit}, reduce_capacity={reduce_capacity}, insert_count={insert_count}"
+                );
+                assert_eq!(buf.as_ref(), &[insert_count % 8 + 1, 0x00, 0x80]);
+
+                // Absorb the QPACK bookkeeping: acknowledgments and so forth.
+                decoder.send(&mut encoder.peer_conn).unwrap();
+                let out = encoder.peer_conn.process_output(now());
+                let out2 = encoder.conn.process(out.dgram(), now());
+                drop(encoder.peer_conn.process(out2.dgram(), now()));
+                encoder.encoder.receive(&mut encoder.conn, now()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn same_table_capacity_updates_required_insert_count_range() {
+        let mut encoder = connect_generic(false, None, 60);
+        encoder.encoder.set_max_capacity(128).unwrap();
+        encoder.encoder.set_max_blocked_streams(1).unwrap();
+        encoder.send_instructions(CAP_INSTRUCTION_60);
+
+        // The new maximum equals the current capacity, but changes the wrapping range.
+        encoder.encoder.set_max_capacity(60).unwrap();
+        for expected_count in [0x02, 0x01] {
+            encoder.insert(
+                HEADER_CONTENT_LENGTH,
+                VALUE_1,
+                HEADER_CONTENT_LENGTH_VALUE_1_NAME_LITERAL,
+            );
+            encoder.encode_header_block(
+                STREAM_1,
+                &[Header::new("content-length", "1234")],
+                &[expected_count, 0x00, 0x80],
+                &[],
+            );
+            recv_instruction(&mut encoder, HEADER_ACK_STREAM_ID_1, now());
+        }
     }
 
     #[test]

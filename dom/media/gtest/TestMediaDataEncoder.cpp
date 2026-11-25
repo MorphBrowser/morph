@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <algorithm>
+#include <cstring>
 
 #include "AOMDecoder.h"
 #include "AnnexB.h"
@@ -16,19 +17,30 @@
 #include "VideoUtils.h"
 #include "gtest/gtest.h"
 #include "mozilla/AbstractThread.h"
+#include "mozilla/CheckedInt.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/RemoteMediaDataEncoderParent.h"
+#include "mozilla/ScopeExit.h"
 #include "mozilla/SpinEventLoopUntil.h"
+#include "mozilla/TaskQueue.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/gfx/DataSurfaceHelpers.h"
 #include "mozilla/gtest/ScopedPrefSetter.h"
 #include "mozilla/gtest/WaitFor.h"
 #include "mozilla/media/MediaUtils.h"  // For media::Await
+
+#ifdef XP_MACOSX
+#  include "MacIOSurfaceImage.h"
+#  include "apple/AppleVTEncoder.h"
+#  include "mozilla/gfx/MacIOSurface.h"
+#endif
 
 #ifdef MOZ_WIDGET_ANDROID
 // Create/init a H.264 encoder and check if it's SW.
 #  define SKIP_IF_ANDROID_SW()                                                \
     do {                                                                      \
       RefPtr<MediaDataEncoder> e = CreateH264Encoder(                         \
-          Usage::Record,                                                      \
-          EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),       \
+          Usage::Record, EncoderConfig::SampleFormat(ImagePixelFormat::I420), \
           kImageSize, ScalabilityMode::None, AsVariant(kH264SpecificAnnexB)); \
       if (EnsureInit(e)) {                                                    \
         nsCString dummy;                                                      \
@@ -124,11 +136,12 @@ class MediaDataEncoderTest : public testing::Test {
       mYUV.mYStride = aSize.width;
       mYUV.mCbCrStride = (aSize.width + 1) / 2;
       mYUV.mChromaSubsampling = gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT;
-      auto ySize = mYUV.YDataSize();
-      auto cbcrSize = mYUV.CbCrDataSize();
+      const auto sizes = mYUV.GetPlaneSizes();
+      const auto& ySize = sizes->mY;
+      const auto& cbcrSize = sizes->mCbCr;
       size_t bufferSize =
           mYUV.mYStride * ySize.height + 2 * mYUV.mCbCrStride * cbcrSize.height;
-      mBuffer = MakeUnique<uint8_t[]>(bufferSize);
+      mBuffer = std::make_unique<uint8_t[]>(bufferSize);
       std::fill_n(mBuffer.get(), bufferSize, 0x7F);
       mYUV.mYChannel = mBuffer.get();
       mYUV.mCbChannel = mYUV.mYChannel + mYUV.mYStride * ySize.height;
@@ -193,8 +206,7 @@ class MediaDataEncoderTest : public testing::Test {
     }
 
     void Draw(const size_t aIndex) {
-      auto ySize = mYUV.YDataSize();
-      DrawChessboard(mYUV.mYChannel, ySize.width, ySize.height, aIndex << 1);
+      DrawChessboard(mYUV.mYChannel, mSize.width, mSize.height, aIndex << 1);
       int16_t color = AssertedCast<int16_t>(mYUV.mCbChannel[0] + mColorStep);
       if (color > 255 || color < 0) {
         mColorStep = AssertedCast<int16_t>(-mColorStep);
@@ -436,7 +448,7 @@ static void CheckH264EncodeOutput(const MediaDataEncoder::EncodedData& aOutput,
 static already_AddRefed<MediaDataEncoder> CreateH264Encoder(
     Usage aUsage = Usage::Realtime,
     EncoderConfig::SampleFormat aFormat =
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        EncoderConfig::SampleFormat(ImagePixelFormat::I420),
     gfx::IntSize aSize = kImageSize,
     ScalabilityMode aScalabilityMode = ScalabilityMode::None,
     const EncoderConfig::CodecSpecific& aSpecific =
@@ -458,8 +470,7 @@ TEST_F(MediaDataEncoderTest, H264Inits) {
   RUN_IF_SUPPORTED(CodecType::H264, []() {
     // w/o codec specific: should fail for h264.
     RefPtr<MediaDataEncoder> e = CreateH264Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::None, AsVariant(void_t{}));
     EXPECT_FALSE(e);
 
@@ -485,7 +496,7 @@ static void H264EncodesTest(Usage aUsage,
 
     // Encode one frame and output in AnnexB/AVCC format.
     RefPtr<MediaDataEncoder> e = CreateH264Encoder(
-        aUsage, EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        aUsage, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         aFrameSource.GetSize(), ScalabilityMode::None, aSpecific);
     bool initOk = EnsureInit(e);
 #ifdef MOZ_WIDGET_ANDROID
@@ -504,7 +515,7 @@ static void H264EncodesTest(Usage aUsage,
 
     // Encode multiple frames and output in AnnexB/AVCC format.
     e = CreateH264Encoder(
-        aUsage, EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        aUsage, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         aFrameSource.GetSize(), ScalabilityMode::None, aSpecific);
     EXPECT_TRUE(EnsureInit(e));
     const bool is4KOrLarger = kImageSize4K <= aFrameSource.GetSize();
@@ -601,7 +612,7 @@ static void H264EncodeBatchTest(
         aSpecific.as<H264Specific>().mFormat == H264BitStreamFormat::AVC;
 
     RefPtr<MediaDataEncoder> e = CreateH264Encoder(
-        aUsage, EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        aUsage, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         aFrameSource.GetSize(), ScalabilityMode::None, aSpecific);
     EXPECT_TRUE(EnsureInit(e));
 
@@ -666,7 +677,7 @@ static void H264EncodeAfterDrainTest(
 
   RUN_IF_SUPPORTED(CodecType::H264, [&]() {
     RefPtr<MediaDataEncoder> e = CreateH264Encoder(
-        aUsage, EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        aUsage, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         aFrameSource.GetSize(), ScalabilityMode::None, aSpecific);
 
     EXPECT_TRUE(EnsureInit(e));
@@ -711,7 +722,7 @@ static void H264InterleavedEncodeAndDrainTest(
 
   RUN_IF_SUPPORTED(CodecType::H264, [&]() {
     RefPtr<MediaDataEncoder> e = CreateH264Encoder(
-        aUsage, EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        aUsage, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         aFrameSource.GetSize(), ScalabilityMode::None, aSpecific);
 
     EXPECT_TRUE(EnsureInit(e));
@@ -770,21 +781,18 @@ TEST_F(MediaDataEncoderTest, H264Duration) {
 TEST_F(MediaDataEncoderTest, H264InvalidSize) {
   RUN_IF_SUPPORTED(CodecType::H264, []() {
     RefPtr<MediaDataEncoder> e0x0 = CreateH264Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P), {0, 0},
-        ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
+        {0, 0}, ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
     EXPECT_EQ(e0x0, nullptr);
 
     RefPtr<MediaDataEncoder> e0x1 = CreateH264Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P), {0, 1},
-        ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
+        {0, 1}, ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
     EXPECT_EQ(e0x1, nullptr);
 
     RefPtr<MediaDataEncoder> e1x0 = CreateH264Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P), {1, 0},
-        ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
+        {1, 0}, ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
     EXPECT_EQ(e1x0, nullptr);
   });
 }
@@ -794,8 +802,7 @@ TEST_F(MediaDataEncoderTest, H264AVCC) {
   RUN_IF_SUPPORTED(CodecType::H264, [this]() {
     // Encod frames in avcC format.
     RefPtr<MediaDataEncoder> e = CreateH264Encoder(
-        Usage::Record,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Record, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::None, AsVariant(kH264SpecificAVCC));
     EXPECT_TRUE(EnsureInit(e));
     MediaDataEncoder::EncodedData output =
@@ -809,6 +816,13 @@ TEST_F(MediaDataEncoderTest, H264AVCC) {
         if (frame->mExtraData && !frame->mExtraData->IsEmpty()) {
           EXPECT_TRUE(AnnexB::IsAVCC(frame));
           AVCCConfig config = AVCCConfig::Parse(frame).unwrap();
+          ASSERT_FALSE(config.mSPSs.IsEmpty());
+          for (const auto& sps : config.mSPSs) {
+            ASSERT_GE(sps.mNALU.Length(), 4u);
+            EXPECT_EQ(sps.mNALU[1], config.mAVCProfileIndication);
+            EXPECT_EQ(sps.mNALU[2], config.mProfileCompatibility);
+            EXPECT_EQ(sps.mNALU[3], config.mAVCLevelIndication);
+          }
           EXPECT_EQ(config.mAVCProfileIndication,
                     static_cast<decltype(config.mAVCProfileIndication)>(
                         kH264SpecificAVCC.mProfile));
@@ -832,12 +846,13 @@ static already_AddRefed<MediaData> CreateNV12Frame(const gfx::IntSize& aSize) {
   data.mChromaSubsampling = gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT;
   data.mCbSkip = 1;
   data.mCrSkip = 1;
-  const auto ySize = data.YDataSize();
-  const auto cbcrSize = data.CbCrDataSize();
+  const auto sizes = data.GetPlaneSizes();
+  const auto& ySize = sizes->mY;
+  const auto& cbcrSize = sizes->mCbCr;
   const size_t yBytes = static_cast<size_t>(data.mYStride) * ySize.height;
   const size_t cbcrBytes =
       static_cast<size_t>(data.mCbCrStride) * cbcrSize.height;
-  auto buffer = MakeUnique<uint8_t[]>(yBytes + cbcrBytes);
+  auto buffer = std::make_unique<uint8_t[]>(yBytes + cbcrBytes);
   std::fill_n(buffer.get(), yBytes, static_cast<uint8_t>(235));
   std::fill_n(buffer.get() + yBytes, cbcrBytes, static_cast<uint8_t>(128));
   data.mYChannel = buffer.get();
@@ -854,12 +869,213 @@ static already_AddRefed<MediaData> CreateNV12Frame(const gfx::IntSize& aSize) {
   return frame.forget();
 }
 
+struct RawBgrxFrame {
+  static constexpr size_t kBytesPerPixel = 4;
+
+  gfx::IntSize mSize;
+  size_t mStride;
+  nsTArray<uint8_t> mData;
+
+  size_t PixelOffset(int32_t aX, int32_t aY) const {
+    const bool isInBounds =
+        aX >= 0 && aX < mSize.width && aY >= 0 && aY < mSize.height;
+    EXPECT_TRUE(isInBounds);
+    if (!isInBounds) {
+      return 0;
+    }
+    const bool hasPixel = mData.Length() >= kBytesPerPixel;
+    EXPECT_TRUE(hasPixel);
+    if (!hasPixel) {
+      return 0;
+    }
+    const CheckedInt<size_t> offset =
+        CheckedInt<size_t>(static_cast<size_t>(aY)) * mStride +
+        CheckedInt<size_t>(static_cast<size_t>(aX)) * kBytesPerPixel;
+    const bool isValidOffset =
+        offset.isValid() && offset.value() <= mData.Length() - kBytesPerPixel;
+    EXPECT_TRUE(isValidOffset);
+    if (!isValidOffset) {
+      return 0;
+    }
+    return offset.value();
+  }
+
+  uint8_t* PixelData(int32_t aX, int32_t aY) {
+    return mData.Elements() + PixelOffset(aX, aY);
+  }
+
+  const uint8_t* PixelData(int32_t aX, int32_t aY) const {
+    return mData.Elements() + PixelOffset(aX, aY);
+  }
+
+  const uint8_t* RowData(int32_t aY) const { return PixelData(0, aY); }
+};
+
+static UniquePtr<RawBgrxFrame> CreateCornerPattern(const gfx::IntSize& aSize,
+                                                   int32_t aMarker) {
+  if (aSize.width <= 0 || aSize.height <= 0 || aMarker <= 0 ||
+      aMarker > (aSize.width - 1) / 2 || aMarker > (aSize.height - 1) / 2) {
+    return nullptr;
+  }
+
+  const CheckedInt<size_t> rowBytes =
+      CheckedInt<size_t>(static_cast<size_t>(aSize.width)) *
+      RawBgrxFrame::kBytesPerPixel;
+  const CheckedInt<size_t> bufferBytes =
+      rowBytes * static_cast<size_t>(aSize.height);
+  if (!rowBytes.isValid() || !bufferBytes.isValid()) {
+    return nullptr;
+  }
+
+  auto frame = std::make_unique<RawBgrxFrame>();
+  frame->mSize = aSize;
+  frame->mStride = rowBytes.value();
+  if (!frame->mData.SetLength(bufferBytes.value(), fallible)) {
+    return nullptr;
+  }
+  std::fill_n(frame->mData.Elements(), frame->mData.Length(),
+              static_cast<uint8_t>(255));
+
+  for (int32_t y = 0; y < aSize.height; ++y) {
+    for (int32_t x = 0; x < aSize.width; ++x) {
+      if (!((x < aMarker || x >= aSize.width - aMarker) &&
+            (y < aMarker || y >= aSize.height - aMarker))) {
+        continue;
+      }
+      uint8_t* pixel = frame->PixelData(x, y);
+      pixel[0] = 0;
+      pixel[1] = 0;
+      pixel[2] = 0;
+    }
+  }
+  return frame;
+}
+
+class MutateOnUnmapDataSourceSurface final : public gfx::DataSourceSurface {
+ public:
+  MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(MutateOnUnmapDataSourceSurface, final)
+
+  explicit MutateOnUnmapDataSourceSurface(gfx::DataSourceSurface* aSurface)
+      : mSurface(aSurface) {}
+
+  uint8_t* GetData() final { return mSurface->GetData(); }
+  int32_t Stride() final { return mSurface->Stride(); }
+  gfx::IntSize GetSize() const final { return mSurface->GetSize(); }
+  gfx::SurfaceFormat GetFormat() const final { return mSurface->GetFormat(); }
+
+  bool Map(MapType aType, MappedSurface* aMap) final {
+    return mSurface->Map(aType, aMap);
+  }
+
+  void Unmap() final {
+    mSurface->Unmap();
+    if (!mMutateOnUnmap) {
+      return;
+    }
+    mMutateOnUnmap = false;
+    MappedSurface map;
+    if (!mSurface->Map(WRITE, &map)) {
+      return;
+    }
+    const size_t bytes =
+        gfx::BufferSizeFromStrideAndHeight(map.mStride, GetSize().height);
+    if (map.mData && bytes) {
+      std::fill_n(map.mData, bytes, static_cast<uint8_t>(0));
+      mDidMutate = true;
+    }
+    mSurface->Unmap();
+  }
+
+  void MutateOnNextUnmap() { mMutateOnUnmap = true; }
+  bool DidMutate() const { return mDidMutate; }
+
+ private:
+  ~MutateOnUnmapDataSourceSurface() final = default;
+
+  RefPtr<gfx::DataSourceSurface> mSurface;
+  bool mMutateOnUnmap = false;
+  bool mDidMutate = false;
+};
+
+static already_AddRefed<MediaData> CreateSourceSurfaceFrame(
+    const RawBgrxFrame& aFrame,
+    RefPtr<MutateOnUnmapDataSourceSurface>* aMutatingSurface) {
+  RefPtr<gfx::DataSourceSurface> surface =
+      gfx::Factory::CreateDataSourceSurface(aFrame.mSize,
+                                            gfx::SurfaceFormat::B8G8R8X8, true);
+  if (!surface) {
+    return nullptr;
+  }
+  gfx::DataSourceSurface::ScopedMap map(surface, gfx::DataSourceSurface::WRITE);
+  if (!map.IsMapped() || map.GetStride() <= 0 || !map.GetData() ||
+      static_cast<size_t>(map.GetStride()) < aFrame.mStride ||
+      !gfx::BufferSizeFromStrideAndHeight(map.GetStride(),
+                                          aFrame.mSize.height)) {
+    return nullptr;
+  }
+  for (int32_t y = 0; y < aFrame.mSize.height; ++y) {
+    const CheckedInt<size_t> offset =
+        CheckedInt<size_t>(static_cast<size_t>(y)) * map.GetStride();
+    if (!offset.isValid()) {
+      return nullptr;
+    }
+    std::copy_n(aFrame.RowData(y), aFrame.mStride,
+                map.GetData() + offset.value());
+  }
+  RefPtr<MutateOnUnmapDataSourceSurface> mutatingSurface =
+      new MutateOnUnmapDataSourceSurface(surface);
+  RefPtr<layers::Image> image =
+      new layers::SourceSurfaceImage(aFrame.mSize, mutatingSurface);
+  *aMutatingSurface = std::move(mutatingSurface);
+  RefPtr<MediaData> frame = VideoData::CreateFromImage(
+      aFrame.mSize, 0, media::TimeUnit::Zero(),
+      media::TimeUnit::FromMicroseconds(FRAME_DURATION), image, true,
+      media::TimeUnit::Zero());
+  return frame.forget();
+}
+
+static void AssertPixelBufferMatches(CVPixelBufferRef aPixelBuffer,
+                                     const RawBgrxFrame& aExpected) {
+  ASSERT_EQ(CVPixelBufferGetPixelFormatType(aPixelBuffer),
+            kCVPixelFormatType_32BGRA);
+  ASSERT_EQ(CVPixelBufferGetWidth(aPixelBuffer),
+            static_cast<size_t>(aExpected.mSize.width));
+  ASSERT_EQ(CVPixelBufferGetHeight(aPixelBuffer),
+            static_cast<size_t>(aExpected.mSize.height));
+  ASSERT_EQ(
+      CVPixelBufferLockBaseAddress(aPixelBuffer, kCVPixelBufferLock_ReadOnly),
+      kCVReturnSuccess);
+  auto unlock = MakeScopeExit([&] {
+    CVPixelBufferUnlockBaseAddress(aPixelBuffer, kCVPixelBufferLock_ReadOnly);
+  });
+
+  const size_t destinationStride = CVPixelBufferGetBytesPerRow(aPixelBuffer);
+  const CheckedInt<size_t> destinationLength =
+      CheckedInt<size_t>(destinationStride) *
+      static_cast<size_t>(aExpected.mSize.height);
+  ASSERT_TRUE(destinationLength.isValid());
+  ASSERT_LE(destinationLength.value(), CVPixelBufferGetDataSize(aPixelBuffer));
+  ASSERT_GE(destinationStride, aExpected.mStride);
+  const uint8_t* destination =
+      static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(aPixelBuffer));
+  ASSERT_TRUE(destination);
+
+  for (int32_t y = 0; y < aExpected.mSize.height; ++y) {
+    const CheckedInt<size_t> destinationOffset =
+        CheckedInt<size_t>(static_cast<size_t>(y)) * destinationStride;
+    ASSERT_TRUE(destinationOffset.isValid());
+    SCOPED_TRACE(y);
+    ASSERT_EQ(std::memcmp(destination + destinationOffset.value(),
+                          aExpected.RowData(y), aExpected.mStride),
+              0);
+  }
+}
+
 TEST_F(MediaDataEncoderTest, H264EncodeNV12Input) {
   RUN_IF_SUPPORTED(CodecType::H264, []() {
     const gfx::IntSize size(640, 480);
     RefPtr<MediaDataEncoder> encoder = CreateH264Encoder(
-        Usage::Record,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420SP_NV12),
+        Usage::Record, EncoderConfig::SampleFormat(ImagePixelFormat::NV12),
         size, ScalabilityMode::None, AsVariant(kH264SpecificAVCC));
     if (!encoder) {
       return;
@@ -881,6 +1097,102 @@ TEST_F(MediaDataEncoderTest, H264EncodeNV12Input) {
   });
 }
 
+namespace mozilla {
+
+// Poison the source on unmap to verify that the returned pixel buffer owns an
+// independent copy rather than retaining the scoped map's address.
+TEST(AppleVTEncoderTest, CopiesPackedInputBeforeUnmap)
+{
+  const gfx::IntSize size(640, 480);
+  constexpr int32_t kCornerMarkerSize = 80;
+  UniquePtr<RawBgrxFrame> expected =
+      CreateCornerPattern(size, kCornerMarkerSize);
+  ASSERT_TRUE(expected);
+  const EncoderConfig config(
+      CodecType::H264, size, Usage::Record,
+      EncoderConfig::SampleFormat(ImagePixelFormat::BGRA), FRAME_RATE,
+      KEYFRAME_INTERVAL, BIT_RATE, 0, 0, BIT_RATE_MODE,
+      HardwarePreference::None, ScalabilityMode::None,
+      AsVariant(kH264SpecificAVCC));
+  RefPtr<TaskQueue> taskQueue = TaskQueue::Create(
+      GetMediaThreadPool(MediaThreadType::PLATFORM_ENCODER), __func__);
+  ASSERT_TRUE(taskQueue);
+  RefPtr<AppleVTEncoder> encoder = new AppleVTEncoder(config, taskQueue);
+  CVPixelBufferRef pixelBuffer = nullptr;
+  auto cleanup = MakeScopeExit([&] {
+    if (pixelBuffer) {
+      CVPixelBufferRelease(pixelBuffer);
+    }
+    encoder = nullptr;
+    taskQueue->BeginShutdown();
+    taskQueue->AwaitShutdownAndIdle();
+  });
+
+  RefPtr<MutateOnUnmapDataSourceSurface> sourceSurface;
+  RefPtr<MediaData> frame = CreateSourceSurfaceFrame(*expected, &sourceSurface);
+  ASSERT_TRUE(frame);
+  ASSERT_TRUE(sourceSurface);
+  RefPtr<layers::Image> image = frame->As<VideoData>()->mImage;
+  ASSERT_TRUE(image);
+  sourceSurface->MutateOnNextUnmap();
+
+  (void)WaitFor(InvokeAsync(taskQueue, __func__, [&] {
+    pixelBuffer = encoder->CreateCVPixelBuffer(image);
+    return GenericPromise::CreateAndResolve(true, __func__);
+  }));
+
+  ASSERT_TRUE(sourceSurface->DidMutate());
+  ASSERT_TRUE(pixelBuffer);
+  AssertPixelBufferMatches(pixelBuffer, *expected);
+}
+
+// A P010 IOSurface has no ImagePixelFormat, so it is read back as RGB.
+TEST(AppleVTEncoderTest, ReadsBackIOSurfaceWithoutPixelFormat)
+{
+  const gfx::IntSize size(64, 48);
+  RefPtr<MacIOSurface> surface = MacIOSurface::CreateBiPlanarSurface(
+      size, gfx::IntSize(size.width / 2, size.height / 2),
+      gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT, gfx::YUVColorSpace::BT709,
+      gfx::TransferFunction::BT709, gfx::ColorRange::LIMITED,
+      gfx::ColorDepth::COLOR_10, MacIOSurface::AllowAlpha::No);
+  ASSERT_TRUE(surface);
+  ASSERT_EQ(surface->GetFormat(), gfx::SurfaceFormat::P010);
+  RefPtr<layers::Image> image = new layers::MacIOSurfaceImage(surface);
+  ASSERT_TRUE(ImageToPixelFormat(image).isNothing());
+
+  const EncoderConfig config(
+      CodecType::H264, size, Usage::Record,
+      EncoderConfig::SampleFormat(ImagePixelFormat::BGRA), FRAME_RATE,
+      KEYFRAME_INTERVAL, BIT_RATE, 0, 0, BIT_RATE_MODE,
+      HardwarePreference::None, ScalabilityMode::None,
+      AsVariant(kH264SpecificAVCC));
+  RefPtr<TaskQueue> taskQueue = TaskQueue::Create(
+      GetMediaThreadPool(MediaThreadType::PLATFORM_ENCODER), __func__);
+  ASSERT_TRUE(taskQueue);
+  RefPtr<AppleVTEncoder> encoder = new AppleVTEncoder(config, taskQueue);
+  CVPixelBufferRef pixelBuffer = nullptr;
+  auto cleanup = MakeScopeExit([&] {
+    if (pixelBuffer) {
+      CVPixelBufferRelease(pixelBuffer);
+    }
+    encoder = nullptr;
+    taskQueue->BeginShutdown();
+    taskQueue->AwaitShutdownAndIdle();
+  });
+
+  (void)WaitFor(InvokeAsync(taskQueue, __func__, [&] {
+    pixelBuffer = encoder->CreateCVPixelBuffer(image);
+    return GenericPromise::CreateAndResolve(true, __func__);
+  }));
+
+  ASSERT_TRUE(pixelBuffer);
+  // TODO(bug 2063701): Expect the IOSurface itself, with its own pixel format,
+  // if the encoder can wrap it.
+  EXPECT_EQ(CVPixelBufferGetPixelFormatType(pixelBuffer),
+            kCVPixelFormatType_32BGRA);
+}
+
+}  // namespace mozilla
 #endif
 
 // For Android HW encoder only.
@@ -889,9 +1201,8 @@ TEST_F(MediaDataEncoderTest, AndroidNotSupportedSize) {
   SKIP_IF_ANDROID_SW();
   RUN_IF_SUPPORTED(CodecType::H264, []() {
     RefPtr<MediaDataEncoder> e = CreateH264Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P), {1, 1},
-        ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
+        {1, 1}, ScalabilityMode::None, AsVariant(kH264SpecificAnnexB));
     EXPECT_NE(e, nullptr);
     EXPECT_FALSE(EnsureInit(e));
   });
@@ -902,7 +1213,7 @@ TEST_F(MediaDataEncoderTest, AndroidNotSupportedSize) {
 static already_AddRefed<MediaDataEncoder> CreateVP8Encoder(
     Usage aUsage = Usage::Realtime,
     EncoderConfig::SampleFormat aFormat =
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        EncoderConfig::SampleFormat(ImagePixelFormat::I420),
     gfx::IntSize aSize = kImageSize,
     ScalabilityMode aScalabilityMode = ScalabilityMode::None,
     const EncoderConfig::CodecSpecific& aSpecific = AsVariant(VP8Specific())) {
@@ -914,7 +1225,7 @@ static already_AddRefed<MediaDataEncoder> CreateVP8Encoder(
 static already_AddRefed<MediaDataEncoder> CreateVP9Encoder(
     Usage aUsage = Usage::Realtime,
     EncoderConfig::SampleFormat aFormat =
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        EncoderConfig::SampleFormat(ImagePixelFormat::I420),
     gfx::IntSize aSize = kImageSize,
     ScalabilityMode aScalabilityMode = ScalabilityMode::None,
     const EncoderConfig::CodecSpecific& aSpecific = AsVariant(VP9Specific())) {
@@ -935,8 +1246,7 @@ TEST_F(MediaDataEncoderTest, VP8Inits) {
   RUN_IF_SUPPORTED(CodecType::VP8, []() {
     // w/o codec specific.
     RefPtr<MediaDataEncoder> e = CreateVP8Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::None, AsVariant(void_t{}));
     EXPECT_TRUE(EnsureInit(e));
     WaitForShutdown(e);
@@ -1043,8 +1353,7 @@ TEST_F(MediaDataEncoderTest, VP8EncodeWithScalabilityModeL1T2) {
                          false                  /* mFrameDropping */
     );
     RefPtr<MediaDataEncoder> e = CreateVP8Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::L1T2, AsVariant(specific));
     EXPECT_TRUE(EnsureInit(e));
 
@@ -1076,8 +1385,7 @@ TEST_F(MediaDataEncoderTest, VP8EncodeWithScalabilityModeL1T3) {
                          false                  /* mFrameDropping */
     );
     RefPtr<MediaDataEncoder> e = CreateVP8Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::L1T3, AsVariant(specific));
     EXPECT_TRUE(EnsureInit(e));
 
@@ -1112,8 +1420,7 @@ TEST_F(MediaDataEncoderTest, VP9Inits) {
   RUN_IF_SUPPORTED(CodecType::VP9, []() {
     // w/o codec specific.
     RefPtr<MediaDataEncoder> e = CreateVP9Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::None, AsVariant(void_t{}));
     EXPECT_TRUE(EnsureInit(e));
     WaitForShutdown(e);
@@ -1222,8 +1529,7 @@ TEST_F(MediaDataEncoderTest, VP9EncodeWithScalabilityModeL1T2) {
     );
 
     RefPtr<MediaDataEncoder> e = CreateVP9Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::L1T2, AsVariant(specific));
     EXPECT_TRUE(EnsureInit(e));
 
@@ -1259,8 +1565,7 @@ TEST_F(MediaDataEncoderTest, VP9EncodeWithScalabilityModeL1T3) {
     );
 
     RefPtr<MediaDataEncoder> e = CreateVP9Encoder(
-        Usage::Realtime,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Realtime, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, ScalabilityMode::L1T3, AsVariant(specific));
     EXPECT_TRUE(EnsureInit(e));
 
@@ -1282,6 +1587,64 @@ TEST_F(MediaDataEncoderTest, VP9EncodeWithScalabilityModeL1T3) {
   });
 }
 #  endif
+
+static EncoderConfig VP8Config() {
+  return EncoderConfig(CodecType::VP8, kImageSize, Usage::Realtime,
+                       EncoderConfig::SampleFormat(ImagePixelFormat::I420),
+                       FRAME_RATE, KEYFRAME_INTERVAL, BIT_RATE, 0, 0,
+                       BIT_RATE_MODE, HardwarePreference::None,
+                       ScalabilityMode::None, AsVariant(VP8Specific()));
+}
+
+// Sends Construct to aParent, runs aWhileCreating before the encoder creation
+// completes, and returns the Construct result.
+static MediaResult ConstructWith(RemoteMediaDataEncoderParent* aParent,
+                                 const std::function<void()>& aWhileCreating) {
+  Maybe<MediaResult> result;
+  aParent->RecvConstruct(
+      [&](const MediaResult& aResult) { result = Some(aResult); });
+  aWhileCreating();
+  SpinEventLoopUntil("RemoteMediaDataEncoderParent::RecvConstruct"_ns,
+                     [&] { return result.isSome(); });
+  return result.extract();
+}
+
+static void ShutdownAndWait(RemoteMediaDataEncoderParent* aParent) {
+  bool done = false;
+  aParent->RecvShutdown([&](const bool&) { done = true; });
+  SpinEventLoopUntil("RemoteMediaDataEncoderParent::RecvShutdown"_ns,
+                     [&] { return done; });
+}
+
+TEST(RemoteMediaDataEncoderParent, Constructs)
+{
+  RUN_IF_SUPPORTED(CodecType::VP8, []() {
+    auto parent = MakeRefPtr<RemoteMediaDataEncoderParent>(VP8Config());
+    EXPECT_EQ(ConstructWith(parent, [] {}).Code(), NS_OK);
+    ShutdownAndWait(parent);
+  });
+}
+
+TEST(RemoteMediaDataEncoderParent, ShutdownWhileConstructing)
+{
+  RUN_IF_SUPPORTED(CodecType::VP8, []() {
+    auto parent = MakeRefPtr<RemoteMediaDataEncoderParent>(VP8Config());
+    MediaResult rv = ConstructWith(
+        parent, [&] { parent->RecvShutdown([](const bool&) {}); });
+    EXPECT_TRUE(NS_FAILED(rv.Code())) << rv.Description().get();
+  });
+}
+
+TEST(RemoteMediaDataEncoderParent, ActorDestroyWhileConstructing)
+{
+  RUN_IF_SUPPORTED(CodecType::VP8, []() {
+    auto parent = MakeRefPtr<RemoteMediaDataEncoderParent>(VP8Config());
+    MediaResult rv = ConstructWith(parent, [&] {
+      parent->ActorDestroy(mozilla::ipc::IProtocol::AbnormalShutdown);
+    });
+    EXPECT_TRUE(NS_FAILED(rv.Code())) << rv.Description().get();
+  });
+}
 #endif
 
 already_AddRefed<MediaDataEncoder> CreateAudioEncoder(
@@ -1416,7 +1779,7 @@ TEST_F(MediaDataEncoderTest, SmallDownsampledInput) {
 static already_AddRefed<MediaDataEncoder> CreateAV1Encoder(
     Usage aUsage = Usage::Realtime,
     EncoderConfig::SampleFormat aFormat =
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        EncoderConfig::SampleFormat(ImagePixelFormat::I420),
     gfx::IntSize aSize = kImageSize, BitrateMode aBitrateMode = BIT_RATE_MODE,
     HardwarePreference aHardwarePreference = HardwarePreference::None,
     ScalabilityMode aScalabilityMode = ScalabilityMode::None) {
@@ -1467,7 +1830,7 @@ static void SetFrameColor(MediaDataEncoderTest::FrameSource& aSource,
 static EncoderConfig::SampleFormat AV1ColorFormat(
     const AV1ColorTestData& aColor) {
   return EncoderConfig::SampleFormat(
-      dom::ImageBitmapFormat::YUV420P,
+      ImagePixelFormat::I420,
       EncoderConfig::VideoColorSpace(aColor.mRange, aColor.mMatrix,
                                      aColor.mPrimaries, aColor.mTransfer));
 }
@@ -1547,8 +1910,7 @@ static Maybe<uint8_t> GetAV1FrameTemporalId(const MediaRawData& aPacket) {
 TEST_F(MediaDataEncoderTest, AV1SVCTemporalIdsMatchBitstream) {
   RUN_IF_SUPPORTED(CodecType::AV1, [this]() {
     RefPtr<MediaDataEncoder> e = CreateAV1Encoder(
-        Usage::Record,
-        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420P),
+        Usage::Record, EncoderConfig::SampleFormat(ImagePixelFormat::I420),
         kImageSize, BitrateMode::Constant, HardwarePreference::RequireSoftware,
         ScalabilityMode::L1T3);
     ASSERT_TRUE(EnsureInit(e));

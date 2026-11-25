@@ -12,6 +12,7 @@
 #include "mozilla/Sprintf.h"
 #include "mozilla/Utf8.h"  // mozilla::ConvertUtf16ToUtf8
 
+#include <iterator>
 #include <string.h>
 
 #include "vm/JSContext-inl.h"
@@ -26,6 +27,7 @@
 #include "jstypes.h"
 
 #include "builtin/RegExp.h"  // js::RegExpSearcherLastLimitSentinel
+#include "builtin/TestingFunctions.h"
 #ifdef MOZ_EXECUTION_TRACING
 #  include "debugger/ExecutionTracer.h"
 #endif
@@ -878,7 +880,7 @@ void InternalJobQueue::runJobs(JSContext* cx) {
 
       cx->runtime()->offThreadPromiseState.ref().internalDrain(cx);
 
-      job = JS::DequeueNextMicroTask(cx);
+      JS::DequeueNextMicroTask(cx, &job);
       MOZ_ASSERT(job->isJS());
 
       // If the next job is the last job in the job queue, allow
@@ -968,6 +970,7 @@ js::UniquePtr<JS::JobQueue::SavedJobQueue> InternalJobQueue::saveJobQueue(
 // embedder enqueued (typically a Private value) which the GC cannot follow, so
 // it is handed to the JobQueue hook instead.
 void JS::MicroTask::trace(JSTracer* trc, const char* name) {
+  TraceRootRange(trc, std::size(extra_), extra_, name);
   if (value_.isGCThing()) {
     TraceRoot(trc, &value_, name);
     return;
@@ -980,46 +983,50 @@ void JS::MicroTask::trace(JSTracer* trc, const char* name) {
   }
 }
 
+static_assert(sizeof(JS::MicroTask) == 7 * sizeof(JS::Value),
+              "MicroTasks are held by value in several queues; keep them "
+              "compact");
+
 void js::MicroTaskQueueElement::trace(JSTracer* trc) {
   microTask_.trace(trc, "microtask-queue-entry");
 }
 
-mozilla::Maybe<JS::MicroTask> js::MicroTaskQueueSet::popDebugFront() {
-  JS_LOG(mtq, Info, "JS Drain Queue: popDebugFront");
-  if (!debugMicroTaskQueue.empty()) {
-    auto p = mozilla::Some(debugMicroTaskQueue.front().toMicroTask());
-    debugMicroTaskQueue.popFront();
-    return p;
+static void PopFrontInto(js::MicroTaskQueue& queue,
+                         JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  out.get().reset();
+  if (!queue.empty()) {
+    // Copy front, then pop.
+    out.get().emplace(queue.front().toMicroTask());
+    queue.popFront();
   }
-  return mozilla::Nothing();
 }
 
-mozilla::Maybe<JS::MicroTask> js::MicroTaskQueueSet::popFront() {
+void js::MicroTaskQueueSet::popFront(
+    JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
   JS_LOG(mtq, Info, "JS Drain Queue");
-  if (!debugMicroTaskQueue.empty()) {
-    auto p = mozilla::Some(debugMicroTaskQueue.front().toMicroTask());
-    debugMicroTaskQueue.popFront();
-    return p;
-  }
-  if (!microTaskQueue.empty()) {
-    auto p = mozilla::Some(microTaskQueue.front().toMicroTask());
-    microTaskQueue.popFront();
-    return p;
-  }
-
-  return mozilla::Nothing();
+  PopFrontInto(nextQueue(), out);
 }
 
-mozilla::Maybe<JS::MicroTask> js::MicroTaskQueueSet::peekFront() {
-  JS_LOG(mtq, Info, "JS Peek Queue");
-  if (!debugMicroTaskQueue.empty()) {
-    return mozilla::Some(debugMicroTaskQueue.front().toMicroTask());
-  }
-  if (!microTaskQueue.empty()) {
-    return mozilla::Some(microTaskQueue.front().toMicroTask());
-  }
+void js::MicroTaskQueueSet::popDebugFront(
+    JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  JS_LOG(mtq, Info, "JS Drain Queue: popDebugFront");
+  PopFrontInto(debugMicroTaskQueue, out);
+}
 
-  return mozilla::Nothing();
+void js::MicroTaskQueueSet::popRegularFront(
+    JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  JS_LOG(mtq, Info, "JS Drain Queue: popRegularFront");
+  PopFrontInto(microTaskQueue, out);
+}
+
+void js::MicroTaskQueueSet::peekFront(
+    JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  JS_LOG(mtq, Info, "JS Peek Queue");
+  out.get().reset();
+  MicroTaskQueue& queue = nextQueue();
+  if (!queue.empty()) {
+    out.get().emplace(queue.front().toMicroTask());
+  }
 }
 
 bool js::MicroTaskQueueSet::enqueueRegularMicroTask(
@@ -1065,19 +1072,24 @@ JS_PUBLIC_API bool JS::PrependMicroTask(JSContext* cx,
   return cx->microTaskQueues->prependRegularMicroTask(cx, entry);
 }
 
-JS_PUBLIC_API mozilla::Maybe<JS::MicroTask> JS::DequeueNextMicroTask(
-    JSContext* cx) {
-  return cx->microTaskQueues->popFront();
+JS_PUBLIC_API void JS::DequeueNextMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  cx->microTaskQueues->popFront(out);
 }
 
-JS_PUBLIC_API mozilla::Maybe<JS::MicroTask> JS::DequeueNextDebuggerMicroTask(
-    JSContext* cx) {
-  return cx->microTaskQueues->popDebugFront();
+JS_PUBLIC_API void JS::DequeueNextDebuggerMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  cx->microTaskQueues->popDebugFront(out);
 }
 
-JS_PUBLIC_API mozilla::Maybe<JS::MicroTask> JS::PeekNextMicroTask(
-    JSContext* cx) {
-  return cx->microTaskQueues->peekFront();
+JS_PUBLIC_API void JS::DequeueNextRegularMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  cx->microTaskQueues->popRegularFront(out);
+}
+
+JS_PUBLIC_API void JS::PeekNextMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<JS::MicroTask>> out) {
+  cx->microTaskQueues->peekFront(out);
 }
 
 JS_PUBLIC_API bool JS::HasAnyMicroTasks(JSContext* cx) {
@@ -1124,17 +1136,6 @@ JS_PUBLIC_API size_t JS::GetRegularMicroTaskCount(JSContext* cx) {
 
 JS_PUBLIC_API bool JS::HasRegularMicroTasks(JSContext* cx) {
   return !cx->microTaskQueues->microTaskQueue.empty();
-}
-
-JS_PUBLIC_API mozilla::Maybe<JS::MicroTask> JS::DequeueNextRegularMicroTask(
-    JSContext* cx) {
-  auto& queue = cx->microTaskQueues->microTaskQueue;
-  if (!queue.empty()) {
-    auto p = mozilla::Some(queue.front().toMicroTask());
-    queue.popFront();
-    return p;
-  }
-  return mozilla::Nothing();
 }
 
 mozilla::GenericErrorResult<OOM> JSContext::alreadyReportedOOM() {
@@ -1228,7 +1229,8 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
       bypassCSPForDebugger(this, false),
       hasDebuggerForcedLexicalInit(this, false),
       insideExclusiveDebuggerOnEval(this, nullptr),
-      microTaskQueues(this) {
+      microTaskQueues(this),
+      testingFunctionData_(this) {
   MOZ_ASSERT(static_cast<JS::RootingContext*>(this) ==
              JS::RootingContext::get(this));
 
@@ -1272,6 +1274,17 @@ JSContext::~JSContext() {
   }
 
   TlsContext.set(nullptr);
+}
+
+TestingFunctionData* JSContext::getOrCreateTestingFunctionData() {
+  if (!testingFunctionData_.ref()) {
+    testingFunctionData_ = MakeUnique<TestingFunctionData>();
+    if (!testingFunctionData_.ref()) {
+      ReportOutOfMemory(this);
+      return nullptr;
+    }
+  }
+  return testingFunctionData_.ref().get();
 }
 
 void JSContext::unsetOOMStackTrace() { oomStackTraceBufferValid_ = false; }
@@ -1432,12 +1445,10 @@ SavedFrame* JSContext::getPendingExceptionStack() {
   return unwrappedExceptionStack();
 }
 
-#ifdef DEBUG
 const JS::Value& JSContext::getPendingExceptionUnwrapped() {
   MOZ_ASSERT(isExceptionPending());
   return unwrappedException();
 }
-#endif
 
 bool JSContext::isThrowingDebuggeeWouldRun() {
   return isExceptionPending() && unwrappedException().isObject() &&

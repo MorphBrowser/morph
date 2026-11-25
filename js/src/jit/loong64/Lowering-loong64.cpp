@@ -19,8 +19,6 @@
 using namespace js;
 using namespace js::jit;
 
-using mozilla::FloorLog2;
-
 LTableSwitch* LIRGeneratorLOONG64::newLTableSwitch(
     const LAllocation& in, const LDefinition& inputCopy) {
   return new (alloc()) LTableSwitch(in, inputCopy, temp());
@@ -181,7 +179,7 @@ void LIRGeneratorLOONG64::lowerDivI(MDiv* div) {
     // to optimize. Division by other constants can be optimized by a reciprocal
     // multiplication technique.
     if (std::has_single_bit(mozilla::Abs(rhs))) {
-      int32_t shift = mozilla::FloorLog2(mozilla::Abs(rhs));
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
       auto* lir = new (alloc())
           LDivPowTwoI(useRegisterAtStart(div->lhs()), temp(), shift, rhs < 0);
       if (div->fallible()) {
@@ -212,7 +210,7 @@ void LIRGeneratorLOONG64::lowerDivI64(MDiv* div) {
     int64_t rhs = div->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(mozilla::Abs(rhs))) {
-      int32_t shift = mozilla::FloorLog2(mozilla::Abs(rhs));
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
       auto* lir = new (alloc())
           LDivPowTwoI64(useRegisterAtStart(div->lhs()), shift, rhs < 0);
       define(lir, div);
@@ -234,7 +232,7 @@ void LIRGeneratorLOONG64::lowerModI(MMod* mod) {
     int32_t rhs = mod->rhs()->toConstant()->toInt32();
 
     if (std::has_single_bit(mozilla::Abs(rhs))) {
-      int32_t shift = mozilla::FloorLog2(mozilla::Abs(rhs));
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
       auto* lir =
           new (alloc()) LModPowTwoI(useRegisterAtStart(mod->lhs()), shift);
       if (mod->fallible()) {
@@ -265,7 +263,7 @@ void LIRGeneratorLOONG64::lowerModI64(MMod* mod) {
     int64_t rhs = mod->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(mozilla::Abs(rhs))) {
-      int32_t shift = mozilla::FloorLog2(mozilla::Abs(rhs));
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
       auto* lir =
           new (alloc()) LModPowTwoI64(useRegisterAtStart(mod->lhs()), shift);
       define(lir, mod);
@@ -288,7 +286,7 @@ void LIRGeneratorLOONG64::lowerUDiv(MDiv* div) {
     uint32_t rhs = div->rhs()->toConstant()->toInt32();
 
     if (std::has_single_bit(rhs)) {
-      int32_t shift = mozilla::FloorLog2(rhs);
+      int32_t shift = std::countr_zero(rhs);
       auto* lir = new (alloc())
           LDivPowTwoI(useRegisterAtStart(div->lhs()), temp(), shift, false);
       if (div->fallible()) {
@@ -325,7 +323,7 @@ void LIRGeneratorLOONG64::lowerUDivI64(MDiv* div) {
     uint64_t rhs = div->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(rhs)) {
-      int32_t shift = mozilla::FloorLog2(rhs);
+      int32_t shift = std::countr_zero(rhs);
       auto* lir = new (alloc())
           LDivPowTwoI64(useRegisterAtStart(div->lhs()), shift, false);
       define(lir, div);
@@ -348,7 +346,7 @@ void LIRGeneratorLOONG64::lowerUMod(MMod* mod) {
     uint32_t rhs = mod->rhs()->toConstant()->toInt32();
 
     if (std::has_single_bit(rhs)) {
-      int32_t shift = mozilla::FloorLog2(rhs);
+      int32_t shift = std::countr_zero(rhs);
       auto* lir =
           new (alloc()) LModPowTwoI(useRegisterAtStart(mod->lhs()), shift);
       if (mod->fallible()) {
@@ -385,7 +383,7 @@ void LIRGeneratorLOONG64::lowerUModI64(MMod* mod) {
     uint64_t rhs = mod->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(rhs)) {
-      int32_t shift = mozilla::FloorLog2(rhs);
+      int32_t shift = std::countr_zero(rhs);
       auto* lir =
           new (alloc()) LModPowTwoI64(useRegisterAtStart(mod->lhs()), shift);
       define(lir, mod);
@@ -1007,6 +1005,12 @@ void LIRGenerator::visitWasmAtomicBinopHeap(MWasmAtomicBinopHeap* ins) {
   define(lir, ins);
 }
 
+// A constant zero is stored from $zero.
+bool LIRGeneratorLOONG64::canStoreConstantWithoutRegister(MDefinition* value) {
+  return value->isConstant() &&
+         (value->toConstant()->isInt32(0) || value->toConstant()->isInt64(0));
+}
+
 #ifdef ENABLE_JIT_SIMD
 bool LIRGeneratorLOONG64::canFoldReduceSimd128AndBranch(wasm::SimdOp op) {
   switch (op) {
@@ -1151,6 +1155,8 @@ bool MWasmTernarySimd128::canRelaxBitselect() { return false; }
 bool MWasmBinarySimd128::canPmaddubsw() { return false; }
 
 bool MWasmBinarySimd128::canTestBits() { return false; }
+
+bool MWasmReplaceLaneSimd128::canMoveLane() { return true; }
 #endif
 
 bool MWasmBinarySimd128::specializeForConstantRhs() {
@@ -1346,13 +1352,27 @@ void LIRGenerator::visitWasmReplaceLaneSimd128(MWasmReplaceLaneSimd128* ins) {
   LAllocation lhs = useRegisterAtStart(ins->lhs());
   if (ins->rhs()->type() == MIRType::Int64) {
     auto* lir = new (alloc())
-        LWasmReplaceInt64LaneSimd128(lhs, useInt64Register(ins->rhs()));
+        LWasmReplaceInt64LaneSimd128(lhs, useInt64RegisterOrZero(ins->rhs()));
     defineReuseInput(lir, ins, 0);
   } else {
     LAllocation rhsAlloc = useRegisterOrZero(ins->rhs());
     auto* lir = new (alloc()) LWasmReplaceLaneSimd128(lhs, rhsAlloc);
     defineReuseInput(lir, ins, 0);
   }
+#else
+  MOZ_CRASH("No SIMD");
+#endif
+}
+
+void LIRGenerator::visitWasmMoveLaneSimd128(MWasmMoveLaneSimd128* ins) {
+#ifdef ENABLE_JIT_SIMD
+  MDefinition* lhs = ins->lhs();
+  MDefinition* rhs = ins->rhs();
+  auto* lir = new (alloc()) LWasmMoveLaneSimd128(
+      useRegisterAtStart(lhs), willHaveDifferentLIRNodes(lhs, rhs)
+                                   ? useRegister(rhs)
+                                   : useRegisterAtStart(rhs));
+  defineReuseInput(lir, ins, 0);
 #else
   MOZ_CRASH("No SIMD");
 #endif

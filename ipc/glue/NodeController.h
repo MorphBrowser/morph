@@ -19,8 +19,6 @@
 
 namespace mozilla::ipc {
 
-class GeckoChildProcessHost;
-
 class NodeController final : public mojo::core::ports::NodeDelegate,
                              public NodeChannel::Listener {
   using NodeName = mojo::core::ports::NodeName;
@@ -91,8 +89,7 @@ class NodeController final : public mojo::core::ports::NodeDelegate,
   // created for the new process, and `aClientHandle` will be the
   // `ChannelHandle` to pass to the child process on the command line.
   // The port can immediately have messages sent to it.
-  bool InviteChildProcess(GeckoChildProcessHost* aChildProcessHost,
-                          IPC::Channel::ChannelHandle* aClientHandle,
+  bool InviteChildProcess(IPC::Channel::ChannelHandle* aClientHandle,
                           ScopedPort* aInitialPort, NodeChannel** aNodeChannel);
 
   // Called as the IO thread is started in the parent process.
@@ -111,8 +108,7 @@ class NodeController final : public mojo::core::ports::NodeDelegate,
   ~NodeController();
 
   UniquePtr<IPC::Message> SerializeEventMessage(
-      UniquePtr<Event> aEvent, const NodeName* aRelayTarget = nullptr,
-      uint32_t aType = EVENT_MESSAGE_TYPE);
+      UniquePtr<Event> aEvent, const NodeName* aRelayTarget = nullptr);
   UniquePtr<Event> DeserializeEventMessage(UniquePtr<IPC::Message> aMessage,
                                            NodeName* aRelayTarget = nullptr);
 
@@ -127,11 +123,15 @@ class NodeController final : public mojo::core::ports::NodeDelegate,
   // If provided, will optionally send an event to the remote node.
   void ContactRemotePeer(const NodeName& aNode, UniquePtr<Event> aEvent);
 
+  // Send a DeadProxy notification to all peers. May be called on any thread.
+  void BroadcastDeadProxyInternal(const NodeName& aProxyNode,
+                                  const PortName& aProxyPort);
+
   // Message Handlers
   void OnEventMessage(const NodeName& aFromNode,
                       UniquePtr<IPC::Message> aMessage) override;
-  void OnBroadcast(const NodeName& aFromNode,
-                   UniquePtr<IPC::Message> aMessage) override;
+  void OnDeadProxy(const NodeName& aFromNode, const NodeName& aProxyNode,
+                   const PortName& aProxyPort) override;
   void OnIntroduce(const NodeName& aFromNode,
                    NodeChannel::Introduction aIntroduction) override;
   void OnRequestIntroduction(const NodeName& aFromNode,
@@ -142,7 +142,7 @@ class NodeController final : public mojo::core::ports::NodeDelegate,
 
   // NodeDelegate Implementation
   void ForwardEvent(const NodeName& aNode, UniquePtr<Event> aEvent) override;
-  void BroadcastEvent(UniquePtr<Event> aEvent) override;
+  void BroadcastDeadProxy(const PortName& aPort) override;
   void PortStatusChanged(const PortRef& aPortRef) override;
   void ObserveRemoteNode(const NodeName& aNode) override;
 

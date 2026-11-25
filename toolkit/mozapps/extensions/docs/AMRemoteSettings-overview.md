@@ -21,7 +21,7 @@ In practice this makes this feature a good choice when the remotely controlled <
 
 In general before changing controlled settings in the `"main/addons-manager-settings"` collection it is advisable to:
 
-- make sure to default value for the related <about:config> preferences has been changed in mozilla-central first,
+- make sure to default value for the related <about:config> preferences has been changed in the `main` branch first,
   and to let it ride the release train and get some backing time on release;
 - only after that consider changing the value controlled by `"main/addons-manager-settings"` collection,
   to set the same value on older Firefox releases where the previous default value was set.
@@ -116,14 +116,14 @@ RemoteSettings service side have been changed, and document new controlled setti
 - Add a new test to cover the expected behaviors on the new remotely controlled settings, the following RemoteSettings
   documentation page provides some useful pointers:
 
-  - <https://firefox-source-docs.mozilla.org/services/settings/index.html#unit-tests>
+  - [Unit tests](/services/settings/index.md#unit-tests)
 
 - Refer to the RemoteSettings docs for more details about managing the JSONSchema for the `"main/addons-manager-settings"`
   collection and how to test it interactively in a Firefox instance:
 
   - <https://remote-settings.readthedocs.io/en/latest/getting-started.html>
-  - <https://firefox-source-docs.mozilla.org/services/settings/index.html#create-new-remote-settings>
-  - <https://firefox-source-docs.mozilla.org/services/settings/index.html#remote-settings-dev-tools>
+  - [Create new remote settings](/services/settings/index.md#create-new-remote-settings)
+  - [Remote Settings Dev Tools](/services/settings/index.md#remote-settings-dev-tools)
 
 (json-schema)=
 

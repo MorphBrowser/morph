@@ -11,6 +11,7 @@
 #include "GLContextProvider.h"
 #include "GPUParent.h"
 #include "GPUProcessHost.h"
+#include "GPUProcessLog.h"
 #include "GPUProcessManager.h"
 #include "GfxInfoBase.h"
 #include "MediaCodecsSupport.h"
@@ -63,6 +64,7 @@
 #include "nsIGfxInfo.h"
 #include "nsIXULRuntime.h"
 #include "nsThreadManager.h"
+#include "nsXULAppAPI.h"
 #include "nscore.h"
 #include "prenv.h"
 #include "skia/include/core/SkGraphics.h"
@@ -235,6 +237,8 @@ bool GPUParent::Init(mozilla::ipc::UntypedEndpoint&& aEndpoint,
 
 void GPUParent::NotifyDeviceReset(DeviceResetReason aReason,
                                   DeviceResetDetectPlace aPlace) {
+  GPUPROCESS_LOG("Device reset detected, reason {} place {}",
+                 fmt::enums::format_as(aReason), fmt::enums::format_as(aPlace));
   // Notify the main process that there's been a device reset
   // and that they should reset their compositors and repaint
   GPUDeviceData data;
@@ -291,7 +295,8 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
     nsTArray<GfxVarUpdate>&& vars, const DevicePrefs& devicePrefs,
     nsTArray<LayerTreeIdMapping>&& aMappings,
     nsTArray<GfxInfoFeatureStatus>&& aFeatures, uint32_t aWrNamespace,
-    InitResolver&& aInitResolver) {
+    bool aDecodeVideo, InitResolver&& aInitResolver) {
+  mDecodeVideo = aDecodeVideo;
   gfxVars::ApplyUpdate(vars);
 
   // Inherit device preferences.
@@ -343,8 +348,8 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
 
 #if defined(MOZ_WIDGET_GTK)
   char* display_name = PR_GetEnv("MOZ_GDK_DISPLAY");
+  bool waylandEnabled = false;
   if (!display_name) {
-    bool waylandEnabled = false;
 #  ifdef MOZ_WAYLAND
     waylandEnabled = IsWaylandEnabled();
 #  endif
@@ -360,9 +365,18 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
                     nullptr, option_name, display_name, nullptr};
     char** argvp = argv;
     gtk_init(&argc, &argvp);
-  } else {
+  } else if (!waylandEnabled) {
     gtk_init(nullptr, nullptr);
   }
+
+  // On Wayland we don't connect to the display. Rendering goes into DMABuf
+  // surfaces which the parent process presents, and EGL uses the device or
+  // surfaceless platform.
+
+#  ifdef MOZ_X11
+  // Do this after initializing GDK, or GDK will install its own handler.
+  XRE_InstallX11ErrorHandler();
+#  endif
 
   // Ensure we have an FT library for font instantiation.
   // This would normally be set by gfxPlatform::Init().
@@ -396,7 +410,7 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
     layers::AndroidHardwareBufferManager::Init();
   }
 
-  if (gfxVars::UseAImageReaderVideoGpuProcessAndroid()) {
+  if (gfxVars::ForceAImageReaderAndroid()) {
     layers::GpuProcessAndroidImageReaderMap::Init();
   }
 
@@ -419,18 +433,20 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
 
   // Dispatch a task to background thread to determine the media codec supported
   // result, and propagate it back to the chrome process on the main thread.
-  MOZ_ALWAYS_SUCCEEDS(NS_DispatchBackgroundTask(
-      NS_NewRunnableFunction(
-          "GPUParent::Supported",
-          []() {
-            NS_DispatchToMainThread(NS_NewRunnableFunction(
-                "GPUParent::UpdateMediaCodecsSupported",
-                [supported = media::MCSInfo::GetSupportFromFactory()]() {
-                  (void)GPUParent::GetSingleton()
-                      ->SendUpdateMediaCodecsSupported(supported);
-                }));
-          }),
-      nsIEventTarget::DISPATCH_NORMAL));
+  if (mDecodeVideo) {
+    MOZ_ALWAYS_SUCCEEDS(NS_DispatchBackgroundTask(
+        NS_NewRunnableFunction(
+            "GPUParent::Supported",
+            []() {
+              NS_DispatchToMainThread(NS_NewRunnableFunction(
+                  "GPUParent::UpdateMediaCodecsSupported",
+                  [supported = media::MCSInfo::GetSupportFromFactory()]() {
+                    (void)GPUParent::GetSingleton()
+                        ->SendUpdateMediaCodecsSupported(supported);
+                  }));
+            }),
+        nsIEventTarget::DISPATCH_NORMAL));
+  }
 
   glean::gpu_process::initialization_time.AccumulateRawDuration(
       TimeStamp::Now() - mLaunchTime);
@@ -513,6 +529,9 @@ mozilla::ipc::IPCResult GPUParent::RecvInitProfiler(
 mozilla::ipc::IPCResult GPUParent::RecvUpdateVar(
     const nsTArray<GfxVarUpdate>& aUpdate) {
   gfxVars::ApplyUpdate(aUpdate);
+  if (!mDecodeVideo) {
+    return IPC_OK();
+  }
   MOZ_ALWAYS_SUCCEEDS(NS_DispatchBackgroundTask(
       NS_NewRunnableFunction(
           "GPUParent::RecvUpdateVar",
@@ -819,6 +838,9 @@ void GPUParent::ActorDestroy(ActorDestroyReason aWhy) {
         gfxVars::Shutdown();
         gfxConfig::Shutdown();
         CrashReporterClient::DestroySingleton();
+#ifdef MOZ_X11
+        XRE_CleanupX11ErrorHandler();
+#endif
         XRE_ShutdownChildProcess();
       });
 }

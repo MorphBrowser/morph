@@ -233,6 +233,9 @@ void LaunchMacPostProcess(const char* aAppBundle) {
   // variables intended to relaunch Firefox impacting post-update operations, in
   // particular background tasks.  The updater will invoke the callback
   // application with the current (non-minimal) environment.
+  //
+  // Unlike on Windows, where the run without elevation gets the user's default
+  // environment (bug 2078262), this always uses an empty environment.
   [task setEnvironment:@{}];
 
   [task launch];
@@ -340,7 +343,7 @@ bool ObtainUpdaterArguments(int* aArgc, char*** aArgv,
         [updateServer performSelector:@selector(getMARChannelID)];
     const char* channelIDStr = [channelID UTF8String];
     aMARStrings->MARChannelID =
-        mozilla::MakeUnique<char[]>(strlen(channelIDStr) + 1);
+        std::make_unique<char[]>(strlen(channelIDStr) + 1);
     strcpy(aMARStrings->MARChannelID.get(), channelIDStr);
   } @catch (NSException* e) {
     // Let's try our best and clean up.
@@ -532,21 +535,4 @@ void SetGroupOwnershipAndPermissions(const char* aAppBundle) {
       return;
     }
   }
-}
-
-bool PerformInstallationFromDMG(int argc, char** argv) {
-  MacAutoreleasePool pool;
-  if (argc < 4) {
-    return false;
-  }
-  NSString* bundlePath = [NSString stringWithUTF8String:argv[2]];
-  NSString* destPath = [NSString stringWithUTF8String:argv[3]];
-  if ([[NSFileManager defaultManager] copyItemAtPath:bundlePath
-                                              toPath:destPath
-                                               error:nil]) {
-    StripQuarantineBit(destPath);
-    RegisterAppWithLaunchServices(destPath);
-    return true;
-  }
-  return false;
 }

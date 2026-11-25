@@ -61,7 +61,7 @@ struct AVFrame;
 
 namespace mozilla {
 namespace layers {
-class AndroidImageReader;
+class AndroidImageReaderClient;
 class BufferRecycleBin;
 }  // namespace layers
 
@@ -100,6 +100,7 @@ class FFmpegVideoDecoder<LIBAV_VER>
   ~FFmpegVideoDecoder();
 
   RefPtr<InitPromise> Init() override;
+  RefPtr<PlatformDecoderModule::CreateDecoderPromise> InitHWDecoderIfAllowed();
   void InitCodecContext() MOZ_REQUIRES(sMutex) override;
   nsCString GetDescriptionName() const override {
 #ifdef USING_MOZFFVPX
@@ -129,8 +130,21 @@ class FFmpegVideoDecoder<LIBAV_VER>
   Maybe<MediaDataDecoder::PropertyValue> GetDecodeProperty(
       MediaDataDecoder::PropertyName aName) const override;
 #endif
+  void SetSeekThreshold(const media::TimeUnit& aTime) override;
 
   static AVCodecID GetCodecId(const nsACString& aMimeType);
+
+#ifdef MOZ_WIDGET_ANDROID
+  // Returns true if MediaCodec can decode aCodec with aColorDepth.
+  static bool MediaCodecSupportsColorDepth(AVCodecID aCodec,
+                                           const nsACString& aMimeType,
+                                           gfx::ColorDepth aColorDepth);
+
+  // Whether or not platform decoding must be performed in the GPU process
+  // instead of this process. We only fallback to the RDD process if the GPU
+  // process is disabled.
+  static bool ShouldDecodeInGPUProcess();
+#endif
 
 #ifdef CUSTOMIZED_BUFFER_ALLOCATION
   int GetVideoBuffer(struct AVCodecContext* aCodecContext, AVFrame* aFrame,
@@ -148,6 +162,18 @@ class FFmpegVideoDecoder<LIBAV_VER>
 
  private:
   RefPtr<FlushPromise> ProcessFlush() override;
+#if LIBAVCODEC_VERSION_MAJOR >= 58
+  // Creates the image for mFrame with the current decoding backend.
+  MediaResult CreateImageForFrame(int64_t aOffset, int64_t aPts,
+                                  int64_t aDuration, int64_t aTimecode,
+                                  MediaDataDecoder::DecodedData& aResults);
+#endif
+  // Returns true if mFrame should not be output, such as when it ends before
+  // mSeekTarget.
+  bool MaybeDropFrame(int64_t aPts, int64_t aDuration);
+
+  // Only accessed on the task queue.
+  Maybe<media::TimeUnit> mSeekTarget;
   void ProcessShutdown() override;
   MediaResult DoDecode(MediaRawData* aSample, uint8_t* aData, int aSize,
                        bool* aGotFrame, DecodedData& aResults) override;
@@ -195,8 +221,7 @@ class FFmpegVideoDecoder<LIBAV_VER>
       AVHWDeviceType aDeviceType = AV_HWDEVICE_TYPE_NONE);
 
  private:
-  // This will be called inside the ctor.
-  void InitHWDecoderIfAllowed();
+  MediaResult ProcessInitHWDecoder();
 
   enum class ContextType {
     D3D11VA,     // Windows
@@ -248,11 +273,11 @@ class FFmpegVideoDecoder<LIBAV_VER>
   java::sdk::Surface::GlobalRef mImageReaderSurface;
   AndroidSurfaceTextureHandle mSurfaceHandle{};
   SimpleMap<void*, AVFrame*, ThreadSafePolicy> mFrameMap;
-  RefPtr<layers::AndroidImageReader> mAndroidImageReader;
+  // Codec-side client shared by local GPU and remote RDD decoding.
+  RefPtr<layers::AndroidImageReaderClient> mAndroidImageReaderClient;
 #endif
 
 #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
-  bool UploadSWDecodeToDMABuf() const;
   bool IsLinuxHDR() const;
   MediaResult InitVAAPIDecoder();
   MediaResult InitV4L2Decoder();
@@ -299,9 +324,6 @@ class FFmpegVideoDecoder<LIBAV_VER>
   bool mVulkanTilingSettled = false;
 #  endif
   bool mUsingV4L2 = false;
-  // If video overlay is used we want to upload SW decoded frames to
-  // DMABuf and present it as a external texture to rendering pipeline.
-  bool mUploadSWDecodeToDMABuf = false;
   VADisplay mDisplay = nullptr;
   UniquePtr<VideoFramePool<LIBAV_VER>> mVideoFramePool;
   static nsTArray<AVCodecID> mAcceleratedFormats;

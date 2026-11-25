@@ -6,48 +6,39 @@ package mozilla.components.browser.engine.gecko.ipprotection
 
 import androidx.annotation.OptIn
 import mozilla.components.ExperimentalAndroidComponentsApi
+import mozilla.components.concept.engine.ipprotection.CurrentAuthProvider
 import mozilla.components.concept.engine.ipprotection.IPProtectionDelegate
 import mozilla.components.concept.engine.ipprotection.IPProtectionHandler
+import mozilla.components.concept.engine.ipprotection.ProxyState
 import mozilla.components.concept.engine.ipprotection.ServiceState
+import mozilla.components.support.base.log.logger.Logger
 import org.mozilla.geckoview.ExperimentalGeckoViewApi
 import org.mozilla.geckoview.IPProtectionController as GeckoViewIPProtectionController
+
+private val logger = Logger("IPP:GeckoDelegate")
 
 @OptIn(ExperimentalGeckoViewApi::class)
 @kotlin.OptIn(ExperimentalAndroidComponentsApi::class)
 internal class GeckoIPProtectionDelegate(private val delegate: IPProtectionDelegate) :
     GeckoViewIPProtectionController.Delegate {
 
-    /**
-     * FIXME(IPP) We are keeping a copy of state info that needs to be in-sync to reduce the delegate calls. If we
-     * notify the delegate separately. The single source of truth there will not be poisoned.
-     */
-    private var stateInfo = IPProtectionHandler.StateInfo()
-
     override fun onServiceStateChanged(state: Int) {
-        stateInfo = stateInfo.copy(serviceState = state.toServiceState())
-        delegate.onStateChanged(stateInfo)
+        delegate.onServiceStateChanged(state.toServiceState())
     }
 
     override fun onProxyStateChanged(state: GeckoViewIPProtectionController.ProxyState) {
-        stateInfo =
-            stateInfo.copy(
-                // FIXME(IPP) this is a footgun waiting to happen. We are relying on the int values from
-                //  org.mozilla.geckoview.IPProtectionController.ProxyState to continue matching with
-                //  mozilla.components.concept.engine.ipprotection.IPProtectionHandler.StateInfo.PROXY_STATE_* values.
-                proxyState = state.state,
-                lastError = state.errorType,
-            )
-        delegate.onStateChanged(stateInfo)
+        delegate.onProxyStateChanged(
+            proxyState = state.state.toProxyState(),
+            lastError = state.errorType,
+        )
     }
 
     override fun onUsageChanged(info: GeckoViewIPProtectionController.UsageInfo) {
-        stateInfo =
-            stateInfo.copy(
-                remaining = info.remaining,
-                max = info.max,
-                resetTime = info.resetTime,
-            )
-        delegate.onStateChanged(stateInfo)
+        delegate.onUsageChanged(
+            remaining = info.remaining,
+            max = info.max,
+            resetTime = info.resetTime,
+        )
     }
 
     override fun onCountryListChanged(countries: List<GeckoViewIPProtectionController.Country>) {
@@ -56,6 +47,10 @@ internal class GeckoIPProtectionDelegate(private val delegate: IPProtectionDeleg
                 IPProtectionHandler.Country(code = it.code, available = it.available)
             }
         )
+    }
+
+    override fun onCurrentAuthProviderChanged(authProvider: String?) {
+        delegate.onCurrentAuthProviderChanged(authProvider.toCurrentAuthProvider())
     }
 }
 
@@ -67,8 +62,36 @@ internal fun Int.toServiceState(): ServiceState =
         GeckoViewIPProtectionController.SERVICE_STATE_UNAVAILABLE -> ServiceState.Unavailable
         GeckoViewIPProtectionController.SERVICE_STATE_UNAUTHENTICATED -> ServiceState.Unauthenticated
         GeckoViewIPProtectionController.SERVICE_STATE_READY -> ServiceState.Ready
-        GeckoViewIPProtectionController.SERVICE_STATE_OPTED_OUT -> ServiceState.OptedOut
         else -> {
             ServiceState.Unavailable
+        }
+    }
+
+@OptIn(ExperimentalGeckoViewApi::class)
+@kotlin.OptIn(ExperimentalAndroidComponentsApi::class)
+internal fun Int.toProxyState(): ProxyState =
+    when (this) {
+        GeckoViewIPProtectionController.ProxyState.NOT_READY -> ProxyState.NOT_READY
+        GeckoViewIPProtectionController.ProxyState.READY -> ProxyState.READY
+        GeckoViewIPProtectionController.ProxyState.ACTIVATING -> ProxyState.ACTIVATING
+        GeckoViewIPProtectionController.ProxyState.ACTIVE -> ProxyState.ACTIVE
+        GeckoViewIPProtectionController.ProxyState.ERROR -> ProxyState.ERROR
+        GeckoViewIPProtectionController.ProxyState.PAUSED -> ProxyState.PAUSED
+        else -> {
+            logger.warn("Unsupported proxy state from GeckoView: $this")
+            ProxyState.UNKNOWN
+        }
+    }
+
+@OptIn(ExperimentalGeckoViewApi::class)
+@kotlin.OptIn(ExperimentalAndroidComponentsApi::class)
+internal fun String?.toCurrentAuthProvider(): CurrentAuthProvider =
+    when (this) {
+        GeckoViewIPProtectionController.CURRENT_AUTH_PROVIDER_FXA -> CurrentAuthProvider.Fxa
+        GeckoViewIPProtectionController.CURRENT_AUTH_PROVIDER_GPI -> CurrentAuthProvider.Gpi
+        null -> CurrentAuthProvider.Unknown
+        else -> {
+            logger.warn("Unsupported auth provider from GeckoView: $this")
+            CurrentAuthProvider.Unknown
         }
     }

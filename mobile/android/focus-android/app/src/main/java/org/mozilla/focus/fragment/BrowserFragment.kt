@@ -28,8 +28,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.snackbar.Snackbar
 import java.net.URLEncoder
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import mozilla.components.browser.state.selector.findTabOrCustomTab
 import mozilla.components.browser.state.selector.privateTabs
 import mozilla.components.browser.state.state.CustomTabConfig
@@ -41,6 +39,7 @@ import mozilla.components.browser.state.state.createTab
 import mozilla.components.concept.engine.HitResult
 import mozilla.components.feature.app.links.AppLinksFeature
 import mozilla.components.feature.contextmenu.ContextMenuFeature
+import mozilla.components.feature.customtabs.CustomTabWindowFeature
 import mozilla.components.feature.downloads.DownloadsFeature
 import mozilla.components.feature.downloads.manager.FetchDownloadManager
 import mozilla.components.feature.downloads.temporary.ShareResourceFeature
@@ -49,6 +48,7 @@ import mozilla.components.feature.prompts.PromptFeature
 import mozilla.components.feature.prompts.file.AndroidPhotoPicker
 import mozilla.components.feature.session.PictureInPictureFeature
 import mozilla.components.feature.session.SessionFeature
+import mozilla.components.feature.sitepermissions.OnDiskSitePermissionsStorage
 import mozilla.components.feature.sitepermissions.SitePermissionsFeature
 import mozilla.components.feature.tabs.WindowFeature
 import mozilla.components.feature.toolbar.ToolbarFeature
@@ -97,10 +97,13 @@ import org.mozilla.focus.menu.BrowserMenuCallbacks
 import org.mozilla.focus.open.OpenWithFragment
 import org.mozilla.focus.session.ui.TabsPopup
 import org.mozilla.focus.settings.permissions.permissionoptions.SitePermissionOptionsStorage
+import org.mozilla.focus.settings.privacy.CertificateDetailsPanel
 import org.mozilla.focus.settings.privacy.ConnectionDetailsPanel
+import org.mozilla.focus.settings.privacy.QwacStatusRequest
 import org.mozilla.focus.settings.privacy.SiteSecurityInfo
 import org.mozilla.focus.settings.privacy.TrackingProtectionPanel
 import org.mozilla.focus.settings.privacy.TrackingProtectionPanelInteractor
+import org.mozilla.focus.settings.privacy.canOpenCertificateDetails
 import org.mozilla.focus.shortcut.HomeScreen
 import org.mozilla.focus.state.AppAction
 import org.mozilla.focus.topsites.DefaultTopSitesStorage.Companion.TOP_SITES_MAX_LIMIT
@@ -126,6 +129,7 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
     private val downloadsFeature = ViewBoundFeatureWrapper<DownloadsFeature>()
     private val shareResourceFeature = ViewBoundFeatureWrapper<ShareResourceFeature>()
     private val windowFeature = ViewBoundFeatureWrapper<WindowFeature>()
+    private val customTabWindowFeature = ViewBoundFeatureWrapper<CustomTabWindowFeature>()
     private val appLinksFeature = ViewBoundFeatureWrapper<AppLinksFeature>()
     private val topSitesFeature = ViewBoundFeatureWrapper<TopSitesFeature>()
     private var sitePermissionsFeature = ViewBoundFeatureWrapper<SitePermissionsFeature>()
@@ -134,6 +138,7 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
     private val toolbarIntegration = ViewBoundFeatureWrapper<BrowserToolbarIntegration>()
 
     private var trackingProtectionPanel: TrackingProtectionPanel? = null
+    private var qwacStatusRequest: QwacStatusRequest? = null
     private lateinit var requestPermissionLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var downloadFileUtils: DownloadFileUtils
     private var tabsPopup: TabsPopup? = null
@@ -421,7 +426,7 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
                     store = components.store,
                     sessionId = tabId,
                     fragmentManager = parentFragmentManager,
-                    launchInApp = { requireContext().settings.openLinksInExternalApp },
+                    launchInApp = { _ -> requireContext().settings.openLinksInExternalApp },
                     loadUrlUseCase = requireContext().components.sessionUseCases.loadUrl,
                     failedToLaunchAction = { fallbackUrl ->
                         fallbackUrl?.let {
@@ -446,7 +451,7 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
                     storage = components.topSitesStorage,
                     config = {
                         TopSitesConfig(
-                            totalSites = TOP_SITES_MAX_LIMIT,
+                            targetSitesCount = TOP_SITES_MAX_LIMIT,
                             frecencyConfig = null,
                             providerConfig = null,
                         )
@@ -465,11 +470,11 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
                 requireContext().isAccessibilityEnabled(),
             )
 
-            // TODO Add custom tabs window feature support
-            // We to add support for Custom Tabs here, however in order to send the window request
-            // back to us through the intent system, we need to register a unique schema that we
-            // can handle. For example, Fenix Nighlyt does this today with `fenix-nightly://`.
-            // See https://bugzilla.mozilla.org/show_bug.cgi?id=1804556
+            customTabWindowFeature.set(
+                feature = CustomTabWindowFeature(requireActivity(), components.store, tab.id),
+                owner = this,
+                view = view,
+            )
         } else {
             initialiseNormalBrowserUi(requireContext().isAccessibilityEnabled())
 
@@ -498,6 +503,11 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
             feature =
                 SitePermissionsFeature(
                     context = requireContext(),
+                    storage =
+                        OnDiskSitePermissionsStorage(
+                            requireContext(),
+                            coroutineScope = requireComponents.applicationScope,
+                        ),
                     fragmentManager = parentFragmentManager,
                     promptsStyling =
                         SitePermissionsFeature.PromptsStyling(
@@ -515,6 +525,7 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
                         SitePermissionOptionsStorage(requireContext()).getSitePermissionsSettingsRules(),
                     sessionId = tabId,
                     store = requireComponents.store,
+                    coroutineScope = requireComponents.applicationScope,
                     shouldShowDoNotAskAgainCheckBox = false,
                 ),
             owner = this,
@@ -686,9 +697,7 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
 
         crashReporterFragment.onCloseTabPressed = { sendCrashReport ->
             if (sendCrashReport) {
-                val crashReporter = requireComponents.crashReporter
-
-                requireComponents.applicationScope.launch(Dispatchers.IO) { crashReporter.submitReport(crash) }
+                requireComponents.crashReporter.submitReport(crash)
             }
 
             requireComponents.sessionUseCases.crashRecovery.invoke()
@@ -1027,6 +1036,7 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
                             isTrackingProtectionOn = tab.trackingProtection.ignoredOnTrackingProtection.not(),
                             isConnectionSecure = tab.content.securityInfo.isSecure,
                             blockedTrackersCount = requireContext().settings.getTotalBlockedTrackersCount(),
+                            showCertificateDetailsLink = showCertificateDetailsLink(),
                         ),
                     interactor =
                         object : TrackingProtectionPanelInteractor {
@@ -1047,22 +1057,45 @@ class BrowserFragment : BaseFragment(), UserInteractionHandler, AccessibilityMan
                         },
                 )
                 .also { currentEtp -> context?.let { currentEtp.show() } }
+
+        // Only secure pages with a certificate can present a QWAC.
+        val panel = trackingProtectionPanel
+        qwacStatusRequest =
+            if (showCertificateDetailsLink()) {
+                QwacStatusRequest(tab.engineState.engineSession).also { request ->
+                    request.observe { qwac -> panel?.updateQwacStatus(isQwac = qwac != null) }
+                }
+            } else {
+                null
+            }
     }
 
     private fun reloadCurrentTab() {
         requireComponents.sessionUseCases.reload(tab.id)
     }
 
+    /** Whether the certificate details are opened from a "Secure connection" link in the tracking protection panel. */
+    private fun showCertificateDetailsLink(): Boolean = tab.content.securityInfo.canOpenCertificateDetails()
+
     private fun showConnectionInfo() {
         val connectionInfoPanel =
-            ConnectionDetailsPanel(
-                context = requireContext(),
-                engineSession = tab.engineState.engineSession,
-                tabTitle = tab.content.title,
-                tabUrl = tab.content.url,
-                isConnectionSecure = tab.content.securityInfo.isSecure,
-                goBack = { trackingProtectionPanel?.show() },
-            )
+            if (showCertificateDetailsLink()) {
+                CertificateDetailsPanel(
+                    context = requireContext(),
+                    qwacStatusRequest = qwacStatusRequest ?: QwacStatusRequest(tab.engineState.engineSession),
+                    tabUrl = tab.content.url,
+                    certificate = tab.content.securityInfo.certificate,
+                    goBack = { trackingProtectionPanel?.show() },
+                )
+            } else {
+                ConnectionDetailsPanel(
+                    context = requireContext(),
+                    tabTitle = tab.content.title,
+                    tabUrl = tab.content.url,
+                    isConnectionSecure = tab.content.securityInfo.isSecure,
+                    goBack = { trackingProtectionPanel?.show() },
+                )
+            }
         trackingProtectionPanel?.hide()
         connectionInfoPanel.show()
     }

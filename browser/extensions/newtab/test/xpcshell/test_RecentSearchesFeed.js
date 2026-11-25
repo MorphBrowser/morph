@@ -107,22 +107,11 @@ add_task(async function test_enabled_reflects_registry() {
     [PREF_WIDGETS_ENABLED]: false,
   });
   Assert.ok(!noContainer.enabled, "Disabled when the widgets container is off");
-
-  // The registry hides the widget on hosts whose search code predates its
-  // access point; the feed is what would run the search there regardless.
-  const oldHost = feedWithPrefs({
-    ...enabledPrefs(),
-    supportsWidgetSearchSap: false,
-  });
-  Assert.ok(
-    !oldHost.enabled,
-    "Disabled on a host that does not know the widget's search access point"
-  );
 });
 
 // Adds a search to form history against the default engine, as the search
-// service does when the user searches, `ageMs` in the past.
-async function addSearch(value, ageMs = 0) {
+// service does when the user searches, last used at `lastUsedMs`.
+async function addSearch(value, lastUsedMs = Date.now()) {
   await SearchService.init();
   await FormHistory.update({
     op: "add",
@@ -131,8 +120,8 @@ async function addSearch(value, ageMs = 0) {
     source: SearchService.defaultEngine.name,
     // FormHistory keeps microseconds.
     timesUsed: 1,
-    firstUsed: (Date.now() - ageMs) * 1000,
-    lastUsed: (Date.now() - ageMs) * 1000,
+    firstUsed: lastUsedMs * 1000,
+    lastUsed: lastUsedMs * 1000,
   });
 }
 
@@ -322,8 +311,9 @@ add_task(async function test_init_broadcasts_no_searches() {
 });
 
 add_task(async function test_removing_a_search_forgets_it() {
-  await addSearch("keep me", 1000);
-  await addSearch("forget me", 2000);
+  const now = Date.now();
+  await addSearch("keep me", now - 1000);
+  await addSearch("forget me", now - 2000);
   const feed = await initFeed();
   feed.store.dispatch.resetHistory();
 
@@ -367,7 +357,7 @@ add_task(async function test_a_new_search_reaches_open_tabs() {
 });
 
 add_task(async function test_switching_the_default_engine_updates_the_list() {
-  await addSearch("before the switch", 1000);
+  await addSearch("before the switch", Date.now() - 1000);
   const feed = await initFeed();
   Assert.deepEqual(
     searchValues(broadcastCall(feed).data.searches),
@@ -432,7 +422,7 @@ add_task(async function test_switching_the_default_engine_updates_trending() {
 });
 
 add_task(async function test_a_burst_of_changes_is_coalesced() {
-  await addSearch("searched", 1000);
+  await addSearch("searched", Date.now() - 1000);
   const feed = await initFeed();
   feed.store.dispatch.resetHistory();
 
@@ -463,21 +453,23 @@ add_task(async function test_a_burst_of_changes_is_coalesced() {
 });
 
 add_task(async function test_searches_carry_their_last_use() {
-  await addSearch("timed", 2000);
+  const lastUsed = Date.now() - 2000;
+  await addSearch("timed", lastUsed);
   const [search] = await searchesFromInit();
   Assert.equal(search.value, "timed", "Sends the search string");
-  Assert.less(
-    Math.abs(Date.now() - search.lastUsed - 2000),
-    1000,
+  Assert.equal(
+    search.lastUsed,
+    lastUsed,
     "Sends when it was last used, as a ms epoch"
   );
   await FormHistory.update({ op: "remove" });
 });
 
 add_task(async function test_searches_are_newest_first() {
-  await addSearch("oldest", 3000);
-  await addSearch("newest", 1000);
-  await addSearch("middle", 2000);
+  const now = Date.now();
+  await addSearch("oldest", now - 3000);
+  await addSearch("newest", now - 1000);
+  await addSearch("middle", now - 2000);
 
   Assert.deepEqual(
     searchValues(await searchesFromInit()),
@@ -489,9 +481,10 @@ add_task(async function test_searches_are_newest_first() {
 });
 
 add_task(async function test_searches_are_capped() {
+  const now = Date.now();
   for (let i = 0; i < MAX_SEARCHES + 2; i++) {
     // Ascending age, so "search0" is the newest.
-    await addSearch(`search${i}`, i * 1000);
+    await addSearch(`search${i}`, now - i * 1000);
   }
 
   Assert.equal(
@@ -504,11 +497,12 @@ add_task(async function test_searches_are_capped() {
 });
 
 add_task(async function test_expired_searches_are_left_behind() {
-  await addSearch("newer", 1000);
-  await addSearch("older", 2000);
+  const now = Date.now();
+  await addSearch("newer", now - 1000);
+  await addSearch("older", now - 2000);
   await addSearch(
     "expired",
-    UrlbarPrefs.get("recentsearches.expirationMs") * 2
+    now - UrlbarPrefs.get("recentsearches.expirationMs") * 2
   );
 
   const stored = await FormHistory.search(["value"], {
@@ -642,6 +636,7 @@ add_task(async function test_trainhop_config_change_triggers_update() {
     "widgets.enabled": true,
     [PREF_RECENT_SEARCHES_ENABLED]: true,
     [PREF_SYSTEM_RECENT_SEARCHES_ENABLED]: false,
+    region: "US",
     trainhopConfig: { widgets: { recentSearchesEnabled: true } },
   });
   Assert.ok(feed.enabled, "Trainhop config alone enables the feed");
@@ -651,6 +646,25 @@ add_task(async function test_trainhop_config_change_triggers_update() {
     data: { name: "trainhopConfig" },
   });
   Assert.ok(broadcastCall(feed), "Broadcasts when trainhopConfig changes");
+
+  await feed.onAction({ type: actionTypes.UNINIT });
+});
+
+add_task(async function test_region_resolves_after_init() {
+  const prefs = {
+    ...enabledPrefs(),
+    [PREF_SYSTEM_RECENT_SEARCHES_ENABLED]: false,
+    trainhopConfig: { widgets: { recentSearchesEnabled: true } },
+  };
+  const feed = await initFeed(prefs);
+  Assert.ok(!broadcastCall(feed), "No searches before the region resolves");
+
+  prefs.region = "FR";
+  await feed.onAction({
+    type: actionTypes.PREF_CHANGED,
+    data: { name: "region", value: "FR" },
+  });
+  Assert.ok(broadcastCall(feed), "Loads searches when the region resolves");
 
   await feed.onAction({ type: actionTypes.UNINIT });
 });

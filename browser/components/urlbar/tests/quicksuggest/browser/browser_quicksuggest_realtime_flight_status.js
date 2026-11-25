@@ -156,8 +156,10 @@ const TEST_MERINO_MULTI = [
 
 add_setup(async function () {
   await SearchTestUtils.installSearchExtension({}, { setAsDefault: true });
+  UrlbarTestUtils.stubLocale("en-US");
   registerCleanupFunction(async () => {
     await PlacesUtils.history.clear();
+    UrlbarTestUtils.stubLocale(null);
   });
 
   await QuickSuggestTestUtils.ensureQuickSuggestInit({
@@ -922,8 +924,8 @@ add_task(async function resultMenu() {
   Assert.deepEqual(
     [...menuitems].map(m => document.l10n.getAttributes(m).id),
     [
-      "urlbar-result-menu-show-less-frequently2",
-      "urlbar-result-menu-dont-show-flight-status2",
+      "urlbar-result-menu-show-less-frequently3",
+      "urlbar-result-menu-dont-show-flight-status",
       "urlbar-result-menu-manage-firefox-suggest2",
       "urlbar-result-menu-learn-more2",
       "urlbar-view-context-menu-skip-menu-with-tab",

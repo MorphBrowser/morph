@@ -2,10 +2,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-/* global gSubDialog, gotoPref, confirmRestartPrompt, CONFIRM_RESTART_PROMPT_RESTART_NOW, srdSectionEnabled */
+/* global gSubDialog, gotoPref, confirmRestartPrompt, CONFIRM_RESTART_PROMPT_RESTART_NOW */
 
+import { ADDITIONAL_LOCATIONS_AVAILABLE } from "chrome://browser/content/ipprotection/ipprotection-constants.mjs";
+import { DefaultBrowserHelper } from "chrome://browser/content/preferences/DefaultBrowserHelper.mjs";
 import { SettingGroupManager } from "chrome://browser/content/preferences/config/SettingGroupManager.mjs";
 import { Preferences } from "chrome://global/content/preferences/Preferences.mjs";
+
+// These register preferences and settings that privacy settings depend on,
+// such as savePasswords and the prefs behind the configuration warnings.
+for (let uri of [
+  "chrome://browser/content/preferences/config/permissions-data.mjs",
+  "chrome://browser/content/preferences/config/passwords-autofill.mjs",
+]) {
+  ChromeUtils.importESModule(uri, { global: "current" });
+}
 
 const XPCOMUtils = ChromeUtils.importESModule(
   "resource://gre/modules/XPCOMUtils.sys.mjs"
@@ -26,15 +37,17 @@ const lazy = XPCOMUtils.declareLazy({
     "resource://gre/modules/ExtensionSettingsStore.sys.mjs",
   FirefoxRelay: "resource://gre/modules/FirefoxRelay.sys.mjs",
   Management: "resource://gre/modules/Extension.sys.mjs",
+  PrivacyMetricsService:
+    "moz-src:///browser/components/protections/PrivacyMetricsService.sys.mjs",
   Sanitizer: "resource:///modules/Sanitizer.sys.mjs",
   SiteDataManager: "resource:///modules/SiteDataManager.sys.mjs",
   IPProtection:
     "moz-src:///browser/components/ipprotection/IPProtection.sys.mjs",
+  IPPPermissionRules:
+    "moz-src:///toolkit/components/ipprotection/IPPSiteRuleManager.sys.mjs",
+  IPPPrincipalRules:
+    "moz-src:///toolkit/components/ipprotection/IPPSiteRuleManager.sys.mjs",
   BANDWIDTH: "chrome://browser/content/ipprotection/ipprotection-constants.mjs",
-  TrackingDBService: {
-    service: "@mozilla.org/tracking-db-service;1",
-    iid: Ci.nsITrackingDBService,
-  },
   listManager: {
     service: "@mozilla.org/url-classifier/listmanager;1",
     iid: Ci.nsIUrlListManager,
@@ -92,29 +105,6 @@ export class PrivacySettingHelpers {
   }
 
   /**
-   * Displays a dialog from which individual parts of private data may be
-   * cleared.
-   */
-  static clearPrivateDataNow(aClearEverything) {
-    let ts = Preferences.get("privacy.sanitize.timeSpan");
-    let timeSpanOrig = ts.value;
-    if (aClearEverything) {
-      ts.value = 0;
-    }
-    let dialogFile = "chrome://browser/content/sanitize_v2.xhtml";
-    gSubDialog.open(dialogFile, {
-      features: "resizable=no",
-      closingCallback: () => {
-        // reset the timeSpan pref
-        if (aClearEverything) {
-          ts.value = timeSpanOrig;
-        }
-        Services.obs.notifyObservers(null, "clear-private-data");
-      },
-    });
-  }
-
-  /**
    * Displays the user's certificates and associated options.
    */
   static showCertificates() {
@@ -156,31 +146,14 @@ export class PrivacySettingHelpers {
         }
       }
     });
-    for (let notification of document.querySelectorAll(".reload-tabs")) {
-      notification.hidden = true;
-    }
     Preferences.getSetting("reloadTabsHint").value = false;
   }
 
   /**
-   * If there are more tabs than just the preferences tab, show a warning to the user that
-   * they need to reload their tabs to apply the setting.
+   * Show a hint to the user that they need to reload their tabs to apply the
+   * setting.
    */
   static maybeNotifyUserToReload() {
-    let shouldShow = false;
-    if (lazy.BrowserWindowTracker.orderedWindows.length > 1) {
-      shouldShow = true;
-    } else {
-      let tabbrowser = window.browsingContext.topChromeWindow.gBrowser;
-      if (tabbrowser.tabs.length > 1) {
-        shouldShow = true;
-      }
-    }
-    if (shouldShow) {
-      for (let notification of document.querySelectorAll(".reload-tabs")) {
-        notification.hidden = false;
-      }
-    }
     Preferences.getSetting("reloadTabsHint").value = true;
   }
 
@@ -295,7 +268,7 @@ export class PrivacySettingHelpers {
 
   static shouldDisableETPCategoryControls() {
     let policy = Services.policies.getActivePolicies();
-    return (
+    return !!(
       policy?.EnableTrackingProtection?.Locked ||
       policy?.EnableTrackingProtection?.Category ||
       policy?.Cookies?.Locked
@@ -375,7 +348,6 @@ Preferences.addAll([
 
   // Clear Private Data
   { id: "privacy.sanitize.sanitizeOnShutdown", type: "bool" },
-  { id: "privacy.sanitize.timeSpan", type: "int" },
   { id: "privacy.clearOnShutdown.cookies", type: "bool" },
   { id: "privacy.clearOnShutdown_v2.cookiesAndStorage", type: "bool" },
   { id: "privacy.clearOnShutdown.cache", type: "bool" },
@@ -391,6 +363,10 @@ Preferences.addAll([
   { id: "privacy.clearOnShutdown.formdata", type: "bool" },
   { id: "privacy.clearOnShutdown.siteSettings", type: "bool" },
   { id: "privacy.clearOnShutdown_v2.siteSettings", type: "bool" },
+
+  // Lock windows when the OS session gets locked
+  { id: "browser.privatebrowsing.lockOnScreenLock.enabled", type: "bool" },
+  { id: "browser.privatebrowsing.lockOnScreenLock.featureGate", type: "bool" },
 
   // Do not track and Global Privacy Control
   { id: "privacy.donottrackheader.enabled", type: "bool" },
@@ -642,27 +618,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   nonTechnicalPrivacy: {
-    l10nId: "non-technical-privacy-group",
-    headingLevel: 2,
-    items: [
-      {
-        id: "gpcEnabled",
-        l10nId: "global-privacy-control-description",
-        supportPage: "global-privacy-control",
-        controlAttrs: {
-          "search-l10n-ids": "global-privacy-control-search",
-        },
-      },
-      {
-        id: "dntRemoval",
-        l10nId: "do-not-track-removal2",
-        control: "moz-box-link",
-        supportPage: "how-do-i-turn-do-not-track-feature",
-      },
-    ],
-  },
-  nonTechnicalPrivacy2: {
-    inProgress: true,
     l10nId: "non-technical-privacy-heading",
     iconSrc: "chrome://browser/skin/controlcenter/tracking-protection.svg",
     headingLevel: 2,
@@ -681,6 +636,13 @@ SettingGroupManager.registerGroups({
         supportPage: "firefox-relay-integration",
       },
       {
+        id: "windowLockEnabled",
+        l10nId:
+          lazy.AppConstants.platform == "win"
+            ? "preferences-window-lock-windows"
+            : "preferences-window-lock-macos",
+      },
+      {
         id: "dntRemoval",
         l10nId: "do-not-track-removal3",
         control: "moz-message-bar",
@@ -693,7 +655,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   securityPrivacyStatus: {
-    inProgress: true,
     card: "never",
     items: [
       {
@@ -703,7 +664,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   securityPrivacyWarnings: {
-    inProgress: true,
     card: "never",
     items: [
       {
@@ -727,83 +687,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   cookiesAndSiteData: {
-    l10nId: "cookies-site-data-group",
-    headingLevel: 2,
-    subcategory: "sitedata",
-    items: [
-      {
-        id: "clearSiteDataButton",
-        l10nId: "sitedata-clear2",
-        control: "moz-box-button",
-        iconSrc: "chrome://browser/skin/flame.svg",
-        controlAttrs: {
-          "search-l10n-ids": `
-            clear-site-data-cookies-empty.label,
-            clear-site-data-cache-empty.label
-          `,
-        },
-      },
-      {
-        id: "deleteOnCloseInfo",
-        l10nId: "sitedata-delete-on-close-private-browsing3",
-        control: "moz-message-bar",
-        controlAttrs: {
-          role: "status",
-        },
-      },
-      {
-        id: "manageDataSettingsGroup",
-        control: "moz-box-group",
-        controlAttrs: {
-          type: "default",
-        },
-        items: [
-          {
-            id: "siteDataSize",
-            l10nId: "sitedata-total-size-calculating",
-            control: "moz-box-item",
-            supportPage: "sitedata-learn-more",
-          },
-          {
-            id: "siteDataSettings",
-            l10nId: "sitedata-settings2",
-            control: "moz-box-button",
-            controlAttrs: {
-              "search-l10n-ids": `
-                site-data-settings-window.title,
-                site-data-column-host.label,
-                site-data-column-cookies.label,
-                site-data-column-storage.label,
-                site-data-settings-description,
-                site-data-remove-all.label,
-              `,
-            },
-          },
-          {
-            id: "cookieExceptions",
-            l10nId: "sitedata-cookies-exceptions2",
-            control: "moz-box-button",
-            controlAttrs: {
-              "search-l10n-ids": `
-                permissions-address,
-                permissions-block.label,
-                permissions-allow.label,
-                permissions-remove.label,
-                permissions-remove-all.label,
-                permissions-exceptions-cookie-desc
-              `,
-            },
-          },
-        ],
-      },
-      {
-        id: "deleteOnClose",
-        l10nId: "sitedata-delete-on-close2",
-      },
-    ],
-  },
-  cookiesAndSiteData2: {
-    inProgress: true,
     subcategory: "sitedata",
     l10nId: "sitedata-heading",
     iconSrc: "chrome://browser/skin/controlcenter/3rdpartycookies.svg",
@@ -890,100 +773,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   history: {
-    l10nId: "history-group",
-    headingLevel: 2,
-    items: [
-      {
-        id: "historyMode",
-        control: "moz-select",
-        options: [
-          {
-            value: "remember",
-            l10nId: "history-remember-option-all2",
-          },
-          { value: "dontremember", l10nId: "history-remember-option-never2" },
-          { value: "custom", l10nId: "history-remember-option-custom2" },
-        ],
-        controlAttrs: {
-          "search-l10n-ids": `
-            history-remember-description4,
-            history-dontremember-description4,
-            history-custom-description4,
-            history-private-browsing-permanent.label,
-            history-remember-browser-option.label,
-            history-remember-search-option.label,
-            history-clear-on-close-option.label,
-            history-clear-on-close-settings.label
-          `,
-        },
-      },
-      {
-        id: "privateBrowsingAutoStart",
-        l10nId: "history-private-browsing-permanent",
-      },
-      {
-        id: "rememberHistory",
-        l10nId: "history-remember-browser-option",
-      },
-      {
-        id: "rememberForms",
-        l10nId: "history-remember-search-option",
-      },
-      {
-        id: "alwaysClear",
-        l10nId: "history-clear-on-close-option",
-      },
-      {
-        id: "clearOnCloseGroup",
-        control: "moz-box-group",
-        controlAttrs: {
-          type: "default",
-        },
-        items: [
-          {
-            id: "clearDataSettings",
-            l10nId: "history-clear-on-close-settings",
-            control: "moz-box-button",
-            controlAttrs: {
-              "search-l10n-ids": `
-                clear-data-settings-label,
-                history-section-label,
-                item-history-and-downloads.label,
-                item-cookies.label,
-                item-active-logins.label,
-                item-cache.label,
-                item-form-search-history.label,
-                data-section-label,
-                item-site-settings.label,
-                item-offline-apps.label
-              `,
-            },
-          },
-          {
-            id: "shutdownClearingExceptions",
-            l10nId: "history-shutdown-exceptions",
-            control: "moz-box-button",
-            controlAttrs: {
-              "search-l10n-ids": `
-                permissions-address,
-                permissions-allow.label,
-                permissions-remove.label,
-                permissions-remove-all.label,
-                permissions-exceptions-shutdown-clearing-desc
-              `,
-            },
-          },
-        ],
-      },
-      {
-        id: "clearHistoryButton",
-        l10nId: "history-clear-button",
-        control: "moz-box-button",
-      },
-    ],
-  },
-  history2: {
-    inProgress: true,
     l10nId: "history-section-header",
     iconSrc: "chrome://browser/skin/history.svg",
     items: [
@@ -1068,7 +857,7 @@ SettingGroupManager.registerGroups({
                   "search-l10n-ids": `
                         clear-data-settings-label,
                         history-section-label,
-                        item-history-and-downloads.label,
+                        item-history-and-downloads2.label,
                         item-cookies.label,
                         item-active-logins.label,
                         item-cache.label,
@@ -1104,7 +893,6 @@ SettingGroupManager.registerGroups({
     l10nId: "dns-over-https-group2",
     supportPage: "dns-over-https",
     headingLevel: 1,
-    inProgress: true,
     items: [
       {
         id: "dohBox",
@@ -1126,7 +914,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   dnsOverHttpsAdvanced: {
-    inProgress: true,
     l10nId: "preferences-doh-advanced-section",
     supportPage: "dns-over-https",
     headingLevel: 2,
@@ -1188,7 +975,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   etpStatus: {
-    inProgress: true,
     subcategory: "etpStatus",
     headingLevel: 2,
     l10nId: "preferences-etp-status-header",
@@ -1228,7 +1014,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   etpBanner: {
-    inProgress: true,
     card: "never",
     items: [
       {
@@ -1238,7 +1023,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   etpAdvanced: {
-    inProgress: true,
     headingLevel: 2,
     l10nId: "preferences-etp-advanced-settings-group",
     supportPage: "enhanced-tracking-protection",
@@ -1329,7 +1113,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   etpReset: {
-    inProgress: true,
     headingLevel: 2,
     l10nId: "preferences-etp-reset",
     items: [
@@ -1365,7 +1148,6 @@ SettingGroupManager.registerGroups({
     ],
   },
   etpCustomize: {
-    inProgress: true,
     headingLevel: 2,
     l10nId: "preferences-etp-custom-control-group",
     items: [
@@ -1520,10 +1302,34 @@ SettingGroupManager.registerGroups({
           imagesrc:
             "chrome://browser/content/ipprotection/assets/vpn-settings-get-started.svg",
           imagealignment: "end",
+          type: "vibrant",
         },
         items: [
           {
             id: "getStartedButton",
+            l10nId: "ip-protection-not-opted-in-button",
+            control: "moz-button",
+            slot: "actions",
+            controlAttrs: {
+              type: "primary",
+            },
+          },
+        ],
+      },
+      {
+        id: "ipProtectionNotOptedInV2",
+        l10nId: "ip-protection-not-opted-in-inclusions-enabled",
+        l10nArgs: { maxUsage: "50" },
+        control: "moz-promo",
+        controlAttrs: {
+          imagesrc:
+            "chrome://browser/content/ipprotection/assets/vpn-settings-get-started.svg",
+          imagealignment: "end",
+          type: "vibrant",
+        },
+        items: [
+          {
+            id: "getStartedButtonV2",
             l10nId: "ip-protection-not-opted-in-button",
             control: "moz-button",
             slot: "actions",
@@ -1546,7 +1352,7 @@ SettingGroupManager.registerGroups({
       },
       {
         id: "ipProtectionSiteRules",
-        l10nId: "ip-protection-site-rules-button",
+        l10nId: "ip-protection-site-rules-button-1",
         control: "moz-box-button",
         loadPane: "vpnSiteRules",
       },
@@ -1573,19 +1379,62 @@ SettingGroupManager.registerGroups({
         items: [{ id: "ipProtectionBandwidth", control: "bandwidth-usage" }],
       },
       {
-        id: "ipProtectionLinks",
-        control: "moz-box-link",
-        l10nId: "ip-protection-vpn-upgrade-link",
+        id: "ipProtectionMozVPNPromo",
+        control: "moz-promo",
+        l10nId: "ipprotection-locations-subview-promo",
         controlAttrs: {
-          href: "https://www.mozilla.org/products/vpn/?utm_medium=fx-desktop&utm_campaign=fx-vpn&utm_source=settings",
+          imagealignment: "end",
+          imagesrc:
+            "chrome://browser/content/ipprotection/assets/mozilla-vpn-promo.svg",
+          type: "vibrant",
         },
+        items: [
+          {
+            id: "mozVPNPromoButton",
+            l10nId: "ipprotection-locations-subview-promo-button",
+            control: "moz-button",
+            slot: "actions",
+            controlAttrs: {
+              type: "primary",
+            },
+          },
+        ],
+      },
+      {
+        id: "ipProtectionSetToDefaultPromo",
+        control: "moz-promo",
+        l10nId: "ipprotection-locations-subview-set-default-promo",
+        l10nArgs: { count: ADDITIONAL_LOCATIONS_AVAILABLE },
+        controlAttrs: {
+          imagealignment: "end",
+          imagesrc:
+            "chrome://browser/content/ipprotection/assets/location-pin.svg",
+          type: "vibrant",
+        },
+        items: [
+          {
+            id: "setToDefaultPromoButton",
+            l10nId: "ipprotection-locations-subview-set-default-promo-button",
+            control: "moz-button",
+            slot: "actions",
+            controlAttrs: {
+              type: "primary",
+            },
+          },
+        ],
       },
     ],
   },
-  // TODO: Add items to site rules section - Bug 2068284
   vpnSiteRules: {
     headingLevel: 2,
-    items: [],
+    l10nId: "ip-protection-site-rules-list-section-1",
+    supportPage: "built-in-vpn",
+    items: [
+      {
+        id: "ipProtectionSiteRulesList",
+        control: "vpn-site-rules-list",
+      },
+    ],
   },
   privacyPanel: {
     iconSrc: "chrome://devtools/skin/images/globe.svg",
@@ -1978,26 +1827,15 @@ if (SECURITY_PRIVACY_STATUS_CARD_ENABLED) {
   });
 
   Preferences.addSetting(
-    /** @type {{ cachedValue: number, loadTrackerCount: (emitChange: SettingEmitChange) => Promise<void> } & SettingConfig} */ ({
+    /** @type {{ cachedValue: number } & SettingConfig} */ ({
       id: "trackerCount",
       cachedValue: null,
-      async loadTrackerCount(emitChange) {
-        const now = new Date();
-        const aMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-        /** @type {{ getResultByName: (_: string) => number }[]} */
-        const events = await lazy.TrackingDBService.getEventsByDateRange(
-          aMonthAgo,
-          now
-        );
-
-        const total = events.reduce((acc, day) => {
-          return acc + day.getResultByName("count");
-        }, 0);
-        this.cachedValue = total;
-        emitChange();
-      },
       setup(emitChange) {
-        this.loadTrackerCount(emitChange);
+        const aMonthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        return lazy.PrivacyMetricsService.getTotalSince(aMonthAgo, total => {
+          this.cachedValue = total;
+          emitChange();
+        });
       },
       get() {
         return this.cachedValue;
@@ -2102,22 +1940,170 @@ Preferences.addSetting({
   id: "ipProtectionUpgradeNotAvailable",
   pref: "browser.ipProtection.upgradeNotAvailable",
 });
+function ipProtectionNotOptedInVisible(inclusionsEnabled) {
+  return ({
+    ipProtectionVisible,
+    ipProtectionNotOptedIn,
+    ipProtectionSiteInclusionsFeatureEnabled,
+  }) =>
+    ipProtectionVisible.value &&
+    ipProtectionNotOptedIn.value &&
+    ipProtectionSiteInclusionsFeatureEnabled.value == inclusionsEnabled;
+}
+function enrollFromIPProtectionSettings() {
+  lazy.IPProtection.getPanel(window.browsingContext.topChromeWindow)?.enroll({
+    entrypoint: "vpn_integration_settings",
+    utm_source: "settings",
+  });
+}
+const IPP_NOT_OPTED_IN_DEPS = [
+  "ipProtectionVisible",
+  "ipProtectionNotOptedIn",
+  "ipProtectionSiteInclusionsFeatureEnabled",
+];
 Preferences.addSetting({
   id: "ipProtectionNotOptedInSection",
-  deps: ["ipProtectionVisible", "ipProtectionNotOptedIn"],
-  visible: ({ ipProtectionVisible, ipProtectionNotOptedIn }) =>
-    ipProtectionVisible.value && ipProtectionNotOptedIn.value,
+  deps: IPP_NOT_OPTED_IN_DEPS,
+  visible: ipProtectionNotOptedInVisible(false),
 });
 Preferences.addSetting({
   id: "getStartedButton",
-  deps: ["ipProtectionVisible", "ipProtectionNotOptedIn"],
-  visible: ({ ipProtectionVisible, ipProtectionNotOptedIn }) =>
-    ipProtectionVisible.value && ipProtectionNotOptedIn.value,
+  deps: IPP_NOT_OPTED_IN_DEPS,
+  visible: ipProtectionNotOptedInVisible(false),
+  onUserClick: enrollFromIPProtectionSettings,
+});
+Preferences.addSetting({
+  id: "ipProtectionNotOptedInV2",
+  deps: IPP_NOT_OPTED_IN_DEPS,
+  visible: ipProtectionNotOptedInVisible(true),
+});
+Preferences.addSetting({
+  id: "getStartedButtonV2",
+  deps: IPP_NOT_OPTED_IN_DEPS,
+  visible: ipProtectionNotOptedInVisible(true),
+  onUserClick: enrollFromIPProtectionSettings,
+});
+Preferences.addSetting({
+  id: "ipProtectionIsDefaultBrowser",
+  setup: emitChange => {
+    if (!DefaultBrowserHelper.canCheck) {
+      return undefined;
+    }
+    return DefaultBrowserHelper.pollForDefaultChanges(emitChange);
+  },
+  get: () =>
+    DefaultBrowserHelper.canCheck && DefaultBrowserHelper.isBrowserDefault,
+});
+/**
+ * Returns setting config members that record promo_seen the first time the
+ * promo is at least half on screen. An IntersectionObserver is used because the
+ * setting's visible() runs as soon as about:preferences loads, even when the
+ * privacy pane isn't shown or the promo is scrolled out of view.
+ *
+ * @param {"mozillavpn" | "defaultbrowser"} promo
+ */
+function recordPromoSeenWhenOnScreen(promo) {
+  let observer = null;
+  return {
+    getControlConfig(config) {
+      if (!observer) {
+        observer = new IntersectionObserver(
+          entries => {
+            if (entries.some(entry => entry.intersectionRatio >= 0.5)) {
+              observer.disconnect();
+              Glean.ipprotection.promoSeen.record({
+                promo,
+                entrypoint: "settings",
+              });
+            }
+          },
+          { threshold: 0.5 }
+        );
+        // getControlConfig runs from the setting-control's render, so the
+        // promo element exists once the current update has finished.
+        queueMicrotask(() => {
+          let promoEl = document.getElementById(config.id);
+          if (promoEl) {
+            observer.observe(promoEl);
+          }
+        });
+      }
+      return config;
+    },
+    setup: () => () => observer?.disconnect(),
+  };
+}
+
+Preferences.addSetting({
+  id: "ipProtectionMozVPNPromo",
+  deps: [
+    "ipProtectionVisible",
+    "ipProtectionNotOptedIn",
+    "ipProtectionSubscribedToVpn",
+    "ipProtectionUpgradeNotAvailable",
+    "ipProtectionIsDefaultBrowser",
+  ],
+  ...recordPromoSeenWhenOnScreen("mozillavpn"),
+  visible: ({
+    ipProtectionVisible,
+    ipProtectionNotOptedIn,
+    ipProtectionSubscribedToVpn,
+    ipProtectionUpgradeNotAvailable,
+    ipProtectionIsDefaultBrowser,
+  }) =>
+    ipProtectionVisible.value &&
+    !ipProtectionNotOptedIn.value &&
+    !ipProtectionSubscribedToVpn.value &&
+    !ipProtectionUpgradeNotAvailable.value &&
+    (!DefaultBrowserHelper.canCheck || ipProtectionIsDefaultBrowser.value),
+});
+Preferences.addSetting({
+  id: "ipProtectionSetToDefaultPromo",
+  deps: [
+    "ipProtectionVisible",
+    "ipProtectionNotOptedIn",
+    "ipProtectionSubscribedToVpn",
+    "ipProtectionIsDefaultBrowser",
+  ],
+  ...recordPromoSeenWhenOnScreen("defaultbrowser"),
+  visible: ({
+    ipProtectionVisible,
+    ipProtectionNotOptedIn,
+    ipProtectionSubscribedToVpn,
+    ipProtectionIsDefaultBrowser,
+  }) =>
+    ipProtectionVisible.value &&
+    !ipProtectionNotOptedIn.value &&
+    !ipProtectionSubscribedToVpn.value &&
+    DefaultBrowserHelper.canCheck &&
+    !ipProtectionIsDefaultBrowser.value &&
+    Services.policies.isAllowed("setDefaultBrowser") &&
+    !Services.prefs.prefIsLocked("pref.general.disable_button.default_browser"),
+});
+Preferences.addSetting({
+  id: "mozVPNPromoButton",
   onUserClick() {
-    lazy.IPProtection.getPanel(window.browsingContext.topChromeWindow)?.enroll({
-      entrypoint: "vpn_integration_settings",
-      utm_source: "settings",
+    Glean.ipprotection.promoClicked.record({
+      promo: "mozillavpn",
+      entrypoint: "settings",
     });
+    window.browsingContext.topChromeWindow.openTrustedLinkIn(
+      "https://www.mozilla.org/products/vpn/?utm_medium=fx-desktop&utm_campaign=fx-vpn&utm_source=settings",
+      "tab"
+    );
+  },
+});
+Preferences.addSetting({
+  id: "setToDefaultPromoButton",
+  deps: ["ipProtectionIsDefaultBrowser"],
+  onUserClick(_, { ipProtectionIsDefaultBrowser }) {
+    Glean.ipprotection.promoClicked.record({
+      promo: "defaultbrowser",
+      entrypoint: "settings",
+    });
+    DefaultBrowserHelper.setDefaultBrowser().then(
+      ipProtectionIsDefaultBrowser.onChange
+    );
   },
 });
 
@@ -2153,6 +2139,38 @@ Preferences.addSetting({
     !ipProtectionNotOptedIn.value,
 });
 
+const IPP_VPN_PERMISSION = "ipp-vpn";
+const ippSiteRuleCollator = new Intl.Collator();
+
+/**
+ * A Setting's setup() that re-reads it whenever a VPN site rule changes,
+ * whether the change came from this pane or from the VPN panel.
+ *
+ * @param {() => void} emitChange
+ * @returns {() => void}
+ */
+function observeIPPVPNPermissions(emitChange) {
+  let permObserver = {
+    /**
+     * @param {any} subject
+     * @param {string} topic
+     */
+    observe(subject, topic) {
+      if (topic !== "perm-changed") {
+        return;
+      }
+      let permission = subject?.QueryInterface(Ci.nsIPermission);
+      if (permission?.type === IPP_VPN_PERMISSION) {
+        emitChange();
+      }
+    },
+  };
+  Services.obs.addObserver(permObserver, "perm-changed");
+  return () => {
+    Services.obs.removeObserver(permObserver, "perm-changed");
+  };
+}
+
 Preferences.addSetting({
   id: "ipProtectionExceptionAllListButton",
   deps: [
@@ -2161,22 +2179,7 @@ Preferences.addSetting({
     "ipProtectionSiteInclusionsFeatureEnabled",
     "ipProtectionNotOptedIn",
   ],
-  setup(emitChange) {
-    let permObserver = {
-      observe(subject, topic, _data) {
-        if (subject && topic === "perm-changed") {
-          let permission = subject.QueryInterface(Ci.nsIPermission);
-          if (permission.type === "ipp-vpn") {
-            emitChange();
-          }
-        }
-      },
-    };
-    Services.obs.addObserver(permObserver, "perm-changed");
-    return () => {
-      Services.obs.removeObserver(permObserver, "perm-changed");
-    };
-  },
+  setup: observeIPPVPNPermissions,
   visible: ({
     ipProtectionVisible,
     ipProtectionSiteExceptionsFeatureEnabled,
@@ -2241,7 +2244,110 @@ Preferences.addSetting({
     settingsRedesignEnabled.value,
   onUserClick(e) {
     e.preventDefault();
+    Glean.ipprotection.rulesPageOpened.record({ entrypoint: "settings" });
     gotoPref("vpnSiteRules");
+  },
+});
+
+/**
+ * The websites the user has set a VPN rule for, sorted by origin.
+ *
+ * @returns {{ origin: string, rule: string }[]}
+ */
+function getIPPSiteRules() {
+  let { INCLUDED, EXCLUDED } = lazy.IPPPrincipalRules;
+  let { ALLOW_ACTION, DENY_ACTION } = Ci.nsIPermissionManager;
+  return Services.perms
+    .getAllByTypes([IPP_VPN_PERMISSION])
+    .filter(
+      perm =>
+        perm.capability === ALLOW_ACTION || perm.capability === DENY_ACTION
+    )
+    .map(perm => ({
+      origin: perm.principal.origin,
+      rule: perm.capability === ALLOW_ACTION ? INCLUDED : EXCLUDED,
+    }))
+    .sort((a, b) => ippSiteRuleCollator.compare(a.origin, b.origin));
+}
+
+/**
+ * Open the dialog for setting a website's VPN rule.
+ *
+ * @param {{ origin: string }} [params]
+ *  The origin of the existing rule to edit. Omit to create a new rule.
+ */
+function openIPPSiteRuleDialog(params) {
+  let dialog = gSubDialog.open(
+    "chrome://browser/content/preferences/dialogs/vpnSiteRule.xhtml",
+    { features: "resizable=no" },
+    params
+  );
+  // The frame around a sub-dialog belongs to this document, so its
+  // corners can only be rounded from here.
+  dialog?._box.classList.add("vpnSiteRuleDialogBox");
+}
+
+/**
+ * Delete a website's VPN rule once the user confirms it.
+ *
+ * @param {HTMLElement} button The delete button that was clicked.
+ * @param {string} website
+ */
+function deleteIPPSiteRule(button, website) {
+  let list = /** @type {any} */ (button.closest("vpn-site-rules-list"));
+  list.confirmDelete(website, () =>
+    lazy.IPPPermissionRules.setRule(
+      Services.scriptSecurityManager.createContentPrincipalFromOrigin(website),
+      lazy.IPPPrincipalRules.DEFAULT
+    )
+  );
+}
+
+/**
+ * Delete every VPN site rule once the user confirms it.
+ *
+ * @param {HTMLElement} button The delete all button that was clicked.
+ */
+function deleteAllIPPSiteRules(button) {
+  let list = /** @type {any} */ (button.closest("vpn-site-rules-list"));
+  list.confirmDeleteAll(() => Services.perms.removeByType(IPP_VPN_PERMISSION));
+}
+
+Preferences.addSetting({
+  id: "ipProtectionSiteRulesList",
+  deps: [
+    "ipProtectionVisible",
+    "ipProtectionSiteInclusionsFeatureEnabled",
+    "ipProtectionNotOptedIn",
+  ],
+  visible: ({
+    ipProtectionVisible,
+    ipProtectionSiteInclusionsFeatureEnabled,
+    ipProtectionNotOptedIn,
+  }) =>
+    ipProtectionVisible.value &&
+    ipProtectionSiteInclusionsFeatureEnabled.value &&
+    !ipProtectionNotOptedIn.value,
+  setup: observeIPPVPNPermissions,
+  get: () => getIPPSiteRules(),
+  onUserClick(e) {
+    let target = /** @type {HTMLElement} */ (e.target);
+    let dataset = target.dataset;
+    let website = dataset.origin ?? "";
+    switch (dataset.action) {
+      case "add":
+        openIPPSiteRuleDialog();
+        break;
+      case "edit":
+        openIPPSiteRuleDialog({ origin: website });
+        break;
+      case "delete":
+        deleteIPPSiteRule(target, website);
+        break;
+      case "delete-all":
+        deleteAllIPPSiteRules(target);
+        break;
+    }
   },
 });
 
@@ -2400,6 +2506,21 @@ Preferences.addSetting({
     } else {
       Glean.relayIntegration.disabledPrefChange.record();
     }
+  },
+});
+Preferences.addSetting({
+  id: "windowLockFeatureEnabled",
+  pref: "browser.privatebrowsing.lockOnScreenLock.featureGate",
+});
+Preferences.addSetting({
+  id: "windowLockEnabled",
+  pref: "browser.privatebrowsing.lockOnScreenLock.enabled",
+  deps: ["windowLockFeatureEnabled"],
+  visible: ({ windowLockFeatureEnabled }) =>
+    ["macosx", "win"].includes(lazy.AppConstants.platform) &&
+    windowLockFeatureEnabled.value,
+  onUserChange(checked) {
+    Glean.windowLock.toggled.record({ checked });
   },
 });
 Preferences.addSetting({
@@ -2735,6 +2856,7 @@ Preferences.addSetting(
         },
         {
           mode: "clearSiteData",
+          entryPoint: lazy.Sanitizer.DIALOG_ENTRY_POINTS.SETTINGS_SITE_DATA,
         }
       );
     },
@@ -3050,18 +3172,7 @@ Preferences.addSetting({
       (sanitizeOnShutdown.locked && sanitizeOnShutdown.value)
     );
   },
-  getControlConfig(config, { privateBrowsingAutoStart }, setting) {
-    let { l10nId } = config;
-    if (!srdSectionEnabled("history2")) {
-      if (setting.value == "remember") {
-        l10nId = "history-remember-description4";
-      } else if (setting.value == "dontremember") {
-        l10nId = "history-dontremember-description4";
-      } else if (setting.value == "custom") {
-        l10nId = "history-custom-description4";
-      }
-    }
-
+  getControlConfig(config, { privateBrowsingAutoStart }) {
     let dontRememberOption = config.options.find(
       opt => opt.value == "dontremember"
     );
@@ -3074,10 +3185,7 @@ Preferences.addSetting({
     dontRememberOption.disabled =
       privateBrowsingAutoStart.locked && !privateBrowsingAutoStart.value;
 
-    return {
-      ...config,
-      l10nId,
-    };
+    return { ...config };
   },
 });
 
@@ -3189,16 +3297,6 @@ Preferences.addSetting({
         prefilledHost: "",
         permissionType: "persist-data-on-shutdown",
       }
-    );
-  },
-});
-
-Preferences.addSetting({
-  id: "clearHistoryButton",
-  deps: ["historyMode"],
-  onUserClick(_, { historyMode }) {
-    PrivacySettingHelpers.clearPrivateDataNow(
-      historyMode.value == "dontremember"
     );
   },
 });
@@ -3701,17 +3799,25 @@ Preferences.addSetting({
   set(value, { contentBlockingCategory }) {
     contentBlockingCategory.value = value;
   },
+  // allowControl keeps the radio group enabled so getControlConfig can decide
+  // which levels to disable.
+  controllingExtensionInfo: {
+    storeId: "websites.trackingProtectionMode",
+    l10nId: "extension-controlling-websites-content-blocking-all-trackers",
+    allowControl: true,
+  },
   getControlConfig(config, _, setting) {
-    if (!PrivacySettingHelpers.shouldDisableETPCategoryControls()) {
-      return config;
-    }
+    let lockedByPolicy =
+      PrivacySettingHelpers.shouldDisableETPCategoryControls();
+    let controlledByExtension = !!setting.controllingExtensionInfo.id;
 
-    let { options } = config;
-
-    // If ETP level is set to custom keep the radio button enabled so the "customize" button works even when the category selection itself is locked.
-    for (let option of options) {
+    // Keep the selected level enabled so its nested controls remain usable.
+    // Extensions only control tracking protection, so they leave the custom
+    // level and its customize pane available.
+    for (let option of config.options) {
       option.disabled =
-        option.id != "etpLevelCustom" || setting.value != "custom";
+        option.value != setting.value &&
+        (lockedByPolicy || (controlledByExtension && option.value != "custom"));
     }
 
     return config;
@@ -3767,6 +3873,9 @@ Preferences.addSetting({
   deps: ["urlbarNimbusListener"],
   visible: () =>
     window.NimbusFeatures.urlbar.getVariable("trackerCountFeatureGate"),
+  onUserChange(enabled) {
+    Glean.privacyUiEtp.trackerCountToggled.record({ enabled });
+  },
 });
 
 Preferences.addSetting({
@@ -4039,6 +4148,10 @@ Preferences.addSetting({
     "trackingProtectionSocialEnabled",
     "socialBlockCookies",
   ],
+  controllingExtensionInfo: {
+    storeId: "websites.trackingProtectionMode",
+    l10nId: "extension-controlling-websites-content-blocking-all-trackers",
+  },
   disabled: ({ trackingProtectionEnabled, trackingProtectionEnabledPBM }) => {
     return (
       trackingProtectionEnabled.locked || trackingProtectionEnabledPBM.locked

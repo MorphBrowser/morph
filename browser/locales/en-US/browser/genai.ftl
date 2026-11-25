@@ -11,6 +11,7 @@ genai-settings-chat-gemini-links = By choosing Google Gemini, you agree to the <
 genai-settings-chat-huggingchat-links = By choosing HuggingChat, you agree to the <a data-l10n-name="link1">HuggingChat Privacy Notice</a> and <a data-l10n-name="link2">Hugging Face Privacy Policy</a>.
 genai-settings-chat-lechat-links-2 = By choosing Mistral Vibe, you agree to the Mistral AI <a data-l10n-name="link1">Terms of Service</a> and <a data-l10n-name="link2">Privacy Policy</a>.
 genai-settings-chat-localhost-links = Bring your own private local chatbot such as <a data-l10n-name="link1">llamafile</a> from { -vendor-short-name }’s Innovation group.
+genai-settings-chat-scout-links = By choosing Yahoo Scout, you agree to the Yahoo <a data-l10n-name="link1">Terms of Service</a> and <a data-l10n-name="link2">Privacy Policy</a>.
 
 ## Chatbot prompts
 ## Prompts are plain language ‘instructions’ sent to a chatbot.
@@ -87,17 +88,42 @@ genai-shortcut-search-button =
 genai-shortcut-copy-button =
     .tooltiptext = Copy selected text
     .aria-label = Copy selected text
+# Shown briefly after clicking the Copy action in the text selection menu,
+# confirming the selection was copied to the clipboard.
+genai-shortcut-copy-confirmation = Copied
 genai-shortcut-more-actions-button =
     .tooltiptext = More options
     .aria-label = More options
+genai-more-actions-panel =
+    .aria-label = Choose which actions to show
+# $provider (string) - name of the chatbot provider
+genai-more-actions-ai-provider =
+    .label = Ask { $provider }
+genai-more-actions-ai-generic =
+    .label = Ask AI
+genai-more-actions-search =
+    .label = Search
+genai-more-actions-copy =
+    .label = Copy
+# The span is a right-pointing chevron that separates the steps of the path to
+# the setting, in place of a ">" character.
+genai-more-actions-all-off-notice = You won’t see this menu when you select text. Visit Settings <span data-l10n-name="chevron"></span> Tabs and browsing to show it again.
+genai-more-actions-manage-settings =
+    .label = Manage settings
+genai-selection-callout-title = Highlight text to choose an action
+# "Search" and "Copy" are verbs.
+genai-selection-callout-text = Search or copy when you select text. Choose which actions appear with the <span data-l10n-name="more-actions">•••</span> menu.
 
 genai-menu-new-badge = New
 genai-menu-summarize-page = Summarize Page
+genai-menu-summarize-with-ai = Summarize with AI
 
 genai-input-ask-smart-window =
     .placeholder = Ask…
 genai-input-ask-generic =
     .placeholder = Ask AI chatbot…
+genai-input-ask-ai =
+    .placeholder = Ask AI…
 # $provider (string) - name of the provider
 genai-input-ask-provider =
     .placeholder = Ask { $provider }…
@@ -183,6 +209,8 @@ genai-onboarding-huggingchat-tooltip =
     .title = HuggingChat
 genai-onboarding-lechat-tooltip-2 =
     .title = Mistral Vibe
+genai-onboarding-scout-tooltip =
+    .title = Yahoo Scout
 
 ## Model Optin Component
 
@@ -245,6 +273,16 @@ highlight-to-search-settings-ask-provider =
     .label = Ask { $provider }
 highlight-to-search-settings-ask-generic =
     .label = Ask AI
+# Checkbox label for one of the actions in the menu that appears when selecting
+# text on a page. "Search" is a verb: the action searches the selected text
+# with the default search engine.
+highlight-to-search-settings-search =
+    .label = Search
+# Checkbox label for one of the actions in the menu that appears when selecting
+# text on a page. "Copy" is a verb: the action copies the selected text to the
+# clipboard.
+highlight-to-search-settings-copy =
+    .label = Copy
 
 # Title that appears when user is shown the opt-in flow for link previews
 link-preview-optin-title = See more with AI?

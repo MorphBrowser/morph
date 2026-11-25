@@ -58,6 +58,7 @@ if toolkit in ("android", "cocoa", "gtk", "uikit", "windows"):
 
 if toolkit == "cocoa":
     XPIDL_SOURCES += [
+        "nsICocoaAppShellTestUtils.idl",
         "nsIMacDockSupport.idl",
         "nsIMacFinderProgress.idl",
         "nsIMacSharingService.idl",
@@ -104,6 +105,8 @@ elif toolkit in ("android", "uikit"):
 TEST_DIRS += ["tests", "tests/gtest"]
 
 DIRS += ["headless"]
+
+SPHINX_TREES["/widget"] = "docs"
 
 # Don't build the DSO under the 'build' directory as windows does.
 #
@@ -199,6 +202,8 @@ EXPORTS.mozilla += [
     "TextEvents.h",
     "TextRange.h",
     "TouchEvents.h",
+    "TouchSwipeInfo.h",
+    "TouchSwipeState.h",
     "VsyncDispatcher.h",
     "WidgetUtils.h",
     "WindowButtonType.h",
@@ -296,6 +301,7 @@ UNIFIED_SOURCES += [
     "ThemeColors.cpp",
     "ThemeDrawing.cpp",
     "TouchResampler.cpp",
+    "TouchSwipeState.cpp",
     "VsyncDispatcher.cpp",
     "WebCustomFormatUtils.cpp",
     "WidgetEventImpl.cpp",

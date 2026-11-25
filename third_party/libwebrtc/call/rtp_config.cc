@@ -41,10 +41,6 @@ uint32_t FindAssociatedSsrc(uint32_t ssrc,
 
 }  // namespace
 
-std::string LntfConfig::ToString() const {
-  return enabled ? "{enabled: true}" : "{enabled: false}";
-}
-
 std::string NackConfig::ToString() const {
   StringBuilder ss;
   ss << "{rtp_history_ms: " << rtp_history_ms;
@@ -112,6 +108,13 @@ std::string RtpConfig::ToString() const {
       ss << ", ";
   }
   ss << "], mid: '" << mid << "'";
+  ss << ", csrcs: [";
+  for (size_t i = 0; i < csrcs.size(); ++i) {
+    ss << csrcs[i];
+    if (i != csrcs.size() - 1)
+      ss << ", ";
+  }
+  ss << ']';
   ss << ", rtcp_mode: "
      << (rtcp_mode == RtcpMode::kCompound ? "RtcpMode::kCompound"
                                           : "RtcpMode::kReducedSize");
@@ -125,12 +128,12 @@ std::string RtpConfig::ToString() const {
   }
   ss << ']';
 
-  ss << ", lntf: " << lntf.ToString();
   ss << ", nack: {rtp_history_ms: " << nack.rtp_history_ms << '}';
   ss << ", ulpfec: " << ulpfec.ToString();
   ss << ", payload_name: " << payload_name;
   ss << ", payload_type: " << payload_type;
   ss << ", raw_payload: " << (raw_payload ? "true" : "false");
+  ss << ", sframe_required: " << (sframe_options.required ? "true" : "false");
 
   ss << ", stream_configs: [";
   for (size_t i = 0; i < stream_configs.size(); ++i) {

@@ -6,6 +6,8 @@
 
 #include "nsContentSecurityUtils.h"
 
+#include <algorithm>
+
 #include "mozilla/Components.h"
 #include "mozilla/dom/PolicyContainer.h"
 #include "mozilla/dom/ScriptSettings.h"
@@ -343,6 +345,20 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
   static constexpr auto kExtensionRegex = u"extensions/(.+)@(.+)!(.+)$"_ns;
   static constexpr auto kSingleFileRegex = u"^[a-zA-Z0-9.?]+$"_ns;
 
+  static constexpr nsLiteralCString kUserChromePrefixes[] = {
+      "userscripts/"_ns,        "userchromejs/"_ns,
+      "user_chrome_files/"_ns,  "tabmix"_ns,
+      "searchwp/"_ns,           "custombuttons"_ns,
+      "tabgroups-resource/"_ns,
+  };
+
+  static constexpr nsLiteralCString kUserResourcePrefixes[] = {
+      "usl-ucjs/"_ns,
+      "sfm-ucjs/"_ns,
+      "cpmanager-legacy/"_ns,
+      "pwa/utils/"_ns,
+  };
+
   if (fileName.IsEmpty()) {
     return FilenameTypeAndDetails(kOther, Nothing());
   }
@@ -350,28 +366,33 @@ FilenameTypeAndDetails nsContentSecurityUtils::FilenameToFilenameType(
   // resource:// and chrome://
   // These don't contain any user (profile) paths.
   if (StringBeginsWith(fileName, "chrome://"_ns)) {
-    if (StringBeginsWith(fileName, "chrome://userscripts/"_ns) ||
-        StringBeginsWith(fileName, "chrome://userchromejs/"_ns) ||
-        StringBeginsWith(fileName, "chrome://user_chrome_files/"_ns) ||
-        StringBeginsWith(fileName, "chrome://tabmix"_ns) ||
-        StringBeginsWith(fileName, "chrome://searchwp/"_ns) ||
-        StringBeginsWith(fileName, "chrome://custombuttons"_ns) ||
-        StringBeginsWith(fileName, "chrome://tabgroups-resource/"_ns)) {
+    const auto path = Substring(fileName, 9);
+
+    if (std::any_of(std::begin(kUserChromePrefixes),
+                    std::end(kUserChromePrefixes), [&](const auto& prefix) {
+                      return StringBeginsWith(path, prefix);
+                    })) {
       return FilenameTypeAndDetails(kSuspectedUserChromeJS,
                                     Some(StripQueryRef(fileName)));
     }
+
     return FilenameTypeAndDetails(kChromeURI, Some(StripQueryRef(fileName)));
   }
+
   if (StringBeginsWith(fileName, "resource://"_ns)) {
-    if (StringBeginsWith(fileName, "resource://usl-ucjs/"_ns) ||
-        StringBeginsWith(fileName, "resource://sfm-ucjs/"_ns) ||
-        StringBeginsWith(fileName, "resource://cpmanager-legacy/"_ns) ||
-        StringBeginsWith(fileName, "resource://pwa/utils/"_ns)) {
+    const auto path = Substring(fileName, 11);
+
+    if (std::any_of(std::begin(kUserResourcePrefixes),
+                    std::end(kUserResourcePrefixes), [&](const auto& prefix) {
+                      return StringBeginsWith(path, prefix);
+                    })) {
       return FilenameTypeAndDetails(kSuspectedUserChromeJS,
                                     Some(StripQueryRef(fileName)));
     }
+
     return FilenameTypeAndDetails(kResourceURI, Some(StripQueryRef(fileName)));
   }
+
   if (StringBeginsWith(fileName, "moz-src://"_ns)) {
     return FilenameTypeAndDetails(kMozSrcURI, Some(StripQueryRef(fileName)));
   }
@@ -621,7 +642,7 @@ bool nsContentSecurityUtils::IsEvalAllowed(JSContext* cx,
       "resource://testing-common/content-task.js"_ns,
 
       // Tracked by Bug 1584605
-      "resource://gre/modules/translations/cld-worker.js"_ns,
+      "moz-src:///toolkit/components/translations/cld2/cld-worker.js"_ns,
 
       // require.js implements a script loader for workers. It uses eval
       // to load the script; but injection is only possible in situations
@@ -636,7 +657,7 @@ bool nsContentSecurityUtils::IsEvalAllowed(JSContext* cx,
       "resource://devtools/shared/performance-new/symbolication.sys.mjs"_ns,
 
       // The devtools use a WASM module to optimize source-map mapping.
-      "resource://devtools/client/shared/vendor/source-map/lib/wasm.js"_ns,
+      "resource://devtools/client/shared/vendor/source-map/lib/mappings-glue-browser.mjs"_ns,
 
       // The Browser Toolbox/Console
       "debugger"_ns,
@@ -868,7 +889,7 @@ void nsContentSecurityUtils::DetectJsHacks() {
 
   static const char* kObservedPrefs[] = {
       "xpinstall.signatures.required", "general.config.filename",
-      "autoadmin.global_config_url", "autoadmin.failover_to_cached", nullptr};
+      "autoadmin.global_config_url", "autoadmin.failover_to_cached"};
   if (MOZ_UNLIKELY(!sJSHackObserverAdded)) {
     Preferences::RegisterCallbacks(JSHackPrefObserver::PrefChanged,
                                    kObservedPrefs);
@@ -1005,16 +1026,12 @@ nsresult CheckCSPFrameAncestorPolicy(nsIChannel* aChannel,
     return rv;
   }
 
-  nsAutoCString tCspHeaderValue, tCspROHeaderValue;
+  PolicyContainer::Headers headers;
   if (httpChannel) {
-    (void)httpChannel->GetResponseHeader("content-security-policy"_ns,
-                                         tCspHeaderValue);
+    headers = PolicyContainer::Headers::FromChannel(httpChannel);
 
-    (void)httpChannel->GetResponseHeader(
-        "content-security-policy-report-only"_ns, tCspROHeaderValue);
-
-    // if there are no CSP values, then there is nothing to do here.
-    if (tCspHeaderValue.IsEmpty() && tCspROHeaderValue.IsEmpty()) {
+    // if there are no policy headers, then there is nothing to do here.
+    if (headers.IsEmpty()) {
       return NS_OK;
     }
   }
@@ -1023,22 +1040,6 @@ nsresult CheckCSPFrameAncestorPolicy(nsIChannel* aChannel,
   rv = nsContentUtils::GetSecurityManager()->GetChannelResultPrincipal(
       aChannel, getter_AddRefs(resultPrincipal));
   NS_ENSURE_SUCCESS(rv, rv);
-
-  RefPtr<extensions::WebExtensionPolicy> addonPolicy;
-  if (!httpChannel) {
-    addonPolicy = BasePrincipal::Cast(resultPrincipal)->AddonPolicy();
-    if (!addonPolicy) {
-      // Neither a HTTP channel, nor a moz-extension:-resource.
-      // CSP is not supported.
-      return NS_OK;
-    }
-  }
-
-  RefPtr<nsCSPContext> csp = new nsCSPContext();
-  // This CSPContext is only used for checking frame-ancestors, we
-  // will parse the CSP again anyway. (Unless this blocks the load, but
-  // parser warnings aren't really important in that case)
-  csp->SuppressParserLogMessages();
 
   nsCOMPtr<nsIURI> selfURI;
   nsAutoCString referrerSpec;
@@ -1054,32 +1055,15 @@ nsresult CheckCSPFrameAncestorPolicy(nsIChannel* aChannel,
     NS_GetFinalChannelURI(aChannel, getter_AddRefs(selfURI));
   }
 
-  uint64_t innerWindowID = loadInfo->GetInnerWindowID();
-
-  rv = csp->SetRequestContextWithPrincipal(resultPrincipal, selfURI,
-                                           referrerSpec, innerWindowID);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    return rv;
-  }
-
-  if (addonPolicy) {
-    csp->AppendPolicy(addonPolicy->BaseCSP(), false, false);
-    csp->AppendPolicy(addonPolicy->ExtensionPageCSP(), false, false);
-  } else {
-    NS_ConvertASCIItoUTF16 cspHeaderValue(tCspHeaderValue);
-    NS_ConvertASCIItoUTF16 cspROHeaderValue(tCspROHeaderValue);
-
-    // ----- if there's a full-strength CSP header, apply it.
-    if (!cspHeaderValue.IsEmpty()) {
-      rv = CSP_AppendCSPFromHeader(csp, cspHeaderValue, false);
-      NS_ENSURE_SUCCESS(rv, rv);
-    }
-
-    // ----- if there's a report-only CSP header, apply it.
-    if (!cspROHeaderValue.IsEmpty()) {
-      rv = CSP_AppendCSPFromHeader(csp, cspROHeaderValue, true);
-      NS_ENSURE_SUCCESS(rv, rv);
-    }
+  // Without a HTTP channel this only returns a CSP for moz-extension:
+  // resources, where the CSP is stored in a WebExtensionPolicy.
+  RefPtr<PolicyContainer> policyContainer =
+      MOZ_TRY(PolicyContainer::CreateForFrameAncestorsCheck(
+          resultPrincipal, selfURI, referrerSpec, loadInfo->GetInnerWindowID(),
+          headers));
+  nsCOMPtr<nsIContentSecurityPolicy> csp = policyContainer->GetCSP();
+  if (!csp) {
+    return NS_OK;
   }
 
   // ----- Enforce frame-ancestor policy on any applied policies
@@ -1465,6 +1449,24 @@ static nsLiteralCString sFrameSrcHttpsHostAllowList[] = {
     "about:home"_ns,
     "about:newtab"_ns,
 };
+// frame-src https://*.example.org
+//  Wildcard host sources are normally forbidden. This is a narrow exception,
+//  agreed with the security team, so that New Tab framed widgets can load from
+//  any Merino-served subdomain. Only the exact sources in
+//  sFrameSrcWildcardHostSources are allowed, and only on these pages.
+static nsLiteralCString sFrameSrcWildcardHostAllowList[] = {
+    "about:home"_ns,
+    "about:newtab"_ns,
+};
+static nsLiteralString sFrameSrcWildcardHostSources[] = {
+    u"https://*.merino.nonprod.webservices.mozgcp.net"_ns,
+    u"https://*.merino.prod.webservices.mozgcp.net"_ns,
+};
+// frame-src moz-extension:
+static nsLiteralCString sFrameSrcMozExtensionAllowList[] = {
+    "about:home"_ns,
+    "about:newtab"_ns,
+};
 
 class DisallowingVisitor : public nsCSPSrcVisitor {
  public:
@@ -1501,6 +1503,11 @@ class DisallowingVisitor : public nsCSPSrcVisitor {
   };
 
   bool visitHashSrc(const nsCSPHashSrc& src) override {
+    Assert(src);
+    return false;
+  };
+
+  bool visitUrlHashSrc(const nsCSPUrlHashSrc& src) override {
     Assert(src);
     return false;
   };
@@ -1723,7 +1730,30 @@ class FrameSrcVisitor : public AllowBuiltinSrcVisitor {
     MOZ_ASSERT(aDirective == CSPDirective::FRAME_SRC_DIRECTIVE);
   }
 
+  bool visitSchemeSrc(const nsCSPSchemeSrc& src) override {
+    nsAutoString scheme;
+    src.getScheme(scheme);
+
+    if (scheme == u"moz-extension"_ns) {
+      if (CheckAllowList(Span(sFrameSrcMozExtensionAllowList))) {
+        return true;
+      }
+    }
+
+    return AllowBuiltinSrcVisitor::visitSchemeSrc(src);
+  }
+
   bool visitHostSrc(const nsCSPHostSrc& src) override {
+    if (CheckAllowList(Span(sFrameSrcWildcardHostAllowList))) {
+      nsAutoString str;
+      src.toString(str);
+      for (const nsLiteralString& allowed : sFrameSrcWildcardHostSources) {
+        if (str.Equals(allowed)) {
+          return true;
+        }
+      }
+    }
+
     return VisitHostSrcWithWildcardAndHttpsHostAllowLists(
         src, nullptr, sFrameSrcHttpsHostAllowList);
   }

@@ -4,8 +4,8 @@
 
 "use strict";
 
-const { TestUtils } = ChromeUtils.importESModule(
-  "resource://testing-common/TestUtils.sys.mjs"
+const { NodeWebSocketHttp2Server } = ChromeUtils.importESModule(
+  "resource://testing-common/NodeServer.sys.mjs"
 );
 
 let h2Port;
@@ -20,9 +20,16 @@ const certOverrideService = Cc[
 add_setup(async function setup() {
   trr_test_setup();
 
-  h2Port = Services.env.get("MOZHTTP2_PORT");
-  Assert.notEqual(h2Port, null);
-  Assert.notEqual(h2Port, "");
+  let h2Server = await create_h2_server({
+    "/server-timing": (req, res) => {
+      const body = "data reached";
+      res.setHeader("X-Connection-Http2", "yes");
+      res.setHeader("Content-Length", body.length);
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(body);
+    },
+  });
+  h2Port = h2Server.port();
 
   h3Port = Services.env.get("MOZHTTP3_PORT");
   Assert.notEqual(h3Port, null);
@@ -65,11 +72,6 @@ add_setup(async function setup() {
       await trrServer.stop();
     }
   });
-
-  if (mozinfo.socketprocess_networking) {
-    Services.dns; // Needed to trigger socket process.
-    await TestUtils.waitForCondition(() => Services.io.socketProcessLaunched);
-  }
 
   Services.prefs.setIntPref("network.trr.mode", Ci.nsIDNSService.MODE_TRRFIRST);
 });
@@ -1053,7 +1055,12 @@ add_task(async function testUpgradeNotUsingHTTPSRR() {
     ],
   });
 
-  let wssUri = "wss://test.ws.com:" + h2Port + "/websocket";
+  let wsServer = new NodeWebSocketHttp2Server();
+  await wsServer.start();
+  registerCleanupFunction(async () => {
+    await wsServer.stop();
+  });
+  let wssUri = "wss://test.ws.com:" + wsServer.port() + "/websocket";
   let chan = Cc["@mozilla.org/network/protocol;1?name=wss"]
     .getService(Ci.nsIWebSocketProtocolHandler)
     .newWebSocketChannel();

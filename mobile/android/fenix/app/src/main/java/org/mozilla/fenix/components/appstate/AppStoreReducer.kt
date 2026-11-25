@@ -4,7 +4,6 @@
 
 package org.mozilla.fenix.components.appstate
 
-import androidx.annotation.VisibleForTesting
 import mozilla.components.lib.crash.store.CrashAction
 import mozilla.components.lib.crash.store.crashReducer
 import org.mozilla.fenix.components.AppStore
@@ -20,6 +19,7 @@ import org.mozilla.fenix.components.appstate.search.SearchStateReducer
 import org.mozilla.fenix.components.appstate.setup.checklist.SetupChecklistReducer
 import org.mozilla.fenix.components.appstate.snackbar.SnackbarState
 import org.mozilla.fenix.components.appstate.snackbar.SnackbarStateReducer
+import org.mozilla.fenix.components.appstate.sports.SportsWidgetReducer
 import org.mozilla.fenix.components.appstate.webcompat.WebCompatReducer
 import org.mozilla.fenix.ext.filterOutTab
 import org.mozilla.fenix.home.recentsyncedtabs.RecentSyncedTabState
@@ -38,9 +38,6 @@ internal object AppStoreReducer {
             is AppAction.UpdateInactiveExpanded -> state.copy(inactiveTabsExpanded = action.expanded)
             is AppAction.UpdateFirstFrameDrawn -> {
                 state.copy(firstFrameDrawn = action.drawn)
-            }
-            is AppAction.UpdateShowFoxPeekAnimation -> {
-                state.copy(longfoxEntryPointReady = action.ready)
             }
             is AppAction.AddNonFatalCrash -> state.copy(nonFatalCrashes = state.nonFatalCrashes + action.crash)
             is AppAction.RemoveNonFatalCrash -> state.copy(nonFatalCrashes = state.nonFatalCrashes - action.crash)
@@ -180,6 +177,18 @@ internal object AppStoreReducer {
             is AppAction.CurrentTabClosed ->
                 state.copy(snackbarState = SnackbarState.CurrentTabClosed(action.isPrivate))
 
+            is AppAction.TabAddedToGroup ->
+                state.copy(
+                    snackbarState =
+                        SnackbarState.TabAddedToGroup(groupTitle = action.groupTitle, groupId = action.groupId)
+                )
+
+            is AppAction.TabMovedToGroup ->
+                state.copy(
+                    snackbarState =
+                        SnackbarState.TabMovedToGroup(groupTitle = action.groupTitle, groupId = action.groupId)
+                )
+
             is AppAction.URLCopiedToClipboard -> state.copy(snackbarState = SnackbarState.URLCopiedToClipboard)
 
             is AppAction.OpenInFirefoxStarted -> {
@@ -266,19 +275,8 @@ internal object AppStoreReducer {
 
             is AppAction.BlockedTrackersAction -> BlockedTrackersStateReducer.reduce(state, action)
 
+            is AppAction.SportsWidgetAction -> SportsWidgetReducer.reduce(state, action)
+
             is AppAction.UpdateTabsTrayVisibility -> state.copy(isTabsTrayVisible = action.visible)
         }
-}
-
-/**
- * Removes a [RecentHistoryGroup] identified by [groupTitle] if it exists in the current list.
- *
- * @param groupTitle [RecentHistoryGroup.title] of the item that should be removed.
- */
-@VisibleForTesting
-internal fun List<RecentlyVisitedItem>.filterOut(groupTitle: String?): List<RecentlyVisitedItem> {
-    return when (groupTitle != null) {
-        true -> filterNot { it is RecentHistoryGroup && it.title.equals(groupTitle, true) }
-        false -> this
-    }
 }

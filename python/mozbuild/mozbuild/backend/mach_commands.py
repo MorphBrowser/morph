@@ -33,7 +33,7 @@ from mozbuild.util import cpu_count
 )
 @CommandArgument("args", nargs=argparse.REMAINDER)
 def run(command_context, ide, no_interactive, args):
-    interactive = not no_interactive
+    interactive = not no_interactive and command_context._mach_context.is_interactive
 
     if ide == "eclipse" and not which("eclipse"):
         command_context.log(
@@ -64,7 +64,7 @@ def run(command_context, ide, no_interactive, args):
         # Then build the rest of the build dependencies by running the full
         # export target, because we can't do anything better.
         result = subprocess.run(
-            [sys.executable, "mach", "build", "pre-export", "export", "pre-compile"],
+            [sys.executable, "mach", "build", "analysis-prereqs"],
             check=False,
             cwd=command_context.topsrcdir,
         )

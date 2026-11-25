@@ -110,11 +110,11 @@ internal object FakeHomepagePreview {
                     /* no op */
                 }
 
-                override fun onLongfoxEntryPointClicked() {
+                override fun onSportsWidgetWallpapersClicked() {
                     /* no op */
                 }
 
-                override fun onLongfoxEntryPointShown() {
+                override fun onSportsWidgetRemoveClicked() {
                     /* no op */
                 }
             }
@@ -297,10 +297,6 @@ internal object FakeHomepagePreview {
     internal val collectionInteractor
         get() =
             object : CollectionInteractor {
-                override fun onCollectionAddTabTapped(collection: TabCollection) {
-                    /* no op */
-                }
-
                 override fun onCollectionOpenTabClicked(tab: Tab) {
                     /* no op */
                 }
@@ -321,18 +317,10 @@ internal object FakeHomepagePreview {
                     /* no op */
                 }
 
-                override fun onRenameCollectionTapped(collection: TabCollection) {
-                    /* no op */
-                }
-
                 override fun onToggleCollectionExpanded(
                     collection: TabCollection,
                     expand: Boolean,
                 ) {
-                    /* no op */
-                }
-
-                override fun onAddTabsToCollectionTapped() {
                     /* no op */
                 }
             }
@@ -487,7 +475,6 @@ internal object FakeHomepagePreview {
         CollectionsState.Content(
             collections = listOf(collection(tabs = listOf(tab()))),
             expandedCollections = setOf(),
-            showSaveTabsToCollection = true,
         )
 
     internal fun collection(tabs: List<Tab> = emptyList()): TabCollection {

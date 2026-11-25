@@ -18,10 +18,10 @@ browser-main-private-window-title = { PLATFORM() ->
 browser-main-private-suffix-for-content = Private Browsing
 
 # The non-variable portion of this MUST match the translation of
-# "PRIVATE_BROWSING_SHORTCUT_TITLE" in custom.properties
+# "private-browsing-shortcut-title" in installer/custom.ftl
 private-browsing-shortcut-text-2 = { -brand-shortcut-name } Private Browsing
 
-# This MUST match the translation of "BRIEF_APP_DESC" in custom.properties
+# This MUST match the translation of "brief-app-desc" in installer/custom.ftl
 browser-shortcut-description = Fast and private web browsing
 
 ##
@@ -108,9 +108,12 @@ urlbar-result-menu-manage-firefox-suggest2 = Manage { -firefox-suggest-brand-nam
 # user tell Firefox that the location is not accurate. Typically the location
 # will be a city name, or a city name combined with the name of its parent
 # administrative division (e.g., a province, prefecture, or state).
-urlbar-result-menu-report-inaccurate-location2 = Report inaccurate location
-urlbar-result-menu-show-less-frequently2 = Show less frequently
-urlbar-result-menu-dont-show-weather-suggestions2 = Don’t show weather suggestions
+urlbar-result-menu-report-inaccurate-location3 = Report inaccurate location
+    .accesskey = R
+urlbar-result-menu-show-less-frequently3 = Show less frequently
+    .accesskey = f
+urlbar-result-menu-dont-show-weather-suggestions3 = Don’t show weather suggestions
+    .accesskey = n
 
 # Shown in the urlbar input field context menu to dismiss an adaptive autofill
 # suggestion.
@@ -130,10 +133,6 @@ urlbar-splitbutton-dropmarker =
 # A message shown in the urlbar when the user submits feedback on a suggestion
 # (e.g., it shows an inaccurate location, it's shown too often, etc.).
 urlbar-feedback-acknowledgment = Thanks for your feedback
-
-# A message shown in the urlbar when the user dismisses weather suggestions.
-# Weather suggestions won't be shown at all anymore.
-urlbar-dismissal-acknowledgment-weather = Thanks for your feedback. You won’t see weather suggestions anymore.
 
 ## Prompts users to use the Urlbar when they open a new tab or visit the
 ## homepage of their default search engine.
@@ -201,6 +200,15 @@ urlbar-split-view-button =
     .tooltiptext = Split view
     .aria-label = Split view
 
+## URLbar context menu
+
+urlbar-menuitem-paste-and-go =
+    .label = Paste and Go
+    .accesskey = G
+urlbar-menuitem-paste-and-search =
+    .label = Paste and Search
+    .accesskey = S
+
 ## Searchbar context menu
 
 clear-search-history =
@@ -261,8 +269,9 @@ search-one-offs-add-engine =
     .aria-label = Add search engine “{ $engineName }”
 # When more than 5 engines are offered by a web page, they are grouped in a
 # submenu using this as its label.
-search-one-offs-add-engine-menu =
+search-one-offs-add-engine-menu2 =
     .label = Add search engine
+    .accesskey = h
 
 ## Local search mode one-off buttons
 ## Variables:
@@ -800,18 +809,12 @@ urlbar-result-realtime-opt-in-dismiss = Dismiss
 urlbar-result-realtime-opt-in-dismiss-all2 = Don’t show these suggestions
 
 # This string is shown in the result menu.
-urlbar-result-menu-dont-show-market2 = Don’t show market suggestions
-
-# A message that replaces a result when the user dismisses Market suggestions.
-urlbar-result-dismissal-acknowledgment-market = Thanks for your feedback. You won’t see market suggestions anymore.
+urlbar-result-menu-dont-show-market3 = Don’t show market suggestions
+    .accesskey = n
 
 # This a11y label is read by screen readers when an item in the row is selected.
 urlbar-result-aria-group-market =
   .aria-label = Stock market suggestions
-
-# A message that replaces a result when the user dismisses all suggestions of a
-# particular type.
-urlbar-result-dismissal-acknowledgment-all = Thanks for your feedback. You won’t see these suggestions anymore.
 
 ## These strings are used for suggestions of important dates in the urlbar.
 
@@ -859,6 +862,72 @@ urlbar-result-dates-today = { $name } · Today
 # Variables:
 #   $name (string) - The name of the event.
 urlbar-result-dates-ends-today = { $name } · Ends today
+
+## These strings are used for flight status suggestions in the urlbar.
+## The flight status suggestions shows the flight time, origin and destination
+## and the status like delayed, etc.
+
+# This string is shown in the result menu.
+urlbar-result-menu-dont-show-flight-status = Don’t show flight status suggestions
+    .accesskey = n
+
+urlbar-result-flight-status-status-ontime = On time
+urlbar-result-flight-status-status-inflight = In flight
+urlbar-result-flight-status-status-arrived = Arrived
+urlbar-result-flight-status-status-cancelled = Cancelled
+# Example: Delayed until 5:50pm
+# Variables:
+#   $departureEstimatedTime (string) - The estimated departure time.
+urlbar-result-flight-status-status-delayed =
+    Delayed until { $departureEstimatedTime }
+# Example: 30 min left
+# Variables:
+#   $timeLeft (string) - Localized duration string, e.g., "1 hr, 30 min"
+urlbar-result-flight-status-time-left = { $timeLeft } left
+# Example: Los Angeles (LAX)
+# Variables:
+#   $city (string) - The city of the airport.
+#   $code (string) - The code of the airport.
+urlbar-result-flight-status-airport = { $city } ({ $code })
+# Example: AC 8170, Air Canada
+# Variables:
+#   $flightNumber (string) - The flight number.
+#   $airlineName (string) - The airline name.
+urlbar-result-flight-status-flight-number-with-airline = { $flightNumber }, { $airlineName }
+
+# This accessibility label is read by screen readers when an item in the row is
+# selected.
+urlbar-result-aria-group-flight-status =
+  .aria-label = Flight status suggestions
+
+## These strings are used for sports suggestions in the urlbar. Sports
+## suggestions show team names, scores, game times, etc.
+
+# This string is shown for a scheduled future game. Please list $homeTeam before
+# $awayTeam so that the ordering of teams in the string matches the ordering of
+# the team icons in the suggestion UI. Without violating the team ordering,
+# please use your language's equivalent of "vs". "and" is another option.
+# Variables:
+#   $homeTeam (string) - Name of the home team.
+#   $awayTeam (string) - Name of the visiting team.
+urlbar-result-sports-team-names = { $homeTeam } vs { $awayTeam }
+
+# This string is shown when the game is today, in the near future, or in the
+# recent past.
+# Variables:
+#   $date (string) - Localized date string, e.g., "Today", "Oct 31"
+#   $time (string) - Localized time
+urlbar-result-sports-game-date-with-time = { $date } at { $time }
+
+urlbar-result-sports-status-live = Live
+urlbar-result-sports-status-final = Final
+urlbar-result-menu-dont-show-sports = Don’t show sports suggestions
+    .accesskey = n
+
+# This accessibility label is read by screen readers when an item in the row is
+# selected.
+urlbar-result-aria-group-sports =
+  .aria-label = Sports suggestions
 
 ## Strings used for buttons in the urlbar
 
@@ -941,6 +1010,14 @@ urlbar-view-context-menu-open-in-window2 = Open in New Window
     .accesskey = N
 urlbar-view-context-menu-open-in-private-window2 = Open in New Private Window
     .accesskey = P
+urlbar-view-context-menu-search-in-tab = Search in New Tab
+    .accesskey = w
+urlbar-view-context-menu-search-in-container-tab = Search in New Container Tab
+    .accesskey = i
+urlbar-view-context-menu-search-in-window = Search in New Window
+    .accesskey = N
+urlbar-view-context-menu-search-in-private-window = Search in New Private Window
+    .accesskey = P
 
 # A checkable menu item that controls whether pressing the Tab key while
 # navigating the address bar results stops on each result's menu button. When
@@ -973,6 +1050,12 @@ urlbar-group-quickactions =
 urlbar-group-recent-searches =
   .label = Recent Searches
 
+# A label shown above the Shortcuts aka Top Sites group in the urlbar results
+# if there's another result before that group. This should be consistent with
+# addressbar-locbar-shortcuts-option.
+urlbar-group-shortcuts =
+  .label = Shortcuts
+
 # The header shown above trending results.
 # Variables:
 #  $engine (String): the name of the search engine providing the trending suggestions
@@ -980,12 +1063,8 @@ urlbar-group-trending =
   .label = Trending on { $engine }
 
 # The result menu labels shown next to trending results.
-urlbar-result-menu-trending-dont-show2 = Don’t show trending searches
-  .accesskey = D
-
-# A message that replaces a result when the user dismisses all suggestions of a
-# particular type.
-urlbar-trending-dismissal-acknowledgment = Thanks for your feedback. You won’t see trending searches anymore.
+urlbar-result-menu-trending-dont-show3 = Don’t show trending searches
+    .accesskey = n
 
 ## Reader View toolbar buttons
 
@@ -1157,19 +1236,19 @@ qrcode-save-filename-with-domain-base = qrcode-{ $domain }
 
 qrcode-window-title = QR Code
 qrcode-dialog-title = QR Code
+qrcode-dialog-title-download-mobile = Download { -brand-product-name } for mobile
 qrcode-image =
     .aria-label = QR code
 qrcode-close-button =
     .aria-label = Close
 
-# Variables:
-#  $shortcut (String): keyboard shortcut to save a copy of the page
+## Variables:
+##  $shortcut (String): keyboard shortcut to perform the action
+
 toolbar-button-save-page =
   .label = Save page
   .tooltiptext = Save this page ({ $shortcut })
 
-# Variables:
-#  $shortcut (String): keyboard shortcut to open a local file
 toolbar-button-open-file =
   .label = Open file
   .tooltiptext = Open a file ({ $shortcut })
@@ -1182,8 +1261,6 @@ toolbar-button-send-tab =
   .label = Send tab
   .tooltiptext = Send current tab to another device
 
-# Variables
-# $shortcut (string) - Keyboard shortcut to open a new private browsing window
 toolbar-button-new-private-window =
   .label = New private window
   .tooltiptext = Open a new private browsing window ({ $shortcut })
@@ -1196,6 +1273,52 @@ toolbar-button-tab-groups =
   .label = Tab groups
   .tooltiptext = Show your tab groups
 
+toolbar-button-history =
+  .label = History
+  .tooltiptext = Show your history ({ $shortcut })
+
+toolbar-button-find =
+  .label = Find
+  .tooltiptext = Find in this page ({ $shortcut })
+
+toolbar-button-developer =
+  .label = Developer
+  .tooltiptext = Open Web developer tools ({ $shortcut })
+
+toolbar-button-forget =
+  .label = Forget
+  .tooltiptext = Forget about some browsing history
+
+toolbar-zoom-controls =
+  .label = Zoom Controls
+  .title = Zoom controls
+
+toolbar-button-zoom-out =
+  .label = Zoom out
+  .tooltiptext = Zoom out ({ $shortcut })
+
+toolbar-button-zoom-reset-tooltip = Reset zoom level ({ $shortcut })
+
+toolbar-button-zoom-in =
+  .label = Zoom in
+  .tooltiptext = Zoom in ({ $shortcut })
+
+toolbar-edit-controls =
+  .label = Edit controls
+  .title = Edit controls
+
+toolbar-button-cut =
+  .label = Cut
+  .tooltiptext = Cut ({ $shortcut })
+
+toolbar-button-copy =
+  .label = Copy
+  .tooltiptext = Copy ({ $shortcut })
+
+toolbar-button-paste =
+  .label = Paste
+  .tooltiptext = Paste ({ $shortcut })
+
 ## EME notification panel
 
 eme-notifications-drm-content-playing = Some audio or video on this site uses DRM software, which may limit what { -brand-short-name } can let you do with it.
@@ -1203,6 +1326,71 @@ eme-notifications-drm-content-playing-manage = Manage settings
 eme-notifications-drm-content-playing-manage-accesskey = M
 eme-notifications-drm-content-playing-dismiss = Dismiss
 eme-notifications-drm-content-playing-dismiss-accesskey = D
+
+## Notification bars for media playback issues
+
+eme-notifications-drm-content-disabled-message = You must enable DRM to play some audio or video on this page.
+eme-notifications-drm-content-disabled-button =
+    .label = Enable DRM
+    .accesskey = E
+eme-notifications-drm-content-cdm-installing-message = { -brand-short-name } is installing components needed to play the audio or video on this page. Please try again later.
+
+decoder-doctor-no-codecs-linux-message = To play video, you may need to install the required video codecs.
+decoder-doctor-no-hw-acceleration-message = To improve video quality, you may need to install Microsoft’s Media Feature Pack.
+decoder-doctor-no-pulse-audio-message = To play audio, you may need to install the required PulseAudio software.
+decoder-doctor-unsupported-libavcodec-message = libavcodec may be vulnerable or is not supported, and should be updated to play video.
+decoder-doctor-decode-error-message = An error occurred while decoding a media resource.
+decoder-doctor-decode-warning-message = A recoverable error occurred while decoding a media resource.
+decoder-doctor-learn-how-link = Learn how
+decoder-doctor-report-issue-button =
+    .label = Report site issue
+    .accesskey = R
+
+# Variables:
+#   $pluginName (String) - The name of the media plugin that crashed (for example, “Widevine Content Decryption Module”).
+plugin-crashed-notification-message = The { $pluginName } plugin has crashed.
+plugin-crashed-notification-reload-button =
+    .label = Reload page
+    .accesskey = R
+plugin-crashed-notification-submit-button =
+    .label = Submit a crash report
+    .accesskey = S
+
+## Notification bar shown after the user chooses to visit a site flagged by Safe Browsing
+
+safebrowsing-deceptive-site-message = Deceptive Site!
+safebrowsing-reported-attack-site-message = Reported Attack Site!
+safebrowsing-reported-unwanted-site-message = Reported Unwanted Software Site!
+safebrowsing-reported-harmful-site-message = Reported Harmful Site!
+safebrowsing-get-me-out-of-here-button =
+    .label = Get me out of here!
+    .accesskey = G
+safebrowsing-not-a-deceptive-site-button =
+    .label = This isn’t a deceptive site…
+    .accesskey = D
+safebrowsing-not-an-attack-site-button =
+    .label = This isn’t an attack site…
+    .accesskey = A
+
+## Notification bar shown when a captive portal is blocking network access
+## and requires the user to log in before browsing.
+
+captive-portal-info-message = You must log in to this network before you can access the Internet.
+# Shown in all tabs except the login page tab. Clicking it shows the portal
+# login page tab.
+captive-portal-show-login-page-button =
+    .label = Open network login page
+
+## Notification bar shown when the user tries to visit a local host, but a
+## search page was already loaded for the given word by the time the DNS
+## request recognized it.
+## Variables:
+##   $hostName (String) - The recognized host (for example, “http://example/”).
+
+keyword-uri-fixup-message = Did you mean to go to { $hostName }?
+keyword-uri-fixup-go-to-button =
+    .label = Yes, take me to { $hostName }
+    .accesskey = Y
 
 ## Password save/update panel
 
@@ -1249,8 +1437,9 @@ menu-share-copy-links =
            *[other] Copy { $count } Links
         }
     .accesskey = L
-menu-share-windows =
+menu-share-windows2 =
     .label = More Options
+    .accesskey = M
 ui-tour-info-panel-close =
     .tooltiptext = Close
 
@@ -1335,12 +1524,6 @@ tabs-toolbar-list-all-tabs-2 =
 ## Drop indicator text for pinned tabs when no tabs are pinned.
 
 pinned-tabs-drop-indicator = Drop tab here to pin
-
-## Infobar shown at startup to suggest session-restore
-
-# <img data-l10n-name="icon"/> will be replaced by the application menu icon
-restore-session-startup-suggestion-message = <strong>Open previous tabs?</strong> You can restore your previous session from the { -brand-short-name } application menu <img data-l10n-name="icon"/>, under History.
-restore-session-startup-suggestion-button = Show me how
 
 ## Infobar shown when the user tries to open a file picker and file pickers are blocked by enterprise policy
 
@@ -1431,7 +1614,7 @@ reset-pbm-toolbar-button2 =
     .label = Clear private session
     .tooltiptext = Clear private session
 reset-pbm-panel-heading2 = Clear data and start a fresh private session?
-reset-pbm-panel-description2 = This deletes history, cookies, and all other site data without closing your Private Window.
+reset-pbm-panel-description3 = This clears your history and cookies, and signs you out of sites. Your Private Windows will close, and a fresh one will open.
 reset-pbm-panel-always-ask-checkbox =
      .label = Always ask me
      .accesskey = A
@@ -1442,6 +1625,27 @@ reset-pbm-panel-confirm-button2 =
     .label = Clear private session
     .accesskey = l
 reset-pbm-panel-complete = Private session data deleted
+
+## Fire button. Clears the whole browsing session, then closes every window and
+## opens a new one.
+
+fire-button-toolbar-button2 =
+    .label = Delete some or all data
+    .tooltiptext = Delete some or all of your browsing data
+fire-button-panel-heading = Delete all browsing data?
+fire-button-panel-description = This deletes history, cookies, and site data. You’ll be signed out of sites. This window will close, and { -brand-short-name } will open a new one.
+fire-button-panel-choose-description = If you don’t want to delete everything, choose specific data instead.
+# Opens the "Delete browsing data" dialog, where the user picks
+# which kinds of data to delete. The trailing ellipsis marks that a dialog
+# follows rather than the action happening immediately.
+fire-button-panel-choose-link = Choose…
+fire-button-panel-cancel-button =
+    .label = Cancel
+    .accesskey = C
+fire-button-panel-confirm-button =
+    .label = Delete all
+    .accesskey = D
+fire-button-panel-complete = Browsing data deleted
 
 ## Autorefresh blocker
 
@@ -1560,6 +1764,29 @@ file-picker-crashed-show-in-folder =
     .label = Show in Folder
     .accessKey = F
 
+## Unsigned add-ons notification
+
+unsigned-addons-disabled-message = One or more installed add-ons cannot be verified and have been disabled.
+unsigned-addons-disabled-learn-more =
+    .label = Learn More
+    .accesskey = L
+
+## Process hang notification ("ProcessHangMonitor.sys.mjs")
+
+process-hang-selected-tab-message = This page is slowing down { -brand-short-name }. To speed up your browser, stop this page.
+process-hang-nonspecific-tab-message = A web page is slowing down { -brand-short-name }. To speed up your browser, stop that page.
+# Variables:
+#   $title (String): the title of the tab.
+process-hang-specific-tab-message = “{ $title }” is slowing down { -brand-short-name }. To speed up your browser, stop that page.
+# Variables:
+#   $addonName (String): the name of the extension.
+process-hang-addon-message = “{ $addonName }” is slowing down { -brand-short-name }. To speed up your browser, stop that extension.
+process-hang-addon-learn-more =
+    .value = Learn more
+process-hang-stop-button =
+    .label = Stop
+    .accesskey = S
+
 ## Onboarding Finish Setup checklist
 
 onboarding-aw-finish-setup-button =
@@ -1583,8 +1810,19 @@ urlbar-trust-icon-trackers-blocked-longform-label = { $count ->
   *[other] { $count } trackers blocked
 }
 
+# Variables:
+#   $count (Number) - Number of trackers blocked on the current site.
+urlbar-trust-icon-trackers-blocked-tooltip = { $count ->
+  [one] { $count } tracker blocked on this site
+  *[other] { $count } trackers blocked on this site
+}
+urlbar-trust-icon-no-trackers-found-tooltip = No trackers found on this site
+urlbar-trust-icon-tracking-protection-off-tooltip = Tracking protection is off for this site
+
 trustpanel-etp-label-enabled = Enhanced Tracking Protection is on
 trustpanel-etp-label-disabled = Enhanced Tracking Protection is off
+
+trustpanel-etp-label-redesign = Enhanced Tracking Protection
 
 # Variables
 #  $host (String): the hostname of the site that is being displayed.
@@ -1598,6 +1836,10 @@ trustpanel-etp-toggle-off =
 trustpanel-etp-description-enabled = If something looks broken on this site, try turning off protections.
 trustpanel-etp-description-disabled = { -brand-product-name } thinks companies should follow you less. We block as many trackers as we can when you turn on protections.
 
+trustpanel-trackercount-label = Show trackers blocked in address bar
+trustpanel-trackercount-toggle =
+    .aria-label = Show trackers blocked in address bar
+
 trustpanel-connection-label-secure = Connection secure
 trustpanel-connection-label-insecure = Connection not secure
 
@@ -1610,7 +1852,10 @@ trustpanel-header-disabled = You turned off protections
 trustpanel-description-disabled = { -brand-product-name } is off-duty. We suggest turning protections back on.
 
 trustpanel-clear-cookies-button = Clear cookies and site data
+trustpanel-delete-site-data-button = Delete site data
+trustpanel-fix-site-issue-button = Fix site issue
 trustpanel-privacy-link = Privacy Settings
+trustpanel-manage-settings-button = Manage settings
 
 # Variables
 #  $host (String): the hostname of the site that is being displayed.
@@ -1624,12 +1869,29 @@ trustpanel-clear-cookies-subview-button-cancel = Cancel
 
 # Variables
 #  $host (String): the hostname of the site that is being displayed.
+trustpanel-clear-cookies-header-redesign =
+    .title = Delete site data for { $host }
+
+trustpanel-clear-cookies-description-redesign = You’ll be signed out of sites. It may clear shopping carts.
+
+# Variables
+#  $host (String): the hostname of the site that is being displayed.
 trustpanel-site-information-header =
     .title = Connection protections for { $host }
+
+# Variables
+#  $host (String): the hostname of the site that is being displayed.
+trustpanel-connection-info-header =
+    .title = Connection info for { $host }
+
+trustpanel-connection-secure = This site’s connection is secure.
+trustpanel-connection-not-secure = This site’s connection isn’t secure.
+trustpanel-connection-not-secure-description = Avoid entering info like passwords or credit cards to help protect them from being stolen.
 
 trustpanel-siteinformation-morelink = More site information
 
 trustpanel-blocker-see-all = See All
+trustpanel-blocker-see-trackers-button = See trackers
 
 # Variables
 #  $host (String): the hostname of the site that is being displayed.
@@ -1644,11 +1906,47 @@ trustpanel-blocker-section-header2 = { $count ->
   *[other] <span data-l10n-name="count">{ $count }</span> Trackers blocked on this site
 }
 trustpanel-blocker-description = { -brand-product-name } thinks companies should follow you less. So we block as many as we can.
+
+##  $count (String): the number of trackers blocked.
+
+trustpanel-blocker-section-header2-redesign = { $count ->
+  [one] { -brand-short-name } blocked <span data-l10n-name="count">{ $count }</span> tracker on this site
+  *[other] { -brand-short-name } blocked <span data-l10n-name="count">{ $count }</span> trackers on this site
+}
+trustpanel-blocker-description-redesign = These trackers were blocked from collecting info about your browsing.
+
+trustpanel-no-trackers-header-redesign = No trackers found on this site
+trustpanel-no-trackers-description-redesign = { -brand-short-name } checked for known trackers and didn’t find any.
+
+trustpanel-etp-off-description-redesign = Turn on protections and { -brand-short-name } will block known trackers from collecting info about your browsing.
+
 trustpanel-blocked-header = { -brand-product-name } blocked these things for you:
 trustpanel-tracking-header = { -brand-product-name } allowed these things so sites don’t break:
 trustpanel-tracking-description = Without trackers, some buttons, forms, and login fields might not work.
 trustpanel-insecure-section-header = Your connection isn’t secure
 trustpanel-insecure-description = The data you’re sending to this site isn’t encrypted. It could be viewed, stolen, or altered.
+
+# Title of the subview opened by trustpanel-fix-site-issue-button.
+trustpanel-site-issue-header =
+    .title = Site not working? Try these steps.
+# Shown when the user reports that the current site isn’t working. It
+# introduces a bulleted list of features (trustpanel-site-issue-step-*) that
+# can break sites: turning them off one at a time helps the user find out
+# whether one of them causes the problem.
+trustpanel-site-issue-steps-intro = Turn these off to see if it fixes the issue:
+trustpanel-report-broken-site-button = Report broken site
+trustpanel-report-broken-site-description = Your report helps us improve { -brand-short-name } for everyone.
+
+## Items of the bulleted list introduced by trustpanel-site-issue-steps-intro.
+## Each one names a feature the user can turn off to check whether it causes
+## the site issue.
+
+trustpanel-site-issue-step-extensions = Extensions
+trustpanel-site-issue-step-vpn = Built-in VPN
+trustpanel-site-issue-step-etp = Enhanced Tracking Protection
+
+## Variables
+##  $count (String): the number of trackers blocked.
 
 trustpanel-list-label-tracking-cookies = { $count ->
   [one] { $count } Cross-site tracking cookie

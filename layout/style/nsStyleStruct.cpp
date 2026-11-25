@@ -427,6 +427,12 @@ nsChangeHint nsStyleMargin::CalcDifference(
             nsChangeHint_ClearAncestorIntrinsics;
   }
 
+  if (mMarginTrim != aNewData.mMarginTrim) {
+    // Which margins are trimmed determines the used margins of our
+    // descendants, so they need to be reflowed as well.
+    hint |= NS_STYLE_HINT_REFLOW;
+  }
+
   if (mScrollMargin != aNewData.mScrollMargin) {
     // FIXME: Bug 1530253 Support re-snapping when scroll-margin changes.
     hint |= nsChangeHint_NeutralChange;
@@ -512,6 +518,7 @@ nsStyleBorder::nsStyleBorder()
 nsStyleBorder::nsStyleBorder(const nsStyleBorder& aSrc)
     : mBorderRadius(aSrc.mBorderRadius),
       mCornerShape(aSrc.mCornerShape),
+      mBorderShape(aSrc.mBorderShape),
       mBorderImageSource(aSrc.mBorderImageSource),
       mBorderImageWidth(aSrc.mBorderImageWidth),
       mBorderImageOutset(aSrc.mBorderImageOutset),
@@ -587,6 +594,10 @@ nsChangeHint nsStyleBorder::CalcDifference(
   }
 
   if (mCornerShape != aNewData.mCornerShape) {
+    return nsChangeHint_RepaintFrame;
+  }
+
+  if (mBorderShape != aNewData.mBorderShape) {
     return nsChangeHint_RepaintFrame;
   }
 
@@ -1105,7 +1116,7 @@ nsStylePosition::nsStylePosition()
       mMinHeight(StyleSize::Auto()),
       mMaxHeight(StyleMaxSize::None()),
       mPositionAnchor(StylePositionAnchorKeyword::Normal()),
-      mPositionVisibility(StylePositionVisibility::ANCHORS_VISIBLE),
+      mPositionVisibility(StylePositionVisibility::ANCHOR_VISIBLE),
       mPositionTryFallbacks(StylePositionTryFallbacks()),
       mPositionTryOrder(StylePositionTryOrder::Normal),
       mFlexBasis(StyleFlexBasis::Size(StyleSize::Auto())),
@@ -2287,6 +2298,7 @@ nsStyleDisplay::nsStyleDisplay()
           StyleBlockEllipsis::Ellipsis(),
           false},
       mShapeMargin(LengthPercentage::Zero()),
+      mFitTolerance(StyleFitTolerance::Normal()),
       mShapeOutside(StyleShapeOutside::None()) {
   MOZ_COUNT_CTOR(nsStyleDisplay);
 }
@@ -2346,6 +2358,7 @@ nsStyleDisplay::nsStyleDisplay(const nsStyleDisplay& aSource)
       mWebkitLineClamp(aSource.mWebkitLineClamp),
       mShapeImageThreshold(aSource.mShapeImageThreshold),
       mShapeMargin(aSource.mShapeMargin),
+      mFitTolerance(aSource.mFitTolerance),
       mShapeOutside(aSource.mShapeOutside),
       mAnchorName(aSource.mAnchorName),
       mAnchorScope(aSource.mAnchorScope) {
@@ -2609,6 +2622,10 @@ nsChangeHint nsStyleDisplay::CalcDifference(
     // XXX Can this just be AllReflowHints + RepaintFrame, and be included in
     // the block below?
     hint |= NS_STYLE_HINT_REFLOW;
+  }
+
+  if (mFitTolerance != aNewData.mFitTolerance) {
+    hint |= nsChangeHint_AllReflowHints;
   }
 
   // XXX the following is conservative, for now: changing float breaking
@@ -3099,6 +3116,7 @@ nsStyleText::nsStyleText(const nsStyleText& aSource)
       mWordBreak(aSource.mWordBreak),
       mOverflowWrap(aSource.mOverflowWrap),
       mTextAutospace(aSource.mTextAutospace),
+      mTextAutospaceSize(aSource.mTextAutospaceSize),
       mHyphens(aSource.mHyphens),
       mRubyAlign(aSource.mRubyAlign),
       mRubyPosition(aSource.mRubyPosition),
@@ -3162,7 +3180,8 @@ nsChangeHint nsStyleText::CalcDifference(const nsStyleText& aNewData) const {
       (mHyphenateLimitChars != aNewData.mHyphenateLimitChars) ||
       (mWebkitTextSecurity != aNewData.mWebkitTextSecurity) ||
       (mTextWrapStyle != aNewData.mTextWrapStyle) ||
-      (mTextAutospace != aNewData.mTextAutospace)) {
+      (mTextAutospace != aNewData.mTextAutospace) ||
+      (mTextAutospaceSize != aNewData.mTextAutospaceSize)) {
     return NS_STYLE_HINT_REFLOW;
   }
 

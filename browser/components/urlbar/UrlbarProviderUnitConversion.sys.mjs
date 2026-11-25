@@ -13,20 +13,15 @@ import { UnitConverterTemperature } from "moz-src:///browser/components/urlbar/u
 import { UnitConverterTimezone } from "moz-src:///browser/components/urlbar/unitconverters/UnitConverterTimezone.sys.mjs";
 import { UrlbarProvider } from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
 
-const lazy = {};
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
   UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarShared: "chrome://browser/content/urlbar/UrlbarShared.mjs",
+  ClipboardHelper: {
+    service: "@mozilla.org/widget/clipboardhelper;1",
+    iid: Ci.nsIClipboardHelper,
+  },
 });
-
-XPCOMUtils.defineLazyServiceGetter(
-  lazy,
-  "ClipboardHelper",
-  "@mozilla.org/widget/clipboardhelper;1",
-  Ci.nsIClipboardHelper
-);
 
 const CONVERTERS = [
   new UnitConverterSimple(),
@@ -41,30 +36,23 @@ const VIEW_TEMPLATE = {
   },
   children: [
     {
-      name: "content",
+      name: "icon",
+      tag: "img",
+      classList: ["urlbarView-favicon"],
+      attributes: {
+        src: "chrome://global/skin/icons/edit-copy.svg",
+      },
+    },
+    {
+      name: "output",
+      tag: "strong",
+      attributes: {
+        dir: "ltr",
+      },
+    },
+    {
+      name: "action",
       tag: "span",
-      classList: ["urlbarView-no-wrap"],
-      children: [
-        {
-          name: "icon",
-          tag: "img",
-          classList: ["urlbarView-favicon"],
-          attributes: {
-            src: "chrome://global/skin/icons/edit-copy.svg",
-          },
-        },
-        {
-          name: "output",
-          tag: "strong",
-          attributes: {
-            dir: "ltr",
-          },
-        },
-        {
-          name: "action",
-          tag: "span",
-        },
-      ],
     },
   ],
 };

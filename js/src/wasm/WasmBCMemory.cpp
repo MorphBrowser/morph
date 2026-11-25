@@ -631,33 +631,36 @@ void BaseCompiler::executeLoad(MemoryAccessDesc* access, RegPtr instance,
   if (zeroExtend == ZeroExtendIndex::Yes) {
     ToValidIndex(masm, ptr);
   }
+  FaultingCodeRange fcr;
   if (IsUnaligned(*access)) {
     switch (dest.tag) {
       case AnyReg::I64:
-        masm.wasmUnalignedLoadI64(*access, memoryBase, ptr, ptr, dest.i64(),
-                                  temp);
+        fcr = masm.wasmUnalignedLoadI64(*access, memoryBase, ptr, ptr,
+                                        dest.i64(), temp);
         break;
       case AnyReg::F32:
-        masm.wasmUnalignedLoadFP(*access, memoryBase, ptr, ptr, dest.f32(),
-                                 temp);
+        fcr = masm.wasmUnalignedLoadFP(*access, memoryBase, ptr, ptr,
+                                       dest.f32(), temp);
         break;
       case AnyReg::F64:
-        masm.wasmUnalignedLoadFP(*access, memoryBase, ptr, ptr, dest.f64(),
-                                 temp);
+        fcr = masm.wasmUnalignedLoadFP(*access, memoryBase, ptr, ptr,
+                                       dest.f64(), temp);
         break;
       case AnyReg::I32:
-        masm.wasmUnalignedLoad(*access, memoryBase, ptr, ptr, dest.i32(), temp);
+        fcr = masm.wasmUnalignedLoad(*access, memoryBase, ptr, ptr, dest.i32(),
+                                     temp);
         break;
       default:
         MOZ_CRASH("Unexpected type");
     }
   } else {
     if (dest.tag == AnyReg::I64) {
-      masm.wasmLoadI64(*access, memoryBase, ptr, ptr, dest.i64());
+      fcr = masm.wasmLoadI64(*access, memoryBase, ptr, ptr, dest.i64());
     } else {
-      masm.wasmLoad(*access, memoryBase, ptr, ptr, dest.any());
+      fcr = masm.wasmLoad(*access, memoryBase, ptr, ptr, dest.any());
     }
   }
+  MaybeAddDebugStackMapForTrapOOB(this, fcr);
 #elif defined(JS_CODEGEN_ARM)
   MOZ_ASSERT(temp.isInvalid());
   if (dest.tag == AnyReg::I64) {
@@ -798,33 +801,36 @@ void BaseCompiler::executeStore(MemoryAccessDesc* access, RegPtr instance,
   if (zeroExtend == ZeroExtendIndex::Yes) {
     ToValidIndex(masm, ptr);
   }
+  FaultingCodeRange fcr;
   if (IsUnaligned(*access)) {
     switch (src.tag) {
       case AnyReg::I64:
-        masm.wasmUnalignedStoreI64(*access, src.i64(), memoryBase, ptr, ptr,
-                                   temp);
+        fcr = masm.wasmUnalignedStoreI64(*access, src.i64(), memoryBase, ptr,
+                                         ptr, temp);
         break;
       case AnyReg::F32:
-        masm.wasmUnalignedStoreFP(*access, src.f32(), memoryBase, ptr, ptr,
-                                  temp);
+        fcr = masm.wasmUnalignedStoreFP(*access, src.f32(), memoryBase, ptr,
+                                        ptr, temp);
         break;
       case AnyReg::F64:
-        masm.wasmUnalignedStoreFP(*access, src.f64(), memoryBase, ptr, ptr,
-                                  temp);
+        fcr = masm.wasmUnalignedStoreFP(*access, src.f64(), memoryBase, ptr,
+                                        ptr, temp);
         break;
       case AnyReg::I32:
-        masm.wasmUnalignedStore(*access, src.i32(), memoryBase, ptr, ptr, temp);
+        fcr = masm.wasmUnalignedStore(*access, src.i32(), memoryBase, ptr, ptr,
+                                      temp);
         break;
       default:
         MOZ_CRASH("Unexpected type");
     }
   } else {
     if (src.tag == AnyReg::I64) {
-      masm.wasmStoreI64(*access, src.i64(), memoryBase, ptr, ptr);
+      fcr = masm.wasmStoreI64(*access, src.i64(), memoryBase, ptr, ptr);
     } else {
-      masm.wasmStore(*access, src.any(), memoryBase, ptr, ptr);
+      fcr = masm.wasmStore(*access, src.any(), memoryBase, ptr, ptr);
     }
   }
+  MaybeAddDebugStackMapForTrapOOB(this, fcr);
 #elif defined(JS_CODEGEN_ARM64)
   MOZ_ASSERT(temp.isInvalid());
   FaultingCodeRange fcr;
@@ -1432,8 +1438,9 @@ static void PopAndAllocate(BaseCompiler* bc, ValType type,
 static void Perform(BaseCompiler* bc, const MemoryAccessDesc& access,
                     Address srcAddr, AtomicOp op, RegI32 rv, RegI32 rd,
                     const Temps& temps) {
-  bc->masm.wasmAtomicFetchOp(access, op, rv, srcAddr, temps.t0, temps.t1,
-                             temps.t2, rd);
+  FaultingCodeRange fcr = bc->masm.wasmAtomicFetchOp(
+      access, op, rv, srcAddr, temps.t0, temps.t1, temps.t2, rd);
+  MaybeAddDebugStackMapForTrapOOB(bc, fcr);
 }
 
 static void Deallocate(BaseCompiler* bc, RegI32 rv, const Temps& temps) {
@@ -1893,8 +1900,9 @@ static void PopAndAllocate(BaseCompiler* bc, ValType type,
 
 static void Perform(BaseCompiler* bc, const MemoryAccessDesc& access,
                     Address srcAddr, RegI32 rv, RegI32 rd, const Temps& temps) {
-  bc->masm.wasmAtomicExchange(access, srcAddr, rv, temps.t0, temps.t1, temps.t2,
-                              rd);
+  FaultingCodeRange fcr = bc->masm.wasmAtomicExchange(
+      access, srcAddr, rv, temps.t0, temps.t1, temps.t2, rd);
+  MaybeAddDebugStackMapForTrapOOB(bc, fcr);
 }
 
 static void Deallocate(BaseCompiler* bc, RegI32 rv, const Temps& temps) {
@@ -2724,7 +2732,7 @@ bool BaseCompiler::atomicNotify(MemoryAccessDesc* access) {
 //
 // Bulk memory.
 
-void BaseCompiler::memCopyInlineM32() {
+bool BaseCompiler::memCopyInlineM32() {
   MOZ_ASSERT(MaxInlineMemoryCopyLength != 0);
 
   // This function assumes a memory index of zero
@@ -2739,22 +2747,34 @@ void BaseCompiler::memCopyInlineM32() {
 
   // Compute the number of copies of each width we will need to do
   size_t remainder = length;
+  // Each copy will push the result onto the stack, so keep track of it
+  size_t numPushes = 0;
 #ifdef ENABLE_JIT_SIMD
   size_t numCopies16 = 0;
   if (MacroAssembler::SupportsFastUnalignedFPAccesses()) {
     numCopies16 = remainder / sizeof(V128);
+    numPushes += numCopies16;
     remainder %= sizeof(V128);
   }
 #endif
 #ifdef JS_64BIT
   size_t numCopies8 = remainder / sizeof(uint64_t);
+  numPushes += numCopies8;
   remainder %= sizeof(uint64_t);
 #endif
   size_t numCopies4 = remainder / sizeof(uint32_t);
+  numPushes += numCopies4;
   remainder %= sizeof(uint32_t);
   size_t numCopies2 = remainder / sizeof(uint16_t);
+  numPushes += numCopies2;
   remainder %= sizeof(uint16_t);
   size_t numCopies1 = remainder;
+  numPushes += numCopies1;
+
+  // A transient address slot is needed for the address.
+  if (!stk_.reserve(stk_.length() + numPushes + 1)) {
+    return false;
+  }
 
   // Load all source bytes onto the value stack from low to high using the
   // widest transfer width we can for the system. We will trap without writing
@@ -2939,6 +2959,8 @@ void BaseCompiler::memCopyInlineM32() {
 
   freeI32(dest);
   freeI32(src);
+
+  return true;
 }
 
 void BaseCompiler::memFillInlineM32() {

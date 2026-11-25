@@ -5,7 +5,7 @@
 #ifndef MOZILLA_GFX_DRAWEVENTRECORDER_H_
 #define MOZILLA_GFX_DRAWEVENTRECORDER_H_
 
-#include <deque>
+#include <algorithm>
 #include <functional>
 #include <vector>
 
@@ -16,6 +16,7 @@
 #include "RecordingTypes.h"
 #include "mozilla/DataMutex.h"
 #include "mozilla/ThreadSafeWeakPtr.h"
+#include "mozilla/UniquePtr.h"
 #include "nsISupportsImpl.h"
 #include "nsTHashMap.h"
 #include "nsTHashSet.h"
@@ -37,6 +38,28 @@ class DrawEventRecorderPrivate : public DrawEventRecorder {
 
   DrawEventRecorderPrivate();
   virtual ~DrawEventRecorderPrivate();
+
+  /**
+   * An upper bound of the blur standard deviations drawn through filters so
+   * far, in device pixels.
+   */
+  Float MaxBlurStdDeviation() const { return mMaxBlurStdDeviation; }
+  /**
+   * Called when a blur filter's standard deviation is recorded, in filter
+   * space.
+   */
+  void NoteFilterBlurStdDeviation(Float aStdDeviation) {
+    mMaxFilterBlurStdDeviation =
+        std::max(mMaxFilterBlurStdDeviation, aStdDeviation);
+  }
+  /**
+   * Called when a filter is drawn, with the scale from filter space to device
+   * space. Assumes the filter may contain any of the blurs recorded so far.
+   */
+  void NoteFilterDrawScale(Float aScale) {
+    mMaxBlurStdDeviation =
+        std::max(mMaxBlurStdDeviation, mMaxFilterBlurStdDeviation * aScale);
+  }
   RecorderType GetRecorderType() const override {
     return RecorderType::PRIVATE;
   }
@@ -45,6 +68,17 @@ class DrawEventRecorderPrivate : public DrawEventRecorder {
     return true;
   }
   virtual void FlushItem(IntRect) {}
+
+  /**
+   * Whether recordings made with this recorder might be replayed against a
+   * DrawTarget which supports glyph source text, e.g. when printing. See
+   * DrawTarget::SupportsGlyphSourceText.
+   */
+  bool SupportsGlyphSourceText() const { return mSupportsGlyphSourceText; }
+  void SetSupportsGlyphSourceText(bool aSupports) {
+    mSupportsGlyphSourceText = aSupports;
+  }
+
   virtual void DetachResources() {
     NS_ASSERT_OWNINGTHREAD(DrawEventRecorderPrivate);
 
@@ -226,7 +260,7 @@ class DrawEventRecorderPrivate : public DrawEventRecorder {
     int64_t mEventCount = -1;
   };
 
-  using ExternalImagesHolder = std::deque<ExternalImageEntry>;
+  using ExternalImagesHolder = std::vector<ExternalImageEntry>;
 
   virtual already_AddRefed<layers::CanvasChild> GetCanvasChild() const {
     return nullptr;
@@ -281,6 +315,9 @@ class DrawEventRecorderPrivate : public DrawEventRecorder {
   ExternalSurfacesHolder mExternalSurfaces;
   ExternalImagesHolder mExternalImages;
   bool mExternalFonts;
+  bool mSupportsGlyphSourceText = false;
+  Float mMaxFilterBlurStdDeviation = 0.0f;
+  Float mMaxBlurStdDeviation = 0.0f;
 };
 
 typedef std::function<void(MemStream& aStream,
@@ -319,9 +356,17 @@ class DrawEventRecorderMemory : public DrawEventRecorderPrivate {
    */
   void WipeRecording();
   bool Finish() override;
+
+  /**
+   * Records object references as sequential ids rather than addresses, so
+   * that recording the same content twice produces identical bytes. Must be
+   * called before anything is recorded.
+   */
+  void UseDeterministicReferenceIds();
   void FlushItem(IntRect) override;
 
   MemStream mOutputStream;
+  UniquePtr<ReferenceIdMap> mReferenceIds;
   /* The index stream is of the form:
    * ItemIndex { size_t dataEnd; size_t extraDataEnd; }
    * It gets concatenated to the end of mOutputStream in Finish()

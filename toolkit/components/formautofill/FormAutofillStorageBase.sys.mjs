@@ -195,8 +195,8 @@ export const VALID_CREDIT_CARD_FIELDS = [
   "cc-exp-month",
   "cc-exp-year",
   "cc-type",
-  // TODO: Uncomment this when storage is ready.
-  // "cc-csc",
+  // cc-csc is kept only as an unknown field here. RustAutofillCreditCardsAdapter
+  // is the store that holds it as a field of its own.
 ];
 
 const VALID_CREDIT_CARD_COMPUTED_FIELDS = [
@@ -1516,6 +1516,11 @@ class AutofillRecords {
           `"${key}" contains invalid data type: ${typeof record[key]}`
         );
       }
+      // The Rust store would replace a lone surrogate with U+FFFD, so refuse
+      // it in both stores rather than store something the page didn't submit.
+      if (typeof record[key] == "string" && !record[key].isWellFormed()) {
+        throw new Error(`"${key}" contains lone surrogates`);
+      }
       if (!preserveEmptyFields && record[key] === "") {
         delete record[key];
       }
@@ -1743,6 +1748,21 @@ export class CreditCardsBase extends AutofillRecords {
     );
   }
 
+  _recordReadProcessor(creditCard) {
+    lazy.CreditCardRecord.stripSecurityCodeWhenDisabled(creditCard);
+  }
+
+  /**
+   * @returns {Promise<{total: number, withSecurityCode: number}>}
+   */
+  async getSavedCounts() {
+    const records = this._data.filter(r => !r.deleted);
+    return {
+      total: records.length,
+      withSecurityCode: records.filter(r => r["cc-csc"]).length,
+    };
+  }
+
   async computeFields(creditCard) {
     // NOTE: Remember to bump the schema version number if any of the existing
     //       computing algorithm changes. (No need to bump when just adding new
@@ -1838,7 +1858,8 @@ export class CreditCardsBase extends AutofillRecords {
     }
     exported["cc-number"] = await lazy.OSKeyStore.decrypt(
       exported["cc-number-encrypted"],
-      "formautofill_cc"
+      // Not a user reading a card, so kept apart from their reads.
+      "formautofill_migration"
     );
     delete exported["cc-number-encrypted"];
     return exported;
@@ -1873,6 +1894,29 @@ export class CreditCardsBase extends AutofillRecords {
       return Promise.resolve(null);
     }
     return lazy.OSKeyStore.decrypt(ciphertext, trigger, reauth);
+  }
+
+  /**
+   * The cleartext of several fields of a stored record.
+   *
+   * A field this store does not keep encrypted, such as cc-csc, which it does
+   * not support, is always null.
+   *
+   * @param {object} record A record this store handed out.
+   * @param {Array<string>} fields The fields to read, from
+   *   CreditCardRecord.SECRET_FIELDS.
+   * @param {object} [options] As for decryptField.
+   * @returns {Promise<object>} Each field's cleartext, or null if the record
+   *   holds none.
+   */
+  async decryptFields(record, fields, options) {
+    const cleartext = {};
+    for (const field of fields) {
+      cleartext[field] = lazy.CreditCardRecord.hasCiphertextField(field)
+        ? await this.decryptField(record, field, options)
+        : null;
+    }
+    return cleartext;
   }
 
   async _stripComputedFields(creditCard) {
@@ -2000,14 +2044,26 @@ export class CreditCardsBase extends AutofillRecords {
         continue;
       }
 
-      const decrypted = await lazy.OSKeyStore.decrypt(
-        recordInStorage["cc-number-encrypted"],
-        "formautofill_cc",
-        false
-      );
+      let decrypted;
+      try {
+        decrypted = await lazy.OSKeyStore.decrypt(
+          recordInStorage["cc-number-encrypted"],
+          "formautofill_cc",
+          false
+        );
+      } catch (ex) {
+        if (ex.result == Cr.NS_ERROR_ABORT) {
+          throw ex;
+        }
+        // A card whose number cannot be decrypted is no duplicate of anything,
+        // and must not stop the search for the others.
+        continue;
+      }
 
       if (decrypted == record["cc-number"]) {
-        yield recordInStorage;
+        const clonedRecord = this._cloneAndCleanUp(recordInStorage);
+        this._recordReadProcessor(clonedRecord);
+        yield clonedRecord;
       }
     }
     return null;

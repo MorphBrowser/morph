@@ -34,6 +34,7 @@
 //! cache invalidation.
 
 use crate::internal_types::FastHashMap;
+use derive_more::AddAssign;
 use malloc_size_of::MallocSizeOf;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -443,23 +444,15 @@ impl<I: Internable> ops::Index<Handle<I>> for Interner<I> {
 macro_rules! enumerate_interners {
     ($macro_name: ident) => {
         $macro_name! {
-            clip: ClipIntern,
-            prim: RectanglePrim,
-            normal_border: NormalBorderPrim,
-            image_border: ImageBorder,
-            image: Image,
-            yuv_image: YuvImage,
-            line_decoration: LineDecoration,
-            linear_grad: LinearGradient,
-            radial_grad: RadialGradient,
-            conic_grad: ConicGradient,
+            // Everything that comes from a display item - every primitive,
+            // clips and clip-path polygons - is interned by the content display
+            // list builder now, so none of it has a slot here. What is left is
+            // what the scene builder synthesises. See
+            // doc/dl-builder-interning.md.
             picture: Picture,
-            text_run: TextRun,
             filter_data: FilterDataIntern,
             backdrop_capture: BackdropCapture,
             backdrop_render: BackdropRender,
-            polygon: PolygonIntern,
-            box_shadow: BoxShadow,
         }
     }
 }
@@ -493,6 +486,7 @@ macro_rules! enumerate_interning_report_fields {
             backdrop_render,
             polygon,
             box_shadow,
+            path,
         }
     }
 }

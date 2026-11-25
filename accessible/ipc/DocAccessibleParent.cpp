@@ -76,10 +76,8 @@ DocAccessibleParent::~DocAccessibleParent() {
 }
 
 uint64_t DocAccessibleParent::EffectiveCacheDomains() const {
-  if (dom::CanonicalBrowsingContext* bc = GetBrowsingContext()) {
-    if (bc->Top()->GetIsPrinting()) {
-      return kPdfCacheDomains;
-    }
+  if (IsPrintDoc()) {
+    return kPdfCacheDomains;
   }
   return nsAccessibilityService::GetActiveCacheDomains();
 }
@@ -1257,7 +1255,7 @@ void DocAccessibleParent::Destroy() {
   }
 }
 
-void DocAccessibleParent::ActorDestroy(ActorDestroyReason aWhy) {
+void DocAccessibleParent::ActorDestroy(ActorDestroyReason /*aWhy*/) {
   MOZ_ASSERT(CheckDocTree());
   if (!mShutdown) {
     ACQUIRE_ANDROID_LOCK

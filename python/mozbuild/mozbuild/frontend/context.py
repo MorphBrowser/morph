@@ -390,6 +390,11 @@ class HostCompileFlags(BaseCompileFlags):
                 context.config.substs.get("WARNINGS_HOST_CXXFLAGS"),
                 ("HOST_CXXFLAGS",),
             ),
+            (
+                "NSPR",
+                context.config.substs.get("NSPR_CFLAGS"),
+                ("HOST_CFLAGS", "HOST_CXXFLAGS"),
+            ),
         )
         BaseCompileFlags.__init__(self, context)
 
@@ -449,6 +454,7 @@ class LinkFlags(BaseCompileFlags):
         self._context = context
 
         self.flag_variables = (
+            ("LTO", context.config.substs.get("MOZ_LTO_LDFLAGS"), ("LDFLAGS",)),
             ("OS", self._os_ldflags(), ("LDFLAGS",)),
             (
                 "MOZ_HARDENING_LDFLAGS",
@@ -480,8 +486,37 @@ class LinkFlags(BaseCompileFlags):
                 ),
                 ("LDFLAGS",),
             ),
+            ("PGO", self._pgo_ldflags(), ("LDFLAGS",)),
+            (
+                "WIN32_EXE_DEFAULT",
+                context.config.substs.get("WIN32_EXE_DEFAULT_LDFLAGS"),
+                ("PROGRAM_LDFLAGS",),
+            ),
+            (
+                # For Mac executables, set the @rpath to be @executable_path by
+                # default so that shared libraries built with an @rpath install
+                # name in the same directory as the executable can be resolved.
+                # Executables not in the same directory should override the
+                # @rpath with a relative path such as @executable_path/../
+                # depending on their install location.
+                "MACOS_RPATH",
+                (
+                    ["-Wl,-rpath,@executable_path"]
+                    if context.config.substs.get("OS_ARCH") == "Darwin"
+                    else []
+                ),
+                ("PROGRAM_LDFLAGS",),
+            ),
         )
         BaseCompileFlags.__init__(self, context)
+
+    def _pgo_ldflags(self):
+        substs = self._context.config.substs
+        if substs.get("MOZ_PROFILE_GENERATE"):
+            return substs.get("PROFILE_GEN_LDFLAGS") or []
+        if substs.get("MOZ_PROFILE_USE"):
+            return substs.get("PROFILE_USE_LDFLAGS") or []
+        return []
 
     def _os_ldflags(self):
         flags = self._context.config.substs.get("OS_LDFLAGS", [])[:]
@@ -557,6 +592,11 @@ class CompileFlags(TargetCompileFlags):
         self._context = context
 
         self.flag_variables = (
+            (
+                "LTO",
+                context.config.substs.get("MOZ_LTO_CFLAGS"),
+                ("CXXFLAGS", "CFLAGS", "CMFLAGS", "CMMFLAGS"),
+            ),
             ("STL", context.config.substs.get("STL_FLAGS"), ("CXXFLAGS",)),
             (
                 "STL_HARDENING",
@@ -618,6 +658,16 @@ class CompileFlags(TargetCompileFlags):
                 ("CXXFLAGS",),
             ),
             (
+                "OS_COMPILE_CMFLAGS",
+                context.config.substs.get("OS_COMPILE_CMFLAGS"),
+                ("CMFLAGS",),
+            ),
+            (
+                "OS_COMPILE_CMMFLAGS",
+                context.config.substs.get("OS_COMPILE_CMMFLAGS"),
+                ("CMMFLAGS",),
+            ),
+            (
                 "OS_CPPFLAGS",
                 context.config.substs.get("OS_CPPFLAGS"),
                 ("CXXFLAGS", "CFLAGS", "CXX_LDFLAGS", "C_LDFLAGS"),
@@ -638,8 +688,8 @@ class CompileFlags(TargetCompileFlags):
                 ("CFLAGS", "CXXFLAGS", "CXX_LDFLAGS", "C_LDFLAGS"),
             ),
             (
-                "CLANG_PLUGIN",
-                context.config.substs.get("CLANG_PLUGIN_FLAGS"),
+                "COMPILER_PLUGIN",
+                context.config.substs.get("COMPILER_PLUGIN_FLAGS"),
                 ("CFLAGS", "CXXFLAGS", "CXX_LDFLAGS", "C_LDFLAGS"),
             ),
             (
@@ -669,6 +719,8 @@ class CompileFlags(TargetCompileFlags):
             ),
             ("MOZBUILD_CFLAGS", None, ("CFLAGS",)),
             ("MOZBUILD_CXXFLAGS", None, ("CXXFLAGS",)),
+            ("MOZBUILD_CMFLAGS", None, ("CMFLAGS",)),
+            ("MOZBUILD_CMMFLAGS", None, ("CMMFLAGS",)),
             (
                 "COVERAGE",
                 context.config.substs.get("COVERAGE_CFLAGS"),
@@ -701,9 +753,24 @@ class CompileFlags(TargetCompileFlags):
                 + ["-ffp-contract=off"],
                 ("CXXFLAGS", "CFLAGS"),
             ),
+            ("PGO_DEFINES", self._pgo_defines(), ("CXXFLAGS", "CFLAGS")),
+            ("PGO", self._pgo_flags(), ("PGO_CFLAGS",)),
         )
 
         TargetCompileFlags.__init__(self, context)
+
+    def _pgo_defines(self):
+        if self._context.config.substs.get("MOZ_PROFILE_GENERATE"):
+            return ["-DNS_FREE_PERMANENT_DATA=1"]
+        return []
+
+    def _pgo_flags(self):
+        substs = self._context.config.substs
+        if substs.get("MOZ_PROFILE_GENERATE"):
+            return substs.get("PROFILE_GEN_CFLAGS") or []
+        if substs.get("MOZ_PROFILE_USE"):
+            return substs.get("PROFILE_USE_CFLAGS") or []
+        return []
 
 
 class WasmFlags(TargetCompileFlags):
@@ -726,8 +793,8 @@ class WasmFlags(TargetCompileFlags):
             ),
             ("DEBUG", self._debug_flags(), ("WASM_CFLAGS", "WASM_CXXFLAGS")),
             (
-                "CLANG_PLUGIN",
-                context.config.substs.get("CLANG_PLUGIN_FLAGS"),
+                "COMPILER_PLUGIN",
+                context.config.substs.get("COMPILER_PLUGIN_FLAGS"),
                 ("WASM_CFLAGS", "WASM_CXXFLAGS"),
             ),
             ("OPTIMIZE", self._optimize_flags(), ("WASM_CFLAGS", "WASM_CXXFLAGS")),
@@ -758,6 +825,7 @@ class WasmFlags(TargetCompileFlags):
                 ("WASM_CFLAGS", "WASM_CXXFLAGS"),
             ),
             ("STL", context.config.substs.get("STL_FLAGS"), ("WASM_CXXFLAGS",)),
+            ("LINK", self._link_flags(), ("WASM_LDFLAGS",)),
         )
 
         TargetCompileFlags.__init__(self, context)
@@ -767,6 +835,17 @@ class WasmFlags(TargetCompileFlags):
         if substs.get("MOZ_DEBUG") or substs.get("MOZ_DEBUG_SYMBOLS"):
             return ["-g"]
         return []
+
+    def _link_flags(self):
+        optimize = self._context.config.substs.get("MOZ_OPTIMIZE")
+        return [
+            "-Wl,--export-all",
+            "-Wl,--stack-first",
+            f"-Wl,-z,stack-size={262144 if optimize else 1048576}",
+            "-Wl,--no-entry",
+            "-Wl,--import-memory",
+            "-Wl,--import-table",
+        ]
 
     def _optimize_flags(self):
         if not self._context.config.substs.get("MOZ_OPTIMIZE"):
@@ -946,23 +1025,6 @@ class SourcePath(Path):
         objdir (aka pseudo-rework), this is needed.
         """
         return ObjDirPath(self.context, "!%s" % self).full_path
-
-
-class RenamedSourcePath(SourcePath):
-    """Like SourcePath, but with a different base name when installed.
-
-    The constructor takes a tuple of (source, target_basename). In moz.build
-    files the same effect is achieved by appending a (source, target_basename)
-    tuple to a ``*_FILES`` variable; this class is kept for direct internal
-    construction (e.g. from jar manifests).
-    """
-
-    def __new__(cls, context, value):
-        assert isinstance(value, tuple)
-        source, target_basename = value
-        self = super().__new__(cls, context, source)
-        self._target_basename = target_basename
-        return self
 
 
 class ObjDirPath(Path):
@@ -1451,7 +1513,11 @@ VARIABLES = {
     "SOURCES": (
         ContextDerivedTypedListWithItems(
             Path,
-            StrictOrderingOnAppendListWithFlagsFactory({"no_pgo": bool, "flags": List}),
+            StrictOrderingOnAppendListWithFlagsFactory({
+                "no_pgo": bool,
+                "flags": List,
+                "object_deps": List,
+            }),
         ),
         list,
         """Source code files.
@@ -1834,6 +1900,14 @@ VARIABLES = {
         bool,
         bool,
         """Whether the current binary requires a console.
+        """,
+    ),
+    "WIN32_WIDE_ENTRY": (
+        bool,
+        bool,
+        """Whether the programs in this directory enter through `wmain` or
+        `wWinMain`. mingw links them with `-municode` so that its startup code
+        calls the wide entry point.
         """,
     ),
     "MOZ_SRC_FILES": (
@@ -2411,30 +2485,6 @@ VARIABLES = {
         see {ref}`jar-manifests`.
         """,
     ),
-    "LOCALE_PP_DEFINES": (
-        dict,
-        dict,
-        """Per-locale preprocessor defines applied when localized jar.mn
-        files are processed.
-
-        Each top-level key is the name of a define. Each value is a lookup
-        table that maps an ab_cd code or an fnmatch pattern to the value
-        the define should take for that locale.
-
-        Example:
-            LOCALE_PP_DEFINES = {
-                "ANDROID_MARKETPLACE_AB_CD": {
-                    "es*": "es-ES",
-                    "es-MX": "es-MX",
-                    "fr": "fr",
-                },
-            }
-
-        Exact ab_cd keys win over patterns. A locale that matches neither
-        leaves the define unset, so #ifdef branches in the jar.mn fall
-        through to their #else.
-        """,
-    ),
     # IDL Generation.
     "XPIDL_SOURCES": (
         ContextDerivedTypedList(SourcePath, StrictOrderingOnAppendList),
@@ -2630,10 +2680,11 @@ VARIABLES = {
     "XPI_NAME": (
         str,
         str,
-        """The name of an extension XPI to generate.
+        """The name of the staging area an extension is installed into.
 
-        When this variable is present, the results of this directory will end up
-        being packaged into an extension instead of the main dist/bin results.
+        When this variable is present, the results of this directory are
+        installed under that name instead of into the main dist/bin results.
+        XPI_PKGNAME asks for an archive of what was staged.
         """,
     ),
     "XPI_PKGNAME": (
@@ -2642,6 +2693,9 @@ VARIABLES = {
         """The name of the package associated to an extension XPI to generate.
 
         Override the name of the package generated for an XPI extension.
+
+        XPI_NAME must be set as well, because the archive packages the staging
+        area that XPI_NAME creates.
         """,
     ),
     "XPI_TESTDIR": (
@@ -2672,16 +2726,6 @@ VARIABLES = {
         neither are present, the result is dist/bin. If XPI_NAME is present, the
         result is dist/xpi-stage/$(XPI_NAME). If DIST_SUBDIR is present, then
         the $(DIST_SUBDIR) directory of the otherwise default value is used.
-        """,
-    ),
-    "USE_EXTENSION_MANIFEST": (
-        bool,
-        bool,
-        """Controls the name of the manifest for JAR files.
-
-        By default, the name of the manifest is ${JAR_MANIFEST}.manifest.
-        Setting this variable to `True` changes the name of the manifest to
-        chrome.manifest.
         """,
     ),
     "GYP_DIRS": (
@@ -2949,6 +2993,16 @@ VARIABLES = {
            at link time (sectcreate inputs, response files, version
            scripts) so backends can declare them as prerequisites of the
            link target.
+        """,
+    ),
+    "IS_COMPILER_PLUGIN": (
+        bool,
+        bool,
+        """Whether the host shared library of this directory is a compiler
+           plugin.
+
+           Compiles with flags in the ``COMPILER_PLUGIN`` category of
+           ``COMPILE_FLAGS`` or ``WASM_FLAGS`` are ordered after the library.
         """,
     ),
     "EXTRA_DSO_LDOPTS": (

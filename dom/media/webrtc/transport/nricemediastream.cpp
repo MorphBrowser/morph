@@ -167,7 +167,7 @@ static bool ToNrIceCandidate(const nr_ice_candidate& candc,
 // defn of nr_ice_candidate but we pass by reference.
 static UniquePtr<NrIceCandidate> MakeNrIceCandidate(
     const nr_ice_candidate& candc) {
-  auto out = MakeUnique<NrIceCandidate>();
+  auto out = std::make_unique<NrIceCandidate>();
 
   if (!ToNrIceCandidate(candc, out.get())) {
     return nullptr;
@@ -786,6 +786,12 @@ void NrIceMediaStream::OnGatheringComplete(nr_ice_media_stream* stream) {
   }
 }
 
+void NrIceMediaStream::GatheringFailed() {
+  if (stream_) {
+    OnGatheringComplete(stream_);
+  }
+}
+
 void NrIceMediaStream::Close() {
   MOZ_MTLOG(ML_DEBUG, "Marking stream closed '" << name_ << "'");
   state_ = ICE_CLOSED;
@@ -797,11 +803,7 @@ void NrIceMediaStream::Close() {
 
 void NrIceMediaStream::CloseStream(nr_ice_media_stream** stream) {
   if (*stream) {
-    int r = nr_ice_remove_media_stream(ctx_->ctx(), stream);
-    if (r) {
-      MOZ_ASSERT(false, "Failed to remove stream");
-      MOZ_MTLOG(ML_ERROR, "Failed to remove stream, error=" << r);
-    }
+    nr_ice_remove_media_stream(ctx_->ctx(), stream);
     *stream = nullptr;
   }
 }

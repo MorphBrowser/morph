@@ -10,8 +10,6 @@ ChromeUtils.defineESModuleGetters(this, {
   GeolocationTestUtils:
     "resource://testing-common/GeolocationTestUtils.sys.mjs",
   MerinoTestUtils: "resource://testing-common/MerinoTestUtils.sys.mjs",
-  TemporaryMerinoClientShim:
-    "resource://newtab/lib/TemporaryMerinoClientShim.sys.mjs",
   WeatherFeed: "resource://newtab/lib/WeatherFeed.sys.mjs",
   Region: "resource://gre/modules/Region.sys.mjs",
 });
@@ -321,6 +319,48 @@ add_task(async function test_onAction_opt_in_no_location_found() {
   sandbox.restore();
 });
 
+add_task(async function test_fetchLocationAutocomplete_broadcasts_results() {
+  let sandbox = sinon.createSandbox();
+  sandbox.stub(WeatherFeed.prototype, "PersistentCache").returns({
+    set: () => {},
+    get: () => {},
+  });
+
+  let feed = new WeatherFeed();
+  feed.store = {
+    dispatch: sinon.spy(),
+    getState() {
+      return { Weather: { locationSearchString: "Tor" } };
+    },
+  };
+  let autoComplete = sandbox.stub();
+  feed.merino = { autoCompleteWeatherLocation: autoComplete };
+
+  const toronto = { key: "55488", localized_name: "Toronto" };
+  const cases = [
+    { response: { locations: [toronto] }, expected: [toronto] },
+    { response: { locations: [] }, expected: [] },
+    { response: null, expected: [] },
+  ];
+  for (const { response, expected } of cases) {
+    feed.store.dispatch.resetHistory();
+    autoComplete.resolves(response);
+
+    await feed.fetchLocationAutocomplete();
+
+    Assert.deepEqual(
+      feed.store.dispatch.firstCall.args[0],
+      actionCreators.BroadcastToContent({
+        type: actionTypes.WEATHER_LOCATION_SUGGESTIONS_UPDATE,
+        data: expected,
+      }),
+      `Broadcasts ${expected.length} suggestion(s) for ${JSON.stringify(response)}`
+    );
+  }
+
+  sandbox.restore();
+});
+
 // Test fetching weather information using GeolocationUtils.geolocation()
 add_task(async function test_fetch_weather_with_geolocation() {
   const TEST_DATA = [
@@ -496,6 +536,27 @@ add_task(async function test_fetch_weather_optin_gate() {
         "weather.optInAccepted": false,
       },
       shouldFetch: false,
+    },
+    {
+      desc: "nova + widgetWeather trainhop opt-in required, not accepted -> no fetch",
+      values: {
+        "nova.enabled": true,
+        trainhopConfig: { widgetWeather: { weatherOptInEnabled: true } },
+        "weather.optInAccepted": false,
+      },
+      shouldFetch: false,
+    },
+    {
+      desc: "nova + widgetWeather opt-in false overrides legacy weather key -> fetch",
+      values: {
+        "nova.enabled": true,
+        trainhopConfig: {
+          widgetWeather: { weatherOptInEnabled: false },
+          weather: { weatherOptInEnabled: true },
+        },
+        "weather.optInAccepted": false,
+      },
+      shouldFetch: true,
     },
     {
       desc: "nova + opt-in required, accepted -> fetch",
@@ -906,6 +967,36 @@ add_task(async function test_isEnabled_classic_mode() {
   sandbox.restore();
 });
 
+add_task(async function test_isEnabled_via_trainhop_namespace() {
+  let sandbox = sinon.createSandbox();
+  sandbox.stub(WeatherFeed.prototype, "PersistentCache").returns({
+    set: () => {},
+    get: () => {},
+  });
+
+  let feed = new WeatherFeed();
+  feed.store = {
+    getState() {
+      return {
+        Prefs: {
+          values: {
+            "nova.enabled": true,
+            "widgets.weather.enabled": true,
+            trainhopConfig: { widgetWeather: { visible: true } },
+          },
+        },
+      };
+    },
+  };
+
+  Assert.ok(
+    feed.isEnabled(),
+    "isEnabled returns true via trainhopConfig.widgetWeather.visible"
+  );
+
+  sandbox.restore();
+});
+
 add_task(async function test_isEnabled_nova_mode() {
   let sandbox = sinon.createSandbox();
   sandbox.stub(WeatherFeed.prototype, "PersistentCache").returns({
@@ -1015,65 +1106,28 @@ add_task(async function test_onPrefChanged_widgets_weather_enabled() {
   sandbox.restore();
 });
 
-// HNT-2544: TemporaryMerinoClientShim should send Accept-Language on weather
-// requests so Merino/AccuWeather can return localized current conditions.
-add_task(async function test_shim_fetchWeatherReport_sends_accept_language() {
-  await MerinoTestUtils.server.start();
-  MerinoTestUtils.server.reset();
+add_task(async function test_optin_regions_in_default_region_weather_config() {
+  const { WEATHER_OPTIN_REGIONS } = ChromeUtils.importESModule(
+    "resource://newtab/lib/ActivityStream.sys.mjs"
+  );
+  const defaultRegions = Services.prefs
+    .getDefaultBranch(null)
+    .getStringPref(
+      "browser.newtabpage.activity-stream.discoverystream.region-weather-config"
+    )
+    .split(",")
+    .map(region => region.trim());
 
-  const client = new TemporaryMerinoClientShim("ACCEPT_LANGUAGE_REPORT");
-  // fetchWeatherReport() arms a long-lived Merino session timer. Cancel it so
-  // it doesn't outlive the test and leave a pending timer racing with shutdown.
-  registerCleanupFunction(() => client.resetSession());
-  await client.fetchWeatherReport({
-    source: "newtab",
-    city: "Yokohama",
-    region: "Kanagawa",
-    country: "JP",
-    endpointUrl: MerinoTestUtils.server.url.toString(),
-  });
+  // Opt-in regions where Weather is not yet enabled by default.
+  const NOT_ENABLED_BY_DEFAULT = ["LU"];
 
-  Assert.equal(
-    MerinoTestUtils.server.requests.length,
-    1,
-    "fetchWeatherReport issued exactly one request"
-  );
-  Assert.ok(
-    MerinoTestUtils.server.requests[0].hasHeader("Accept-Language"),
-    "fetchWeatherReport sent an Accept-Language header"
-  );
-  Assert.equal(
-    MerinoTestUtils.server.requests[0].getHeader("Accept-Language"),
-    Services.locale.appLocaleAsBCP47,
-    "Accept-Language equals appLocaleAsBCP47"
-  );
-});
-
-add_task(async function test_shim_fetchHourlyForecasts_sends_accept_language() {
-  await MerinoTestUtils.server.start();
-  MerinoTestUtils.server.reset();
-
-  const client = new TemporaryMerinoClientShim("ACCEPT_LANGUAGE_HOURLY");
-  await client.fetchHourlyForecasts({
-    source: "newtab",
-    city: "Yokohama",
-    region: "Kanagawa",
-    country: "JP",
-    endpointUrl: MerinoTestUtils.server.url.toString(),
-  });
-
-  Assert.equal(
-    MerinoTestUtils.server.requests.length,
-    1,
-    "fetchHourlyForecasts issued exactly one request"
-  );
-  Assert.ok(
-    MerinoTestUtils.server.requests[0].hasHeader("Accept-Language"),
-    "fetchHourlyForecasts sent an Accept-Language header"
-  );
-  Assert.equal(
-    MerinoTestUtils.server.requests[0].getHeader("Accept-Language"),
-    Services.locale.appLocaleAsBCP47,
-    "Accept-Language equals appLocaleAsBCP47"
-  );
+  for (const region of WEATHER_OPTIN_REGIONS) {
+    if (NOT_ENABLED_BY_DEFAULT.includes(region)) {
+      continue;
+    }
+    Assert.ok(
+      defaultRegions.includes(region),
+      `Opt-in region ${region} is in the default region-weather-config pref`
+    );
+  }
 });

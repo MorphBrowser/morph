@@ -475,7 +475,7 @@ add_task(async function test_updateRecipes_invalidFeatureAfterUpdate() {
   const featureConfig = { featureId: "bogus", value: {} };
 
   const { manager, cleanup } = await setupTest({
-    storePath: await NimbusTestUtils.createStoreWith(store => {
+    populateStore: store => {
       NimbusTestUtils.addEnrollmentForRecipe(
         NimbusTestUtils.factories.recipe.withFeatureConfig(
           "recipe",
@@ -483,7 +483,7 @@ add_task(async function test_updateRecipes_invalidFeatureAfterUpdate() {
         ),
         { store }
       );
-    }),
+    },
     experiments: [
       NimbusTestUtils.factories.recipe.withFeatureConfig(
         "recipe",
@@ -2086,12 +2086,6 @@ add_task(async function test_updateRecipes_enrollmentStatus_telemetry() {
             status: "WasEnrolled",
           },
           {
-            reason: "Qualified",
-            slug: "stays-enrolled",
-            branch: "control",
-            status: "Enrolled",
-          },
-          {
             status: "Disqualified",
             branch: "control",
             slug: "recipe-mismatch",
@@ -2303,7 +2297,7 @@ async function doEnrollmentStatusOptOutTest(
   ];
 
   const { cleanup } = await setupTest({
-    storePath: await NimbusTestUtils.createStoreWith(store => {
+    populateStore: store => {
       NimbusTestUtils.addEnrollmentForRecipe(recipes[0], {
         store,
         extra: {
@@ -2319,7 +2313,7 @@ async function doEnrollmentStatusOptOutTest(
           unenrollReason: NimbusTelemetry.UnenrollReason.ROLLOUTS_OPT_OUT,
         },
       });
-    }),
+    },
     migrationState: NimbusTestUtils.migrationState.LATEST,
     experiments: recipes,
     init: false,
@@ -2683,11 +2677,6 @@ add_task(async function testUnenrolledInAnotherProfileBeforeUpdate() {
     profileId: otherProfileId2,
   });
 
-  const resetEnrollmentPrefs = await NimbusTestUtils.enableNimbusEnrollments({
-    read: true,
-    sync: true,
-  });
-
   let cleanup, store;
   await GleanPings.nimbusTargetingContext.testSubmission(
     () => {
@@ -2770,7 +2759,6 @@ add_task(async function testUnenrolledInAnotherProfileBeforeUpdate() {
   ]);
 
   await cleanup();
-  resetEnrollmentPrefs();
 });
 
 add_task(async function testUnenrolledInAnotherProfileBetweenUpdates() {
@@ -2799,10 +2787,6 @@ add_task(async function testUnenrolledInAnotherProfileBetweenUpdates() {
     { isRollout: true }
   );
 
-  const resetEnrollmentPrefs = await NimbusTestUtils.enableNimbusEnrollments({
-    read: true,
-    sync: true,
-  });
   const { cleanup, loader, store } = await setupTest({
     experiments: [e1, e2, e3, r1, r2],
   });
@@ -2846,18 +2830,6 @@ add_task(async function testUnenrolledInAnotherProfileBetweenUpdates() {
           ?.map(ev => ev.extra),
         [
           {
-            slug: "rollout-1",
-            branch: "control",
-            status: "Enrolled",
-            reason: "Qualified",
-          },
-          {
-            slug: "rollout-2",
-            branch: "control",
-            status: "Enrolled",
-            reason: "Qualified",
-          },
-          {
             slug: "experiment-1",
             branch: "control",
             status: "Disqualified",
@@ -2868,12 +2840,6 @@ add_task(async function testUnenrolledInAnotherProfileBetweenUpdates() {
             branch: "control",
             status: "Disqualified",
             reason: "UnenrolledInAnotherProfile",
-          },
-          {
-            slug: "experiment-3",
-            branch: "control",
-            status: "Enrolled",
-            reason: "Qualified",
           },
         ]
       );
@@ -2937,7 +2903,6 @@ add_task(async function testUnenrolledInAnotherProfileBetweenUpdates() {
   ]);
 
   await cleanup();
-  resetEnrollmentPrefs();
 });
 
 add_task(async function test_remoteSettingsSyncError_backwardsSync() {

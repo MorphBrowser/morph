@@ -11,12 +11,25 @@ const { sinon } = ChromeUtils.importESModule(
   "resource://testing-common/Sinon.sys.mjs"
 );
 
+const { AuthProvider } = ChromeUtils.importESModule(
+  "moz-src:///browser/components/aiwindow/models/AuthProvider.sys.mjs"
+);
 const { openAIEngine } = ChromeUtils.importESModule(
   "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs"
 );
 
 const { MockRegistrar } = ChromeUtils.importESModule(
   "resource://testing-common/MockRegistrar.sys.mjs"
+);
+
+const { PAGE_SETTLE_DELAY_MS, setPageSettleDelayForTesting } =
+  ChromeUtils.importESModule(
+    "moz-src:///browser/components/aiwindow/models/agents/Monitor.sys.mjs"
+  );
+
+setPageSettleDelayForTesting(0);
+registerCleanupFunction(() =>
+  setPageSettleDelayForTesting(PAGE_SETTLE_DELAY_MS)
 );
 
 /**
@@ -298,21 +311,17 @@ async function withServer(serverOptions, task) {
     set: [["browser.smartwindow.endpoint", `http://localhost:${port}/v1`]],
   });
 
-  const getFxAccountTokenStub = sinon
-    .stub(openAIEngine, "getFxAccountToken")
+  const getTokenStub = sinon
+    .stub(AuthProvider, "getToken")
     .resolves("mock-fxa-token");
 
   try {
     await task({ port });
   } finally {
-    getFxAccountTokenStub.restore();
+    getTokenStub.restore();
     await SpecialPowers.popPrefEnv();
     await stopMockOpenAI(server);
   }
-}
-
-function startTitleGenerationServer(title) {
-  return startMockOpenAI({ streamChunks: [title] });
 }
 
 /**
@@ -343,4 +352,198 @@ function mockAlertsService() {
     },
     cleanup: () => MockRegistrar.unregister(cid),
   };
+}
+
+/**
+ * Have the chat model call a tool, the way production runs one: start a chat
+ * turn on `conversation` and answer it with the tool call. Answer any requests
+ * the tool makes to other engines before awaiting the result.
+ *
+ * @param {MockEngineManager} mockEngine
+ * @param {ChatConversation} conversation
+ * @param {object} options
+ * @param {string} options.toolName
+ * @param {object} options.toolParams - The arguments the model calls it with.
+ * @returns {Promise<{body: any, toolUIData: object}>} Once the turn is over,
+ *   the tool's result and the UI data it attached to the assistant message, if
+ *   any.
+ */
+async function callTool(mockEngine, conversation, { toolName, toolParams }) {
+  const { Chat } = ChromeUtils.importESModule(
+    "moz-src:///browser/components/aiwindow/models/Chat.sys.mjs"
+  );
+  const { PURPOSES } = ChromeUtils.importESModule(
+    "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs"
+  );
+  const { MESSAGE_ROLE } = ChromeUtils.importESModule(
+    "moz-src:///browser/components/aiwindow/ui/modules/AIWindowConstants.sys.mjs"
+  );
+
+  conversation.addUserMessage(`Call ${toolName}`);
+  conversation.addAssistantMessage("text", "");
+  const turn = Chat.fetchWithHistory({ conversation });
+  const id = await mockEngine.respondToWithToolCall({ toolName, toolParams });
+
+  // Most tools hand their result back to the model for a follow-up turn, which
+  // ends the turn once answered.
+  const chatEngine = mockEngine.engines.get(PURPOSES.CHAT);
+  await Promise.race([turn, chatEngine.waitForRunRequest()]);
+  if (chatEngine.runRequests.size) {
+    await mockEngine.respondTo({ purpose: PURPOSES.CHAT, response: "" });
+  }
+  await turn;
+
+  const message = conversation.messages.find(
+    m => m.role === MESSAGE_ROLE.TOOL && m.content.tool_call_id === id
+  );
+  Assert.ok(message, `The ${toolName} call left its result in the chat`);
+  return {
+    body: message.content.body,
+    toolUIData: conversation.messages.findLast(
+      m => m.toolUIData?.toolCallId === id
+    )?.toolUIData,
+  };
+}
+
+/**
+ * Store a user chat message at an exact `created_date` so tasks can place
+ * messages on either side of the watermark boundary. Goes through the real
+ * ChatStore, so the memories chat source reads it back over real SQL.
+ *
+ * @param {number} createdDate  Message creation time in ms since epoch
+ * @param {string} body         Message body
+ */
+async function addChatMessage(createdDate, body) {
+  const { ChatStore, ChatConversation, ChatMessage, MESSAGE_ROLE } =
+    ChromeUtils.importESModule(
+      "moz-src:///browser/components/aiwindow/ui/modules/ChatStore.sys.mjs"
+    );
+  await ChatStore.updateConversation(
+    new ChatConversation({
+      title: body,
+      description: "",
+      pageUrl: new URL("https://example.com/chat"),
+      pageMeta: {},
+      messages: [
+        new ChatMessage({
+          createdDate,
+          ordinal: 0,
+          role: MESSAGE_ROLE.USER,
+          content: { body },
+          pageUrl: new URL("https://example.com/chat"),
+        }),
+      ],
+    })
+  );
+}
+
+/**
+ * Store a page visit at an exact visit date so tasks can place visits on either
+ * side of the watermark boundary.
+ *
+ * `getRecentHistory` reads page visits from moz_places_metadata rather than
+ * moz_historyvisits, so the metadata row has to be written by hand. Its
+ * `total_view_time` must exceed the source's own minimum viewtime filter for the
+ * visit to be returned at all.
+ *
+ * @param {string} url            URL to record a visit for
+ * @param {string} title          Page title, which cannot be null or the source
+ *                                filters the visit out
+ * @param {number} visitDateMs    Visit time in ms since epoch
+ */
+async function writePageVisitToMozPlaces(url, title, visitDateMs) {
+  await PlacesUtils.history.insertMany([
+    { url, title, visits: [{ date: new Date(visitDateMs) }] },
+  ]);
+
+  await PlacesUtils.withConnectionWrapper(
+    "memories-test-metadata",
+    async db => {
+      const rows = await db.execute(
+        "SELECT id FROM moz_places WHERE url_hash = hash(:url) AND url = :url",
+        { url }
+      );
+      await db.execute(
+        `INSERT INTO moz_places_metadata
+           (place_id, created_at, updated_at, total_view_time,
+            typing_time, key_presses, scrolling_time, scrolling_distance, document_type)
+         VALUES
+           (:place_id, :created_at, :created_at, 30000, 0, 0, 0, 0, 0)`,
+        {
+          place_id: rows[0].getResultByName("id"),
+          created_at: visitDateMs,
+        }
+      );
+    }
+  );
+}
+
+/**
+ * Record a page visit and wait for the resulting "page-visited" notification to
+ * have been dispatched, arming the memories scheduler's browsing trigger.
+ *
+ * @param {string} url  The URL to record a visit for
+ */
+async function visitPage(url) {
+  const { PlacesTestUtils } = ChromeUtils.importESModule(
+    "resource://testing-common/PlacesTestUtils.sys.mjs"
+  );
+  const visited = new Promise(resolve => {
+    const listener = () => {
+      PlacesUtils.observers.removeListener(["page-visited"], listener);
+      resolve();
+    };
+    PlacesUtils.observers.addListener(["page-visited"], listener);
+  });
+  await PlacesTestUtils.addVisits(url);
+  await visited;
+}
+
+/**
+ * Return all events recorded for a generation run metric
+ *
+ * @param {object} metric  Glean event metric, e.g.
+ *                         Glean.smartWindow.memoriesGenerationRun
+ * @returns {Array<object>} The events recorded
+ */
+function getGenerationRunEvents(metric) {
+  return metric.testGetValue() ?? [];
+}
+
+/**
+ * Assert that exactly one expected Glean run was recorded.
+ *
+ * Runs called directly, without the scheduler, record no event. For those,
+ * pass the stats object the run filled in, which is checked instead.
+ *
+ * @param {object} metric    Glean event metric, e.g.
+ *                           Glean.smartWindow.memoriesGenerationRun
+ * @param {object} expected  Expected extra values the Glean run should include
+ * @param {object} [options]
+ * @param {object} [options.stats]  Stats from a direct call to check instead
+ *                                  of the recorded event
+ */
+function assertGenerationRunEvent(metric, expected, { stats } = {}) {
+  const toExtras = values =>
+    Object.fromEntries(
+      Object.entries(values).map(([key, value]) => [key, String(value)])
+    );
+  let actual;
+  if (stats) {
+    Assert.deepEqual(
+      getGenerationRunEvents(metric),
+      [],
+      "A direct call records no run."
+    );
+    actual = toExtras(stats);
+  } else {
+    const events = getGenerationRunEvents(metric);
+    Assert.equal(events.length, 1, "One run should be recorded.");
+    actual = events[0].extra;
+  }
+  Assert.deepEqual(
+    actual,
+    toExtras(expected),
+    "The run should be recorded with the expected extras."
+  );
 }

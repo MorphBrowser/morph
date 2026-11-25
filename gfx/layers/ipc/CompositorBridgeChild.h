@@ -131,7 +131,7 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
    */
   void SetForceSyncFlushRendering(bool aForceSyncFlushRendering);
 
-  bool SendStartFrameTimeRecording(const int32_t& bufferSize,
+  bool SendStartFrameTimeRecording(const uint32_t& bufferSize,
                                    uint32_t* startIndex);
   bool SendStopFrameTimeRecording(const uint32_t& startIndex,
                                   nsTArray<float>* intervals);
@@ -163,8 +163,6 @@ class CompositorBridgeChild final : public PCompositorBridgeChild,
   FixedSizeSmallShmemSectionAllocator* GetTileLockAllocator() override;
 
   nsISerialEventTarget* GetThread() const override { return mThread; }
-
-  base::ProcessId GetParentPid() const override { return OtherPid(); }
 
   bool AllocUnsafeShmem(size_t aSize, mozilla::ipc::Shmem* aShmem) override;
   bool AllocShmem(size_t aSize, mozilla::ipc::Shmem* aShmem) override;

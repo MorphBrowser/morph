@@ -14,16 +14,17 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import junit.framework.TestCase.assertTrue
 import mozilla.components.compose.base.theme.Theme
 import mozilla.components.compose.base.utils.LocalUnderTest
+import mozilla.components.compose.draggable.NoOpItemInteractionHandler
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.fenix.tabstray.LocalTabManagementFeatureHelper
 import org.mozilla.fenix.tabstray.TabManagementFeatureHelper
 import org.mozilla.fenix.tabstray.TabsTrayTestTag
-import org.mozilla.fenix.tabstray.controller.NoOpItemInteractionHandler
 import org.mozilla.fenix.tabstray.data.TabsTrayItem
 import org.mozilla.fenix.tabstray.data.createTab
 import org.mozilla.fenix.tabstray.data.createTabGroup
+import org.mozilla.fenix.tabstray.telemetry.TabCloseType
 import org.mozilla.fenix.theme.FirefoxTheme
 
 @RunWith(AndroidJUnit4::class)
@@ -172,7 +173,12 @@ class ExpandedTabGroupTest {
                     Surface {
                         ExpandedTabGroup(
                             group = fakeTabGroup(tabs = mutableListOf(tab)),
-                            actions = expandedTabGroupActions(onTabClose = { if (it == tab) itemClosed = true }),
+                            actions =
+                                expandedTabGroupActions(
+                                    onTabClose = { closedTab, _ ->
+                                        if (closedTab == tab) itemClosed = true
+                                    }
+                                ),
                             displayTabsInGrid = true,
                             itemInteractionHandler = NoOpItemInteractionHandler,
                         )
@@ -319,7 +325,7 @@ class ExpandedTabGroupTest {
 
     private fun expandedTabGroupActions(
         onItemClick: (TabsTrayItem) -> Unit = {},
-        onTabClose: (TabsTrayItem.Tab) -> Unit = {},
+        onTabClose: (TabsTrayItem.Tab, TabCloseType) -> Unit = { _, _ -> },
         onDeleteTabGroupClick: () -> Unit = {},
         onEditTabGroupClick: () -> Unit = {},
         onCloseTabGroupClick: () -> Unit = {},

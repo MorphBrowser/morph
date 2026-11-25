@@ -16,6 +16,10 @@ import pytest
 from mozunit import main
 
 from mozbuild.vendor.host_base import TagNotFound
+from mozbuild.vendor.rewrite_mozbuild import (
+    MozBuildFileNotListedException,
+    MozBuildRewriteException,
+)
 from mozbuild.vendor.vendor_manifest import VendorManifest, _replace_in_file
 
 
@@ -335,6 +339,31 @@ def test_update_moz_build_only_touches_tracked_file_types(add_file, remove_file)
     ]
 
 
+@pytest.mark.parametrize(
+    "exception,expectation",
+    [
+        (MozBuildFileNotListedException("unlisted"), does_not_raise()),
+        (MozBuildRewriteException("unparseable"), pytest.raises(SystemExit)),
+    ],
+)
+@mock.patch("mozbuild.vendor.vendor_manifest.remove_file_from_moz_build_file")
+def test_update_moz_build_removed_file_not_listed(remove_file, exception, expectation):
+    """A removed file that no moz.build mentions needs no moz.build change, so
+    the vendor must not abort over it. Any other failure to remove still
+    aborts."""
+    vm = VendorManifest.__new__(VendorManifest)
+    vm.log = mock.Mock()
+    vm.logInfo = mock.Mock()
+    vm.repository = mock.Mock()
+    vm.repository.get_changed_files.side_effect = lambda diff_filter: (
+        ["third_party/foo/src/gone.h"] if diff_filter == "D" else []
+    )
+    remove_file.side_effect = exception
+
+    with expectation:
+        vm.update_moz_build("third_party/foo", "third_party/foo", False)
+
+
 def test_update_yaml_asserts_when_a_field_is_missing(tmp_path):
     """update_yaml fails loudly (rather than silently leaving a stale field) if
     a release/revision line it expects to rewrite is absent (bug 2056510)."""
@@ -345,6 +374,75 @@ def test_update_yaml_asserts_when_a_field_is_missing(tmp_path):
     vm.yaml_file = str(moz_yaml)
     with pytest.raises(AssertionError):
         vm.update_yaml("v9.9.9", "2026-01-01T00:00:00Z")
+
+
+def _git(cwd, *args, date=None):
+    env = dict(
+        os.environ,
+        GIT_AUTHOR_NAME="Test",
+        GIT_AUTHOR_EMAIL="test@example.com",
+        GIT_COMMITTER_NAME="Test",
+        GIT_COMMITTER_EMAIL="test@example.com",
+    )
+    if date:
+        env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = date
+    subprocess.run(
+        ["git", "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", *args],
+        cwd=cwd,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def tag_upstream(tmp_path):
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _git(upstream, "init", "--quiet")
+    # Fetching with --filter from a local repo needs the server side to allow it.
+    _git(upstream, "config", "uploadpack.allowFilter", "true")
+    (upstream / "file.txt").write_text("one\n")
+    _git(upstream, "add", "file.txt")
+    _git(upstream, "commit", "--quiet", "-m", "one", date="2020-01-01T00:00:00+0100")
+    return upstream
+
+
+def _host(upstream, **vendoring):
+    from mozbuild.vendor.host_base import BaseHost
+
+    return BaseHost({
+        "origin": {"name": "testlib"},
+        "vendoring": {"url": upstream.as_uri(), **vendoring},
+    })
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires git")
+def test_upstream_tag_latest_by_creation_date(tag_upstream):
+    # Highest version number, but created first.
+    _git(tag_upstream, "tag", "v10.0")
+    (tag_upstream / "file.txt").write_text("two\n")
+    _git(
+        tag_upstream, "commit", "--quiet", "-am", "two", date="2021-01-01T00:00:00+0100"
+    )
+    _git(
+        tag_upstream, "tag", "-a", "v2.0", "-m", "v2.0", date="2022-01-01T00:00:00+0100"
+    )
+
+    host = _host(tag_upstream)
+    assert host.upstream_tag(None) == ("v2.0", "2021-01-01T00:00:00+01:00")
+    assert host.upstream_tag("HEAD") == ("v2.0", "2021-01-01T00:00:00+01:00")
+    assert host.upstream_tag("v10.0") == ("v10.0", "2020-01-01T00:00:00+01:00")
+    with pytest.raises(TagNotFound, match="Requested tag v3.0 not found"):
+        host.upstream_tag("v3.0")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires git")
+@pytest.mark.parametrize("tolerate_fsck_errors", [False, True])
+def test_upstream_tag_without_tags(tag_upstream, tolerate_fsck_errors):
+    host = _host(tag_upstream, **{"tolerate-git-fsck-errors": tolerate_fsck_errors})
+    with pytest.raises(TagNotFound, match="No tags found"):
+        host.upstream_tag(None)
 
 
 if __name__ == "__main__":

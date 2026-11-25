@@ -15,7 +15,6 @@ DIRS += [
     "base",
     "components",
     "fonts",
-    "fxr",
     "locales",
     "modules",
     "themes",
@@ -84,6 +83,12 @@ with Files("confvars.sh"):
 with Files("LICENSE"):
     BUG_COMPONENT = ("Firefox Build System", "General")
 
+with Files("AGENTS.md"):
+    BUG_COMPONENT = ("Developer Infrastructure", "AI for Development")
+
+with Files("CLAUDE.md"):
+    BUG_COMPONENT = ("Developer Infrastructure", "AI for Development")
+
 with Files("branding/**"):
     BUG_COMPONENT = ("Firefox", "General")
 
@@ -92,6 +97,9 @@ with Files("config/**"):
 
 with Files("docs/**"):
     BUG_COMPONENT = ("Toolkit", "Telemetry")
+
+with Files("docs/DistributionIni.md"):
+    BUG_COMPONENT = ("Firefox", "Distributions")
 
 with Files("fonts/**"):
     BUG_COMPONENT = ("Core", "Graphics: Text")

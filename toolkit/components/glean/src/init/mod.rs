@@ -190,7 +190,7 @@ fn build_configuration(
     let acceleration_factor = if static_prefs::pref!("telemetry.fog.test.decelerate_early_events") {
         0
     } else {
-        5
+        7 // (bug 2064404): Temporarily elevated until bug 2087139.
     };
 
     let builder = ConfigurationBuilder::new(false, data_path, application_id)
@@ -372,7 +372,7 @@ fn fog_test_reset_internal(
     glean::test_reset_glean(conf, client_info, true);
 
     // Register all custom pings after we initialize.
-    pings::register_pings(None);
+    firefox_on_glean::factory::test_with_preserved_ping_state(|| pings::register_pings(None));
 
     Ok(())
 }

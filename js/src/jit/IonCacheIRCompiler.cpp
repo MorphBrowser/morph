@@ -584,6 +584,7 @@ bool IonCacheIRCompiler::init() {
 JitCode* IonCacheIRCompiler::compile(IonICStub* stub) {
   AutoCreatedBy acb(masm, "IonCacheIRCompiler::compile");
 
+  masm.indirectTarget(TargetKind::Jump);
   masm.setFramePushed(ionScript_->frameSize());
   if (cx_->runtime()->geckoProfiler().enabled()) {
     masm.enableProfilingInstrumentation();
@@ -940,9 +941,13 @@ bool IonCacheIRCompiler::emitLoadFixedSlotResult(ObjOperandId objId,
   return true;
 }
 
-bool IonCacheIRCompiler::emitLoadFixedSlotTypedResult(ObjOperandId objId,
-                                                      uint32_t offsetOffset,
-                                                      ValueType) {
+bool IonCacheIRCompiler::emitLoadReservedFixedSlotResult(
+    ObjOperandId objId, uint32_t offsetOffset) {
+  return emitLoadFixedSlotResult(objId, offsetOffset);
+}
+
+bool IonCacheIRCompiler::emitLoadReservedFixedSlotTypedResult(
+    ObjOperandId objId, uint32_t offsetOffset, ValueType) {
   // The type is only used by Warp.
   return emitLoadFixedSlotResult(objId, offsetOffset);
 }
@@ -1211,6 +1216,7 @@ bool IonCacheIRCompiler::emitCallNativeGetterResult(
   masm.moveStackPtrTo(argVp.get());
 
   // Push marking data for later use.
+  masm.Push(ImmGCPtr(target));
   masm.Push(argUintN);
   pushStubCodePointer();
 
@@ -1725,6 +1731,7 @@ bool IonCacheIRCompiler::emitCallNativeSetter(ObjOperandId receiverId,
   masm.move32(Imm32(1), argUintN);
 
   // Push marking data for later use.
+  masm.Push(ImmGCPtr(target));
   masm.Push(argUintN);
   pushStubCodePointer();
 
@@ -2427,9 +2434,7 @@ bool IonCacheIRCompiler::emitRegExpHasCaptureGroupsResult(
   MOZ_CRASH("Call ICs not used in ion");
 }
 
-bool IonCacheIRCompiler::emitMetaCreateThis(uint32_t numFixedSlots,
-                                            uint32_t numDynamicSlots,
-                                            gc::AllocKind allocKind,
+bool IonCacheIRCompiler::emitMetaCreateThis(gc::AllocKind allocKind,
                                             uint32_t thisShapeOffset,
                                             uint32_t siteOffset) {
   MOZ_CRASH("Call ICs not used in ion");

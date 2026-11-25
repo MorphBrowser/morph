@@ -101,8 +101,6 @@ class HangMonitorChild : public PProcessHangMonitorChild,
   void NotifySlowScriptAsync(TabId aTabId, const nsCString& aFileName,
                              const nsString& aAddonId, const double aDuration);
 
-  bool IsDebuggerStartupComplete();
-
   void ClearHang();
   void ClearHangAsync();
   void ClearPaintWhileInterruptingJS();
@@ -116,14 +114,12 @@ class HangMonitorChild : public PProcessHangMonitorChild,
 
   mozilla::ipc::IPCResult RecvTerminateScript() override;
   mozilla::ipc::IPCResult RecvRequestContentJSInterrupt() override;
-  mozilla::ipc::IPCResult RecvBeginStartingDebugger() override;
-  mozilla::ipc::IPCResult RecvEndStartingDebugger() override;
 
   mozilla::ipc::IPCResult RecvPaintWhileInterruptingJS(
-      const TabId& aTabId) override;
+      const TabId& aTabId, const uint64_t& aEpoch) override;
 
   mozilla::ipc::IPCResult RecvUnloadLayersWhileInterruptingJS(
-      const TabId& aTabId) override;
+      const TabId& aTabId, const uint64_t& aEpoch) override;
 
   mozilla::ipc::IPCResult RecvCancelContentJSExecutionIfRunning(
       const TabId& aTabId, const nsIRemoteTab::NavigationType& aNavigationType,
@@ -181,14 +177,15 @@ class HangMonitorChild : public PProcessHangMonitorChild,
 
   // These fields must be accessed with mMonitor held.
   bool mTerminateScript MOZ_GUARDED_BY(mMonitor);
-  bool mStartDebugger MOZ_GUARDED_BY(mMonitor);
-  bool mFinishedStartingDebugger MOZ_GUARDED_BY(mMonitor);
 
   // this variable is used to paint/unload layers
   // if not set, no action required
   // true means, we will paint. false - unload layers
   Maybe<bool> mPaintWhileInterruptingJS MOZ_GUARDED_BY(mMonitor);
   TabId mPaintWhileInterruptingJSTab MOZ_GUARDED_BY(mMonitor);
+  // Overwritten with the two fields above, so a request superseded before
+  // InterruptCallback runs is dropped, never applied with a newer epoch.
+  uint64_t mPaintWhileInterruptingJSEpoch MOZ_GUARDED_BY(mMonitor) = 0;
   bool mCancelContentJS MOZ_GUARDED_BY(mMonitor);
   TabId mCancelContentJSTab MOZ_GUARDED_BY(mMonitor);
   nsIRemoteTab::NavigationType mCancelContentJSNavigationType
@@ -287,8 +284,6 @@ class HangMonitorParent : public PProcessHangMonitorParent {
   void SetMainThreadQoSPriority(nsIThread::QoSPriority aQoSPriority);
 
   void TerminateScript();
-  void BeginStartingDebugger();
-  void EndStartingDebugger();
 
   nsresult Dispatch(already_AddRefed<nsIRunnable> aRunnable) {
     return mHangMonitor->Dispatch(std::move(aRunnable));
@@ -303,8 +298,8 @@ class HangMonitorParent : public PProcessHangMonitorParent {
 
   void ClearHangNotification();
 
-  void PaintOrUnloadLayersWhileInterruptingJSOnThread(bool aPaint,
-                                                      TabId aTabId);
+  void PaintOrUnloadLayersWhileInterruptingJSOnThread(bool aPaint, TabId aTabId,
+                                                      uint64_t aEpoch);
   void CancelContentJSExecutionIfRunningOnThread(
       TabId aTabId, nsIRemoteTab::NavigationType aNavigationType,
       int32_t aNavigationIndex, nsIURI* aNavigationURI, int32_t aEpoch);
@@ -343,8 +338,6 @@ HangMonitorChild::HangMonitorChild(ProcessHangMonitor* aMonitor)
       mMonitor("HangMonitorChild lock"),
       mSentReport(false),
       mTerminateScript(false),
-      mStartDebugger(false),
-      mFinishedStartingDebugger(false),
       mCancelContentJS(false),
       mCancelContentJSNavigationType(nsIRemoteTab::NAVIGATE_BACK),
       mCancelContentJSNavigationIndex(0),
@@ -402,11 +395,13 @@ bool HangMonitorChild::InterruptCallback() {
 
   Maybe<bool> paintWhileInterruptingJS;
   TabId paintWhileInterruptingJSTab;
+  uint64_t paintWhileInterruptingJSEpoch;
 
   {
     MonitorAutoLock lock(mMonitor);
     paintWhileInterruptingJS = mPaintWhileInterruptingJS;
     paintWhileInterruptingJSTab = mPaintWhileInterruptingJSTab;
+    paintWhileInterruptingJSEpoch = mPaintWhileInterruptingJSEpoch;
 
     mPaintWhileInterruptingJS.reset();
   }
@@ -419,11 +414,12 @@ bool HangMonitorChild::InterruptCallback() {
       if (paintWhileInterruptingJS.value()) {
         AUTO_PROFILER_MARKER_UNTYPED(
             "InterruptCallback: PaintWhileInterruptingJS", DOM, {});
-        browserChild->PaintWhileInterruptingJS();
+        browserChild->PaintWhileInterruptingJS(paintWhileInterruptingJSEpoch);
       } else {
         AUTO_PROFILER_MARKER_UNTYPED(
             "InterruptCallback: UnloadLayersWhileInterruptingJS", DOM, {});
-        browserChild->UnloadLayersWhileInterruptingJS();
+        browserChild->UnloadLayersWhileInterruptingJS(
+            paintWhileInterruptingJSEpoch);
       }
     }
   }
@@ -571,24 +567,8 @@ mozilla::ipc::IPCResult HangMonitorChild::RecvRequestContentJSInterrupt() {
   return IPC_OK();
 }
 
-mozilla::ipc::IPCResult HangMonitorChild::RecvBeginStartingDebugger() {
-  MOZ_RELEASE_ASSERT(IsOnThread());
-
-  MonitorAutoLock lock(mMonitor);
-  mStartDebugger = true;
-  return IPC_OK();
-}
-
-mozilla::ipc::IPCResult HangMonitorChild::RecvEndStartingDebugger() {
-  MOZ_RELEASE_ASSERT(IsOnThread());
-
-  MonitorAutoLock lock(mMonitor);
-  mFinishedStartingDebugger = true;
-  return IPC_OK();
-}
-
 mozilla::ipc::IPCResult HangMonitorChild::RecvPaintWhileInterruptingJS(
-    const TabId& aTabId) {
+    const TabId& aTabId, const uint64_t& aEpoch) {
   PROFILER_MARKER_UNTYPED("PaintWhileInterruptingJS", DOM, {});
   MOZ_RELEASE_ASSERT(IsOnThread());
 
@@ -597,6 +577,7 @@ mozilla::ipc::IPCResult HangMonitorChild::RecvPaintWhileInterruptingJS(
     MaybeStartPaintWhileInterruptingJS();
     mPaintWhileInterruptingJS = Some(true);
     mPaintWhileInterruptingJSTab = aTabId;
+    mPaintWhileInterruptingJSEpoch = aEpoch;
   }
 
   JS_RequestInterruptCallback(mContext);
@@ -605,7 +586,7 @@ mozilla::ipc::IPCResult HangMonitorChild::RecvPaintWhileInterruptingJS(
 }
 
 mozilla::ipc::IPCResult HangMonitorChild::RecvUnloadLayersWhileInterruptingJS(
-    const TabId& aTabId) {
+    const TabId& aTabId, const uint64_t& aEpoch) {
   MOZ_RELEASE_ASSERT(IsOnThread());
 
   {
@@ -613,6 +594,7 @@ mozilla::ipc::IPCResult HangMonitorChild::RecvUnloadLayersWhileInterruptingJS(
     MaybeStartPaintWhileInterruptingJS();
     mPaintWhileInterruptingJS = Some(false);
     mPaintWhileInterruptingJSTab = aTabId;
+    mPaintWhileInterruptingJSEpoch = aEpoch;
   }
 
   JS_RequestInterruptCallback(mContext);
@@ -737,11 +719,6 @@ HangMonitorChild::SlowScriptAction HangMonitorChild::NotifySlowScript(
       mTerminateScript = false;
       return SlowScriptAction::Terminate;
     }
-
-    if (mStartDebugger) {
-      mStartDebugger = false;
-      return SlowScriptAction::StartDebugger;
-    }
   }
 
   TabId id;
@@ -759,19 +736,6 @@ HangMonitorChild::SlowScriptAction HangMonitorChild::NotifySlowScript(
   return SlowScriptAction::Continue;
 }
 
-bool HangMonitorChild::IsDebuggerStartupComplete() {
-  MOZ_RELEASE_ASSERT(NS_IsMainThread());
-
-  MonitorAutoLock lock(mMonitor);
-
-  if (mFinishedStartingDebugger) {
-    mFinishedStartingDebugger = false;
-    return true;
-  }
-
-  return false;
-}
-
 void HangMonitorChild::ClearHang() {
   MOZ_ASSERT(NS_IsMainThread());
 
@@ -784,8 +748,6 @@ void HangMonitorChild::ClearHang() {
     MonitorAutoLock lock(mMonitor);
     mSentReport = false;
     mTerminateScript = false;
-    mStartDebugger = false;
-    mFinishedStartingDebugger = false;
   }
 }
 
@@ -850,11 +812,11 @@ void HangMonitorParent::PaintWhileInterruptingJS(dom::BrowserParent* aTab) {
   MOZ_RELEASE_ASSERT(NS_IsMainThread());
   if (StaticPrefs::browser_tabs_remote_force_paint()) {
     TabId id = aTab->GetTabId();
-    Dispatch(NewNonOwningRunnableMethod<bool, TabId>(
+    Dispatch(NewNonOwningRunnableMethod<bool, TabId, uint64_t>(
         "HangMonitorParent::PaintOrUnloadLayersWhileInterruptingJSOnThread ",
         this,
         &HangMonitorParent::PaintOrUnloadLayersWhileInterruptingJSOnThread,
-        true, id));
+        true, id, aTab->GetRenderLayersEpoch()));
   }
 }
 
@@ -862,21 +824,21 @@ void HangMonitorParent::UnloadLayersWhileInterruptingJS(
     dom::BrowserParent* aTab) {
   MOZ_RELEASE_ASSERT(NS_IsMainThread());
   TabId id = aTab->GetTabId();
-  Dispatch(NewNonOwningRunnableMethod<bool, TabId>(
+  Dispatch(NewNonOwningRunnableMethod<bool, TabId, uint64_t>(
       "HangMonitorParent::PaintOrUnloadLayersWhileInterruptingJSOnThread ",
       this, &HangMonitorParent::PaintOrUnloadLayersWhileInterruptingJSOnThread,
-      false, id));
+      false, id, aTab->GetRenderLayersEpoch()));
 }
 
 void HangMonitorParent::PaintOrUnloadLayersWhileInterruptingJSOnThread(
-    const bool aPaint, TabId aTabId) {
+    const bool aPaint, TabId aTabId, uint64_t aEpoch) {
   MOZ_RELEASE_ASSERT(IsOnThread());
 
   if (mIPCOpen) {
     if (aPaint) {
-      (void)SendPaintWhileInterruptingJS(aTabId);
+      (void)SendPaintWhileInterruptingJS(aTabId, aEpoch);
     } else {
-      (void)SendUnloadLayersWhileInterruptingJS(aTabId);
+      (void)SendUnloadLayersWhileInterruptingJS(aTabId, aEpoch);
     }
   }
 }
@@ -1040,22 +1002,6 @@ void HangMonitorParent::TerminateScript() {
   }
 }
 
-void HangMonitorParent::BeginStartingDebugger() {
-  MOZ_RELEASE_ASSERT(IsOnThread());
-
-  if (mIPCOpen) {
-    (void)SendBeginStartingDebugger();
-  }
-}
-
-void HangMonitorParent::EndStartingDebugger() {
-  MOZ_RELEASE_ASSERT(IsOnThread());
-
-  if (mIPCOpen) {
-    (void)SendEndStartingDebugger();
-  }
-}
-
 /* HangMonitoredProcess implementation */
 
 NS_IMPL_ISUPPORTS(HangMonitoredProcess, nsIHangReport)
@@ -1114,32 +1060,6 @@ HangMonitoredProcess::TerminateScript() {
   ProcessHangMonitor::Get()->Dispatch(
       NewNonOwningRunnableMethod("HangMonitorParent::TerminateScript", mActor,
                                  &HangMonitorParent::TerminateScript));
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-HangMonitoredProcess::BeginStartingDebugger() {
-  MOZ_RELEASE_ASSERT(NS_IsMainThread());
-  if (!mActor) {
-    return NS_ERROR_UNEXPECTED;
-  }
-
-  ProcessHangMonitor::Get()->Dispatch(NewNonOwningRunnableMethod(
-      "HangMonitorParent::BeginStartingDebugger", mActor,
-      &HangMonitorParent::BeginStartingDebugger));
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-HangMonitoredProcess::EndStartingDebugger() {
-  MOZ_RELEASE_ASSERT(NS_IsMainThread());
-  if (!mActor) {
-    return NS_ERROR_UNEXPECTED;
-  }
-
-  ProcessHangMonitor::Get()->Dispatch(NewNonOwningRunnableMethod(
-      "HangMonitorParent::EndStartingDebugger", mActor,
-      &HangMonitorParent::EndStartingDebugger));
   return NS_OK;
 }
 
@@ -1260,11 +1180,6 @@ ProcessHangMonitor::SlowScriptAction ProcessHangMonitor::NotifySlowScript(
   ReleaseAssertIsOnMainThread();
   return HangMonitorChild::Get()->NotifySlowScript(aBrowserChild, aFileName,
                                                    aAddonId, aDuration);
-}
-
-bool ProcessHangMonitor::IsDebuggerStartupComplete() {
-  ReleaseAssertIsOnMainThread();
-  return HangMonitorChild::Get()->IsDebuggerStartupComplete();
 }
 
 bool ProcessHangMonitor::ShouldTimeOutReplies() {

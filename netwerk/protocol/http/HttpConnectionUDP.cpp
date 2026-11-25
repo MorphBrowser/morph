@@ -235,7 +235,11 @@ nsresult HttpConnectionUDP::Init(nsHttpConnectionInfo* info,
 
   mConnInfo = info;
   MOZ_ASSERT(mConnInfo);
-  MOZ_ASSERT(mConnInfo->IsHttp3() || mConnInfo->IsHttp3ProxyConnection());
+  // Direct/alt-svc H3, a MASQUE proxy, or the outer H3 connection to an HTTPS
+  // CONNECT proxy (whose HTTPS RR advertised h3, so IsHttp3ProxyConnection() is
+  // false).
+  MOZ_ASSERT(mConnInfo->IsHttp3() || mConnInfo->IsHttp3ProxyConnection() ||
+             (mConnInfo->UsingHttpsProxy() && mConnInfo->UsingConnect()));
 
   mErrorBeforeConnect = status;
   mAlpnToken = mConnInfo->GetNPNToken();
@@ -253,11 +257,15 @@ nsresult HttpConnectionUDP::Init(nsHttpConnectionInfo* info,
   dnsAddrRecord->GetEffectiveTRRMode(&mEffectiveTRRMode);
   dnsAddrRecord->GetTrrSkipReason(&mTRRSkipReason);
   NetAddr peerAddr;
-  uint16_t port =
-      mConnInfo->IsHttp3ProxyConnection()
-          ? mConnInfo->ProxyPort()
-          : (!mConnInfo->GetRoutedHost().IsEmpty() ? mConnInfo->RoutedPort()
-                                                   : mConnInfo->OriginPort());
+  // An outer proxy CONNECT connection targets the proxy, so use the proxy port;
+  // otherwise it's a direct/alt-svc H3 connection to the origin.
+  bool outerProxyConn =
+      mConnInfo->IsHttp3ProxyConnection() ||
+      (mConnInfo->UsingHttpsProxy() && mConnInfo->UsingConnect());
+  uint16_t port = outerProxyConn ? mConnInfo->ProxyPort()
+                                 : (!mConnInfo->GetRoutedHost().IsEmpty()
+                                        ? mConnInfo->RoutedPort()
+                                        : mConnInfo->OriginPort());
 
   nsresult rv = dnsAddrRecord->GetNextAddr(port, &peerAddr);
   if (NS_FAILED(rv)) {
@@ -472,6 +480,12 @@ nsresult HttpConnectionUDP::Activate(nsAHttpTransaction* trans, uint32_t caps,
   // Important: we must not reset the transaction while the outer connection
   // is still connecting. Resetting here could lead to opening another HTTP/3
   // connection.
+  //
+  // TODO: this is the legacy masque outer-proxy path (queue +
+  // ResetTransaction). Remove it once Happy Eyeballs establishes the outer
+  // proxy connection by default (network.http.happy_eyeballs_proxy_enabled); HE
+  // handles this via
+  // HappyEyeballsConnectionAttempt::MaybeDispatchOuterProxyConn.
   if (IsProxyConnectInProgress() && !mIsInTunnel && hTrans) {
     if (!mConnected) {
       mQueuedHttpConnectTransaction.AppendElement(hTrans);
@@ -581,7 +595,7 @@ void HttpConnectionUDP::OnConnected() {
 
 already_AddRefed<nsIInputStream> HttpConnectionUDP::CreateProxyConnectStream(
     nsAHttpTransaction* trans) {
-  UniquePtr<nsHttpRequestHead> request = MakeUnique<nsHttpRequestHead>();
+  auto request = std::make_unique<nsHttpRequestHead>();
   nsAutoCString host;
   DebugOnly<nsresult> rv{};
   rv = nsHttpHandler::GenerateHostPort(
@@ -863,6 +877,11 @@ void HttpConnectionUDP::HandleTunnelResponse(
   }
 }
 
+// TODO: legacy masque outer-proxy path — converts the outer connection to a
+// wildcard proxy connection and resets the transaction so it re-dispatches
+// through a tunnel. Remove once Happy Eyeballs establishes the outer proxy
+// connection by default (network.http.happy_eyeballs_proxy_enabled); HE does
+// this in HappyEyeballsConnectionAttempt::MaybeDispatchOuterProxyConn.
 void HttpConnectionUDP::ResetTransaction(nsHttpTransaction* aHttpTransaction) {
   LOG(("HttpConnectionUDP::ResetTransaction [this=%p mState=%d]\n", this,
        static_cast<uint32_t>(mState)));
@@ -1043,10 +1062,38 @@ nsresult HttpConnectionUDP::ForceSend() {
   return MaybeForceSendIO();
 }
 
+nsresult HttpConnectionUDP::ForceSendNow() {
+  LOG(("HttpConnectionUDP::ForceSendNow [this=%p]\n", this));
+  MOZ_ASSERT(OnSocketThread(), "not on socket thread");
+
+  if (mForceSendTimer) {
+    mForceSendTimer->Cancel();
+    mForceSendTimer = nullptr;
+    mForceSendPending = false;
+  }
+  if (mForceSendPending) {
+    return NS_OK;
+  }
+  mForceSendPending = true;
+  nsresult rv =
+      DispatchToCurrent(do_AddRef(new HttpConnectionUDPForceIO(this, false)));
+  if (NS_FAILED(rv)) {
+    mForceSendPending = false;
+  }
+  return rv;
+}
+
 HttpVersion HttpConnectionUDP::Version() { return HttpVersion::v3_0; }
 
 PRIntervalTime HttpConnectionUDP::LastWriteTime() {
   return mHttp3Session->LastWriteTime();
+}
+
+uint32_t HttpConnectionUDP::ReadTimeoutTick() {
+  MOZ_ASSERT(OnSocketThread(), "not on socket thread");
+  // Hold a reference, since the session may close this connection.
+  RefPtr<Http3Session> session = mHttp3Session;
+  return session ? session->ReadTimeoutTick() : UINT32_MAX;
 }
 
 //-----------------------------------------------------------------------------
@@ -1079,10 +1126,13 @@ void HttpConnectionUDP::CloseTransaction(nsAHttpTransaction* trans,
   }
 
   // The connection and security errors clear out alt-svc mappings
-  // in case any previously validated ones are now invalid
+  // in case any previously validated ones are now invalid.
+  // Not for a connection running inside a tunnel: its errors can come from
+  // the tunnel being torn down rather than from the origin, so they say
+  // nothing about whether the origin's alternatives are still valid.
   if (((reason == NS_ERROR_NET_RESET) ||
        (NS_ERROR_GET_MODULE(reason) == NS_ERROR_MODULE_SECURITY)) &&
-      mConnInfo && !(mTransactionCaps & NS_HTTP_ERROR_SOFTLY)) {
+      mConnInfo && !mIsInTunnel && !(mTransactionCaps & NS_HTTP_ERROR_SOFTLY)) {
     gHttpHandler->ClearHostMapping(mConnInfo);
   }
 

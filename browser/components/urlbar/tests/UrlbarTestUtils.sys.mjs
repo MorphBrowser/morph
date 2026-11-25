@@ -36,6 +36,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   UrlbarChildController:
     "chrome://browser/content/urlbar/UrlbarChildController.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
+  UrlbarResult: "chrome://browser/content/urlbar/UrlbarResult.mjs",
   UrlbarSearchUtils:
     "moz-src:///browser/components/urlbar/UrlbarSearchUtils.sys.mjs",
   setTimeout: "resource://gre/modules/Timer.sys.mjs",
@@ -113,6 +114,33 @@ export class UrlbarInputBaseTestUtils {
       this.EventUtils = null;
       this.SimpleTest = null;
     });
+  }
+
+  /**
+   * Registers a TestProvider that returns one URL result for empty searches,
+   * so the view opens on an empty string.
+   *
+   * @param {UrlbarSapName} [sap]
+   *   The SAP to register the provider for.
+   */
+  registerZeroPrefixProvider(sap = "urlbar") {
+    let provider = new this.TestProvider({
+      priority: Infinity,
+      results: [
+        new lazy.UrlbarResult({
+          type: UrlbarShared.RESULT_TYPE.URL,
+          source: UrlbarShared.RESULT_SOURCE.OTHER_LOCAL,
+          payload: { url: "https://example.com/" },
+        }),
+      ],
+    });
+    provider.isActive = async context =>
+      !context.searchString && !context.searchMode;
+    let providersManager = lazy.ProvidersManager.getInstanceForSap(sap);
+    providersManager.registerProvider(provider);
+    this.registerCleanupFunction(() =>
+      providersManager.unregisterProvider(provider)
+    );
   }
 
   /**
@@ -1185,6 +1213,13 @@ export class UrlbarInputBaseTestUtils {
       // the expected state, which the assertions below report precisely.
     });
 
+    // Wait for current query because we will inspect the results.
+    let lastQuery;
+    while (lastQuery != this.#urlbar(window).lastQueryContextPromise) {
+      lastQuery = this.#urlbar(window).lastQueryContextPromise;
+      await lastQuery;
+    }
+
     this.Assert.equal(
       !!this.#urlbar(window).searchMode,
       this.#urlbar(window).hasAttribute("searchmode"),
@@ -1198,13 +1233,13 @@ export class UrlbarInputBaseTestUtils {
     );
 
     let results = this.#urlbar(window).querySelector(".urlbarView-results");
-    await lazy.TestUtils.waitForCondition(
-      () =>
-        results.hasAttribute("actionmode") ==
-        (this.#urlbar(window).searchMode?.source ==
-          UrlbarShared.RESULT_SOURCE.ACTIONS)
+    this.Assert.equal(
+      results.hasAttribute("actionmode"),
+      this.#urlbar(window).searchMode?.source ==
+        UrlbarShared.RESULT_SOURCE.ACTIONS &&
+        !!this.getResultsContainer(window).children.length,
+      "Urlbar results have proper actionmode attribute"
     );
-    this.Assert.ok(true, "Urlbar results have proper actionmode attribute");
 
     if (!expectedSearchMode) {
       // Check the input's placeholder.
@@ -1252,12 +1287,18 @@ export class UrlbarInputBaseTestUtils {
       expectedSearchMode.isPreview = false;
     }
 
-    // The search service is parent-only, so a content-process caller
-    // supplies this itself.
+    let inParentProcess =
+      Services.appinfo.processType == Services.appinfo.PROCESS_TYPE_DEFAULT;
     if (
       expectedSearchMode.engineName &&
       !expectedSearchMode.hasOwnProperty("isGeneralPurposeEngine")
     ) {
+      if (!inParentProcess) {
+        // The search service is parent-only.
+        throw new Error(
+          "isGeneralPurposeEngine must be supplied in content processes."
+        );
+      }
       let engine = lazy.SearchService.getEngineByName(
         expectedSearchMode.engineName
       );
@@ -1363,16 +1404,28 @@ export class UrlbarInputBaseTestUtils {
       !expectedSearchMode.isPreview &&
       this.isPopupOpen(window)
     ) {
+      let historyInSearchMode = lazy.UrlbarPrefs.get(
+        "unifiedSearchButton.historyInSearchMode"
+      );
       let resultCount = this.getResultCount(window);
       for (let i = 0; i < resultCount; i++) {
         let result = await this.getDetailsOfResultAt(window, i);
         if (result.source == UrlbarShared.RESULT_SOURCE.SEARCH) {
-          this.Assert.equal(
-            expectedSearchMode.engineName,
-            result.searchParams.engine,
-            "Search mode result matches engine name."
-          );
-        } else {
+          // With historyInSearchMode, results offering to switch to another
+          // engine's search mode, like search shortcuts, can show too.
+          if (
+            !historyInSearchMode ||
+            !result.result.payload.providesSearchMode
+          ) {
+            this.Assert.equal(
+              expectedSearchMode.engineName,
+              result.searchParams.engine,
+              "Search mode result matches engine name."
+            );
+          }
+        } else if (!historyInSearchMode && inParentProcess) {
+          // The search service is only available in the main process.
+          // Skip the check in child processes.
           let engine = lazy.SearchService.getEngineByName(
             expectedSearchMode.engineName
           );
@@ -1385,6 +1438,74 @@ export class UrlbarInputBaseTestUtils {
           );
         }
       }
+    }
+  }
+
+  /**
+   * Asserts a search term is in the url bar and state values are what they
+   * should be. Can only be used if UrlbarTestUtils has been initialized with
+   * init().
+   *
+   * @param {ChromeWindow} window
+   *   The browser window.
+   * @param {string} searchString
+   *   String that should be matched in the url bar.
+   * @param {object} [options]
+   *   Options for the assertions.
+   * @param {string} [options.pageProxyState]
+   *   The pageproxystate that should be expected.
+   * @param {string} [options.userTypedValue]
+   *   The userTypedValue that should be expected.
+   * @param {boolean} [options.persistSearchTerms]
+   *   Whether the persistsearchterms attribute should be expected.
+   */
+  assertSearchStringIsInUrlbar(
+    window,
+    searchString,
+    {
+      pageProxyState = "invalid",
+      userTypedValue = searchString,
+      persistSearchTerms = true,
+    } = {}
+  ) {
+    if (this.#urlbar(window).sapName != "urlbar") {
+      throw new Error(
+        "Persisted search terms are only supported in the address bar"
+      );
+    }
+    this.Assert.equal(
+      this.#urlbar(window).value,
+      searchString,
+      `Search string should be the urlbar value.`
+    );
+    let state = this.#urlbar(window).getBrowserState(
+      window.gBrowser.selectedBrowser
+    );
+    this.Assert.equal(
+      state.persist?.searchTerms,
+      searchString,
+      `Search terms should match.`
+    );
+    this.Assert.equal(
+      window.gBrowser.userTypedValue,
+      userTypedValue,
+      "userTypedValue should match."
+    );
+    this.Assert.equal(
+      this.#urlbar(window).getAttribute("pageproxystate"),
+      pageProxyState,
+      "Pageproxystate should match."
+    );
+    if (persistSearchTerms) {
+      this.Assert.ok(
+        this.#urlbar(window).hasAttribute("persistsearchterms"),
+        "Urlbar has persistsearchterms attribute."
+      );
+    } else {
+      this.Assert.ok(
+        !this.#urlbar(window).hasAttribute("persistsearchterms"),
+        "Urlbar does not have persistsearchterms attribute."
+      );
     }
   }
 
@@ -1658,9 +1779,11 @@ export class UrlbarInputBaseTestUtils {
     // controller (the child owns construction; the actor only resolves the
     // chrome window). It is exposed as `controller.parentController`.
     parentOptions.input.browserWindow.windowGlobalChild = {
-      getActor: () => ({
-        browsingContext: { topChromeWindow: browserWindow },
-      }),
+      parentActor: {
+        getActor: () => ({
+          browsingContext: { topChromeWindow: browserWindow },
+        }),
+      },
     };
     // A provided `manager` stands in for the per-sap `ProvidersManager` the
     // child-built parent controller resolves at construction. Swap it in for the
@@ -2169,10 +2292,6 @@ export class UrlbarInputBaseTestUtils {
    * @returns {boolean}
    */
   isSeparatorVisible(separatorElement) {
-    if (!Services.prefs.getBoolPref("browser.nova.enabled", false)) {
-      return this.#isVisible(separatorElement);
-    }
-
     let before = separatorElement.documentGlobal.getComputedStyle(
       separatorElement,
       "::before"
@@ -2190,7 +2309,7 @@ export class UrlbarInputBaseTestUtils {
   }
 
   /**
-   * Stubs `UrlbarShared._zonedDateTimeISO()`. Helpful for tests that use
+   * Stubs `UrlbarShared.zonedDateTimeISO()`. Helpful for tests that use
    * `UrlbarShared.formatDate()`.
    *
    * Browser tests should call this again with a falsey value during cleanup to
@@ -2213,7 +2332,7 @@ export class UrlbarInputBaseTestUtils {
     if (!this.#zonedDateTimeISOStub) {
       this.#zonedDateTimeISOStub = lazy.sinon.stub(
         UrlbarShared,
-        "_zonedDateTimeISO"
+        "zonedDateTimeISO"
       );
     }
 
@@ -2222,6 +2341,29 @@ export class UrlbarInputBaseTestUtils {
     this.#zonedDateTimeISOStub.returns(zonedNow);
 
     return zonedNow;
+  }
+
+  /**
+   * Stubs `UrlbarShared.locale()`. Helpful for tests that check formatted dates
+   * and times, which otherwise depend on the OS regional settings.
+   *
+   * Browser tests should call this again with a falsey value during cleanup to
+   * remove the stub.
+   *
+   * @param {?string} locale
+   *   The locale to use, e.g. "en-US". A falsey value removes the stub.
+   */
+  stubLocale(locale) {
+    if (!locale) {
+      this.#localeStub?.restore();
+      this.#localeStub = null;
+      return;
+    }
+
+    if (!this.#localeStub) {
+      this.#localeStub = lazy.sinon.stub(UrlbarShared, "locale");
+    }
+    this.#localeStub.returns(locale);
   }
 
   /**
@@ -2325,6 +2467,7 @@ export class UrlbarInputBaseTestUtils {
   }
 
   #firstDayOfWeekStub;
+  #localeStub;
   #urlbar;
   #zonedDateTimeISOStub;
 }
