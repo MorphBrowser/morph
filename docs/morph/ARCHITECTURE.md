@@ -24,7 +24,23 @@ Expected concepts include:
 - Morph-specific preferences;
 - product branding.
 
-Exact source locations should follow Firefox conventions and be documented once the first implementation lands.
+### Current locations (implemented)
+
+| Concern | Location |
+|---|---|
+| Morph tokens and sidebar styling | `browser/themes/shared/morph/morph.css`, imported last from `browser-shared.css` and packaged in `browser/themes/shared/jar.inc.mn` |
+| Morph preferences | `browser/app/profile/firefox.js` (`browser.morph.enabled`, and the `sidebar.verticalTabs` default), next to the sidebar prefs and marked `// Morph:` |
+| Tests | `browser/components/sidebar/tests/browser/browser_morph_sidebar.js` |
+
+### Rules for Morph styling
+
+- Every Morph rule sits inside `@media -moz-pref("browser.morph.enabled")`, so turning the pref off restores upstream rendering.
+- Restyle by overriding existing component tokens (`--tab-*`, `--sidebar-*`) on `:root` before adding selectors against Firefox DOM.
+- Unlayered overrides outrank the generated token layers, including forced colours and prefers-contrast. Colour overrides must therefore stay inside `not ((forced-colors) or (prefers-contrast))` and `[theme-in-app]`.
+- Morph-only custom properties use the `--morph-` prefix. A custom property that nothing reads fails `browser_parsable_css.js`, so define only what is used.
+- Do not hand-edit generated `*.tokens.css`. Morph does not yet use the `*.tokens.json` pipeline; see `ROADMAP.md` M4.
+
+See `FIREFOX_BASELINE.md` for the upstream systems Morph builds on.
 
 ## Material 3 Expressive relationship
 

@@ -40,6 +40,18 @@ When synchronising with Mozilla:
 
 The exact automation can evolve once Morph has its own CI and release cadence.
 
+### Practical notes
+
+- The development clone is shallow. Fetch upstream with `git fetch --shallow-since=<date before the last sync> upstream main` until `git merge-base HEAD upstream/main` returns the previous sync point.
+- Morph's own diff against upstream should stay small and reviewable. Check it with `git diff --stat upstream/main HEAD`.
+- After a sync, run `browser_morph_sidebar.js` and the vertical-tabs tests. If Morph styling misbehaves, set `browser.morph.enabled` to `false` to tell an upstream regression from a Morph one.
+
+### Sync log
+
+| Date | Upstream revision | Notes |
+|---|---|---|
+| 2026-11-25 | `4f6c8bb9a8` | 13,416 upstream commits since `83cebcf5a5`. The only conflict was in `moz.build`: Morph's and upstream's `SPHINX_TREES` additions, resolved by keeping both. |
+
 ## Patch discipline
 
 Prefer changes that are:
