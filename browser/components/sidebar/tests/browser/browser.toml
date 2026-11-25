@@ -144,6 +144,8 @@ skip-if = [
 
 ["browser_verticalTabs_widget_placements.js"]
 
+["browser_morph_sidebar.js"]
+
 ["browser_vertical_tabs.js"]
 
 ["browser_vertical_tabs_cui_reset.js"]
