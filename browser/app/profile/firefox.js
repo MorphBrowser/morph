@@ -2363,8 +2363,11 @@ pref("sidebar.animation.expand-on-hover.delay-duration-ms", 200);
 // you can introduce a new tool to the sidebar launcher.
 pref("sidebar.main.tools", "");
 pref("sidebar.installed.extensions", "");
-pref("sidebar.verticalTabs", false);
+// Morph: vertical tabs are the canonical layout.
+pref("sidebar.verticalTabs", true);
 pref("sidebar.verticalTabs.dragToPinPromo.dismissed", false);
+// Morph: the Morph visual foundation (browser/themes/shared/morph/).
+pref("browser.morph.enabled", true);
 // One value per behavior, none shared across tab orientations. Vertical tabs:
 // "always-show", "expand-on-hover", "hide-sidebar". Horizontal tabs:
 // "hide-on-close" (default) and "hide-launcher" (switcher-only). The default
