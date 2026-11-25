@@ -48,6 +48,7 @@
 #include "js/ErrorReport.h"           // JSErrorBase
 #include "js/friend/ErrorMessages.h"  // js::GetErrorMessage, JSMSG_*
 #include "js/HashTable.h"
+#include "js/Prefs.h"        // JS::Prefs
 #include "js/RegExpFlags.h"  // JS::RegExpFlags
 #include "js/Stack.h"        // JS::NativeStackLimit
 #include "util/DifferentialTesting.h"
@@ -81,7 +82,6 @@ namespace js::frontend {
 using DeclaredNamePtr = ParseContext::Scope::DeclaredNamePtr;
 using AddDeclaredNamePtr = ParseContext::Scope::AddDeclaredNamePtr;
 using BindingIter = ParseContext::Scope::BindingIter;
-using UsedNamePtr = UsedNameTracker::UsedNameMap::Ptr;
 
 using ParserBindingNameVector = Vector<ParserBindingName, 6>;
 
@@ -99,6 +99,49 @@ static bool StatementKindIsBraced(StatementKind kind) {
   return kind == StatementKind::Block || kind == StatementKind::Switch ||
          kind == StatementKind::Try || kind == StatementKind::Catch ||
          kind == StatementKind::Finally;
+}
+
+static bool GetInlinableNumber(ParseNode* node, double* initialValue) {
+  bool negate = false;
+
+  if (node->isKind(ParseNodeKind::NegExpr)) {
+    node = node->as<UnaryNode>().kid();
+    negate = true;
+  }
+  if (!node->isKind(ParseNodeKind::NumberExpr)) {
+    return false;
+  }
+
+  double literalValue = node->as<NumericLiteral>().value();
+  *initialValue = negate ? -literalValue : literalValue;
+  return true;
+}
+
+static bool GetInlinableValue(ParseNode* node, InlinedFieldValueKind* kind,
+                              double* initialValue) {
+  switch (node->getKind()) {
+    case ParseNodeKind::TrueExpr:
+      *kind = InlinedFieldValueKind::True;
+      return true;
+    case ParseNodeKind::FalseExpr:
+      *kind = InlinedFieldValueKind::False;
+      return true;
+    case ParseNodeKind::NullExpr:
+      *kind = InlinedFieldValueKind::Null;
+      return true;
+    case ParseNodeKind::RawUndefinedExpr:
+      *kind = InlinedFieldValueKind::Undefined;
+      return true;
+    case ParseNodeKind::ArrayExpr:
+      *kind = InlinedFieldValueKind::EmptyArray;
+      return node->as<ListNode>().empty();
+    case ParseNodeKind::ObjectExpr:
+      *kind = InlinedFieldValueKind::EmptyObject;
+      return node->as<ListNode>().empty();
+    default:
+      *kind = InlinedFieldValueKind::Number;
+      return GetInlinableNumber(node, initialValue);
+  }
 }
 
 template <class ParseHandler, typename Unit>
@@ -924,17 +967,16 @@ bool PerHandlerParser<ParseHandler>::
   uint32_t slotCount = 0;
   for (BindingIter bi = scope.bindings(pc_); bi; bi++) {
     bool closedOver = false;
-    if (UsedNamePtr p = usedNames_.lookup(bi.name())) {
-      p->value().noteBoundInScope(scriptId, scopeId, &closedOver);
-      if (closedOver) {
-        bi.setClosedOver();
+    usedNames_.noteBindingInScope(bi.name(), scriptId, scopeId, &closedOver);
 
-        if constexpr (isSyntaxParser) {
-          if (!pc_->closedOverBindingsForLazy().append(
-                  TrivialTaggedParserAtomIndex::from(bi.name()))) {
-            ReportOutOfMemory(fc_);
-            return false;
-          }
+    if (closedOver) {
+      bi.setClosedOver();
+
+      if constexpr (isSyntaxParser) {
+        if (!pc_->closedOverBindingsForLazy().append(
+                TrivialTaggedParserAtomIndex::from(bi.name()))) {
+          ReportOutOfMemory(fc_);
+          return false;
         }
       }
     }
@@ -1949,33 +1991,6 @@ FullParseHandler::ModuleNodeResult Parser<FullParseHandler, Unit>::moduleBody(
 
     p->value()->setClosedOver();
   }
-
-  // Reserve an environment slot for a "*namespace*" psuedo-binding and mark as
-  // closed-over. We do not know until module linking if this will be used.
-  if (!noteDeclaredName(
-          TaggedParserAtomIndex::WellKnown::star_namespace_star_(),
-          DeclarationKind::Const, pos())) {
-    return errorResult();
-  }
-  modulepc.varScope()
-      .lookupDeclaredName(
-          TaggedParserAtomIndex::WellKnown::star_namespace_star_())
-      ->value()
-      ->setClosedOver();
-
-  // Reserve an environment slot for a "*deferred-namespace*" pseudo-binding
-  // and mark as closed-over. We do not know until module linking if this will
-  // be used.
-  if (!noteDeclaredName(
-          TaggedParserAtomIndex::WellKnown::star_deferred_namespace_star_(),
-          DeclarationKind::Const, pos())) {
-    return errorResult();
-  }
-  modulepc.varScope()
-      .lookupDeclaredName(
-          TaggedParserAtomIndex::WellKnown::star_deferred_namespace_star_())
-      ->value()
-      ->setClosedOver();
 
   if (!CheckParseTree(this->fc_, alloc_, stmtList)) {
     return errorResult();
@@ -8026,12 +8041,35 @@ bool GeneralParser<ParseHandler, Unit>::finishClassConstructor(
   bool hasPrivateBrand = classInitializedMembers.hasPrivateBrand();
   if (hasPrivateBrand || numMemberInitializers > 0) {
     // Now that we have full set of initializers, update the constructor.
+    bool hasInstanceDecorators = false;
+#ifdef ENABLE_DECORATORS
+    hasInstanceDecorators = classInitializedMembers.hasInstanceDecorators;
+#endif
+    // The names are only valid in this compilation: skip constructors that may
+    // be compiled later.
+    mozilla::Span<const InlinedField> inlinedFields;
+    if (!hasPrivateBrand && !hasInstanceDecorators &&
+        hasHeritage == HasHeritage::No && ctorbox->emitBytecode &&
+        !classInitializedMembers.inlinableFields.empty()) {
+      const auto& fields = classInitializedMembers.inlinableFields;
+      MOZ_ASSERT(fields.length() <= classInitializedMembers.instanceFields);
+      InlinedField* copy =
+          this->alloc_.template newArrayUninitialized<InlinedField>(
+              fields.length());
+      if (!copy) {
+        js::ReportOutOfMemory(fc_);
+        return false;
+      }
+      std::copy(fields.begin(), fields.end(), copy);
+      inlinedFields = mozilla::Span(copy, fields.length());
+    }
     MemberInitializers initializers(
         hasPrivateBrand,
 #ifdef ENABLE_DECORATORS
         classInitializedMembers.hasInstanceDecorators,
 #endif
-        numMemberInitializers);
+        numMemberInitializers, !inlinedFields.IsEmpty());
+    ctorbox->setInlinedFields(inlinedFields);
     ctorbox->setMemberInitializers(initializers);
 
     // Field initialization need access to `this`.
@@ -8154,6 +8192,7 @@ GeneralParser<ParseHandler, Unit>::classDefinition(
       return errorResult();
     }
 
+    ClassInitializedMembers classInitializedMembers{};
     {
       ParseContext::Statement bodyScopeStmt(pc_, StatementKind::Block);
       ParseContext::Scope bodyScope(this);
@@ -8164,7 +8203,6 @@ GeneralParser<ParseHandler, Unit>::classDefinition(
       ListNodeType classMembers =
           MOZ_TRY(handler_.newClassMemberList(pos().begin));
 
-      ClassInitializedMembers classInitializedMembers{};
       for (;;) {
         bool done;
         if (!classMember(yieldHandling, classStmt, className, classStartOffset,
@@ -8206,22 +8244,6 @@ GeneralParser<ParseHandler, Unit>::classDefinition(
         }
       }
 
-      if (classInitializedMembers.staticFields > 0) {
-        if (!noteDeclaredName(
-                TaggedParserAtomIndex::WellKnown::dot_staticInitializers_(),
-                DeclarationKind::Synthetic, namePos)) {
-          return errorResult();
-        }
-      }
-
-      if (classInitializedMembers.staticFieldKeys > 0) {
-        if (!noteDeclaredName(
-                TaggedParserAtomIndex::WellKnown::dot_staticFieldKeys_(),
-                DeclarationKind::Synthetic, namePos)) {
-          return errorResult();
-        }
-      }
-
       classEndOffset = pos().end;
       if (!finishClassConstructor(classStmt, className, hasHeritage,
                                   classStartOffset, classEndOffset,
@@ -8232,6 +8254,25 @@ GeneralParser<ParseHandler, Unit>::classDefinition(
       classBodyBlock = MOZ_TRY(finishClassBodyScope(bodyScope, classMembers));
 
       // Pop the class body scope
+    }
+
+    // Note: `.staticInitializers` and `.staticFieldKeys` are cleared after the
+    // static fields have been initialized, so we declare these as Let bindings
+    // in the class's lexical scope instead of Synthetic class body scope
+    // bindings.
+    if (classInitializedMembers.staticFields > 0) {
+      if (!noteDeclaredName(
+              TaggedParserAtomIndex::WellKnown::dot_staticInitializers_(),
+              DeclarationKind::Let, namePos)) {
+        return errorResult();
+      }
+    }
+    if (classInitializedMembers.staticFieldKeys > 0) {
+      if (!noteDeclaredName(
+              TaggedParserAtomIndex::WellKnown::dot_staticFieldKeys_(),
+              DeclarationKind::Let, namePos)) {
+        return errorResult();
+      }
     }
 
     if (className) {
@@ -8734,6 +8775,37 @@ GeneralParser<ParseHandler, Unit>::fieldInitializerOpt(
     handler_.checkAndSetIsDirectRHSAnonFunction(initializerExpr);
   } else {
     initializerExpr = MOZ_TRY(handler_.newRawUndefinedLiteral(propNamePos));
+  }
+
+  if constexpr (!std::is_same_v<ParseHandler, SyntaxParseHandler>) {
+    if (!isStatic && classInitializedMembers.inlinedPrefixOpen &&
+        JS::Prefs::experimental_inline_simple_field_initializers()) {
+      // Computed names (`[expr] = 0;`) leave propAtom null. Index-like names
+      // need different bytecode than a plain InitProp.
+      uint32_t index;
+      bool isPrivate = propAtom && handler_.isPrivateName(propName);
+      bool isPlainName = propAtom && (isPrivate || !this->parserAtoms().isIndex(
+                                                       propAtom, &index));
+
+      InlinedFieldValueKind valueKind;
+      double literalValue = 0;
+      bool isInlinableValue =
+          GetInlinableValue(initializerExpr, &valueKind, &literalValue);
+      bool hasMaxInlinedFields =
+          classInitializedMembers.inlinableFields.length() >=
+          MemberInitializers::MaxInlinedFields;
+      if (isPlainName && isInlinableValue && !hasMaxInlinedFields) {
+        if (!classInitializedMembers.inlinableFields.append(
+                InlinedField{propAtom, isPrivate, valueKind, literalValue})) {
+          js::ReportOutOfMemory(fc_);
+          return errorResult();
+        }
+      } else {
+        // Every field is parsed into its own initializer function, so this
+        // field and the ones after it can run through .initializers.
+        classInitializedMembers.inlinedPrefixOpen = false;
+      }
+    }
   }
 
   TokenPos wholeInitializerPos(propNamePos.begin, pos().end);
@@ -11383,8 +11455,7 @@ PerHandlerParser<ParseHandler>::stringLiteral() {
 template <class ParseHandler>
 typename ParseHandler::NodeResult
 PerHandlerParser<ParseHandler>::noSubstitutionTaggedTemplate() {
-  if (anyChars.hasInvalidTemplateEscape()) {
-    anyChars.clearInvalidTemplateEscape();
+  if (anyChars.currentToken().hasInvalidTemplateEscape()) {
     return handler_.newRawUndefinedLiteral(pos());
   }
 

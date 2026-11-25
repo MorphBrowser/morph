@@ -379,20 +379,6 @@ bool FinalizationRegistryObject::register_(JSContext* cx, unsigned argc,
     return false;
   }
 
-  // Create the finalization record representing this target and heldValue.
-  Rooted<FinalizationQueueObject*> queue(cx, registry->queue());
-  Rooted<FinalizationRecordObject*> record(
-      cx, FinalizationRecordObject::create(cx, queue, heldValue));
-  if (!record) {
-    return false;
-  }
-
-  if (!addRegistration(cx, registry, unregisterToken, record)) {
-    return false;
-  }
-  auto registrationGuard = mozilla::MakeScopeExit(
-      [&] { removeRegistrationOnError(registry, unregisterToken, record); });
-
   bool isPermanent = false;
   if (target.isObject()) {
     // Fully unwrap the target to register it with the GC.
@@ -411,6 +397,23 @@ bool FinalizationRegistryObject::register_(JSContext* cx, unsigned argc,
     target = SymbolValue(symbol);
     isPermanent = symbol->isPermanentAndMayBeShared();
   }
+
+  // Create the finalization record representing this target and heldValue.
+  Rooted<FinalizationQueueObject*> queue(cx, registry->queue());
+  Rooted<FinalizationRecordObject*> record(
+      cx, FinalizationRecordObject::create(cx, queue, heldValue));
+  if (!record) {
+    return false;
+  }
+
+  // We shouldn't GC after this point because removeRegistrationOnError assumes
+  // the record is still the last element.
+  JS::AutoAssertNoGC nogc(cx);
+  if (!addRegistration(cx, registry, unregisterToken, record)) {
+    return false;
+  }
+  auto registrationGuard = mozilla::MakeScopeExit(
+      [&] { removeRegistrationOnError(registry, unregisterToken, record); });
 
   // Register the record with the target, unless the target is permanent.
   // (See the note following https://tc39.es/ecma262/#sec-canbeheldweakly)
@@ -478,15 +481,15 @@ void FinalizationRegistryObject::removeRegistrationOnError(
   JS::AutoAssertNoGC nogc;
 
   if (unregisterToken.isUndefined()) {
-    MOZ_ASSERT(registry->recordsWithoutToken()->back() == record);
+    MOZ_RELEASE_ASSERT(registry->recordsWithoutToken()->back() == record);
     registry->recordsWithoutToken()->popBack();
     return;
   }
 
   auto ptr = registry->registrations()->lookup(unregisterToken);
-  MOZ_ASSERT(ptr.found());
+  MOZ_RELEASE_ASSERT(ptr.found());
   FinalizationRecordVector& records = ptr->value();
-  MOZ_ASSERT(records.back() == record);
+  MOZ_RELEASE_ASSERT(records.back() == record);
   records.popBack();
   if (records.empty()) {
     registry->registrations()->remove(ptr);
@@ -799,6 +802,7 @@ bool FinalizationQueueObject::cleanupQueuedRecords(
     JSContext* cx, HandleFinalizationQueueObject queue,
     HandleObject callbackArg) {
   MOZ_ASSERT(cx->compartment() == queue->compartment());
+  JS::AssertObjectIsNotGray(queue);
 
   // 2. If callback is undefined, set callback to
   //    finalizationRegistry.[[CleanupCallback]].
@@ -827,7 +831,7 @@ bool FinalizationQueueObject::cleanupQueuedRecords(
     FinalizationRecordObject* record = records->popCopy();
     MOZ_ASSERT(!record->isInRecordMap());
 
-    JS::ExposeObjectToActiveJS(record);
+    JS::AssertObjectIsNotGray(record);
 
     MOZ_ASSERT(record->isInQueue());
     record->setInQueue(false);

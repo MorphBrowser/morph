@@ -15,11 +15,13 @@ import androidx.fragment.app.Fragment
 import androidx.navigation.fragment.findNavController
 import androidx.navigation.fragment.navArgs
 import mozilla.components.feature.qr.QrFeature
+import mozilla.components.service.fxa.FxaService
 import mozilla.components.service.fxa.manager.SCOPE_PROFILE
 import mozilla.components.service.fxa.manager.SCOPE_SESSION
 import mozilla.components.service.fxa.manager.SCOPE_SYNC
 import mozilla.components.support.base.feature.UserInteractionHandler
 import mozilla.components.support.base.feature.ViewBoundFeatureWrapper
+import org.mozilla.fenix.GleanMetrics.SyncAuth
 import org.mozilla.fenix.R
 import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
 import org.mozilla.fenix.ext.requireComponents
@@ -30,6 +32,8 @@ class PairFragment : Fragment(R.layout.fragment_pair), UserInteractionHandler, S
     private val args by navArgs<PairFragmentArgs>()
 
     private val qrFeature = ViewBoundFeatureWrapper<QrFeature>()
+
+    private var hasExited: Boolean = false
 
     @Suppress("DEPRECATION")
     // https://github.com/mozilla-mobile/fenix/issues/19920
@@ -46,19 +50,17 @@ class PairFragment : Fragment(R.layout.fragment_pair), UserInteractionHandler, S
                 onScanResult = { pairingUrl ->
                     // By the time we get a scan result, we may not be attached to the context anymore.
                     // See https://github.com/mozilla-mobile/fenix/issues/15812
-                    if (context == null) {
-                        findNavController()
-                            .popBackStack(
-                                R.id.turnOnSyncFragment,
-                                false,
-                            )
+                    // The scanner returns an empty result when the user navigates back.
+                    if (context == null || pairingUrl.isBlank()) {
+                        exitPairing(ScannerCloseReason.CANCELLED)
                         return@QrFeature
                     }
                     requireComponents.services.accountsAuthFeature.beginPairingAuthentication(
-                        requireContext(),
-                        pairingUrl,
-                        args.entrypoint,
-                        setOf(SCOPE_SYNC, SCOPE_PROFILE, SCOPE_SESSION),
+                        context = requireContext(),
+                        pairingUrl = pairingUrl,
+                        entrypoint = args.entrypoint,
+                        service = FxaService.Sync.identifier,
+                        scopes = setOf(SCOPE_SYNC, SCOPE_PROFILE, SCOPE_SESSION),
                     )
                     val vibrator = requireContext().getSystemService<Vibrator>()!!
                     vibrator.vibrate(
@@ -67,11 +69,7 @@ class PairFragment : Fragment(R.layout.fragment_pair), UserInteractionHandler, S
                             VibrationEffect.DEFAULT_AMPLITUDE,
                         )
                     )
-                    findNavController()
-                        .popBackStack(
-                            R.id.turnOnSyncFragment,
-                            false,
-                        )
+                    exitPairing(ScannerCloseReason.SCANNED)
                 },
                 scanMessage = R.string.pair_instructions_2,
             ),
@@ -92,7 +90,7 @@ class PairFragment : Fragment(R.layout.fragment_pair), UserInteractionHandler, S
 
     override fun onBackPressed(): Boolean {
         qrFeature.onBackPressed()
-        findNavController().popBackStack(R.id.turnOnSyncFragment, false)
+        exitPairing(ScannerCloseReason.CANCELLED)
         return true
     }
 
@@ -119,9 +117,33 @@ class PairFragment : Fragment(R.layout.fragment_pair), UserInteractionHandler, S
                         it.onPermissionsResult(permissions, grantResults)
                     }
                 } else {
-                    findNavController().popBackStack(R.id.turnOnSyncFragment, false)
+                    exitPairing(ScannerCloseReason.PERMISSION_DENIED)
                 }
             }
         }
     }
+
+    private fun exitPairing(reason: ScannerCloseReason) {
+        if (!hasExited) {
+            hasExited = true
+            SyncAuth.pairingScannerClosed.record(
+                SyncAuth.PairingScannerClosedExtra(
+                    reason = reason.telemetryId,
+                    entrypoint = args.entrypoint.entryName,
+                )
+            )
+            findNavController().popBackStack(R.id.pairFragment, true)
+        }
+    }
+}
+
+/**
+ * The reason why the pairing scanner was closed.
+ *
+ * @property telemetryId The telemetry identifier recorded in `sync_auth.pairing_scanner_closed`.
+ */
+private enum class ScannerCloseReason(val telemetryId: String) {
+    SCANNED("scanned"),
+    CANCELLED("cancelled"),
+    PERMISSION_DENIED("permission_denied"),
 }

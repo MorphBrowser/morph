@@ -83,14 +83,13 @@ run-if = [
 ["browser_test_element_picker.js"]
 
 ["browser_test_moving_tab_to_new_window.js"]
-skip-if = [
-  "os == 'win' && os_version == '11.26200' && arch == 'x86_64' && ccov", # Bug 1894797
-]
 
 ["browser_test_prevent_events.js"]
 
 ["browser_test_resize.js"]
 
 ["browser_test_selection_size_text.js"]
+
+["browser_test_touch.js"]
 
 ["browser_text_selectionAPI_test.js"]

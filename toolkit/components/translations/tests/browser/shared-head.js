@@ -18,6 +18,9 @@ const { TranslationsFeature } = ChromeUtils.importESModule(
 const { TranslationsUtils } = ChromeUtils.importESModule(
   "chrome://global/content/translations/TranslationsUtils.mjs"
 );
+const { sinon: translationsSinon } = ChromeUtils.importESModule(
+  "resource://testing-common/Sinon.sys.mjs"
+);
 
 // This is a bit silly, but ml/tests/browser/head.js relies on this function:
 // https://searchfox.org/mozilla-central/rev/14f68f084d6a3bc438a3f973ed81d3a4dbab9629/toolkit/components/ml/tests/browser/head.js#23-25
@@ -732,10 +735,7 @@ class TranslationsSettingsTestUtils {
   static async openTranslationsSettingsSubpage(lexicalShortlistPrefs = []) {
     const { cleanup, remoteClients, translationsSettingsTestUtils } =
       await setupAboutPreferences(LANGUAGE_PAIRS, {
-        prefs: [
-          ["browser.settings-redesign.enabled", true],
-          ...lexicalShortlistPrefs,
-        ],
+        prefs: [...lexicalShortlistPrefs],
       });
 
     const document = gBrowser.selectedBrowser.contentDocument;
@@ -2643,6 +2643,66 @@ function waitForTranslationChildActorInBrowsingContext(
 }
 
 /**
+ * @typedef {object} HeldAsyncCall
+ * @property {Promise<void>} entered
+ *   Resolves when the matching call starts.
+ * @property {function(): (Promise<unknown> | undefined)} release
+ *   Allows the caller to receive the result and returns the caller's promise once
+ *   the matching call has started.
+ * @property {function(): void} restore
+ *   Disarms an unused intercept or releases a held result. Safe to call more
+ *   than once.
+ */
+
+/**
+ * Holds the result of the next matching async method call until released.
+ * Subsequent calls proceed normally, including while that result is held.
+ *
+ * @param {object} owner - The object that defines the method.
+ * @param {string} method - The method to intercept.
+ * @param {function(object, unknown[]): boolean} [matches]
+ *   Selects a call by its receiver and arguments.
+ *   Omit to hold the next call unconditionally.
+ * @returns {HeldAsyncCall}
+ */
+function holdNextAsyncResult(owner, method, matches = () => true) {
+  const original = owner[method];
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  let completion;
+
+  const stub = translationsSinon.stub(owner, method).callsFake(function (
+    ...args
+  ) {
+    if (!matches(this, args)) {
+      return original.apply(this, args);
+    }
+
+    stub.restore();
+    const result = original.apply(this, args);
+    completion = result.finally(() => resume.promise);
+    entered.resolve();
+
+    return completion;
+  });
+
+  return {
+    entered: entered.promise,
+    release() {
+      resume.resolve();
+
+      return completion;
+    },
+    restore() {
+      if (owner[method] === stub) {
+        stub.restore();
+      }
+      resume.resolve();
+    },
+  };
+}
+
+/**
  * Closes all open panels and menu popups related to Translations.
  *
  * @param {ChromeWindow} [win]
@@ -2653,6 +2713,7 @@ async function closeAllOpenPanelsAndMenus(win) {
   await closeSelectPanelSettingsMenuIfOpen(win);
   await closeSelectTranslationsPanelIfOpen(win);
   await closeContextMenuIfOpen(win);
+  await closePopupIfOpen("appMenu-popup", win);
 }
 
 /**
@@ -4364,72 +4425,16 @@ async function modifyRemoteSettingsRecords(
   });
 }
 
-async function selectAboutPreferencesElements(redesignEnabled) {
+async function selectAboutPreferencesElements() {
   const document = gBrowser.selectedBrowser.contentDocument;
 
   const settingsButton = document.getElementById(
     "translations-manage-settings-button"
   );
 
-  if (redesignEnabled) {
-    return {
-      document,
-      settingsButton,
-    };
-  }
-
-  const rows = await waitForCondition(() => {
-    const elements = document.querySelectorAll(".translations-manage-language");
-    if (elements.length !== 4) {
-      return false;
-    }
-    return elements;
-  }, "Waiting for manage language rows.");
-
-  const [downloadAllRow, frenchRow, spanishRow, ukrainianRow] = rows;
-  const downloadAllLabel = downloadAllRow.querySelector("label");
-  const downloadAll = downloadAllRow.querySelector(
-    "#translations-manage-install-all"
-  );
-  const deleteAll = downloadAllRow.querySelector(
-    "#translations-manage-delete-all"
-  );
-  const frenchLabel = frenchRow.querySelector("label");
-  const frenchDownload = frenchRow.querySelector(
-    `[data-l10n-id="translations-manage-language-download-button"]`
-  );
-  const frenchDelete = frenchRow.querySelector(
-    `[data-l10n-id="translations-manage-language-remove-button"]`
-  );
-  const spanishLabel = spanishRow.querySelector("label");
-  const spanishDownload = spanishRow.querySelector(
-    `[data-l10n-id="translations-manage-language-download-button"]`
-  );
-  const spanishDelete = spanishRow.querySelector(
-    `[data-l10n-id="translations-manage-language-remove-button"]`
-  );
-  const ukrainianLabel = ukrainianRow.querySelector("label");
-  const ukrainianDownload = ukrainianRow.querySelector(
-    `[data-l10n-id="translations-manage-language-download-button"]`
-  );
-  const ukrainianDelete = ukrainianRow.querySelector(
-    `[data-l10n-id="translations-manage-language-remove-button"]`
-  );
   return {
     document,
-    downloadAllLabel,
-    downloadAll,
-    deleteAll,
-    frenchLabel,
-    frenchDownload,
-    frenchDelete,
-    ukrainianLabel,
-    ukrainianDownload,
-    ukrainianDelete,
     settingsButton,
-    spanishLabel,
-    spanishDownload,
-    spanishDelete,
   };
 }
 
@@ -4517,7 +4522,6 @@ async function setupAboutPreferences(
       ["browser.translations.logLevel", "All"],
       ["identity.fxaccounts.account.device.name", ""],
       [USE_LEXICAL_SHORTLIST_PREF, false],
-      ["browser.settings-redesign.enabled", true],
       ...DOCUMENT_LANGUAGE_METADATA_TEST_PREFS,
       ...prefs,
     ],
@@ -4544,29 +4548,24 @@ async function setupAboutPreferences(
 
   // Load the Languages pane if SRD is enabled (moved from General)
   const document = gBrowser.selectedBrowser.contentDocument;
-  let redesigned = Services.prefs.getBoolPref(
-    "browser.settings-redesign.enabled",
-    false
-  );
-  if (redesigned) {
-    let loaded = BrowserTestUtils.waitForEvent(document, "paneshown");
-    let categoryLanguages = document.getElementById("category-languages");
-    categoryLanguages.scrollIntoView();
-    EventUtils.synthesizeMouseAtCenter(
-      categoryLanguages,
-      {},
-      document.documentGlobal
-    );
-    EventUtils.synthesizeMouseAtCenter(
-      categoryLanguages,
-      {},
-      document.documentGlobal
-    );
-    let event = await loaded;
-    is(event.detail.category, "paneLanguages", "Loaded the correct pane");
-  }
 
-  const elements = await selectAboutPreferencesElements(redesigned);
+  let loaded = BrowserTestUtils.waitForEvent(document, "paneshown");
+  let categoryLanguages = document.getElementById("category-languages");
+  categoryLanguages.scrollIntoView();
+  EventUtils.synthesizeMouseAtCenter(
+    categoryLanguages,
+    {},
+    document.documentGlobal
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    categoryLanguages,
+    {},
+    document.documentGlobal
+  );
+  let event = await loaded;
+  is(event.detail.category, "paneLanguages", "Loaded the correct pane");
+
+  const elements = await selectAboutPreferencesElements();
 
   const translationsSettingsTestUtils = new TranslationsSettingsTestUtils(
     document
@@ -5093,6 +5092,23 @@ const TRANSLATIONS_ENGINE_CACHE_TIMEOUT_MS = 300;
 /** Test utility functions for translations engine lifetime. */
 class TranslationsEngineTestUtils {
   /**
+   * Waits for the inference process associated with an engine actor to shut down.
+   *
+   * @param {TranslationsEngineParent} engineParent
+   * @returns {Promise<void>}
+   */
+  static async waitForProcessShutdown(engineParent) {
+    const childID = engineParent.childID;
+
+    await TestUtils.topicObserved(
+      "ipc:content-shutdown",
+      subject =>
+        subject instanceof Ci.nsIPropertyBag2 &&
+        subject.get("childID") === childID
+    );
+  }
+
+  /**
    * Waits for the translations engine process to exit after its idle timeout.
    *
    * @param {LanguagePair} languagePair
@@ -5100,12 +5116,8 @@ class TranslationsEngineTestUtils {
    */
   static async waitForIdleTimeout(languagePair) {
     const engineParent = await EngineProcess.getTranslationsEngineParent();
-    const processShutdown = TestUtils.topicObserved(
-      "ipc:content-shutdown",
-      subject =>
-        subject instanceof Ci.nsIPropertyBag2 &&
-        subject.get("childID") === engineParent.childID
-    );
+    const processShutdown =
+      TranslationsEngineTestUtils.waitForProcessShutdown(engineParent);
 
     await engineParent.waitForEngineIdleTimeoutForTests(
       languagePair,
@@ -5168,7 +5180,517 @@ class TranslationsEngineTestUtils {
   }
 }
 
+/**
+ * Shared browser interactions for creating and separating Split View tabs.
+ */
+class SplitViewTranslationsTestUtils {
+  /**
+   * Closes a loaded tab and waits for its document actors and SessionStore to shut down.
+   *
+   * @param {MozTabbrowserTab} tab
+   * @returns {Promise<void>}
+   */
+  static async closeTab(tab) {
+    const innerWindowId = tab.linkedBrowser.innerWindowID;
+    const documentDestroyed = TestUtils.topicObserved(
+      "window-global-destroyed",
+      windowGlobal => windowGlobal.innerWindowId === innerWindowId
+    );
+    const sessionStoreUpdated = BrowserTestUtils.waitForSessionStoreUpdate(tab);
+    const tabRemoved = BrowserTestUtils.waitForMutationCondition(
+      tab.documentGlobal.gBrowser.tabContainer,
+      { childList: true, subtree: true },
+      () => !tab.isConnected
+    );
+    BrowserTestUtils.removeTab(tab);
+    await Promise.all([documentDestroyed, sessionStoreUpdated, tabRemoved]);
+  }
+
+  /**
+   * Closes a browser window and waits for its window and document actors to shut down.
+   *
+   * @param {Window} win
+   * @returns {Promise<void>}
+   */
+  static async closeWindow(win) {
+    await win.gBrowserInit.idleTasksFinished.promise;
+
+    const windowId = win.windowGlobalChild.innerWindowId;
+    const windowDestroyed = TestUtils.topicObserved(
+      "window-global-destroyed",
+      windowGlobal => windowGlobal.innerWindowId === windowId
+    );
+    const documentsDestroyed = win.gBrowser.browsers.map(browser => {
+      const innerWindowId =
+        browser.browsingContext.currentWindowGlobal?.innerWindowId;
+      if (!innerWindowId) {
+        return Promise.resolve();
+      }
+
+      return TestUtils.topicObserved(
+        "window-global-destroyed",
+        windowGlobal => windowGlobal.innerWindowId === innerWindowId
+      );
+    });
+    await Promise.all([
+      BrowserTestUtils.closeWindow(win),
+      windowDestroyed,
+      ...documentsDestroyed,
+    ]);
+  }
+
+  /**
+   * Right-clicks a tab and activates an enabled context-menu command.
+   *
+   * @param {MozTabbrowserTab} tab
+   * @param {string} menuItemId
+   * @returns {Promise<void>}
+   */
+  static async #clickContextMenuItem(tab, menuItemId) {
+    const win = tab.documentGlobal;
+    info(`Right-click the tab and choose ${menuItemId}`);
+    await SimpleTest.promiseFocus(win);
+
+    const menu = win.document.getElementById("tabContextMenu");
+    const shown = BrowserTestUtils.waitForPopupEvent(menu, "shown");
+    EventUtils.synthesizeMouseAtCenter(
+      tab,
+      { type: "contextmenu", button: 2 },
+      win
+    );
+    await shown;
+
+    try {
+      const menuItem = win.document.getElementById(menuItemId);
+      await BrowserTestUtils.waitForMutationCondition(
+        menuItem,
+        { attributes: true, attributeFilter: ["hidden", "disabled"] },
+        () => !menuItem.hidden && !menuItem.disabled,
+        { msg: `Waiting for ${menuItemId} to be available` }
+      );
+
+      const hidden = BrowserTestUtils.waitForPopupEvent(menu, "hidden");
+      info(`Activate ${menuItemId} in the tab context menu`);
+      menu.activateItem(menuItem);
+      await hidden;
+    } finally {
+      if (menu.state !== "closed") {
+        const hidden = BrowserTestUtils.waitForPopupEvent(menu, "hidden");
+        menu.hidePopup();
+        await hidden;
+      }
+    }
+  }
+
+  /**
+   * Opens two existing tabs in Split View using the tab context menu.
+   *
+   * @param {MozTabbrowserTab} selectedTab
+   *   The currently selected tab.
+   * @param {MozTabbrowserTab} otherTab
+   *   The tab to select alongside it.
+   * @returns {Promise<void>}
+   */
+  static async openExistingTabsInSplitView(selectedTab, otherTab) {
+    const win = selectedTab.documentGlobal;
+    await SimpleTest.promiseFocus(win);
+    const splitViewCreated = BrowserTestUtils.waitForEvent(
+      win.gBrowser.tabContainer,
+      "SplitViewCreated"
+    );
+
+    EventUtils.synthesizeMouseAtCenter(otherTab, { accelKey: true }, win);
+    await this.#clickContextMenuItem(selectedTab, "context_moveTabToSplitView");
+    await splitViewCreated;
+
+    const splitView = selectedTab.splitview;
+    Assert.ok(
+      splitView && otherTab.splitview === splitView,
+      "Both existing tabs share the new Split View"
+    );
+  }
+
+  /**
+   * Separates a Split View through its tab context menu.
+   *
+   * @param {MozTabbrowserTab} tab
+   * @returns {Promise<void>}
+   */
+  static async separateTabs(tab) {
+    const splitViewRemoved = BrowserTestUtils.waitForEvent(
+      tab.documentGlobal.gBrowser.tabContainer,
+      "SplitViewRemoved",
+      false,
+      () => !tab.splitview
+    );
+    await this.#clickContextMenuItem(tab, "context_separateSplitView");
+    await splitViewRemoved;
+  }
+}
+
 class AboutTranslationsTestUtils {
+  /**
+   * Asserts the selected source and target languages after page initialization.
+   *
+   * @param {Browser} browser
+   * @param {object} options
+   * @param {string} options.sourceLanguage
+   *   The expected source language, or "detect" for automatic detection.
+   * @param {string} options.targetLanguage
+   *   The expected target language.
+   * @returns {Promise<void>}
+   */
+  static async assertSelectedLanguages(
+    browser,
+    { sourceLanguage, targetLanguage }
+  ) {
+    await SpecialPowers.spawn(
+      browser,
+      [sourceLanguage, targetLanguage],
+      async (expectedSource, expectedTarget) => {
+        await ContentTaskUtils.waitForMutationCondition(
+          content.document.body,
+          { attributes: true, attributeFilter: ["ready-for-testing"] },
+          () => content.document.body.hasAttribute("ready-for-testing")
+        );
+
+        const sourceSelector = Cu.waiveXrays(
+          content.document.getElementById("about-translations-source-select")
+        );
+        const targetSelector = Cu.waiveXrays(
+          content.document.getElementById("about-translations-target-select")
+        );
+        Assert.equal(
+          sourceSelector.value,
+          expectedSource,
+          "The companion's source-language selector has the expected value"
+        );
+        Assert.equal(
+          targetSelector.value,
+          expectedTarget,
+          "The companion's target-language selector has the expected value"
+        );
+      }
+    );
+  }
+
+  /**
+   * Asserts the close button's visibility after the page and Split View UI settle.
+   *
+   * @param {Browser} browser
+   * @param {object} options
+   * @param {boolean} options.visible
+   * @param {() => Promise<void>} [action]
+   *   A transition that should produce the expected button visibility.
+   * @returns {Promise<void>}
+   */
+  static async assertSplitViewCloseButton(browser, { visible }, action) {
+    await SpecialPowers.spawn(browser, [], () =>
+      ContentTaskUtils.waitForMutationCondition(
+        content.document.body,
+        { attributes: true, attributeFilter: ["ready-for-testing"] },
+        () => content.document.body.hasAttribute("ready-for-testing")
+      )
+    );
+    await action?.();
+    await SpecialPowers.spawn(browser, [visible], async expectedVisible => {
+      const button = content.document.getElementById(
+        "about-translations-split-view-close-button"
+      );
+      Assert.ok(button, "The Split View close button exists");
+
+      await ContentTaskUtils.waitForMutationCondition(
+        button,
+        { attributes: true, attributeFilter: ["hidden"] },
+        () => button.hidden === !expectedVisible
+      );
+      Assert.equal(
+        !button.hidden,
+        expectedVisible,
+        "The Split View close button has the expected visibility"
+      );
+    });
+  }
+
+  /**
+   * Clicks the visible Split View close button with the mouse.
+   *
+   * @param {Browser} browser
+   * @returns {Promise<void>}
+   */
+  static async clickSplitViewCloseButton(browser) {
+    await this.assertSplitViewCloseButton(browser, { visible: true });
+    await BrowserTestUtils.synthesizeMouseAtCenter(
+      "#about-translations-split-view-close-button",
+      {},
+      browser
+    );
+  }
+
+  /**
+   * Verifies that only the page's close button records activation in its flow.
+   *
+   * @param {object} options
+   * @param {boolean} options.closeWithButton
+   *   Whether to use the page's close button or separate and close the tab normally.
+   * @returns {Promise<void>}
+   */
+  static async assertSplitViewCloseButtonTelemetry({ closeWithButton }) {
+    const { cleanup, tab: partnerTab } = await loadTestPage({
+      page: SPANISH_PAGE_URL,
+      languagePairs: LANGUAGE_PAIRS,
+      prefs: [["browser.tabs.splitView.enabled", true]],
+    });
+    let aboutTranslationsTab = null;
+
+    try {
+      aboutTranslationsTab = await BrowserTestUtils.openNewForegroundTab(
+        gBrowser,
+        "about:translations"
+      );
+      const browser = aboutTranslationsTab.linkedBrowser;
+      await this.assertSplitViewCloseButton(browser, { visible: false });
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsAboutTranslationsPage.open,
+        {
+          expectedEventCount: 1,
+          expectNewFlowId: true,
+          assertForAllEvents: {
+            flow_id: value =>
+              typeof value === "string" && Boolean(value.length),
+          },
+        }
+      );
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsAboutTranslationsPage.closeCompanionButton,
+        { expectedEventCount: 0 }
+      );
+
+      info("Joining Split View does not record close-button activation");
+      await this.assertSplitViewCloseButton(browser, { visible: true }, () =>
+        SplitViewTranslationsTestUtils.openExistingTabsInSplitView(
+          aboutTranslationsTab,
+          partnerTab
+        )
+      );
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsAboutTranslationsPage.closeCompanionButton,
+        { expectedEventCount: 0 }
+      );
+
+      if (!closeWithButton) {
+        info("Separating Split View does not record close-button activation");
+        await this.assertSplitViewCloseButton(browser, { visible: false }, () =>
+          SplitViewTranslationsTestUtils.separateTabs(aboutTranslationsTab)
+        );
+        await TestTranslationsTelemetry.assertEvent(
+          Glean.translationsAboutTranslationsPage.closeCompanionButton,
+          { expectedEventCount: 0 }
+        );
+        if (gBrowser.selectedTab !== aboutTranslationsTab) {
+          await BrowserTestUtils.switchTab(gBrowser, aboutTranslationsTab);
+        }
+      }
+
+      const tabClosed = BrowserTestUtils.waitForEvent(
+        aboutTranslationsTab,
+        "TabClose"
+      );
+      const tabRemoved = BrowserTestUtils.waitForMutationCondition(
+        gBrowser.tabContainer,
+        { childList: true, subtree: true },
+        () => !aboutTranslationsTab.isConnected,
+        { msg: "Waiting for the closed about:translations tab to be removed" }
+      );
+      if (closeWithButton) {
+        info(
+          "The page's close button records activation before closing its tab"
+        );
+        const splitViewRemoved = BrowserTestUtils.waitForEvent(
+          gBrowser.tabContainer,
+          "SplitViewRemoved",
+          false,
+          () => !partnerTab.splitview
+        );
+        await this.clickSplitViewCloseButton(browser);
+        await Promise.all([tabClosed, splitViewRemoved]);
+      } else {
+        info(
+          "The browser's tab close button does not record page-button activation"
+        );
+        EventUtils.synthesizeMouseAtCenter(
+          aboutTranslationsTab.querySelector(".tab-close-button"),
+          {},
+          window
+        );
+        await tabClosed;
+      }
+      await tabRemoved;
+
+      ok(!aboutTranslationsTab.isConnected, "about:translations is closed");
+      ok(partnerTab.isConnected, "The partner tab remains open");
+      ok(!partnerTab.splitview, "The partner tab has left Split View");
+      await TestTranslationsTelemetry.assertEvent(
+        Glean.translationsAboutTranslationsPage.closeCompanionButton,
+        {
+          expectedEventCount: closeWithButton ? 1 : 0,
+          expectNewFlowId: closeWithButton ? false : null,
+        }
+      );
+    } finally {
+      partnerTab.splitview?.unsplitTabs();
+      if (aboutTranslationsTab?.isConnected) {
+        await BrowserTestUtils.removeTab(aboutTranslationsTab);
+      }
+      await cleanup();
+    }
+  }
+
+  /**
+   * Verifies close-button visibility when an existing page joins or leaves Split View,
+   * optionally after the page moves to another window without reloading.
+   *
+   * @param {object} options
+   * @param {boolean} options.separate
+   *   Whether to separate an existing Split View rather than create one.
+   * @param {boolean} options.moveToNewWindow
+   *   Whether to move the tab or Split View before the tested transition.
+   * @returns {Promise<void>}
+   */
+  static async assertSplitViewCloseButtonAfterTabChange({
+    separate,
+    moveToNewWindow,
+  }) {
+    const testPage = await loadTestPage({
+      page: SPANISH_PAGE_URL,
+      languagePairs: LANGUAGE_PAIRS,
+      prefs: [["browser.tabs.splitView.enabled", true]],
+    });
+    let partnerTab = testPage.tab;
+    let aboutTranslationsTab = null;
+    let newWindow = null;
+
+    try {
+      info("Open about:translations as a standalone tab");
+      aboutTranslationsTab = await BrowserTestUtils.openNewForegroundTab(
+        gBrowser,
+        "about:translations"
+      );
+      await this.assertSplitViewCloseButton(
+        aboutTranslationsTab.linkedBrowser,
+        {
+          visible: false,
+        }
+      );
+
+      if (separate) {
+        info("Add the existing about:translations page to Split View");
+        await this.assertSplitViewCloseButton(
+          aboutTranslationsTab.linkedBrowser,
+          { visible: true },
+          () =>
+            SplitViewTranslationsTestUtils.openExistingTabsInSplitView(
+              aboutTranslationsTab,
+              partnerTab
+            )
+        );
+        is(
+          aboutTranslationsTab.splitview,
+          partnerTab.splitview,
+          "Both tabs share the Split View"
+        );
+      }
+
+      if (moveToNewWindow) {
+        info("Move the existing page to another window without reloading it");
+        const innerWindowId = aboutTranslationsTab.linkedBrowser.innerWindowID;
+        newWindow = await BrowserTestUtils.openNewBrowserWindow();
+        const originalTab = aboutTranslationsTab;
+        const tabAdopted = BrowserTestUtils.waitForEvent(
+          newWindow.gBrowser.tabContainer,
+          "TabOpen",
+          false,
+          event => event.detail.adoptedTab === originalTab
+        );
+
+        if (separate) {
+          const adoptedSplitView = newWindow.gBrowser.adoptSplitView(
+            aboutTranslationsTab.splitview,
+            { selectTab: true }
+          );
+          aboutTranslationsTab = (await tabAdopted).target;
+          partnerTab = adoptedSplitView.tabs.find(
+            tab => tab !== aboutTranslationsTab
+          );
+        } else {
+          partnerTab = newWindow.gBrowser.selectedTab;
+          aboutTranslationsTab = newWindow.gBrowser.adoptTab(
+            aboutTranslationsTab,
+            { selectTab: true }
+          );
+          await tabAdopted;
+        }
+
+        is(
+          aboutTranslationsTab.documentGlobal,
+          newWindow,
+          "The about:translations tab belongs to the destination window"
+        );
+        is(
+          aboutTranslationsTab.linkedBrowser.innerWindowID,
+          innerWindowId,
+          "Moving the tab preserves the existing about:translations document"
+        );
+        await this.assertSplitViewCloseButton(
+          aboutTranslationsTab.linkedBrowser,
+          {
+            visible: separate,
+          }
+        );
+      }
+
+      await this.assertSplitViewCloseButton(
+        aboutTranslationsTab.linkedBrowser,
+        { visible: !separate },
+        async () => {
+          if (separate) {
+            info(
+              "Separate the tabs and check that the close button disappears"
+            );
+            await SplitViewTranslationsTestUtils.separateTabs(
+              aboutTranslationsTab
+            );
+            ok(!partnerTab.splitview, "The partner tab has left Split View");
+            ok(
+              !aboutTranslationsTab.splitview,
+              "about:translations has left Split View"
+            );
+          } else {
+            info(
+              "Add the existing page to Split View and check that the close button appears"
+            );
+            await SplitViewTranslationsTestUtils.openExistingTabsInSplitView(
+              aboutTranslationsTab,
+              partnerTab
+            );
+          }
+        }
+      );
+    } finally {
+      try {
+        aboutTranslationsTab?.splitview?.unsplitTabs();
+        if (aboutTranslationsTab?.isConnected) {
+          await SplitViewTranslationsTestUtils.closeTab(aboutTranslationsTab);
+        }
+        await testPage.cleanup({ browser: partnerTab.linkedBrowser });
+      } finally {
+        if (newWindow) {
+          await SplitViewTranslationsTestUtils.closeWindow(newWindow);
+        }
+      }
+    }
+  }
+
   /**
    * A collection of custom events that the about:translations document may dispatch.
    */

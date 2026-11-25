@@ -25,6 +25,7 @@
 #include "SVGMotionSMILAttr.h"
 #include "mozAutoDocUpdate.h"
 #include "mozilla/AlreadyAddRefed.h"
+#include "mozilla/BitSet.h"
 #include "mozilla/EventListenerManager.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/RestyleManager.h"
@@ -343,7 +344,8 @@ nsresult SVGElement::BindToTree(BindContext& aContext, nsINode& aParent) {
         [self = RefPtr<SVGElement>(this)]() {
           nsAutoString nonce;
           self->GetNonce(nonce);
-          self->SetAttr(kNameSpaceID_None, nsGkAtoms::nonce, u""_ns, true);
+          self->SetAttr(kNameSpaceID_None, nsGkAtoms::nonce, u""_ns, true,
+                        IsKnownNewAttr::No);
           self->SetNonce(nonce);
         }));
   }
@@ -948,7 +950,7 @@ bool SVGElement::IsNoNamespaceAttrMapped(const nsAtom* name) const {
     return SVGElementBase::IsNoNamespaceAttrMapped(name);
   }
 
-  static const MappedAttributeEntry attributes[] = {
+  static constexpr MappedAttributeEntry attributes[] = {
       // Properties that we don't support are commented out.
       // { nsGkAtoms::alignment_baseline },
       {nsGkAtoms::baseline_shift},
@@ -1010,9 +1012,17 @@ bool SVGElement::IsNoNamespaceAttrMapped(const nsAtom* name) const {
       {nsGkAtoms::writing_mode},
       {nullptr}};
 
-  static const MappedAttributeEntry* const map[] = {attributes};
+  static constexpr BitSet<nsGkAtoms::kStaticAtomCount> sMappedAttributes = [] {
+    BitSet<nsGkAtoms::kStaticAtomCount> mapped;
+    for (const MappedAttributeEntry* entry = attributes; entry->attribute;
+         ++entry) {
+      mapped[nsGkAtoms::IndexOf(entry->attribute)] = true;
+    }
+    return mapped;
+  }();
 
-  return FindAttributeDependence(name, map) ||
+  return (name->IsStatic() &&
+          sMappedAttributes.test(nsGkAtoms::IndexOf(name->AsStatic()))) ||
          SVGElementBase::IsNoNamespaceAttrMapped(name);
 }
 
@@ -1464,12 +1474,11 @@ void SVGElement::DidChangeValue(nsAtom* aName, nsAttrValue& aNewValue,
   // but currently SVG elements do not even use the old attribute value in
   // |AfterSetAttr|, so this should be ok.
   const AttrModType modType =
-      aName ? AttrModType::Modification : AttrModType::Addition;
+      HasAttr(aName) ? AttrModType::Modification : AttrModType::Addition;
   const nsAttrValue emptyValue;
   SetAttrAndNotify(kNameSpaceID_None, aName, nullptr, &emptyValue, aNewValue,
                    nullptr, modType, kNotifyDocumentObservers,
-                   kCallAfterSetAttr, GetComposedDoc(), aProofOfUpdate,
-                   mozilla::dom::IsKnownNewAttr::No);
+                   kCallAfterSetAttr, aProofOfUpdate, IsKnownNewAttr::No);
 }
 
 nsAtom* SVGElement::GetEventNameForAttr(nsAtom* aAttr) {
@@ -2017,7 +2026,7 @@ void SVGElement::SetStringBaseValue(uint8_t aAttrEnum,
   NS_ASSERTION(aAttrEnum < info.mCount, "aAttrEnum out of range");
 
   SetAttr(info.mInfos[aAttrEnum].mNamespaceID, info.mInfos[aAttrEnum].mName,
-          aValue, true);
+          aValue, true, IsKnownNewAttr::No);
 }
 
 SVGElement::StringListAttributesInfo SVGElement::GetStringListInfo() {

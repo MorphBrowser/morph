@@ -10,10 +10,11 @@ prefs = [
 ]
 support-files = [
   "head.js",
+  "head_agent_monitor_item.js",
   "head_aitab.js",
-  "head_aiwindow_group_tabs_button.js",
   "head_smartformfill_autocomplete.js",
   "head_history_thumbnails.js",
+  "head_monitor_suggest.js",
   "head_smartformfill_form_review.js",
   "head_smartformfill_telemetry.js",
   "test_agent_monitor_item_page.html",
@@ -63,7 +64,7 @@ support-files = [
   "test_context_url_injection_page.html"
 ]
 skip-if = [
-  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11' && tsan && nova", # Bug 2057552
+  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11' && tsan", # Bug 2057552
 ]
 
 ["browser_actor_user_prompt.js"]
@@ -94,8 +95,6 @@ skip-if = [
 
 ["browser_aitab_blocks.js"]
 
-["browser_aitab_menu_triggers.js"]
-
 ["browser_aitab_page.js"]
 
 ["browser_aitab_store_integration.js"]
@@ -109,6 +108,8 @@ skip-if = [
 ["browser_aiwindow_agent_monitor_chat.js"]
 
 ["browser_aiwindow_agent_monitor_item.js"]
+
+["browser_aiwindow_agent_monitor_item_suggest.js"]
 
 ["browser_aiwindow_agentui_command.js"]
 
@@ -131,33 +132,7 @@ skip-if = [
 
 ["browser_aiwindow_chat_tool_ui.js"]
 
-["browser_aiwindow_firstrun.js"]
-skip-if = [
-  "debug && standalone", # Bug 2025711
-  "os == 'mac' && os_version == '15.30' && arch == 'aarch64'", # Bug 2012723
-]
-
 ["browser_aiwindow_followup_tokens.js"]
-
-["browser_aiwindow_group_tabs_button_interaction.js"]
-skip-if = [
-  "verify", # Bug 2060705
-]
-
-["browser_aiwindow_group_tabs_button_model.js"]
-skip-if = [
-  "verify", # Bug 2060705
-]
-
-["browser_aiwindow_group_tabs_button_suggestions.js"]
-skip-if = [
-  "verify", # Bug 2060705
-]
-
-["browser_aiwindow_group_tabs_button_tab_management.js"]
-skip-if = [
-  "verify", # Bug 2060705
-]
 
 ["browser_aiwindow_grouped_chips.js"]
 
@@ -175,11 +150,13 @@ skip-if = [
 
 ["browser_aiwindow_memories_toggle_prefs.js"]
 
-["browser_aiwindow_monitor_button.js"]
-
-["browser_aiwindow_monitor_button_panel.js"]
-
 ["browser_aiwindow_monitor_create.js"]
+
+["browser_aiwindow_monitor_suggest_chat.js"]
+
+["browser_aiwindow_monitor_suggest_chat_context.js"]
+
+["browser_aiwindow_monitor_suggest_panel.js"]
 
 ["browser_aiwindow_new_chat_button.js"]
 
@@ -205,7 +182,7 @@ skip-if = [
 
 ["browser_aiwindow_smartbar_context_paste.js"]
 skip-if = [
-  "os == 'linux' && os_version == '22.04' && arch == 'x86_64' && display == 'wayland' && opt && nova", # Bug 2057548
+  "os == 'linux' && os_version == '22.04' && arch == 'x86_64' && display == 'wayland' && opt", # Bug 2057548
 ]
 
 ["browser_aiwindow_smartbar_focus.js"]
@@ -236,20 +213,11 @@ skip-if = [
 
 ["browser_aiwindow_smartbar_tabgroups.js"]
 
-["browser_aiwindow_smartbar_telemetry.js"]
-skip-if = [
-  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11' && tsan",
-  "os == 'win' && os_version == '11.26200' && arch == 'x86_64' && ccov",
-]
-
 ["browser_aiwindow_smartwindow_promo.js"]
 
 ["browser_aiwindow_stop_generation.js"]
 
 ["browser_aiwindow_switcher.js"]
-skip-if = [
-  "debug && standalone", # Bug 2025711
-]
 
 ["browser_aiwindow_tab_close_integration.js"]
 

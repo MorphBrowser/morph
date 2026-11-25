@@ -46,12 +46,45 @@ from mozlog.formatters import TestSummaryFormatter
             id="assertion_count_dropped",
         ),
         pytest.param(
-            {"action": "lsan_leak", "frames": []}, False, id="lsan_leak_dropped"
+            {
+                "action": "lsan_leak",
+                "frames": ["Ensure", "nsFoo::Bar"],
+                "kind": "Direct",
+                "bytes": 168,
+                "objects": 1,
+                "scope": "browser.toml",
+                "allowed_match": None,
+            },
+            True,
+            id="lsan_leak_kept",
         ),
         pytest.param(
-            {"action": "lsan_summary", "allocated_bytes": 10},
+            {
+                "action": "lsan_leak",
+                "frames": ["PR_LoadLibrary", "nsFoo::Bar"],
+                "kind": "Direct",
+                "bytes": 64,
+                "objects": 1,
+                "scope": "browser.toml",
+                "allowed_match": "PR_LoadLibrary",
+            },
             False,
-            id="lsan_summary_dropped",
+            id="lsan_leak_allowed_match_dropped",
+        ),
+        pytest.param(
+            {
+                "action": "lsan_summary",
+                "bytes": 488,
+                "allocations": 3,
+                "allowed": False,
+            },
+            True,
+            id="lsan_summary_kept",
+        ),
+        pytest.param(
+            {"action": "lsan_summary", "bytes": 64, "allocations": 1, "allowed": True},
+            False,
+            id="lsan_summary_allowed_dropped",
         ),
         pytest.param(
             {"action": "process_exit", "process": 1234, "exitcode": 0},
@@ -64,7 +97,16 @@ from mozlog.formatters import TestSummaryFormatter
             id="process_start_dropped",
         ),
         pytest.param(
-            {"action": "tsan_error", "stack": "race"}, False, id="tsan_error_dropped"
+            {
+                "action": "tsan_error",
+                "kind": "data race",
+                "signature": "pk11slot.c:1350:17 in PK11_InitToken",
+                "pid": 1596,
+                "stacks": [{"label": "Write of size 2 by thread T9", "stack": []}],
+                "scope": "browser_syncedtabs_errors_firefoxview.js",
+            },
+            True,
+            id="tsan_error_kept",
         ),
         pytest.param(
             {"action": "assertion_failure", "kind": "MOZ_ASSERT", "stack": []},
@@ -75,6 +117,11 @@ from mozlog.formatters import TestSummaryFormatter
             {"action": "ubsan_error", "kind": "undefined-behavior", "message": "m"},
             True,
             id="ubsan_error_kept",
+        ),
+        pytest.param(
+            {"action": "asan_error", "kind": "SEGV", "message": "m", "quiet": True},
+            True,
+            id="asan_error_kept",
         ),
         pytest.param(
             {"action": "group_start", "name": "manifestA"}, True, id="group_start_kept"
@@ -123,6 +170,29 @@ from mozlog.formatters import TestSummaryFormatter
             },
             False,
             id="test_status_matching_expected_dropped",
+        ),
+        pytest.param(
+            {
+                "action": "test_status",
+                "test": "test_foo",
+                "subtest": "subtest1",
+                "status": "FAIL",
+                "expected": "PASS",
+                "known_intermittent": ["FAIL"],
+            },
+            True,
+            id="test_status_known_intermittent_kept",
+        ),
+        pytest.param(
+            {
+                "action": "test_status",
+                "test": "test_foo",
+                "subtest": "subtest1",
+                "status": "FAIL",
+                "will_retry": True,
+            },
+            False,
+            id="test_status_will_retry_dropped",
         ),
         pytest.param(
             {"action": "crash", "test": "test_foo", "signature": "sig"},
@@ -250,9 +320,7 @@ def test_testsummary_strips_noise_fields():
         "source",
         "extra",
         "tests",
-        "stack",
         "js_source",
-        "minidump_path",
         "crashing_thread_stack",
         "stackwalk_stdout",
         "stackwalk_stderr",
@@ -262,6 +330,8 @@ def test_testsummary_strips_noise_fields():
     assert result["test"] == "xpcom/tests/unit/test_bug476919.js"
     assert result["status"] == "FAIL"
     assert result["expected"] == "PASS"
+    assert result["stack"] == "stack/trace\nlines"
+    assert result["minidump_path"] == "/tmp/foo.dmp"
 
 
 def test_testsummary_log_error_keeps_only_level_and_message():
@@ -322,6 +392,64 @@ def test_testsummary_mozleak_total_keeps_the_leak_fields():
     }
 
 
+def test_testsummary_lsan_summary_keeps_the_counts():
+    fmt = TestSummaryFormatter()
+    record = {
+        "action": "lsan_summary",
+        "time": 1791156513865,
+        "thread": "MainThread",
+        "pid": 1652,
+        "source": "mochitest",
+        "bytes": 488,
+        "allocations": 3,
+    }
+    out = fmt(record)
+    result = json.loads(out)
+    assert result == {
+        "action": "lsan_summary",
+        "time": 1791156513865,
+        "bytes": 488,
+        "allocations": 3,
+    }
+
+
+def test_testsummary_lsan_leak_keeps_the_stack():
+    fmt = TestSummaryFormatter()
+    frames = [
+        "Ensure",
+        "mozilla::dom::FileSystemBackgroundRequestHandler::CreateFileSystemManagerChild",
+        "mozilla::dom::FileSystemManager::BeginRequest",
+        "mozilla::dom::fs::FileSystemRequestHandler::GetRootHandle",
+    ]
+    stack = [{"function": "Ensure", "file": "MozPromise.h", "line": 1550}]
+    scope = "browser/components/aiwindow/ui/test/browser/browser_smartwindow.toml"
+    record = {
+        "action": "lsan_leak",
+        "time": 1791156513878,
+        "thread": "MainThread",
+        "pid": 1652,
+        "source": "mochitest",
+        "frames": frames,
+        "kind": "Direct",
+        "bytes": 168,
+        "objects": 1,
+        "stack": stack,
+        "scope": scope,
+    }
+    out = fmt(record)
+    result = json.loads(out)
+    assert result == {
+        "action": "lsan_leak",
+        "time": 1791156513878,
+        "frames": frames,
+        "kind": "Direct",
+        "bytes": 168,
+        "objects": 1,
+        "stack": stack,
+        "scope": scope,
+    }
+
+
 def test_testsummary_crash_keeps_stack():
     fmt = TestSummaryFormatter()
     record = {
@@ -337,6 +465,51 @@ def test_testsummary_crash_keeps_stack():
     assert result["stack"] == "frame1\nframe2"
     assert "thread" not in result
     assert "pid" not in result
+
+
+def test_testsummary_crash_keeps_the_minidump_path():
+    fmt = TestSummaryFormatter()
+    minidump_path = (
+        "/var/folders/ss/l_yg30rn4777np9phmknlrgw000014/T/xpc-vmxo7brg"
+        "/xpc-other-p9w3v69p/33672F0C-6F69-4499-AAE6-85A13340212B.dmp"
+    )
+    reason = (
+        "MOZ_ASSERT(staticPrefValue == preferenceValue) (Preference"
+        " 'dom.ipc.processLaunch.useMacPlists' got modified since"
+        " StaticPrefs::dom_ipc_processLaunch_useMacPlists_AtStartup was"
+        " initialized. Consider using an `always` mirror kind instead)"
+    )
+    record = {
+        "action": "crash",
+        "time": 1792157632661,
+        "thread": "MainThread",
+        "pid": 13322,
+        "source": "xpcshell",
+        "process": None,
+        "test": "extensions/pref/autoconfig/test/unit/test_autoconfig_profile_prefs.js",
+        "signature": "@ mozilla::StaticPrefs::InitOncePrefs()::$_13::operator()",
+        "minidump_path": minidump_path,
+        "stackwalk_stdout": "Operating system: Mac OS X\n...",
+        "stackwalk_stderr": None,
+        "stackwalk_retcode": 0,
+        "stackwalk_errors": [],
+        "crashing_thread_stack": [{"frame": 0}],
+        "process_type": "main",
+        "reason": reason,
+        "quiet": False,
+    }
+    result = json.loads(fmt(record))
+    assert result == {
+        "action": "crash",
+        "time": 1792157632661,
+        "process": None,
+        "test": "extensions/pref/autoconfig/test/unit/test_autoconfig_profile_prefs.js",
+        "signature": "@ mozilla::StaticPrefs::InitOncePrefs()::$_13::operator()",
+        "minidump_path": minidump_path,
+        "process_type": "main",
+        "reason": reason,
+        "quiet": False,
+    }
 
 
 def test_testsummary_ubsan_error_keeps_stack():
@@ -359,6 +532,118 @@ def test_testsummary_ubsan_error_keeps_stack():
     assert result["column"] == 33
     assert "thread" not in result
     assert "pid" not in result
+
+
+def test_testsummary_tsan_error_keeps_pid_and_stacks():
+    fmt = TestSummaryFormatter()
+    stacks = [
+        {
+            "label": "Write of size 2 at 0x725c002ac828 by thread T9",
+            "stack": [
+                {
+                    "function": "PK11_InitToken",
+                    "module": "libnss3.so",
+                    "module_offset": "0xd9c2f",
+                    "file": "/builds/worker/checkouts/gecko/security/nss/lib/pk11wrap/pk11slot.c",
+                    "line": 1350,
+                    "column": 17,
+                }
+            ],
+        }
+    ]
+    scope = "browser/components/firefoxview/tests/browser/browser_syncedtabs_errors_firefoxview.js"
+    record = {
+        "action": "tsan_error",
+        "time": 1793990929939,
+        "thread": "MainThread",
+        # The racing process, not the harness that logged the record.
+        "pid": 1596,
+        "source": "mochitest",
+        "kind": "data race",
+        "signature": "pk11slot.c:1350:17 in PK11_InitToken",
+        "description": None,
+        "stacks": stacks,
+        "scope": scope,
+    }
+    result = json.loads(fmt(record))
+    assert result == {
+        "action": "tsan_error",
+        "time": 1793990929939,
+        "pid": 1596,
+        "kind": "data race",
+        "signature": "pk11slot.c:1350:17 in PK11_InitToken",
+        "description": None,
+        "stacks": stacks,
+        "scope": scope,
+    }
+
+
+def test_testsummary_asan_error_keeps_stacks_and_pid():
+    fmt = TestSummaryFormatter()
+    stack = [{"function": "GetInnerWindow", "file": "Document.h", "line": 1942}]
+    stacks = [{"label": "freed by thread T0 here", "stack": stack}]
+    record = {
+        "action": "asan_error",
+        "time": 1792157632661,
+        "thread": "MainThread",
+        "pid": 28130,
+        "source": "web-platform-tests",
+        "kind": "SEGV",
+        "message": "SEGV on unknown address 0x00000000030b (pc 0x7b03e9dd40af T0)",
+        "file": "Document.h",
+        "lineno": 1942,
+        "column": 12,
+        "function": "GetInnerWindow",
+        "stack": stack,
+        "stacks": stacks,
+        "scope": "/css/selectors",
+    }
+    result = json.loads(fmt(record))
+    assert result == {
+        "action": "asan_error",
+        "time": 1792157632661,
+        "pid": 28130,
+        "kind": "SEGV",
+        "message": "SEGV on unknown address 0x00000000030b (pc 0x7b03e9dd40af T0)",
+        "file": "Document.h",
+        "lineno": 1942,
+        "column": 12,
+        "function": "GetInnerWindow",
+        "stack": stack,
+        "stacks": stacks,
+        "scope": "/css/selectors",
+    }
+
+
+def test_testsummary_log_error_keeps_stack():
+    fmt = TestSummaryFormatter()
+    message = (
+        "Unexpected exception NS_ERROR_FAILURE: Component returned failure code:"
+        " 0x80004005 (NS_ERROR_FAILURE) [nsIGIOService.createHandlerAppFromAppId]"
+    )
+    stack = (
+        "promiseStartLegacyDownload@head.js:282:8\n"
+        "test_launch_id@common_test_Download.js:2629:26\n"
+        "@-e:1:1\n"
+    )
+    record = {
+        "action": "log",
+        "time": 1791156063780,
+        "thread": None,
+        "pid": None,
+        "source": "xpcshell/head.js",
+        "level": "ERROR",
+        "message": message,
+        "exc_info": False,
+        "extra": {"source_file": "head.js", "stack": stack},
+        "stack": stack,
+        "test": "toolkit/components/downloads/test/unit/test_DownloadLegacy.js",
+    }
+    result = json.loads(fmt(record))
+    assert result["stack"] == stack
+    assert result["message"] == message
+    for stripped in ("thread", "pid", "source", "extra"):
+        assert stripped not in result
 
 
 def test_testsummary_emits_test_start_and_end_separately():

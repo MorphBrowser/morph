@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <limits>
+#include <memory>
 
 #include "mozHunspellRLBoxHost.h"
 #include "mozilla/DebugOnly.h"
@@ -96,7 +97,7 @@ void mozHunspellCallbacks::Clear() {
 
 /* static */
 tainted_hunspell<uint32_t> mozHunspellCallbacks::CreateFilemgr(
-    rlbox_sandbox_hunspell& aSandbox,
+    rlbox_sandbox_hunspell& /*aSandbox*/,
     tainted_hunspell<const char*> t_aFilename) {
   mozilla::StaticAutoWriteLock lock(sFileMgrMapLock);
 
@@ -111,8 +112,8 @@ tainted_hunspell<uint32_t> mozHunspellCallbacks::CreateFilemgr(
         // Get new id
         uint32_t freshId = GetFreshId();
         // Save mapping of id to file manager
-        sFileMgrMap[freshId] = std::unique_ptr<mozHunspellFileMgrHost>(
-            new mozHunspellFileMgrHost(cFilename));
+        sFileMgrMap[freshId] =
+            std::make_unique<mozHunspellFileMgrHost>(cFilename);
 
         return freshId;
       });
@@ -175,7 +176,7 @@ tainted_hunspell<bool> mozHunspellCallbacks::GetLine(
 
 /* static */
 tainted_hunspell<int> mozHunspellCallbacks::GetLineNum(
-    rlbox_sandbox_hunspell& aSandbox, tainted_hunspell<uint32_t> t_aFd) {
+    rlbox_sandbox_hunspell& /*aSandbox*/, tainted_hunspell<uint32_t> t_aFd) {
   mozHunspellFileMgrHost& inst =
       mozHunspellCallbacks::GetMozHunspellFileMgrHost(t_aFd);
   int num = inst.GetLineNum();
@@ -183,7 +184,7 @@ tainted_hunspell<int> mozHunspellCallbacks::GetLineNum(
 }
 
 /* static */
-void mozHunspellCallbacks::DestructFilemgr(rlbox_sandbox_hunspell& aSandbox,
+void mozHunspellCallbacks::DestructFilemgr(rlbox_sandbox_hunspell& /*aSandbox*/,
                                            tainted_hunspell<uint32_t> t_aFd) {
   mozilla::StaticAutoWriteLock lock(sFileMgrMapLock);
   uint32_t aFd = t_aFd.copy_and_verify([](uint32_t aFd) { return aFd; });
@@ -198,7 +199,7 @@ void mozHunspellCallbacks::DestructFilemgr(rlbox_sandbox_hunspell& aSandbox,
 
 /* static */
 tainted_hunspell<uint32_t> mozHunspellCallbacks::ToUpperCase(
-    rlbox_sandbox_hunspell& aSandbox, tainted_hunspell<uint32_t> t_aChar) {
+    rlbox_sandbox_hunspell& /*aSandbox*/, tainted_hunspell<uint32_t> t_aChar) {
   uint32_t aChar =
       t_aChar.copy_and_verify([](uint32_t aChar) { return aChar; });
   return ::ToUpperCase(aChar);
@@ -206,7 +207,7 @@ tainted_hunspell<uint32_t> mozHunspellCallbacks::ToUpperCase(
 
 /* static */
 tainted_hunspell<uint32_t> mozHunspellCallbacks::ToLowerCase(
-    rlbox_sandbox_hunspell& aSandbox, tainted_hunspell<uint32_t> t_aChar) {
+    rlbox_sandbox_hunspell& /*aSandbox*/, tainted_hunspell<uint32_t> t_aChar) {
   uint32_t aChar =
       t_aChar.copy_and_verify([](uint32_t aChar) { return aChar; });
   return ::ToLowerCase(aChar);

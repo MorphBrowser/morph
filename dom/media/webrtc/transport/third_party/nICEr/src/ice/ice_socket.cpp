@@ -82,9 +82,7 @@ static void nr_ice_socket_readable_cb(NR_SOCKET s, int how, void *cb_arg)
 
     len = (int)len_s;
 
-#ifdef USE_TURN
   re_process:
-#endif /* USE_TURN */
     r_log(LOG_ICE,LOG_DEBUG,"ICE(%s): Read %d bytes %sfrom %s",sock->ctx->label,len,(processed_indication ? "relayed " : ""),addr.as_string);
 
     /* First question: is this STUN or not? */
@@ -120,11 +118,18 @@ static void nr_ice_socket_readable_cb(NR_SOCKET s, int how, void *cb_arg)
             break;
 
           case NR_ICE_STUN_SERVER:
+            // A pooled socket has no peer yet and only placeholder
+            // credentials, so it does not answer connectivity checks until a
+            // component takes it and re-keys its STUN server context.
+            if (is_req && sock->component->stream->defer_gathering_events) {
+              r_log(LOG_ICE, LOG_DEBUG, "ICE(%s): ignoring STUN request on a pooled socket from %s",
+                    sock->ctx->label, addr.as_string);
+              break;
+            }
             if(is_req){
               r=nr_stun_server_process_request(sc1->u.server,stun_srv_sock,(char *)buf,len,&addr,NR_STUN_AUTH_RULE_SHORT_TERM);
             }
             break;
-#ifdef USE_TURN
           case NR_ICE_TURN_CLIENT:
             /* data indications are ok, so don't ignore those */
             /* Check that this is from the right TURN server address. Else
@@ -166,7 +171,6 @@ static void nr_ice_socket_readable_cb(NR_SOCKET s, int how, void *cb_arg)
               }
             }
             break;
-#endif /* USE_TURN */
 
           default:
             assert(0); /* Can't happen */
@@ -248,13 +252,13 @@ int nr_ice_socket_create(nr_ice_ctx *ctx,nr_ice_component *comp, nr_socket *nsoc
   }
 
 
-int nr_ice_socket_destroy(nr_ice_socket **isockp)
+void nr_ice_socket_destroy(nr_ice_socket **isockp)
   {
     nr_ice_stun_ctx *s1,*s2;
     nr_ice_socket *isock;
 
     if(!isockp || !*isockp)
-      return(0);
+      return;
 
     isock=*isockp;
     *isockp=0;
@@ -272,8 +276,6 @@ int nr_ice_socket_destroy(nr_ice_socket **isockp)
     }
 
     free(isock);
-
-    return(0);
   }
 
 int nr_ice_socket_close(nr_ice_socket *isock)
@@ -391,11 +393,9 @@ void nr_ice_socket_failed(nr_ice_socket *sock)
         case NR_ICE_STUN_SERVER:
           /* Nothing to do here? */
           break;
-#ifdef USE_TURN
         case NR_ICE_TURN_CLIENT:
           nr_turn_client_failed(s1->u.turn_client.turn_client);
           break;
-#endif
         default:
           assert(0);
       }

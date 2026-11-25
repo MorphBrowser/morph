@@ -441,8 +441,7 @@ static int32_t PerformWait(Instance* instance, uint32_t memoryIndex,
 
   mozilla::Maybe<mozilla::TimeDuration> timeout;
   if (timeout_ns >= 0) {
-    timeout = mozilla::Some(
-        mozilla::TimeDuration::FromMicroseconds(double(timeout_ns) / 1000));
+    timeout = mozilla::Some(mozilla::TimeDuration::FromNanoseconds(timeout_ns));
   }
 
   MOZ_ASSERT(byteOffset <= SIZE_MAX, "Bounds check is broken");
@@ -2481,7 +2480,8 @@ Instance::Instance(JSContext* cx, Handle<WasmInstanceObject*> object,
       ieeeMxcsr_(0),
       wasmMxcsr_(0),
 #endif
-      allocationMetadataBuilder_(nullptr),
+      hasAllocationMetadataBuilder_(
+          cx->realm()->hasAllocationMetadataBuilder()),
       addressOfLastBufferedWholeCell_(
           cx->runtime()->gc.addressOfLastBufferedWholeCell()) {
   std::fill(std::begin(baselineScratchWords_), std::end(baselineScratchWords_),
@@ -2532,7 +2532,7 @@ bool Instance::init(JSContext* cx, const JSObjectVector& funcImports,
 
   // Capture this thread's MXCSR once, so the wasm stubs can restore it with
   // a single ldmxcsr each.
-  uint32_t mxcsr = ReadMxcsr();
+  uint32_t mxcsr = mozilla::supports_sse() ? ReadMxcsr() : 0;
   ieeeMxcsr_ = mxcsr;
   if (CanDisableDenormals() && cx->options().wasmDisablesDenormals()) {
     wasmMxcsr_ = mxcsr | MxcsrDenormalsDisabled;
@@ -2829,7 +2829,7 @@ bool Instance::init(JSContext* cx, const JSObjectVector& funcImports,
     data.mappedSize = memory->buffer().wasmMappedSize();
 
     // Add observer if our memory base may grow
-    if (memory && memory->movingGrowable() &&
+    if (memory->movingGrowable() &&
         !memory->addMovingGrowObserver(cx, object_)) {
       return false;
     }
@@ -3193,6 +3193,20 @@ void Instance::submitCallRefHints(uint32_t funcIndex) {
   }
 }
 
+void Instance::resetPretenuredAllocSites() {
+  if (!allocSites_) {
+    return;
+  }
+
+  uint32_t allocSitesCount = codeTailMeta().numAllocSites;
+  for (uint32_t i = 0; i < allocSitesCount; i++) {
+    gc::AllocSite* site = &allocSites_[i];
+    if (site->initialHeap() == gc::Heap::Tenured) {
+      site->maybeResetState();
+    }
+  }
+}
+
 bool Instance::debugFilter(uint32_t funcIndex) const {
   return (debugFilter_[funcIndex / 32] >> funcIndex % 32) & 1;
 }
@@ -3332,10 +3346,8 @@ void js::wasm::TraceInstanceEdge(JSTracer* trc, Instance* instance,
 }
 
 static uintptr_t* GetFrameScanStartForStackMap(
-    const wasm::WasmFrameIter& wfi, const StackMap* map,
+    const Frame* frame, const StackMap* map,
     uintptr_t* highestByteVisitedInPrevFrame) {
-  const Frame* frame = wfi.frame();
-
   // |frame| points somewhere in the middle of the area described by |map|.
   // We have to calculate |scanStart|, the lowest address that is described by
   // |map|, by consulting |map->frameOffsetFromTop|.
@@ -3355,13 +3367,6 @@ static uintptr_t* GetFrameScanStartForStackMap(
   // This is so as to ensure there are no areas of stack inadvertently ignored
   // by a stackmap, nor covered by two stackmaps.  Hence any failure of this
   // assertion is serious and should be investigated.
-  //
-  // The hidden frame of a cross-instance return_call has no stackmap, but its
-  // size is fixed, so step over it.
-  if (highestByteVisitedInPrevFrame && *highestByteVisitedInPrevFrame != 0 &&
-      wfi.skippedReturnCallTrampoline()) {
-    *highestByteVisitedInPrevFrame += SizeOfHiddenReturnCallFrame();
-  }
 #ifndef JS_CODEGEN_ARM64
   MOZ_ASSERT_IF(
       highestByteVisitedInPrevFrame && *highestByteVisitedInPrevFrame != 0,
@@ -3387,13 +3392,35 @@ uintptr_t Instance::traceFrame(JSTracer* trc, const wasm::WasmFrameIter& wfi,
                                uint8_t* nextPC,
                                uintptr_t highestByteVisitedInPrevFrame) {
   const StackMap* map = code().lookupStackMap(nextPC);
+#ifdef DEBUG
+  if (maybeDebug_) {
+    // Every frame of a function compiled by the baseline compiler in debug
+    // mode should have a stackmap here, with two exceptions:
+    //
+    // * Import-function wrappers aren't compiled by the baseline compiler, and
+    //   have no stackmaps.
+    //
+    // * A frame at a ReturnCallFallback call site has no stackmap.  It made a
+    //   return call to an import or to a function in another instance as a
+    //   regular call, and stays on the stack while the callee runs, so a GC
+    //   can see it.  But it is dead: after the call it only restores the
+    //   instance and pops itself, so it holds no live GC pointers.
+    const CodeRange* range = code().lookupFuncRange(nextPC);
+    CallSite site;
+    bool atReturnCallFallback = code().lookupCallSite(nextPC, &site) &&
+                                site.kind() == CallSiteKind::ReturnCallFallback;
+    MOZ_ASSERT_IF(range && !codeMeta().funcIsImport(range->funcIndex()) &&
+                      !atReturnCallFallback,
+                  map);
+  }
+#endif
   if (!map) {
     return 0;
   }
 
   Frame* frame = wfi.frame();
   uintptr_t* stackWords =
-      GetFrameScanStartForStackMap(wfi, map, &highestByteVisitedInPrevFrame);
+      GetFrameScanStartForStackMap(frame, map, &highestByteVisitedInPrevFrame);
 
   // Hand refs off to the GC.
   for (uint32_t i = 0; i < map->header.numMappedWords; i++) {
@@ -3438,7 +3465,8 @@ void Instance::updateFrameForMovingGC(const wasm::WasmFrameIter& wfi,
   if (!map) {
     return;
   }
-  uintptr_t* stackWords = GetFrameScanStartForStackMap(wfi, map, nullptr);
+  Frame* frame = wfi.frame();
+  uintptr_t* stackWords = GetFrameScanStartForStackMap(frame, map, nullptr);
 
   // Update array data pointers, both IL and OOL, and struct data pointers,
   // which are only OOL, for any such data areas that moved.  Note, the

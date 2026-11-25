@@ -13,7 +13,7 @@ prefs = [
 
 ["browser_taskbarTabs_chromeTest.js"]
 skip-if = [
-  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && ccov && nova", # Bug 2057867
+  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && ccov", # Bug 2057867
 ]
 
 ["browser_taskbarTabs_cmd.js"]
@@ -39,6 +39,9 @@ support-files = [
 ["browser_taskbarTabs_title.js"]
 
 ["browser_taskbarTabs_uriTest.js"]
+
+["browser_taskbarTabs_windowClass.js"]
+run-if = ["os == 'linux'"]
 
 ["browser_taskbarTabs_windowManager.js"]
 support-files = [

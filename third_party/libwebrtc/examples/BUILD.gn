@@ -65,20 +65,23 @@ rtc_library("read_auth_file") {
     "turnserver/read_auth_file.h",
   ]
   deps = [
+    "../rtc_base:span_helpers",
     "../rtc_base:stringutils",
     "//third_party/abseil-cpp/absl/strings:string_view",
   ]
 }
 
 if (rtc_include_tests) {
-  rtc_test("examples_unittests") {
-    testonly = true
+  rtc_cc_test("read_auth_file_unittest") {
     sources = [ "turnserver/read_auth_file_unittest.cc" ]
     deps = [
       ":read_auth_file",
-      "//test:test_support",
-      "//testing/gtest",
+      "../test:test_support",
     ]
+  }
+
+  rtc_test_suite("examples_unittests") {
+    tests = [ ":read_auth_file_unittest" ]
   }
 }
 
@@ -140,7 +143,6 @@ if (is_android) {
       "../sdk/android:filevideo_java",
       "../sdk/android:hwcodecs_java",
       "../sdk/android:java_audio_device_module_java",
-      "../sdk/android:libjingle_peerconnection_java",
       "../sdk/android:libjingle_peerconnection_metrics_default_java",
       "../sdk/android:peerconnection_java",
       "../sdk/android:screencapturer_java",
@@ -207,7 +209,6 @@ if (is_android) {
       ":AppRTCMobile_javalib",
       "../sdk/android:base_java",
       "../sdk/android:camera_java",
-      "../sdk/android:libjingle_peerconnection_java",
       "../sdk/android:peerconnection_java",
       "../sdk/android:video_api_java",
       "../sdk/android:video_java",
@@ -631,8 +632,7 @@ if (is_ios || (is_mac && target_cpu != "x86")) {
         ]
       }
 
-      rtc_test("apprtcmobile_tests") {
-        is_xctest = true
+      rtc_xctest("apprtcmobile_tests") {
         info_plist = "objc/AppRTCMobile/ios/Info.plist"
         deps = [
           ":AppRTCMobile_lib",
@@ -800,6 +800,7 @@ if (is_linux || is_chromeos || is_win) {
       "//third_party/abseil-cpp/absl/strings:string_view",
     ]
   }
+
   rtc_executable("turnserver") {
     testonly = true
     sources = [ "turnserver/turnserver_main.cc" ]
@@ -821,6 +822,7 @@ if (is_linux || is_chromeos || is_win) {
       "//third_party/abseil-cpp/absl/strings",
     ]
   }
+
   rtc_executable("stunserver") {
     testonly = true
     sources = [ "stunserver/stunserver_main.cc" ]

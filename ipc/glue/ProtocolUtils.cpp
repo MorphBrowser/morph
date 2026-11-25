@@ -76,8 +76,9 @@ IPCResult IPCResult::FailImpl(NotNull<IProtocol*> actor, const char* where,
 }
 
 /* static */
-IPCResult IPCResult::FailForTesting(NotNull<IProtocol*> actor,
-                                    const char* where, const char* why) {
+IPCResult IPCResult::FailForTesting(NotNull<IProtocol*> /*actor*/,
+                                    const char* /*where*/,
+                                    const char* /*why*/) {
   return IPCResult(false);
 }
 
@@ -462,7 +463,7 @@ bool IProtocol::SetManagerAndRegister(IRefCountedProtocol* aManager,
   }
 
   // If our manager is already dying, mark ourselves as doomed as well.
-  if (aManager && aManager->mLinkStatus != LinkStatus::Connected) {
+  if (aManager->mLinkStatus != LinkStatus::Connected) {
     mLinkStatus = LinkStatus::Doomed;
     if (aManager->mLinkStatus != LinkStatus::Doomed) {
       // Our manager is already fully dead, make sure we call

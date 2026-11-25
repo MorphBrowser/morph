@@ -398,9 +398,7 @@ async function doDismissTest({
   );
   Assert.equal(
     details.displayed.title,
-    command == DISMISS_ONE_COMMAND
-      ? "Thanks for your feedback. You won’t see this suggestion again."
-      : "Thanks for your feedback. You won’t see these suggestions anymore.",
+    "Thanks for your feedback",
     "Tip text should be correct for the dismiss type"
   );
   Assert.ok(
@@ -486,19 +484,19 @@ class TestProvider extends UrlbarTestUtils.TestProvider {
       {
         name: FEEDBACK_COMMAND,
         l10n: {
-          id: "urlbar-result-menu-report-inaccurate-location2",
+          id: "urlbar-result-menu-show-less-frequently3",
         },
       },
       {
         name: DISMISS_ONE_COMMAND,
         l10n: {
-          id: "firefox-suggest-command-not-interested2",
+          id: "urlbar-result-menu-dismiss-suggestion2",
         },
       },
       {
         name: DISMISS_ALL_COMMAND,
         l10n: {
-          id: "firefox-suggest-command-not-interested2",
+          id: "urlbar-result-menu-dont-show-weather-suggestions3",
         },
       },
       {
@@ -526,17 +524,9 @@ class TestProvider extends UrlbarTestUtils.TestProvider {
           controller.view.acknowledgeFeedback(details.result.id);
           break;
         case DISMISS_ONE_COMMAND:
-          controller.removeResult(details.result, {
-            acknowledgeDismissalL10n: {
-              id: "firefox-suggest-dismissal-acknowledgment-one",
-            },
-          });
-          break;
         case DISMISS_ALL_COMMAND:
           controller.removeResult(details.result, {
-            acknowledgeDismissalL10n: {
-              id: "urlbar-result-dismissal-acknowledgment-all",
-            },
+            acknowledgeDismissal: true,
           });
           break;
         case REMOVE_COMMAND:

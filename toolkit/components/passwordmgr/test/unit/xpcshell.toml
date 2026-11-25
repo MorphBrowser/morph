@@ -40,10 +40,14 @@ run-if = [
 ]
 
 ["test_LoginStorageMigrator.js"]
+run-if = [
+  "os != 'android'", # The migrator only runs on desktop
+]
 
 ["test_LoginStorageMigrator_nimbus.js"]
 run-if = [
-  "os != 'android'", # The migrator only runs on desktop
+  # The migrator only runs on desktop browser builds.
+  "os != 'android' && buildapp == 'browser'",
 ]
 
 ["test_OSCrypto_win.js"]
@@ -165,6 +169,8 @@ run-if = [
 ["test_storage.js"]
 
 ["test_storage_rust_shutdown.js"]
+
+["test_storage_rust_timestamps.js"]
 
 ["test_telemetry.js"]
 

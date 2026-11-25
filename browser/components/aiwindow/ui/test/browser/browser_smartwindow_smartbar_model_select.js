@@ -23,28 +23,9 @@ add_setup(async function () {
     set: [
       ["browser.smartwindow.firstrun.modelChoice", DEFAULT_MODEL_CHOICE_ID],
       ["places.semanticHistory.smartwindow.featureGate", false],
-      // TODO: Bug 2053495 - Refactor tests upon pref removal
-      ["browser.smartwindow.mistralRelease", false],
     ],
   });
 });
-
-/**
- * Waits for the expected model in the smartbar model select.
- *
- * @param {MozBrowser} browser - The browser element
- * @param {string} expectedModel - The expected model name
- */
-async function waitForSelectedModel(browser, expectedModel) {
-  await SpecialPowers.spawn(browser, [expectedModel], async expected => {
-    const aiWindowElement = content.document.querySelector("ai-window");
-    await ContentTaskUtils.waitForMutationCondition(
-      aiWindowElement,
-      { attributes: true },
-      () => aiWindowElement.selectedModelId === expected
-    );
-  });
-}
 
 /**
  * Opens the model select panel, returns the choice IDs of the items showing the
@@ -81,7 +62,10 @@ async function getCheckedModelChoiceIds(browser) {
         const iconSrc = item
           .querySelector(".model-item-icon")
           .getAttribute("src");
-        checkedIds.push(iconSrc.match(/model-choice-(\d+)\.svg/)?.[1]);
+        const iconName = iconSrc.match(/model-choice-(.+)\.svg/)?.[1];
+        checkedIds.push(
+          { 0: "0", gemini: "1", qwen: "2", mistral: "3" }[iconName]
+        );
       }
     }
 
@@ -96,14 +80,26 @@ async function getCheckedModelChoiceIds(browser) {
   });
 }
 
+/**
+ * Returns the options the chat engine was last created with, which carry the
+ * model and endpoint its requests go to.
+ *
+ * @returns {object} The options passed to openAIEngine._createEngine
+ */
+function getLastChatEngineOptions() {
+  return openAIEngine._createEngine
+    .getCalls()
+    .map(call => call.args[0])
+    .findLast(options => options.purpose === "chat");
+}
+
 add_task(async function test_smartbar_model_select_shows_default_model() {
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: null,
-  });
+  const mockEngineManager = new MockEngineManager();
+  let win;
 
   try {
     const expectedDefaultModel = FALLBACK_MODELS[DEFAULT_MODEL_CHOICE_ID].model;
-    const win = await openAIWindow();
+    win = await openAIWindow();
     const browser = win.gBrowser.selectedBrowser;
 
     const { selectedModelId } = await getSmartbarModelSelectData(browser);
@@ -112,26 +108,25 @@ add_task(async function test_smartbar_model_select_shows_default_model() {
       expectedDefaultModel,
       "Should show the default model based on modelChoice pref"
     );
-
-    await BrowserTestUtils.closeWindow(win);
   } finally {
-    await restore();
+    await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
 add_task(async function test_smartbar_model_select_panel_shows_default_badge() {
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: null,
-  });
+  const mockEngineManager = new MockEngineManager();
+  let win;
 
   try {
-    const win = await openAIWindow();
+    win = await openAIWindow();
     const browser = win.gBrowser.selectedBrowser;
 
     const defaultItemHasBadge = await SpecialPowers.spawn(
       browser,
-      [DEFAULT_MODEL_CHOICE_ID],
-      async defaultModelChoiceId => {
+      [FALLBACK_MODELS[DEFAULT_MODEL_CHOICE_ID].brandName.toLowerCase()],
+      async iconName => {
         const aiWindowElement = content.document.querySelector("ai-window");
         const smartbar = aiWindowElement.shadowRoot.querySelector(
           "#ai-window-smartbar"
@@ -149,28 +144,27 @@ add_task(async function test_smartbar_model_select_panel_shows_default_badge() {
         );
 
         const defaultItem = panelList.querySelector(
-          `button.model-item:has(.model-item-icon[src*="model-choice-${defaultModelChoiceId}.svg"])`
+          `button.model-item:has(.model-item-icon[src*="model-choice-${iconName}.svg"])`
         );
         return !!defaultItem.querySelector("moz-badge");
       }
     );
 
     Assert.ok(defaultItemHasBadge, "Default model item should have the badge");
-
-    await BrowserTestUtils.closeWindow(win);
   } finally {
-    await restore();
+    await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
 add_task(
   async function test_smartbar_model_select_check_marks_selected_model() {
-    const { restore } = await stubEngineNetworkBoundaries({
-      serverOptions: null,
-    });
+    const mockEngineManager = new MockEngineManager();
+    let win;
 
     try {
-      const win = await openAIWindow();
+      win = await openAIWindow();
       const browser = win.gBrowser.selectedBrowser;
 
       // A fresh tab starts on the user's currently selected model (the saved
@@ -189,10 +183,10 @@ add_task(
         ["1"],
         "The checkmark should follow the newly selected model"
       );
-
-      await BrowserTestUtils.closeWindow(win);
     } finally {
-      await restore();
+      await BrowserTestUtils.closeWindow(win);
+      await mockEngineManager.rejectAllRequests();
+      mockEngineManager.cleanupMocks();
     }
   }
 );
@@ -205,12 +199,11 @@ add_task(
       ],
     });
 
-    const { restore } = await stubEngineNetworkBoundaries({
-      serverOptions: null,
-    });
+    const mockEngineManager = new MockEngineManager();
+    let win;
 
     try {
-      const win = await openAIWindow();
+      win = await openAIWindow();
       const browser = win.gBrowser.selectedBrowser;
 
       const { availableModels } = await getSmartbarModelSelectData(browser);
@@ -219,14 +212,122 @@ add_task(
         m => m.model === "custom-model"
       );
       Assert.ok(hasCustomModel, "Custom model should show when configured");
-
-      await BrowserTestUtils.closeWindow(win);
     } finally {
-      await restore();
+      await BrowserTestUtils.closeWindow(win);
+      await mockEngineManager.rejectAllRequests();
+      mockEngineManager.cleanupMocks();
       await SpecialPowers.popPrefEnv();
     }
   }
 );
+
+add_task(async function test_smartbar_model_select_shows_custom_model_name() {
+  const fullName = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M";
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["browser.smartwindow.customEndpoint", "https://custom.endpoint/v1"],
+      ["browser.smartwindow.model", fullName],
+      ["browser.smartwindow.firstrun.modelChoice", "0"],
+    ],
+  });
+
+  const mockEngineManager = new MockEngineManager();
+  let win;
+
+  try {
+    win = await openAIWindow();
+    const browser = win.gBrowser.selectedBrowser;
+
+    const getCustomModelLabels = () =>
+      SpecialPowers.spawn(browser, [], async () => {
+        const aiWindowElement = content.document.querySelector("ai-window");
+        const smartbar = aiWindowElement.shadowRoot.querySelector(
+          "#ai-window-smartbar"
+        );
+        const modelSelect = smartbar.querySelector("input-model-select");
+        await ContentTaskUtils.waitForCondition(
+          () => modelSelect.shadowRoot.querySelector("moz-button"),
+          "Model select button should render"
+        );
+        await modelSelect.updateComplete;
+        const button = modelSelect.shadowRoot.querySelector("moz-button");
+        const customItemLabel = modelSelect.shadowRoot.querySelector(
+          "button.model-item:has(.model-item-icon--custom) .model-item-label"
+        );
+        return {
+          buttonLabel: button.getAttribute("label"),
+          buttonTitle: button.shadowRoot
+            .querySelector("button")
+            .getAttribute("title"),
+          buttonL10nId: button.getAttribute("data-l10n-id"),
+          itemLabel: customItemLabel.textContent.trim(),
+          itemL10nId: customItemLabel.getAttribute("data-l10n-id"),
+        };
+      });
+
+    let labels = await getCustomModelLabels();
+    Assert.equal(
+      labels.buttonLabel,
+      "Llama",
+      "Button should show the first word of the custom model name"
+    );
+    Assert.equal(
+      labels.buttonTitle,
+      fullName,
+      "Button tooltip should show the full custom model name"
+    );
+    Assert.equal(
+      labels.itemLabel,
+      fullName,
+      "Menu item should show the full custom model name"
+    );
+
+    for (const [name, expected] of [
+      ["/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf", "Qwen2.5"],
+      ["meta-llama/Llama-3.1-8B-Instruct", "Llama"],
+      ["llama3.2:3b", "llama3.2"],
+      ["gpt-oss-120b", "gpt"],
+      ["mistral", "mistral"],
+    ]) {
+      await SpecialPowers.pushPrefEnv({
+        set: [["browser.smartwindow.model", name]],
+      });
+      labels = await getCustomModelLabels();
+      Assert.equal(
+        labels.buttonLabel,
+        expected,
+        `Button should shorten "${name}" to "${expected}"`
+      );
+      await SpecialPowers.popPrefEnv();
+    }
+
+    await SpecialPowers.pushPrefEnv({
+      set: [["browser.smartwindow.model", ""]],
+    });
+    labels = await getCustomModelLabels();
+    Assert.equal(
+      labels.buttonL10nId,
+      "aiwindow-input-model-select-button-label-custom",
+      "Button should fall back to the Custom label without a model name"
+    );
+    Assert.equal(
+      labels.buttonTitle,
+      null,
+      "Button should have no tooltip without a model name"
+    );
+    Assert.equal(
+      labels.itemL10nId,
+      "aiwindow-input-model-select-button-label-custom",
+      "Menu item should fall back to the Custom label without a model name"
+    );
+    await SpecialPowers.popPrefEnv();
+  } finally {
+    await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+    await SpecialPowers.popPrefEnv();
+  }
+});
 
 add_task(
   async function test_smartbar_model_select_hides_custom_model_without_custom_endpoint() {
@@ -234,12 +335,11 @@ add_task(
       clear: [["browser.smartwindow.customEndpoint"]],
     });
 
-    const { restore } = await stubEngineNetworkBoundaries({
-      serverOptions: null,
-    });
+    const mockEngineManager = new MockEngineManager();
+    let win;
 
     try {
-      const win = await openAIWindow();
+      win = await openAIWindow();
       const browser = win.gBrowser.selectedBrowser;
 
       const { availableModels } = await getSmartbarModelSelectData(browser);
@@ -251,22 +351,21 @@ add_task(
         !hasCustomModel,
         "Custom model should NOT be available without a custom endpoint"
       );
-
-      await BrowserTestUtils.closeWindow(win);
     } finally {
-      await restore();
+      await BrowserTestUtils.closeWindow(win);
+      await mockEngineManager.rejectAllRequests();
+      mockEngineManager.cleanupMocks();
       await SpecialPowers.popPrefEnv();
     }
   }
 );
 
 add_task(async function test_model_switch_uses_correct_model_for_requests() {
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: null,
-  });
+  const mockEngineManager = new MockEngineManager();
+  let win;
 
   try {
-    const win = await openAIWindow();
+    win = await openAIWindow();
     const browser = win.gBrowser.selectedBrowser;
 
     const { selectedModelId: initialModelId } =
@@ -281,50 +380,47 @@ add_task(async function test_model_switch_uses_correct_model_for_requests() {
       updatedModelId,
       "Model should have changed"
     );
-
-    await BrowserTestUtils.closeWindow(win);
   } finally {
-    await restore();
+    await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
 add_task(
   async function test_model_switch_updates_system_prompt_mid_conversation() {
-    let { promise: requestPromise, resolve: resolveRequest } =
-      Promise.withResolvers();
-
-    const { restore } = await stubEngineNetworkBoundaries({
-      serverOptions: {
-        streamChunks: ["Hello", "from mock server."],
-        onRequest(body) {
-          resolveRequest(body);
-          ({ promise: requestPromise, resolve: resolveRequest } =
-            Promise.withResolvers());
-        },
-      },
-    });
+    const mockEngineManager = new MockEngineManager();
+    let win;
 
     try {
-      const win = await openAIWindow();
+      win = await openAIWindow();
       const browser = win.gBrowser.selectedBrowser;
 
       await typeInSmartbar(browser, "First message");
       await submitSmartbar(browser);
-      const firstRequest = await requestPromise;
+      const firstRequest = await mockEngineManager.captureRequest({
+        purpose: "chat",
+      });
+      const firstModel = getLastChatEngineOptions().modelId;
+      firstRequest.respond(["Hello", "from mock server."]);
 
       await switchSmartbarModel(browser, "1");
 
       await typeInSmartbar(browser, "Second message");
       await submitSmartbar(browser);
-      const secondRequest = await requestPromise;
+      const secondRequest = await mockEngineManager.captureRequest({
+        purpose: "chat",
+      });
+      const secondModel = getLastChatEngineOptions().modelId;
+      secondRequest.respond(["Hello", "from mock server."]);
 
-      const userMessages = secondRequest.messages
+      const userMessages = secondRequest.request.args
         .filter(message => message.role === "user")
         .map(message => message.content);
 
       Assert.notEqual(
-        firstRequest.model,
-        secondRequest.model,
+        firstModel,
+        secondModel,
         "Model should change after model switch"
       );
       Assert.ok(
@@ -335,49 +431,27 @@ add_task(
         userMessages.some(message => message.includes("Second message")),
         "Should include second message"
       );
-
-      await BrowserTestUtils.closeWindow(win);
     } finally {
-      await restore();
+      await BrowserTestUtils.closeWindow(win);
+      await mockEngineManager.rejectAllRequests();
+      mockEngineManager.cleanupMocks();
     }
   }
 );
 
 add_task(async function test_model_switch_routes_to_correct_endpoint() {
-  let customServer;
-  let stubRestore;
-  const customRequests = [];
-  const presetRequests = [];
+  const customEndpoint = "https://custom.endpoint/v1";
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ["browser.smartwindow.customEndpoint", customEndpoint],
+      ["browser.smartwindow.model", "custom-model"],
+      ["browser.smartwindow.apiKey", "custom-key"],
+    ],
+  });
+  const mockEngineManager = new MockEngineManager();
+  let win;
 
   try {
-    const { server, port: customPort } = startMockOpenAI({
-      streamChunks: ["Custom reply"],
-      onRequest(body) {
-        customRequests.push(body);
-      },
-    });
-    customServer = server;
-    await SpecialPowers.pushPrefEnv({
-      set: [
-        [
-          "browser.smartwindow.customEndpoint",
-          `http://localhost:${customPort}/v1`,
-        ],
-        ["browser.smartwindow.model", "custom-model"],
-        ["browser.smartwindow.apiKey", "custom-key"],
-      ],
-    });
-
-    const { restore } = await stubEngineNetworkBoundaries({
-      serverOptions: {
-        streamChunks: ["Preset reply"],
-        onRequest(body) {
-          presetRequests.push(body);
-        },
-      },
-    });
-    stubRestore = restore;
-
     // Waits for the smartbar to return to idle after a turn completes.
     const waitForIdle = browser =>
       SpecialPowers.spawn(browser, [], async () => {
@@ -391,7 +465,7 @@ add_task(async function test_model_switch_routes_to_correct_endpoint() {
         );
       });
 
-    const win = await openAIWindow();
+    win = await openAIWindow();
     const browser = win.gBrowser.selectedBrowser;
 
     // The custom model choice option "0" is available when configured
@@ -401,30 +475,32 @@ add_task(async function test_model_switch_routes_to_correct_endpoint() {
     // Test initial preset turn
     await typeInSmartbar(browser, "Preset message");
     await submitSmartbar(browser);
-    await TestUtils.waitForCondition(
-      () => presetRequests.length,
+    const presetRequest = await mockEngineManager.captureRequest({
+      purpose: "chat",
+    });
+    const presetBaseURL = getLastChatEngineOptions().baseURL;
+    Assert.equal(
+      presetBaseURL,
+      openAIEngine.endpoint,
       "MLPA endpoint should receive the preset request"
     );
-    Assert.equal(
-      customRequests.length,
-      0,
-      "Custom endpoint should not receive the preset request"
-    );
+    presetRequest.respond("Preset reply");
     await waitForIdle(browser);
 
     // Test switch to custom model
     await switchSmartbarModel(browser, "0");
     await typeInSmartbar(browser, "Custom message");
     await submitSmartbar(browser);
-    await TestUtils.waitForCondition(
-      () => customRequests.length,
+    const customRequest = await mockEngineManager.captureRequest({
+      purpose: "chat",
+    });
+    const customBaseURL = getLastChatEngineOptions().baseURL;
+    Assert.equal(
+      customBaseURL,
+      customEndpoint,
       "Custom endpoint should receive the custom-model request"
     );
-    Assert.equal(
-      presetRequests.length,
-      1,
-      "Mozilla endpoint must not receive the custom-model request"
-    );
+    customRequest.respond("Custom reply");
 
     // Custom model choice stays available
     const { availableModels: afterSwitch } =
@@ -433,22 +509,20 @@ add_task(async function test_model_switch_routes_to_correct_endpoint() {
       Object.values(afterSwitch).some(m => m.model === "custom-model"),
       "Custom option stays available"
     );
-
-    await BrowserTestUtils.closeWindow(win);
   } finally {
-    await stubRestore();
+    await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
     await SpecialPowers.popPrefEnv();
-    await stopMockOpenAI(customServer);
   }
 });
 
 add_task(async function test_model_choice_pref_change_updates_selected_model() {
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: null,
-  });
+  const mockEngineManager = new MockEngineManager();
+  let win;
 
   try {
-    const win = await openAIWindow();
+    win = await openAIWindow();
     const browser = win.gBrowser.selectedBrowser;
 
     const { selectedModelId: initialModelId } =
@@ -485,10 +559,10 @@ add_task(async function test_model_choice_pref_change_updates_selected_model() {
       expectedNewModel,
       "Selected model should update when pref changes"
     );
-
-    await BrowserTestUtils.closeWindow(win);
   } finally {
-    await restore();
+    await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
     await SpecialPowers.popPrefEnv();
   }
 });

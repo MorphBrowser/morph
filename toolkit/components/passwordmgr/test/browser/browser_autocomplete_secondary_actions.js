@@ -130,6 +130,107 @@ async function openFlyout(popup, button, label) {
   return menupopup;
 }
 
+// Checks every autocomplete event since the last reset shares one flow id.
+function assertOneFlow() {
+  const events = [
+    Glean.autocomplete.dropdownShown,
+    Glean.autocomplete.dropdownClosed,
+    Glean.autocomplete.recordInteraction,
+    Glean.autocomplete.recordDialogInteraction,
+  ].flatMap(metric => metric.testGetValue() ?? []);
+  const flowIds = new Set(events.map(e => e.extra.flow_id));
+  Assert.equal(flowIds.size, 1, "Every event shares one flow id");
+  const [flowId] = flowIds;
+  Assert.ok(flowId, "The shared flow id is not empty");
+  return flowId;
+}
+
+// Waits until only the Manage Passwords footer remains.
+function waitForFooterOnly(popup) {
+  return TestUtils.waitForCondition(
+    () =>
+      popup.view.matchCount === 1 &&
+      popup.view.getStyleAt(0) === "loginsFooter",
+    "Wait for only the footer to remain"
+  );
+}
+
+// A key typed while a search is running stops it with no results, which closes
+// the dropdown; the next search then reopens it as a new dropdown. So wait for
+// the open search, and for each key's results, before typing on.
+async function waitForDropdownSettled(browser) {
+  await SpecialPowers.spawn(browser, [], async () => {
+    const controller = Cc["@mozilla.org/autocomplete/controller;1"].getService(
+      Ci.nsIAutoCompleteController
+    );
+    const actor = content.windowGlobalChild.getActor("AutoComplete");
+    await ContentTaskUtils.waitForCondition(
+      () =>
+        actor.popupOpen &&
+        controller.searchStatus ===
+          Ci.nsIAutoCompleteController.STATUS_COMPLETE_MATCH,
+      "Wait for the dropdown to settle in content"
+    );
+  });
+}
+
+async function typeAndWaitForResults(popup, browser, key) {
+  const before = popup.view.results;
+  await BrowserTestUtils.synthesizeKey(key, {}, browser);
+  await TestUtils.waitForCondition(
+    () => popup.view.results !== before,
+    `Wait for the results after typing ${key}`
+  );
+}
+
+function assertNoCloseYet() {
+  Assert.equal(
+    Glean.autocomplete.dropdownClosed.testGetValue()?.length ?? 0,
+    0,
+    "The dropdown did not close while typing"
+  );
+}
+
+function waitForPopupHidden(popup) {
+  return BrowserTestUtils.waitForEvent(
+    popup,
+    "popuphidden",
+    false,
+    event => event.target === popup
+  );
+}
+
+async function closeWithEscape(popup) {
+  const hidden = waitForPopupHidden(popup);
+  await EventUtils.synthesizeKey("KEY_Escape");
+  await hidden;
+}
+
+function assertClosedAs(closeReason, message) {
+  const closedEvents = Glean.autocomplete.dropdownClosed.testGetValue();
+  Assert.equal(
+    closedEvents?.length,
+    1,
+    "One dropdown closed event is recorded"
+  );
+  Assert.equal(
+    closedEvents[0].extra.record_type,
+    "password",
+    "The event names the password record type"
+  );
+  Assert.equal(closedEvents[0].extra.close_reason, closeReason, message);
+}
+
+async function activateDelete(popup) {
+  const { item, button } = getSecondaryAction(popup, 0);
+  await selectRow(item, 0);
+  const menupopup = await openFlyout(popup, button, DELETE_LABEL);
+  const menuitem = [...menupopup.querySelectorAll("menuitem")].find(
+    mi => mi.getAttribute("label") === DELETE_LABEL
+  );
+  menupopup.activateItem(menuitem);
+}
+
 add_task(async function test_edit_icon_when_pref_disabled() {
   await SpecialPowers.pushPrefEnv({ set: [[PREF, false]] });
   await BrowserTestUtils.withNewTab(
@@ -162,7 +263,24 @@ add_task(async function test_flyout_when_pref_enabled() {
     { gBrowser, url: TEST_URL_PATH },
     async function (browser) {
       const popup = document.getElementById("PopupAutoComplete");
+      Services.fog.testResetFOG();
       await openACPopup(popup, browser, "#form-basic-username");
+      const shownEvents = Glean.autocomplete.dropdownShown.testGetValue();
+      Assert.equal(
+        shownEvents?.length,
+        1,
+        "One dropdown shown event is recorded"
+      );
+      Assert.equal(
+        shownEvents[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
+      Assert.equal(
+        shownEvents[0].extra.reopened_after_removal,
+        "false",
+        "A user-opened dropdown is not marked as reopened after a removal"
+      );
 
       const { item, rowItem, button } = getSecondaryAction(popup, 0);
 
@@ -235,10 +353,173 @@ add_task(async function test_flyout_when_pref_enabled() {
       );
 
       await closePopup(popup);
+      const closedEvents = Glean.autocomplete.dropdownClosed.testGetValue();
+      Assert.equal(
+        closedEvents?.length,
+        1,
+        "One dropdown closed event is recorded"
+      );
+      Assert.equal(
+        closedEvents[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
+      Assert.equal(
+        closedEvents[0].extra.close_reason,
+        "dismissed",
+        "Closing the panel records a dismissed close"
+      );
+      Assert.ok(closedEvents[0].extra.flow_id, "The event carries a flow id");
+      Assert.equal(
+        closedEvents[0].extra.flow_id,
+        shownEvents[0].extra.flow_id,
+        "The closed event's flow id matches the shown event for the same dropdown"
+      );
     }
   );
   await SpecialPowers.popPrefEnv();
 });
+
+add_task(async function test_selecting_a_login_records_dropdown_closed() {
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: TEST_URL_PATH },
+    async function (browser) {
+      const popup = document.getElementById("PopupAutoComplete");
+      await openACPopup(popup, browser, "#form-basic-username");
+
+      const { item } = getSecondaryAction(popup, 0);
+      await selectRow(item, 0);
+
+      Services.fog.testResetFOG();
+      const popupHidden = BrowserTestUtils.waitForEvent(
+        popup,
+        "popuphidden",
+        false,
+        event => event.target == popup
+      );
+      await EventUtils.synthesizeKey("KEY_Enter");
+      await popupHidden;
+
+      const closedEvents = Glean.autocomplete.dropdownClosed.testGetValue();
+      Assert.equal(
+        closedEvents?.length,
+        1,
+        "One dropdown closed event is recorded"
+      );
+      Assert.equal(
+        closedEvents[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
+      Assert.equal(
+        closedEvents[0].extra.close_reason,
+        "selected",
+        "Picking a login records a selected close"
+      );
+    }
+  );
+});
+
+add_task(async function test_typing_past_logins_records_typed_through() {
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: TEST_URL_PATH },
+    async function (browser) {
+      const popup = document.getElementById("PopupAutoComplete");
+      await openACPopup(popup, browser, "#form-basic-username");
+      await waitForDropdownSettled(browser);
+
+      Services.fog.testResetFOG();
+      for (const ch of ["z", "z", "z"]) {
+        await typeAndWaitForResults(popup, browser, ch);
+      }
+      await waitForFooterOnly(popup);
+      Assert.equal(popup.state, "open", "The footer keeps the dropdown open");
+      assertNoCloseYet();
+
+      await closeWithEscape(popup);
+      assertClosedAs(
+        "typed_through",
+        "Closing once only the footer remains records typed_through"
+      );
+    }
+  );
+});
+
+add_task(async function test_backspace_back_to_logins_records_dismissed() {
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: TEST_URL_PATH },
+    async function (browser) {
+      const popup = document.getElementById("PopupAutoComplete");
+      await openACPopup(popup, browser, "#form-basic-username");
+      await waitForDropdownSettled(browser);
+
+      Services.fog.testResetFOG();
+      await typeAndWaitForResults(popup, browser, "u");
+      await typeAndWaitForResults(popup, browser, "z");
+      await waitForFooterOnly(popup);
+
+      await typeAndWaitForResults(popup, browser, "KEY_Backspace");
+      await TestUtils.waitForCondition(
+        () => popup.view.getStyleAt(0) === "loginWithOrigin",
+        "Wait for the logins to come back"
+      );
+      assertNoCloseYet();
+
+      await closeWithEscape(popup);
+      assertClosedAs(
+        "dismissed",
+        "Closing once the logins are back records dismissed"
+      );
+    }
+  );
+});
+
+add_task(async function test_typing_in_password_field_records_typed_through() {
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: TEST_URL_PATH },
+    async function (browser) {
+      const popup = document.getElementById("PopupAutoComplete");
+      await openACPopup(popup, browser, "#form-basic-password");
+
+      Services.fog.testResetFOG();
+      const hidden = waitForPopupHidden(popup);
+      await BrowserTestUtils.synthesizeKey("z", {}, browser);
+      await hidden;
+      assertClosedAs(
+        "typed_through",
+        "Typing in the password field closes with typed_through"
+      );
+    }
+  );
+});
+
+add_task(
+  async function test_footer_after_typing_past_logins_records_selected() {
+    await BrowserTestUtils.withNewTab(
+      { gBrowser, url: TEST_URL_PATH },
+      async function (browser) {
+        const popup = document.getElementById("PopupAutoComplete");
+        await openACPopup(popup, browser, "#form-basic-username");
+
+        await BrowserTestUtils.synthesizeKey("z", {}, browser);
+        await waitForFooterOnly(popup);
+
+        Services.fog.testResetFOG();
+        const hidden = waitForPopupHidden(popup);
+        const passwordManager = await openPasswordManager(async () => {
+          await EventUtils.synthesizeKey("KEY_ArrowDown");
+          await EventUtils.synthesizeKey("KEY_Enter");
+        }, false);
+        await hidden;
+        assertClosedAs(
+          "selected",
+          "Picking the footer records a selected close"
+        );
+        passwordManager.close();
+      }
+    );
+  }
+);
 
 add_task(async function test_flyout_opens_via_keyboard() {
   await SpecialPowers.pushPrefEnv({ set: [[PREF, true]] });
@@ -355,15 +636,15 @@ add_task(async function test_flyout_actions_dispatch_by_index() {
         actions[0].action();
         Assert.deepEqual(
           calls.at(-1),
-          [true, 0],
-          "First flyout item dispatches secondary action index 0"
+          [true, 0, 0],
+          "First flyout item dispatches action index 0 for row 0"
         );
 
         actions[1].action();
         Assert.deepEqual(
           calls.at(-1),
-          [true, 1],
-          "Second flyout item dispatches secondary action index 1"
+          [true, 1, 0],
+          "Second flyout item dispatches action index 1 for row 0"
         );
       } finally {
         AutoCompleteParent.prototype.selectAutoCompleteEntry = original;
@@ -417,6 +698,7 @@ add_task(async function test_flyout_edit_opens_about_logins() {
         return originalAddTrustedTab.call(gBrowser, url, ...rest);
       };
 
+      Services.fog.testResetFOG();
       let tab;
       try {
         menupopup.activateItem(editItem);
@@ -424,6 +706,19 @@ add_task(async function test_flyout_edit_opens_about_logins() {
       } finally {
         gBrowser.addTrustedTab = originalAddTrustedTab;
       }
+
+      const events = Glean.autocomplete.recordInteraction.testGetValue();
+      Assert.equal(events?.length, 1, "One interaction event is recorded");
+      Assert.equal(
+        events[0].extra.interaction_type,
+        "edit",
+        "The flyout edit item records an edit interaction"
+      );
+      Assert.equal(
+        events[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
 
       Assert.equal(
         openedURL,
@@ -741,6 +1036,7 @@ add_task(async function test_delete_reauthenticates_then_confirms() {
         mi => mi.getAttribute("label") === deleteLabel
       );
 
+      Services.fog.testResetFOG();
       let dialogWin;
       const dialogClosed = BrowserTestUtils.promiseAlertDialog(
         null,
@@ -785,6 +1081,47 @@ add_task(async function test_delete_reauthenticates_then_confirms() {
       );
       Assert.ok(dialogWin, "The confirmation dialog was shown");
 
+      const events = Glean.autocomplete.recordDialogInteraction.testGetValue();
+      Assert.equal(
+        events?.length,
+        1,
+        "One dialog interaction event is recorded"
+      );
+      Assert.equal(
+        events[0].extra.interaction_type,
+        "cancel",
+        "Cancelling the dialog records a cancel interaction"
+      );
+      Assert.equal(
+        events[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
+      Assert.equal(
+        events[0].extra.update_type,
+        "delete",
+        "The update type is delete"
+      );
+
+      const clickEvents = Glean.autocomplete.recordInteraction.testGetValue();
+      Assert.equal(clickEvents?.length, 1, "One interaction event is recorded");
+      Assert.equal(
+        clickEvents[0].extra.interaction_type,
+        "delete",
+        "The flyout delete item records a delete interaction"
+      );
+      Assert.equal(
+        clickEvents[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
+      Assert.ok(clickEvents[0].extra.flow_id, "The interaction has a flow id");
+      Assert.equal(
+        events[0].extra.flow_id,
+        clickEvents[0].extra.flow_id,
+        "The dialog event shares the interaction's flow id"
+      );
+
       await TestUtils.waitForCondition(
         () => popup.state == "open",
         "Wait for the dropdown to come back after the confirmation"
@@ -794,6 +1131,19 @@ add_task(async function test_delete_reauthenticates_then_confirms() {
         "open",
         "The dropdown is restored once the confirmation is dismissed"
       );
+      const closedEvents = Glean.autocomplete.dropdownClosed.testGetValue();
+      Assert.deepEqual(
+        closedEvents?.map(e => e.extra.close_reason),
+        ["removal_prompt"],
+        "The prompt hiding the dropdown records a removal_prompt close"
+      );
+      const shownEvents = Glean.autocomplete.dropdownShown.testGetValue();
+      Assert.deepEqual(
+        shownEvents?.map(e => e.extra.reopened_after_removal),
+        ["true"],
+        "The reopened dropdown is marked as reopened after a removal"
+      );
+      assertOneFlow();
 
       const logins = await Services.logins.getAllLogins();
       Assert.equal(
@@ -822,6 +1172,7 @@ add_task(async function test_delete_skips_confirm_when_reauth_fails() {
     { gBrowser, url: TEST_URL_PATH },
     async function (browser) {
       const popup = document.getElementById("PopupAutoComplete");
+      Services.fog.testResetFOG();
       await openACPopup(popup, browser, "#form-basic-username");
 
       const { item, rowItem, button } = getSecondaryAction(popup, 0);
@@ -841,6 +1192,23 @@ add_task(async function test_delete_skips_confirm_when_reauth_fails() {
       await TestUtils.waitForTick();
 
       Assert.ok(!sawDialog, "No confirmation is shown when reauth is declined");
+      Assert.equal(
+        Glean.autocomplete.recordDialogInteraction.testGetValue(),
+        null,
+        "No dialog interaction is recorded when reauth is declined"
+      );
+      const clickEvents = Glean.autocomplete.recordInteraction.testGetValue();
+      Assert.equal(clickEvents?.length, 1, "One interaction event is recorded");
+      Assert.equal(
+        clickEvents[0].extra.interaction_type,
+        "delete",
+        "The flyout delete item records a delete interaction before reauth"
+      );
+      Assert.equal(
+        clickEvents[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
 
       await TestUtils.waitForCondition(
         () => popup.state == "open",
@@ -853,6 +1221,23 @@ add_task(async function test_delete_skips_confirm_when_reauth_fails() {
       );
 
       await closePopup(popup);
+      const shownEvents = Glean.autocomplete.dropdownShown.testGetValue();
+      Assert.deepEqual(
+        shownEvents?.map(e => e.extra.reopened_after_removal),
+        ["false", "true"],
+        "Only the automatic reopen is marked as reopened after a removal"
+      );
+      const closedEvents = Glean.autocomplete.dropdownClosed.testGetValue();
+      Assert.deepEqual(
+        closedEvents?.map(e => e.extra.close_reason),
+        ["removal_prompt", "dismissed"],
+        "The reauthentication prompt and the final close are both recorded"
+      );
+      Assert.equal(
+        assertOneFlow(),
+        shownEvents[1].extra.flow_id,
+        "The reopened dropdown keeps the flow id of the interaction"
+      );
     }
   );
   Services.obs.removeObserver(observer, "common-dialog-loaded");
@@ -882,6 +1267,7 @@ add_task(async function test_delete_removes_the_login() {
         mi => mi.getAttribute("label") === DELETE_LABEL
       );
 
+      Services.fog.testResetFOG();
       const dialogClosed = BrowserTestUtils.promiseAlertDialog("accept");
       menupopup.activateItem(menuitem);
       await dialogClosed;
@@ -890,6 +1276,41 @@ add_task(async function test_delete_removes_the_login() {
         const logins = await Services.logins.getAllLogins();
         return logins.length == before.length - 1;
       }, "Wait for the confirmed removal to reach storage");
+
+      const events = Glean.autocomplete.recordInteraction.testGetValue();
+      Assert.equal(events?.length, 1, "One interaction event is recorded");
+      Assert.equal(
+        events[0].extra.interaction_type,
+        "delete",
+        "The flyout delete item records a delete interaction"
+      );
+      Assert.equal(
+        events[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
+      const dialogEvents =
+        Glean.autocomplete.recordDialogInteraction.testGetValue();
+      Assert.equal(
+        dialogEvents?.length,
+        1,
+        "One dialog interaction event is recorded"
+      );
+      Assert.equal(
+        dialogEvents[0].extra.interaction_type,
+        "confirm",
+        "Accepting the dialog records a confirm interaction"
+      );
+      Assert.equal(
+        dialogEvents[0].extra.record_type,
+        "password",
+        "The event names the password record type"
+      );
+      Assert.equal(
+        dialogEvents[0].extra.update_type,
+        "delete",
+        "The update type is delete"
+      );
 
       const remaining = await Services.logins.getAllLogins();
       const removed = before.find(
@@ -957,6 +1378,211 @@ add_task(async function test_delete_refuses_a_foreign_guid() {
       await closePopup(popup);
     }
   );
+  gReauthAuthorized = false;
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function test_removals_in_one_dropdown_share_a_flow_id() {
+  await SpecialPowers.pushPrefEnv({ set: [[PREF, true]] });
+  gReauthAuthorized = true;
+  const before = await Services.logins.getAllLogins();
+  await Services.logins.addLogins(
+    ["user3", "user4"].map(username =>
+      LoginTestUtils.testData.formLogin({
+        origin: TEST_ORIGIN,
+        username,
+        password: "pass",
+      })
+    )
+  );
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: TEST_URL_PATH },
+    async function (browser) {
+      const popup = document.getElementById("PopupAutoComplete");
+      Services.fog.testResetFOG();
+      await openACPopup(popup, browser, "#form-basic-username");
+
+      for (const button of ["accept", "accept", "cancel"]) {
+        const count = (await Services.logins.getAllLogins()).length;
+        const dialogClosed = BrowserTestUtils.promiseAlertDialog(button);
+        await activateDelete(popup);
+        await dialogClosed;
+        if (button == "accept") {
+          await TestUtils.waitForCondition(
+            async () => (await Services.logins.getAllLogins()).length < count,
+            "Wait for the confirmed removal to reach storage"
+          );
+        }
+        await TestUtils.waitForCondition(
+          () => popup.state == "open",
+          "Wait for the dropdown to come back after the removal"
+        );
+      }
+      await closePopup(popup);
+
+      Assert.equal(
+        Glean.autocomplete.recordInteraction.testGetValue()?.length,
+        3,
+        "Three interaction events are recorded"
+      );
+      Assert.equal(
+        Glean.autocomplete.recordDialogInteraction.testGetValue()?.length,
+        3,
+        "Three dialog interaction events are recorded"
+      );
+      Assert.deepEqual(
+        Glean.autocomplete.dropdownShown
+          .testGetValue()
+          ?.map(e => e.extra.reopened_after_removal),
+        ["false", "true", "true", "true"],
+        "The dropdown is shown once by the user and reopened after each removal"
+      );
+      Assert.deepEqual(
+        Glean.autocomplete.dropdownClosed
+          .testGetValue()
+          ?.map(e => e.extra.close_reason),
+        ["removal_prompt", "removal_prompt", "removal_prompt", "dismissed"],
+        "Each removal prompt and the final close are recorded"
+      );
+      assertOneFlow();
+    }
+  );
+
+  const after = await Services.logins.getAllLogins();
+  for (const login of after) {
+    if (!before.some(kept => kept.guid == login.guid)) {
+      await Services.logins.removeLoginAsync(login);
+    }
+  }
+  for (const login of before) {
+    if (!after.some(kept => kept.guid == login.guid)) {
+      await Services.logins.addLoginAsync(login);
+    }
+  }
+  gReauthAuthorized = false;
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function test_reopening_after_removal_starts_a_new_flow() {
+  await SpecialPowers.pushPrefEnv({ set: [[PREF, true]] });
+  gReauthAuthorized = true;
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: TEST_URL_PATH },
+    async function (browser) {
+      const popup = document.getElementById("PopupAutoComplete");
+      Services.fog.testResetFOG();
+      await openACPopup(popup, browser, "#form-basic-username");
+
+      const dialogClosed = BrowserTestUtils.promiseAlertDialog("cancel");
+      await activateDelete(popup);
+      await dialogClosed;
+      await TestUtils.waitForCondition(
+        () => popup.state == "open",
+        "Wait for the dropdown to come back after the removal"
+      );
+      await closePopup(popup);
+      const removalFlowId = assertOneFlow();
+
+      await SpecialPowers.spawn(browser, [], () =>
+        content.document.querySelector("#form-basic-username").blur()
+      );
+      Services.fog.testResetFOG();
+      await openACPopup(popup, browser, "#form-basic-username");
+      const shownEvents = Glean.autocomplete.dropdownShown.testGetValue();
+      Assert.equal(shownEvents?.length, 1, "One dropdown shown event");
+      Assert.equal(
+        shownEvents[0].extra.reopened_after_removal,
+        "false",
+        "Opening the dropdown again is not a reopen after a removal"
+      );
+      Assert.notEqual(
+        shownEvents[0].extra.flow_id,
+        removalFlowId,
+        "Opening the dropdown again starts a new flow"
+      );
+      await closePopup(popup);
+    }
+  );
+  gReauthAuthorized = false;
+  await SpecialPowers.popPrefEnv();
+});
+
+// Like about:logins, a reauthentication is reused for 5 minutes in the same
+// tab, until the user switches tabs.
+add_task(async function test_recent_reauth_is_reused_until_tab_switch() {
+  await SpecialPowers.pushPrefEnv({ set: [[PREF, true]] });
+  const { AutocompleteRemoveRecord } = ChromeUtils.importESModule(
+    "resource://gre/modules/AutocompleteRemoveRecord.sys.mjs"
+  );
+  AutocompleteRemoveRecord.resetAuthForTesting();
+  gReauthCalls = [];
+  const popup = document.getElementById("PopupAutoComplete");
+  const tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    TEST_URL_PATH
+  );
+  const browser = tab.linkedBrowser;
+  const waitForReopen = () =>
+    TestUtils.waitForCondition(
+      () => popup.state == "open",
+      "Wait for the dropdown to come back after the removal"
+    );
+  const deleteAndCancel = async () => {
+    const dialogClosed = BrowserTestUtils.promiseAlertDialog("cancel");
+    await activateDelete(popup);
+    await dialogClosed;
+    await waitForReopen();
+  };
+  const reopenAfterBlur = async () => {
+    await SpecialPowers.spawn(browser, [], () =>
+      content.document.querySelector("#form-basic-username").blur()
+    );
+    await openACPopup(popup, browser, "#form-basic-username");
+  };
+
+  await openACPopup(popup, browser, "#form-basic-username");
+  gReauthAuthorized = false;
+  await activateDelete(popup);
+  await TestUtils.waitForCondition(
+    () => gReauthCalls.length == 1,
+    "Wait for the declined reauthentication"
+  );
+  await waitForReopen();
+
+  gReauthAuthorized = true;
+  await deleteAndCancel();
+  Assert.equal(
+    gReauthCalls[1][1],
+    null,
+    "A declined reauthentication is not reused"
+  );
+
+  await deleteAndCancel();
+  Assert.greater(
+    gReauthCalls[2][1],
+    Date.now(),
+    "A recent reauthentication in the same tab is reused"
+  );
+  await closePopup(popup);
+
+  const otherTab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    "about:blank"
+  );
+  await BrowserTestUtils.switchTab(gBrowser, tab);
+  BrowserTestUtils.removeTab(otherTab);
+  await reopenAfterBlur();
+  await deleteAndCancel();
+  Assert.equal(
+    gReauthCalls[3][1],
+    null,
+    "Switching tabs drops the recent reauthentication"
+  );
+  Assert.equal(gReauthCalls.length, 4, "Every delete asked for reauth");
+  await closePopup(popup);
+
+  BrowserTestUtils.removeTab(tab);
+  AutocompleteRemoveRecord.resetAuthForTesting();
   gReauthAuthorized = false;
   await SpecialPowers.popPrefEnv();
 });

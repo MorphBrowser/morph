@@ -14,9 +14,11 @@ import subprocess
 import sys
 import time
 from collections import Counter, namedtuple
+from datetime import datetime
 from itertools import dropwhile, islice, takewhile
 from pathlib import Path
 from textwrap import TextWrapper
+from types import SimpleNamespace
 
 from mach.logging import BUILD_ERROR, SUPPRESSED_WARNING, THIRD_PARTY_WARNING
 from mach.site import CommandSiteManager
@@ -31,12 +33,19 @@ import mozpack.path as mozpath
 from mach.mixin.logging import LoggingMixin
 from mach.util import get_state_dir, get_virtualenv_base_dir
 from mozsystemmonitor.resourcemonitor import SystemResourceMonitor
+from mozversioncontrol import (
+    InvalidRepoPath,
+    MissingVCSInfo,
+    MissingVCSTool,
+    StaleWorkspaceError,
+    get_repository_from_build_config,
+)
 from rich.console import Console
 from rich.live import Live
 from rich.text import Text
 
 from ..backend import get_backend_class
-from ..base import MozbuildObject
+from ..base import MozbuildObject, split_job_flags
 from ..compilation.warnings import (
     RE_STRIP_COLORS,
     WarningsCollector,
@@ -48,11 +57,13 @@ from ..telemetry import get_cpu_brand
 from ..testing import install_test_files
 from ..util import (
     FileAvoidWrite,
+    compiler_cache_env,
     construct_log_filename,
     is_running_under_coding_agent,
     resolve_target_to_make,
 )
 from .clobber import Clobberer
+from .jobserver import jobserver
 
 RE_BUILD_OUTPUT = re.compile(
     r"""
@@ -277,6 +288,9 @@ class BuildMonitor(MozbuildObject):
         self.resources.start()
         self._resources_started = True
 
+        if self.resources.forwarding:
+            return
+
         if "MOZ_AUTOMATION" in os.environ and "UPLOAD_PATH" in os.environ:
             self._build_resources_profile_path = mozpath.join(
                 os.environ["UPLOAD_PATH"], "profile_build_resources.json"
@@ -396,7 +410,37 @@ class BuildMonitor(MozbuildObject):
         self.warnings_database.prune()
         self.warnings_database.save_to_file(self._warnings_path)
 
+    @property
+    def build_times_path(self):
+        return mozpath.join(self.topobjdir, ".mozbuild", "build_times.json")
+
+    def _write_build_times(self):
+        resources = self.resources
+        if "MOZ_AUTOMATION" not in os.environ or resources.end_time is None:
+            return
+        try:
+            now = time.monotonic()
+            phases = {
+                name: end - start for name, (start, end) in resources.phases.items()
+            }
+            phases["teardown"] = now - resources.stop_time
+            os.makedirs(os.path.dirname(self.build_times_path), exist_ok=True)
+            with open(self.build_times_path, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(
+                    {"duration": now - resources.start_time, "phases": phases}, fh
+                )
+        except Exception as e:
+            self.log(
+                logging.WARNING,
+                "build_times_error",
+                {"msg": str(e)},
+                "Exception when writing build times: {msg}",
+            )
+
     def record_usage(self):
+        if self.resources.forwarding:
+            self._write_build_times()
+            return
         try:
             with open(
                 self._build_resources_profile_path, "w", encoding="utf-8", newline="\n"
@@ -495,7 +539,7 @@ class BuildMonitor(MozbuildObject):
     @property
     def have_resource_usage(self):
         """Whether resource usage is available."""
-        return self.resources.start_time is not None
+        return self.resources.start_time is not None and not self.resources.forwarding
 
     def get_resource_usage(self):
         """Produce a data structure containing the low-level resource usage information.
@@ -555,7 +599,7 @@ class BuildMonitor(MozbuildObject):
                 "Swap in/out (MB): {sin}/{sout}",
             )
 
-    def ccache_stats(self, ccache=None):
+    def ccache_stats(self, ccache=None, ccache_dir=None):
         ccache_stats = None
 
         if ccache is None:
@@ -563,9 +607,13 @@ class BuildMonitor(MozbuildObject):
         if ccache:
             # With CCache v3.7+ we can use --print-stats
             has_machine_format = CCacheStats.check_version_3_7_or_newer(ccache)
+            env = os.environ.copy()
+            if ccache_dir:
+                env["CCACHE_DIR"] = ccache_dir
             try:
                 output = subprocess.check_output(
                     [ccache, "--print-stats" if has_machine_format else "-s"],
+                    env=env,
                     universal_newlines=True,
                 )
                 ccache_stats = CCacheStats(output, has_machine_format)
@@ -1236,6 +1284,79 @@ class CCacheStats:
         return ((major << 8) + minor) >= ((3 << 8) + 7)
 
 
+BUILDID_FILE = "buildid.txt"
+
+
+def write_buildid(topobjdir, substs, environ, what=None):
+    path = mozpath.join(topobjdir, BUILDID_FILE)
+    # We only want to choose the build id once
+    if os.path.exists(path):
+        # Android keeps the one it was first given
+        if substs.get("MOZ_BUILD_APP") == "mobile/android":
+            return
+        # faster make build the files explicitly so also match those
+        if what and not {"faster", "buildid.h"} & set(what):
+            return
+    buildid = environ.get("MOZ_BUILD_DATE")
+    if buildid and not re.fullmatch(r"\d{14}", buildid):
+        print(f"Ignoring invalid MOZ_BUILD_DATE: {buildid}", file=sys.stderr)
+        buildid = None
+    if not buildid:
+        buildid = datetime.now().strftime("%Y%m%d%H%M%S")
+    with FileAvoidWrite(path) as fh:
+        fh.write(f"{buildid}\n")
+
+
+SOURCE_REPO_FILE = "source-repo.txt"
+SOURCESTAMP_FILENAME = "sourcestamp.txt"
+
+
+def get_info_from_sourcestamp(sourcestamp_path):
+    """Return the repository and changeset from a sourcestamp file, or
+    (None, None) when it does not hold a build id and then a source URL.
+    """
+    with open(sourcestamp_path) as f:
+        lines = f.read().splitlines()
+
+    if len(lines) != 2 or not lines[1].startswith("http"):
+        return None, None
+
+    for separator in ["/rev/", "/commit/"]:
+        if separator in lines[1]:
+            return lines[1].split(separator)
+    return None, None
+
+
+def write_source_repo(topobjdir, topsrcdir, substs):
+    # We allow the source repo and changeset to be specified via the
+    # environment (see configure)
+    repo = substs.get("MOZ_SOURCE_REPO")
+    changeset = substs.get("MOZ_SOURCE_CHANGESET")
+    if not repo:
+        sourcestamp_path = mozpath.join(topsrcdir, SOURCESTAMP_FILENAME)
+        if os.path.exists(sourcestamp_path):
+            repo, changeset = get_info_from_sourcestamp(sourcestamp_path)
+    elif not changeset:
+        try:
+            changeset = get_repository_from_build_config(
+                SimpleNamespace(topsrcdir=topsrcdir, substs=substs)
+            ).head_rev
+        except (
+            InvalidRepoPath,
+            MissingVCSInfo,
+            MissingVCSTool,
+            StaleWorkspaceError,
+            subprocess.CalledProcessError,
+        ):
+            pass
+        if not changeset:
+            raise Exception(
+                "could not resolve changeset; try setting MOZ_SOURCE_CHANGESET"
+            )
+    with FileAvoidWrite(mozpath.join(topobjdir, SOURCE_REPO_FILE)) as fh:
+        fh.write(f"{changeset or ''}\n{repo or ''}\n")
+
+
 class BuildDriver(MozbuildObject):
     """Provides a high-level API for build actions."""
 
@@ -1394,7 +1515,9 @@ class BuildDriver(MozbuildObject):
 
             if config.substs.get("MOZ_USING_CCACHE"):
                 ccache = config.substs.get("CCACHE")
-                ccache_start = monitor.ccache_stats(ccache)
+                ccache_start = monitor.ccache_stats(
+                    ccache, config.substs.get("CCACHE_DIR")
+                )
             else:
                 ccache_start = None
 
@@ -1438,11 +1561,17 @@ class BuildDriver(MozbuildObject):
             if not config_rc:
                 self.ensure_backend_current()
 
+            write_buildid(self.topobjdir, substs, os.environ, what)
+            write_source_repo(self.topobjdir, self.topsrcdir, substs)
+
             jobs = self.resolve_num_jobs(jobs, job_size)
 
+            backend_cls = get_backend_class(active_backend)
+            if what:
+                what = backend_cls.resolve_targets(what)
+
             if "Make" not in active_backend:
-                backend_cls = get_backend_class(active_backend)(config)
-                status = backend_cls.build(
+                status = backend_cls(config).build(
                     self, output, jobs, verbose, what, append_env=append_env
                 )
 
@@ -1542,20 +1671,17 @@ class BuildDriver(MozbuildObject):
                 # starts, so it needs the sccache variables in its environment.
                 # config.mk covers the sub-makes.
                 client_mk_env = dict(append_env or {})
-                client_mk_env.update(
-                    (name, value)
-                    for name, value in config.substs.items()
-                    if name.startswith("SCCACHE_")
-                )
-                status = self._run_client_mk(
-                    line_handler=output.on_stdout_line,
-                    stderr_line_handler=output.on_stderr_line,
-                    jobs=jobs,
-                    job_size=job_size,
-                    verbose=verbose,
-                    keep_going=keep_going,
-                    append_env=client_mk_env,
-                )
+                client_mk_env.update(compiler_cache_env(config.substs))
+                with jobserver(jobs, substs["GMAKE"]) as makeflags:
+                    status = self._run_client_mk(
+                        line_handler=output.on_stdout_line,
+                        stderr_line_handler=output.on_stderr_line,
+                        jobs=jobs,
+                        job_size=job_size,
+                        verbose=verbose,
+                        keep_going=keep_going,
+                        append_env={**client_mk_env, "MAKEFLAGS": makeflags},
+                    )
 
             self.log(
                 logging.WARNING,
@@ -1693,7 +1819,7 @@ class BuildDriver(MozbuildObject):
             print(FINDER_SLOW_MESSAGE % finder_percent)
 
         if config.substs.get("MOZ_USING_CCACHE"):
-            ccache_end = monitor.ccache_stats(ccache)
+            ccache_end = monitor.ccache_stats(ccache, config.substs.get("CCACHE_DIR"))
         else:
             ccache_end = None
 
@@ -1822,6 +1948,7 @@ class BuildDriver(MozbuildObject):
         line_handler = line_handler or on_line
 
         append_env = dict(append_env or {})
+        sccache = None
 
         # Back when client.mk was used, `mk_add_options "export ..."` lines
         # from the mozconfig would spill into the configure environment, so
@@ -1831,6 +1958,8 @@ class BuildDriver(MozbuildObject):
                 k, eq, v = line[len("export ") :].partition("=")
                 if eq == "=":
                     append_env[k] = v
+            elif line.startswith("MOZBUILD_MANAGE_SCCACHE_DAEMON="):
+                sccache = line.partition("=")[2]
 
         build_site = CommandSiteManager.from_environment(
             self.topsrcdir,
@@ -1852,21 +1981,52 @@ class BuildDriver(MozbuildObject):
         env = os.environ.copy()
         env.update(append_env)
 
-        with subprocess.Popen(
-            command,
-            cwd=self.topobjdir,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-        ) as process:
-            for line in process.stdout:
-                line_handler(line.rstrip())
-            status = process.wait()
+        def run_sccache(*args, extra_env=None):
+            result = subprocess.run(
+                [sccache, *args],
+                env={**env, **(extra_env or {})},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            for line in result.stdout.splitlines():
+                line_handler(line)
+
+        upload_path = os.environ.get("UPLOAD_PATH")
+        # In automation, configure's compiler checks would otherwise implicitly
+        # start an sccache server without logging, leaving nothing to debug
+        # failures to start it. client.mk starts its own server for the build.
+        if sccache and upload_path:
+            mkdir(upload_path)
+            run_sccache(
+                "--start-server",
+                extra_env={
+                    "SCCACHE_LOG": "sccache=debug",
+                    "SCCACHE_ERROR_LOG": mozpath.join(upload_path, "sccache.log"),
+                    "SCCACHE_LOG_MILLIS": "true",
+                },
+            )
+
+        try:
+            with subprocess.Popen(
+                command,
+                cwd=self.topobjdir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+            ) as process:
+                for line in process.stdout:
+                    line_handler(line.rstrip())
+                status = process.wait()
+        finally:
+            if sccache and upload_path:
+                run_sccache("--stop-server")
         if buildstatus_messages:
             line_handler("BUILDSTATUS TIER_FINISH configure")
         # config.log is written in the objdir, which automation doesn't upload.
-        if upload_path := os.environ.get("UPLOAD_PATH"):
+        if upload_path:
             try:
                 mkdir(upload_path)
                 shutil.copy2(
@@ -2004,10 +2164,9 @@ class BuildDriver(MozbuildObject):
         for arg in mozconfig["make_extra"] or []:
             mozconfig_make_lines.append(arg)
 
-        if mozconfig["make_flags"]:
-            mozconfig_make_lines.append(
-                "MOZ_MAKE_FLAGS=%s" % " ".join(mozconfig["make_flags"])
-            )
+        _, make_flags = split_job_flags(mozconfig["make_flags"])
+        if make_flags:
+            mozconfig_make_lines.append(f"MOZ_MAKE_FLAGS={' '.join(make_flags)}")
         objdir = mozpath.normsep(self.topobjdir)
         mozconfig_make_lines.append("MOZ_OBJDIR=%s" % objdir)
         mozconfig_make_lines.append("OBJDIR=%s" % objdir)

@@ -26,8 +26,10 @@ class PerfProfile(RaptorProfiling):
     """Collect system-wide perf traces and convert them to
     Firefox Profiler JSON profiles using Samply."""
 
-    def __init__(self, upload_dir, raptor_config, test_config):
-        super().__init__(upload_dir, raptor_config, test_config)
+    def __init__(
+        self, upload_dir, raptor_config, test_config, source_path_mappings=None
+    ):
+        super().__init__(upload_dir, raptor_config, test_config, source_path_mappings)
 
         if self.raptor_config.get("app", "") not in PERF_PROFILE_APPS:
             raise RuntimeError(f"Perf profiling only supports: {PERF_PROFILE_APPS}")
@@ -80,7 +82,7 @@ class PerfProfile(RaptorProfiling):
                 "IONPERF": "func",
                 "MOZ_USE_PERFORMANCE_MARKER_FILE": "1",
                 "MOZ_DISABLE_CONTENT_SANDBOX": "1",
-                "JIT_OPTION_enableICFramePointers": "true",
+                "JIT_OPTION_enableStubFramePointers": "true",
                 "JIT_OPTION_onlyInlineSelfHosted": "true",
                 "JIT_OPTION_emitInterpreterEntryTrampoline": "true",
                 "PERF_SPEW_DIR": f"{self.temp_dir}",

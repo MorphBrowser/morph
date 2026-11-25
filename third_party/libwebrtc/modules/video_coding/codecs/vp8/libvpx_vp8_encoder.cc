@@ -17,6 +17,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -457,6 +458,40 @@ void LibvpxVp8Encoder::SetRates(const RateControlParameters& parameters) {
   }
 }
 
+void LibvpxVp8Encoder::SetComplexity(
+    std::span<const VideoCodecComplexity> complexity_by_spatial_layer,
+    ComplexityControlMode /*complexity_control_mode*/) {
+  if (!inited_) {
+    return;
+  }
+  for (size_t i = 0; i < encoders_.size(); ++i) {
+    const size_t stream_idx = encoders_.size() - 1 - i;
+    const VideoCodecComplexity complexity =
+        complexity_by_spatial_layer.empty()
+            ? VideoCodecComplexity::kComplexityNormal
+            : complexity_by_spatial_layer[std::min(
+                  stream_idx, complexity_by_spatial_layer.size() - 1)];
+    switch (complexity) {
+      case VideoCodecComplexity::kComplexityLow:
+        cpu_speed_[i] = -12;
+        break;
+      case VideoCodecComplexity::kComplexityNormal:
+        cpu_speed_[i] = -10;
+        break;
+      case VideoCodecComplexity::kComplexityHigh:
+        cpu_speed_[i] = -7;
+        break;
+      case VideoCodecComplexity::kComplexityHigher:
+        cpu_speed_[i] = -5;
+        break;
+      case VideoCodecComplexity::kComplexityMax:
+        cpu_speed_[i] = -4;
+        break;
+    }
+    libvpx_->codec_control(&encoders_[i], VP8E_SET_CPUUSED, cpu_speed_[i]);
+  }
+}
+
 void LibvpxVp8Encoder::OnPacketLossRateUpdate(float packet_loss_rate) {
   // TODO(bugs.webrtc.org/10431): Replace condition by DCHECK.
   if (frame_buffer_controller_) {
@@ -468,13 +503,6 @@ void LibvpxVp8Encoder::OnRttUpdate(int64_t rtt_ms) {
   // TODO(bugs.webrtc.org/10431): Replace condition by DCHECK.
   if (frame_buffer_controller_) {
     frame_buffer_controller_->OnRttUpdate(rtt_ms);
-  }
-}
-
-void LibvpxVp8Encoder::OnLossNotification(
-    const LossNotification& loss_notification) {
-  if (frame_buffer_controller_) {
-    frame_buffer_controller_->OnLossNotification(loss_notification);
   }
 }
 

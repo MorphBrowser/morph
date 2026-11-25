@@ -185,8 +185,8 @@ static EGLSurface CreateSurfaceFromNativeWindow(
     gfxCriticalNote << "Failed to obtain native window from Surface";
     return EGL_NO_SURFACE;
   }
-  const auto& display = egl.mLib->fGetDisplay(EGL_DEFAULT_DISPLAY);
-  newSurface = egl.mLib->fCreateWindowSurface(display, config, nativeWindow, 0);
+  newSurface =
+      egl.mLib->fCreateWindowSurface(egl.mDisplay, config, nativeWindow, 0);
   ANativeWindow_release(nativeWindow);
 #else
   newSurface = egl.fCreateWindowSurface(config, window, nullptr);
@@ -205,11 +205,12 @@ static EGLSurface CreateSurfaceFromNativeWindow(
  */
 class GLContextEGLFactory {
  public:
-  static already_AddRefed<GLContext> Create(EGLNativeWindowType aWindow,
-                                            bool aHardwareWebRender);
-  static already_AddRefed<GLContext> CreateImpl(EGLNativeWindowType aWindow,
-                                                bool aHardwareWebRender,
-                                                bool aUseGles);
+  static already_AddRefed<GLContext> Create(
+      EGLNativeWindowType aWindow, bool aHardwareWebRender,
+      const std::shared_ptr<EglDisplay>& aEgl = nullptr);
+  static already_AddRefed<GLContext> CreateImpl(
+      EGLNativeWindowType aWindow, bool aHardwareWebRender, bool aUseGles,
+      const std::shared_ptr<EglDisplay>& aEgl);
 
  private:
   GLContextEGLFactory() = default;
@@ -217,15 +218,19 @@ class GLContextEGLFactory {
 };
 
 already_AddRefed<GLContext> GLContextEGLFactory::CreateImpl(
-    EGLNativeWindowType aWindow, bool aHardwareWebRender, bool aUseGles) {
+    EGLNativeWindowType aWindow, bool aHardwareWebRender, bool aUseGles,
+    const std::shared_ptr<EglDisplay>& aEgl) {
   nsCString failureId;
-  const auto lib = GLLibraryEGL::Get(&failureId);
-  if (!lib) {
-    gfxCriticalNote << "Failed[3] to load EGL library: " << failureId.get();
-    return nullptr;
+  auto egl = aEgl;
+  if (!egl) {
+    const auto lib = GLLibraryEGL::Get(&failureId);
+    if (!lib) {
+      gfxCriticalNote << "Failed[3] to load EGL library: " << failureId.get();
+      return nullptr;
+    }
+    egl = lib->CreateDisplay(EGLCreateDisplayFlags{.mForceAccel = true},
+                             &failureId);
   }
-  const auto egl = lib->CreateDisplay(
-      EGLCreateDisplayFlags{.mForceAccel = true}, &failureId);
   if (!egl) {
     gfxCriticalNote << "Failed[3] to create EGL library  display: "
                     << failureId.get();
@@ -305,7 +310,8 @@ already_AddRefed<GLContext> GLContextEGLFactory::CreateImpl(
 }
 
 already_AddRefed<GLContext> GLContextEGLFactory::Create(
-    EGLNativeWindowType aWindow, bool aHardwareWebRender) {
+    EGLNativeWindowType aWindow, bool aHardwareWebRender,
+    const std::shared_ptr<EglDisplay>& aEgl) {
   bool preferGles;
 #if defined(MOZ_WIDGET_ANDROID)
   preferGles = true;
@@ -314,25 +320,17 @@ already_AddRefed<GLContext> GLContextEGLFactory::Create(
 #endif  // defined(MOZ_WIDGET_ANDROID)
 
   RefPtr<GLContext> glContext =
-      CreateImpl(aWindow, aHardwareWebRender, preferGles);
+      CreateImpl(aWindow, aHardwareWebRender, preferGles, aEgl);
 #if !defined(MOZ_WIDGET_ANDROID)
   if (!glContext) {
-    glContext = CreateImpl(aWindow, aHardwareWebRender, !preferGles);
+    glContext = CreateImpl(aWindow, aHardwareWebRender, !preferGles, aEgl);
   }
 #endif  // !defined(MOZ_WIDGET_ANDROID)
   return glContext.forget();
 }
 
-/* static */
 EGLSurface GLContextEGL::CreateEGLSurfaceForCompositorWidget(
     widget::CompositorWidget* aCompositorWidget, const EGLConfig aConfig) {
-  nsCString discardFailureId;
-  const auto egl = DefaultEglDisplay(&discardFailureId);
-  if (!egl) {
-    gfxCriticalNote << "Failed to load EGL library 6!";
-    return EGL_NO_SURFACE;
-  }
-
   MOZ_ASSERT(aCompositorWidget);
   EGLNativeWindowType window =
       GET_NATIVE_WINDOW_FROM_COMPOSITOR_WIDGET(aCompositorWidget);
@@ -340,8 +338,7 @@ EGLSurface GLContextEGL::CreateEGLSurfaceForCompositorWidget(
     gfxCriticalNote << "window is null";
     return EGL_NO_SURFACE;
   }
-
-  return mozilla::gl::CreateSurfaceFromNativeWindow(*egl, window, aConfig);
+  return mozilla::gl::CreateSurfaceFromNativeWindow(*mEgl, window, aConfig);
 }
 
 GLContextEGL::GLContextEGL(const std::shared_ptr<EglDisplay> egl,
@@ -912,6 +909,16 @@ bool CreateConfig(EglDisplay& aEgl, EGLConfig* aConfig, int32_t aDepth,
       return false;
   }
 
+#ifdef MOZ_WIDGET_GTK
+  // Without a GDK display, e.g. in the GPU process on Wayland, the EGL display
+  // uses the device or surfaceless platform, which has no window surfaces. We
+  // render into framebuffers there, so any surface type will do.
+  if (!gdk_display_get_default()) {
+    MOZ_ASSERT(attribs[0] == LOCAL_EGL_SURFACE_TYPE);
+    attribs[1] = -1;  // EGL_DONT_CARE
+  }
+#endif
+
   if (aUseGles) {
     attribs.push_back(LOCAL_EGL_RENDERABLE_TYPE);
     attribs.push_back(LOCAL_EGL_OPENGL_ES2_BIT);
@@ -1006,6 +1013,27 @@ static bool CreateConfigScreen(EglDisplay& egl, EGLConfig* const aConfig,
 #endif
   return false;
 }
+
+#ifdef MOZ_WIDGET_ANDROID
+/* static */
+already_AddRefed<GLContext> GLContextProviderEGL::CreateForCompositorANGLE(
+    bool aHardwareWebRender, nsACString* const out_failureId) {
+  const auto lib = GLLibraryEGL::Get(out_failureId);
+  if (!lib) {
+    return nullptr;
+  }
+  const auto egl = lib->CreateDisplayForWebRenderAndroidGLES(out_failureId);
+  if (!egl) {
+    return nullptr;
+  }
+  RefPtr<GLContext> gl =
+      GLContextEGLFactory::Create(nullptr, aHardwareWebRender, egl);
+  if (!gl) {
+    *out_failureId = "FEATURE_FAILURE_WR_ANGLE_CONTEXT"_ns;
+  }
+  return gl.forget();
+}
+#endif
 
 already_AddRefed<GLContext> GLContextProviderEGL::CreateForCompositorWidget(
     CompositorWidget* aCompositorWidget, bool aHardwareWebRender,
@@ -1115,23 +1143,34 @@ static EGLConfig ChooseConfig(EglDisplay& egl, const GLContextCreateDesc& desc,
 #ifdef MOZ_X11
 /* static */
 bool GLContextEGL::FindVisual(int* const out_visualId) {
-  nsCString discardFailureId;
-  const auto egl = DefaultEglDisplay(&discardFailureId);
-  if (!egl) {
-    gfxCriticalNote
-        << "GLContextEGL::FindVisual(): Failed to load EGL library!";
-    return false;
-  }
+  // The default display is only held for the duration of the query, so
+  // without caching every new window would initialize and terminate EGL.
+  static const Maybe<int> sVisualId = []() -> Maybe<int> {
+    nsCString discardFailureId;
+    const auto egl = DefaultEglDisplay(&discardFailureId);
+    if (!egl) {
+      gfxCriticalNote
+          << "GLContextEGL::FindVisual(): Failed to load EGL library!";
+      return Nothing();
+    }
 
-  EGLConfig config;
-  const int bpp = 32;
-  if (!CreateConfig(*egl, &config, bpp, /* aEnableDepthBuffer */ false,
-                    /* aUseGles */ false, /* aAllowFallback */ false)) {
-    // We are on a buggy driver. Do not return a visual so a fallback path can
-    // be used. See https://gitlab.freedesktop.org/mesa/mesa/-/issues/149
-    return false;
-  }
-  if (egl->fGetConfigAttrib(config, LOCAL_EGL_NATIVE_VISUAL_ID, out_visualId)) {
+    EGLConfig config;
+    const int bpp = 32;
+    if (!CreateConfig(*egl, &config, bpp, /* aEnableDepthBuffer */ false,
+                      /* aUseGles */ false, /* aAllowFallback */ false)) {
+      // We are on a buggy driver. Do not return a visual so a fallback path
+      // can be used. See https://gitlab.freedesktop.org/mesa/mesa/-/issues/149
+      return Nothing();
+    }
+    int visualId = 0;
+    if (egl->fGetConfigAttrib(config, LOCAL_EGL_NATIVE_VISUAL_ID, &visualId)) {
+      return Some(visualId);
+    }
+    return Nothing();
+  }();
+
+  if (sVisualId) {
+    *out_visualId = *sVisualId;
     return true;
   }
   return false;
@@ -1270,6 +1309,27 @@ already_AddRefed<GLContext> GLContextProviderEGL::CreateHeadless(
   auto ret = GLContextEGL::CreateWithoutSurface(display, desc, out_failureId);
   return ret.forget();
 }
+
+#ifdef MOZ_WIDGET_ANDROID
+/* static */
+already_AddRefed<GLContext> GLContextProviderEGL::CreateHeadlessNative(
+    const GLContextCreateDesc& desc, nsACString* const out_failureId) {
+  if (desc.flags & CreateContextFlags::FORBID_HARDWARE) {
+    *out_failureId = "FEATURE_FAILURE_NATIVE_EGL_SOFTWARE_UNSUPPORTED"_ns;
+    return nullptr;
+  }
+  const auto lib = GLLibraryEGL::GetNative(out_failureId);
+  if (!lib) {
+    return nullptr;
+  }
+  const auto display = lib->DefaultDisplay(out_failureId);
+  if (!display) {
+    return nullptr;
+  }
+  auto ret = GLContextEGL::CreateWithoutSurface(display, desc, out_failureId);
+  return ret.forget();
+}
+#endif
 
 // Don't want a global context on Android as 1) share groups across 2 threads
 // fail on many Tegra drivers (bug 759225) and 2) some mobile devices have a

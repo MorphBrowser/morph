@@ -71,10 +71,13 @@ enum class Extra {
     TEXT,
     TEXT_SUBSTRING,
     DESC_SUBSTRING,
+    STATE_DESC,
+    CLICKABLE_WITHOUT_TEXT,
     SIBLING_TEXT,
     DESCENDANT_TEXT,
     CHILD_TEXT,
     EDITABLE_UNDER,
+    ANCESTOR_TAG,
 }
 
 /**
@@ -100,9 +103,17 @@ val STRATEGY_LOCATORS: Map<SelectorStrategy, Locator> =
         SelectorStrategy.COMPOSE_BY_TEXT_MERGED to Locator(Layer.COMPOSE, Handle.TEXT),
         SelectorStrategy.COMPOSE_BY_TEXT_SUBSTRING to
             Locator(Layer.COMPOSE, Handle.TEXT, Match.SUBSTRING, Tree.UNMERGED, Pick.FIRST_OF_ALL),
+        SelectorStrategy.COMPOSE_BY_TEXT_AND_TEXT_SUBSTRING to
+            Locator(Layer.COMPOSE, Handle.TEXT, extra = Extra.TEXT_SUBSTRING),
+        SelectorStrategy.COMPOSE_BY_TEXT_AND_STATE_DESCRIPTION to
+            Locator(Layer.COMPOSE, Handle.TEXT, extra = Extra.STATE_DESC),
+        SelectorStrategy.COMPOSE_CLICKABLE_BY_TEXT_SUBSTRING_WITHOUT_TEXT to
+            Locator(Layer.COMPOSE, Handle.TEXT, Match.SUBSTRING, extra = Extra.CLICKABLE_WITHOUT_TEXT),
         SelectorStrategy.COMPOSE_BY_CONTENT_DESCRIPTION to Locator(Layer.COMPOSE, Handle.DESC),
         SelectorStrategy.COMPOSE_BY_CONTENT_DESCRIPTION_SUBSTRING to
             Locator(Layer.COMPOSE, Handle.DESC, Match.SUBSTRING),
+        SelectorStrategy.COMPOSE_BY_CONTENT_DESCRIPTION_UNDER_TAG to
+            Locator(Layer.COMPOSE, Handle.DESC, extra = Extra.ANCESTOR_TAG),
 
         // Espresso
         SelectorStrategy.ESPRESSO_BY_ID to Locator(Layer.ESPRESSO, Handle.ID),

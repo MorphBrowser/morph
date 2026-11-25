@@ -15,12 +15,15 @@
 
 #if defined(ANDROID)
 
-// Enabled for testing signatures bug 2061833 will turn it on for release when ready
+// Bug 2081246 will turn this on for release.
+// Note: These prefs must remain defined while under Nimbus control.
+// Note: Keep the default in sync in Settings.kt as a fallback.
 #ifdef NIGHTLY_BUILD
-  pref("pdfjs.annotationEditorMode", 0);
+  pref("pdfjs.enableAndroidEditing", true);
 #else
-  pref("pdfjs.annotationEditorMode", -1);
+  pref("pdfjs.enableAndroidEditing", false);
 #endif
+  pref("pdfjs.enableSignatureEditor", true);
 
   pref("pdfjs.capCanvasAreaFactor", 100);
 
@@ -44,6 +47,10 @@
 #endif
 
 pref("pdfjs.enableOptimizedPartialRendering", true);
+
+#if defined(NIGHTLY_BUILD) || defined(MOZ_DEV_EDITION)
+  pref("pdfjs.disableWorkerRendering", false);
+#endif
 
 // Off by default until the UX is exercised in Enterprise. Flip via
 // `about:config`, a profile pref, or the `enableSignatureVerification`

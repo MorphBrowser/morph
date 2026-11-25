@@ -189,6 +189,19 @@ void MediaSource::IsTypeSupported(const nsAString& aType,
   if (mimeType == MEDIAMIMETYPE("audio/webm")) {
     return;
   }
+  // https://w3c.github.io/mse-byte-stream-format-mpeg-audio/#mime-types
+  // The "codecs" MIME-type parameter MUST NOT be used with these MIME-types.
+  // An empty codecs parameter is deliberately accepted, though: it is treated
+  // as if it were absent, as for the other types here and as in Chrome and
+  // Safari.
+  if (mimeType == MEDIAMIMETYPE(AUDIO_MP3) &&
+      StaticPrefs::media_mediasource_mp3_enabled() && codecs.IsEmpty()) {
+    return;
+  }
+  if (mimeType == MEDIAMIMETYPE(AUDIO_AAC) &&
+      StaticPrefs::media_mediasource_aac_enabled() && codecs.IsEmpty()) {
+    return;
+  }
 
   return aRv.ThrowNotSupportedError("Type not supported in MediaSource");
 }
@@ -210,6 +223,7 @@ already_AddRefed<MediaSource> MediaSource::Constructor(
 MediaSource::~MediaSource() {
   MOZ_ASSERT(NS_IsMainThread());
   MSE_API("");
+  CompletePendingTransactions();
   if (mDecoder) {
     mDecoder->DetachMediaSource();
   }
@@ -502,7 +516,7 @@ bool MediaSource::Attach(MediaSourceDecoder* aDecoder) {
 
 void MediaSource::Detach() {
   MOZ_ASSERT(NS_IsMainThread());
-  MOZ_RELEASE_ASSERT(mCompletionPromises.IsEmpty());
+  CompletePendingTransactions();
   MSE_DEBUG("mDecoder={} owner={}", fmt::ptr(mDecoder.get()),
             fmt::ptr(mDecoder ? mDecoder->GetOwner() : nullptr));
   if (!mDecoder) {
@@ -677,8 +691,7 @@ already_AddRefed<Promise> MediaSource::MozDebugReaderData(ErrorResult& aRv) {
     return nullptr;
   }
   MOZ_ASSERT(domPromise);
-  UniquePtr<MediaSourceDecoderDebugInfo> info =
-      MakeUnique<MediaSourceDecoderDebugInfo>();
+  auto info = std::make_unique<MediaSourceDecoderDebugInfo>();
   mDecoder->RequestDebugInfo(*info)->Then(
       mAbstractMainThread, __func__,
       [domPromise, infoPtr = std::move(info)] {

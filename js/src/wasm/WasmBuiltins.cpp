@@ -769,20 +769,6 @@ static void WasmHandleRequestTierUp(Instance* instance) {
   }
 }
 
-#ifdef JS_HW_SHADOW_STACK
-// Advance the tracked shadow stack pointer by exactly one entry with the
-// provided return address.
-static void UnwindShadowStackEntry(ResumeFromException* rfe,
-                                   uintptr_t returnAddress) {
-  if (!rfe->shadowStackPointer) {
-    return;
-  }
-
-  MOZ_RELEASE_ASSERT(*rfe->shadowStackPointer == returnAddress);
-  rfe->shadowStackPointer++;
-}
-#endif
-
 // Unwind the activation in response to a thrown exception. This function is
 // responsible for notifying the debugger of each unwound frame.
 //
@@ -823,21 +809,6 @@ void wasm::HandleExceptionWasm(JSContext* cx, JitFrameIter& iter,
   // re-added to the map of live frames, right as it becomes trash).
   iter.asWasm().setIsLeavingFrames();
 
-#ifdef JS_HW_SHADOW_STACK
-  if (activation->isWasmTrapping()) {
-    const TrapData& trapData = activation->wasmTrapData();
-    if (trapData.unwoundFrame) {
-      // wasm::StartUnwinding() unwound the frame where the trap occurred.
-      UnwindShadowStackEntry(rfe,
-                             reinterpret_cast<uintptr_t>(trapData.unwoundPC));
-    }
-  } else {
-    // Non-trapping iteration starts after the Wasm exit frame.
-    UnwindShadowStackEntry(rfe, reinterpret_cast<uintptr_t>(
-                                    iter.asWasm().resumePCinCurrentFrame()));
-  }
-#endif
-
   // Get (or wrap) the exception that we'll search for catch handlers for.
   Rooted<WasmExceptionObject*> wasmExn(cx,
                                        GetOrWrapWasmException(activation, cx));
@@ -850,24 +821,29 @@ void wasm::HandleExceptionWasm(JSContext* cx, JitFrameIter& iter,
   // in a continuation's entry function): it has no iterated frame, so it must
   // be freed when we cross the first stack switch.
   wasm::ContStack* wasmPreviousStack = iter.asWasm().unwoundContStack();
-#endif
 
-  auto advanceFrame = [&] {
-#ifdef JS_HW_SHADOW_STACK
-    auto returnAddress =
-        reinterpret_cast<uintptr_t>(iter.asWasm().frame()->returnAddress());
-#endif
-    ++iter;
-#ifdef JS_HW_SHADOW_STACK
-    // We don't want to unwind past the shadow stack entry of the frame
-    // we will resume in.
-    if (!iter.done()) {
-      UnwindShadowStackEntry(rfe, returnAddress);
+  // When we iterate out of a continuation stack, we need to defer freeing it
+  // for one iteration. This is because the activation's exit FP keeps pointing
+  // into it until we advance past the first frame of the new stack.
+  wasm::ContStack* wasmStackToFree = nullptr;
+  auto freeUnwoundStack = [&]() {
+    if (!wasmStackToFree) {
+      return;
     }
-#endif
+    MOZ_RELEASE_ASSERT(
+        !activation->hasWasmExitFP() ||
+        !wasmStackToFree->hasStackAddress(uintptr_t(activation->wasmExitFP())));
+    ContStack::unwind(wasmStackToFree->handlers());
+    wasmStackToFree = nullptr;
   };
+#else
+  auto freeUnwoundStack = [&]() {};
+#endif
+  // Ensure any early returns also free an unwound stack.
+  auto ensureFreeUnwoundStack =
+      mozilla::MakeScopeExit([&]() { freeUnwoundStack(); });
 
-  for (; !iter.done() && iter.isWasm(); advanceFrame()) {
+  for (; !iter.done() && iter.isWasm(); ++iter, freeUnwoundStack()) {
     // Wasm code can enter same-compartment realms, so reset cx->realm to
     // this frame's realm.
     WasmFrameIter& wasmFrame = iter.asWasm();
@@ -877,14 +853,19 @@ void wasm::HandleExceptionWasm(JSContext* cx, JitFrameIter& iter,
 #ifdef ENABLE_WASM_JSPI
     wasm::ContStack* wasmStack = wasmFrame.contStack();
     if (wasmFrame.currentFrameStackSwitched()) {
-      if (wasmPreviousStack) {
-        ContStack::unwind(wasmPreviousStack->handlers());
-      }
+      MOZ_RELEASE_ASSERT(!wasmStackToFree);
+      wasmStackToFree = wasmPreviousStack;
       wasmPreviousStack = wasmStack;
     } else {
       MOZ_RELEASE_ASSERT(wasmStack == wasmPreviousStack);
     }
 #endif
+
+    // This frame has semantically returned already, so it can't catch the
+    // exception and the debugger has already been notified of it being left.
+    if (wasmFrame.currentFrameIsReturnCallFallback()) {
+      continue;
+    }
 
     // Only look for an exception handler if there's a catchable exception.
     if (wasmExn) {
@@ -920,6 +901,9 @@ void wasm::HandleExceptionWasm(JSContext* cx, JitFrameIter& iter,
           rfe->stackTarget = &cx->wasm().mainStackTarget();
           rfe->baseHandlers = nullptr;
         }
+#  ifdef JS_HW_SHADOW_STACK
+        rfe->shadowStackSwitchPointer = wasmFrame.shadowStackSwitchPointer();
+#  endif
 #endif  // ENABLE_WASM_JSPI
 
         // Maintain the invariant that trapping and exit frame state is always
@@ -1805,9 +1789,6 @@ void* wasm::AddressOf(SymbolicAddress imm, ABIFunctionType* abiType) {
 #endif  // ENABLE_WASM_JSPI
     case SymbolicAddress::SlotsToAllocKindBytesTable:
       return (void*)gc::slotsToAllocKindBytes;
-    case SymbolicAddress::ReturnCallTrampoline:
-      // Resolved directly by SymbolicAddressTarget; no C++ target address.
-      MOZ_CRASH("ReturnCallTrampoline has no C++ address");
     case SymbolicAddress::ExceptionNew:
       *abiType = Args_General2;
       MOZ_ASSERT(*abiType == ToABIType(SASigExceptionNew));
@@ -1910,8 +1891,6 @@ bool wasm::NeedsBuiltinThunk(SymbolicAddress sym) {
 
     // No thunk because they're just data
     case SymbolicAddress::SlotsToAllocKindBytesTable:
-    // Raw code in the thunk set; resolved by SymbolicAddressTarget.
-    case SymbolicAddress::ReturnCallTrampoline:
       return false;
 
     // Everyone else gets a thunk to handle the exit from the activation
@@ -2182,19 +2161,17 @@ using TypedNativeToCodeRangeMap =
 using SymbolicAddressToCodeRangeArray =
     EnumeratedArray<SymbolicAddress, uint32_t, size_t(SymbolicAddress::Limit)>;
 
-struct GlobalStubs {
+struct BuiltinThunks {
   uint8_t* codeBase;
   size_t codeSize;
   CodeRangeVector codeRanges;
   TypedNativeToCodeRangeMap typedNativeToCodeRange;
   SymbolicAddressToCodeRangeArray symbolicAddressToCodeRange;
   uint32_t provisionalLazyJitEntryOffset = 0;
-  // Offset of the shared return_call trampoline's entry in the thunk set.
-  uint32_t returnCallTrampolineOffset = 0;
 
-  GlobalStubs() : codeBase(nullptr), codeSize(0) {}
+  BuiltinThunks() : codeBase(nullptr), codeSize(0) {}
 
-  ~GlobalStubs() {
+  ~BuiltinThunks() {
     if (codeBase) {
       DeallocateExecutableMemory(codeBase, codeSize);
     }
@@ -2202,7 +2179,7 @@ struct GlobalStubs {
 };
 
 MOZ_RUNINIT Mutex initBuiltinThunks(mutexid::WasmInitBuiltinThunks);
-mozilla::Atomic<const GlobalStubs*> builtinThunks;
+mozilla::Atomic<const BuiltinThunks*> builtinThunks;
 
 bool wasm::EnsureBuiltinThunksInitialized() {
   AutoMarkJitCodeWritableForThread writable;
@@ -2216,7 +2193,7 @@ bool wasm::EnsureBuiltinThunksInitialized(
     return true;
   }
 
-  auto thunks = MakeUnique<GlobalStubs>();
+  auto thunks = MakeUnique<BuiltinThunks>();
   if (!thunks) {
     return false;
   }
@@ -2282,20 +2259,6 @@ bool wasm::EnsureBuiltinThunksInitialized(
     }
   }
 
-  // Emit the single shared return_call trampoline: position- and
-  // instance-independent, so one copy serves every site.
-  {
-    CallableOffsets offsets;
-    if (!GenerateReturnCallTrampoline(masm, &offsets)) {
-      return false;
-    }
-    thunks->returnCallTrampolineOffset = offsets.begin;
-    if (!thunks->codeRanges.emplaceBack(CodeRange::ReturnCallTrampoline,
-                                        offsets)) {
-      return false;
-    }
-  }
-
   // Provisional lazy JitEntry stub: This is a shared stub that can be installed
   // in the jit-entry jump table.  It uses the JIT ABI and when invoked will
   // retrieve (via TlsContext()) and invoke the context-appropriate
@@ -2357,21 +2320,14 @@ bool wasm::EnsureBuiltinThunksInitialized(
 
 void wasm::ReleaseBuiltinThunks() {
   if (builtinThunks) {
-    const GlobalStubs* ptr = builtinThunks;
-    js_delete(const_cast<GlobalStubs*>(ptr));
+    const BuiltinThunks* ptr = builtinThunks;
+    js_delete(const_cast<BuiltinThunks*>(ptr));
     builtinThunks = nullptr;
   }
 }
 
 void* wasm::SymbolicAddressTarget(SymbolicAddress sym) {
   MOZ_ASSERT(builtinThunks);
-
-  // The return_call trampoline is raw code in the thunk set, not a
-  // thunk-to-C++; resolve its address directly.
-  if (sym == SymbolicAddress::ReturnCallTrampoline) {
-    const GlobalStubs& thunks = *builtinThunks;
-    return thunks.codeBase + thunks.returnCallTrampolineOffset;
-  }
 
   ABIFunctionType abiType;
   void* funcPtr = AddressOf(sym, &abiType);
@@ -2380,7 +2336,7 @@ void* wasm::SymbolicAddressTarget(SymbolicAddress sym) {
     return funcPtr;
   }
 
-  const GlobalStubs& thunks = *builtinThunks;
+  const BuiltinThunks& thunks = *builtinThunks;
   uint32_t codeRangeIndex = thunks.symbolicAddressToCodeRange[sym];
   return thunks.codeBase + thunks.codeRanges[codeRangeIndex].begin();
 }
@@ -2388,7 +2344,7 @@ void* wasm::SymbolicAddressTarget(SymbolicAddress sym) {
 void* wasm::ProvisionalLazyJitEntryStub() {
   MOZ_ASSERT(builtinThunks);
 
-  const GlobalStubs& thunks = *builtinThunks;
+  const BuiltinThunks& thunks = *builtinThunks;
   return thunks.codeBase + thunks.provisionalLazyJitEntryOffset;
 }
 
@@ -2449,7 +2405,7 @@ void* wasm::MaybeGetTypedNative(JSFunction* f, const FuncType& funcType) {
     return nullptr;
   }
 
-  const GlobalStubs& thunks = *builtinThunks;
+  const BuiltinThunks& thunks = *builtinThunks;
 
   // If this function must use the fdlibm implementation first try to lookup
   // the fdlibm version. If that version doesn't exist we still fallback to
@@ -2481,7 +2437,7 @@ bool wasm::LookupBuiltinThunk(void* pc, const CodeRange** codeRange,
     return false;
   }
 
-  const GlobalStubs& thunks = *builtinThunks;
+  const BuiltinThunks& thunks = *builtinThunks;
   if (pc < thunks.codeBase || pc >= thunks.codeBase + thunks.codeSize) {
     return false;
   }
@@ -2492,13 +2448,4 @@ bool wasm::LookupBuiltinThunk(void* pc, const CodeRange** codeRange,
   *codeRange = LookupInSorted(thunks.codeRanges, target);
 
   return !!*codeRange;
-}
-
-bool wasm::IsReturnCallTrampolineReturnAddress(const void* pc) {
-  const GlobalStubs* thunks = builtinThunks;
-  MOZ_ASSERT(thunks);
-  // Callers pass a stored return address, which always points at the
-  // trampoline's entry, so a single equality check suffices (no lookup).
-  return (const uint8_t*)pc ==
-         thunks->codeBase + thunks->returnCallTrampolineOffset;
 }

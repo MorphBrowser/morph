@@ -18,11 +18,6 @@ A diagram of all the main components is the following:
 :align: center
 :caption: IP Protection architecture
 
----
-config:
-  flowchart:
-    defaultRenderer: "elk"
----
 flowchart LR
 
   %% browser/components/ipprotection
@@ -50,8 +45,7 @@ flowchart LR
       IPPStartupCache["Startup Cache Helper"]
       IPProtectionServerlist
       IPPProxyManager
-      IPPAutoStart["Auto-Start Helper"]
-      IPPAutoRestoreHelper["Auto-Restore Helper"]
+      IPPAutoActivation["Auto-Activation Helper"]
       IPPNimbusHelper["Nimbus Eligibility Helper"]
       IPPSessionPrefManager["Session Pref Manager"]
       IPPSiteRuleManager
@@ -123,11 +117,14 @@ GuardianClient
 IPPChannelFilter
 
 : Main network component. It processes network requests and decides which ones
-  should go through the proxy.
+  should go through the proxy, applying the mode it was given by
+  `IPPProxyManager`.
 
 IPPProxyManager
 
 : Implements the proxy activation/deactivation and exposes the current status.
+  It owns a connection's country and mode: both can be passed to `start()`, and
+  changed on a live connection with `switch()` and `setMode()`.
 
 IPProtectionService
 
@@ -146,6 +143,7 @@ IPPSiteRuleManager
 
 : Classifies a principal as included/excluded/default for the proxy, and is the
   single source of truth for that decision. It consults multiple rule-providers like permissions, prefs, enterprise-policies and others.
+  `getRule(principal, browserId)` takes an optional `browserId`; when it is given, tab-specific rules are applied too.
 
 ### Additional proxy/telemetry components
 
@@ -162,13 +160,17 @@ IPPNetworkErrorObserver
 
 The core helper list is defined in `IPProtectionActivator.sys.mjs` (toolkit).
 
-IPPAutoStart
+IPPAutoActivation
 
-: Activates the proxy at startup time when auto-start is enabled.
-
-IPPAutoRestoreHelper
-
-: Restores the proxy state after a crash or restart when auto-restore is enabled.
+: Brings the proxy up on its own on desktop: auto-start at startup,
+  auto-restore of a session the user left the VPN on for, and a connection in
+  inclusion mode while at least one site is marked as always using the VPN.
+  It routes through the egress location the user picked, resolved by
+  `IPProtectionServerlist.resolveEgressCountry()`; the browser sets its
+  `isPremium` callback so locked locations are only used by premium users.
+  `IPProtectionActivator` picks the activation helper per build: this one on
+  desktop, `IPPAlwaysOn` on enterprise, and none on Android, where the embedder
+  decides through `IPProtectionController`.
 
 IPPStartupCache
 
@@ -218,9 +220,10 @@ IPPSessionPrefManager
 
 ### Android authentication
 
-On Android, two concrete `IPPAuthProvider` implementations are available and
-selected at initialisation time by `GeckoViewIPProtection` based on the FxA
-sign-in state stored in `toolkit.ipProtection.android.authProvider`.
+On Android, two concrete `IPPAuthProvider` implementations are available.
+`GeckoViewIPProtection` selects one from the auth provider used while no account
+is signed in, passed at initialisation, and the FxA sign-in state reported by
+the Android layer.
 
 IPPAndroidAuthProvider
 
@@ -229,29 +232,34 @@ IPPAndroidAuthProvider
 
 IPPGpiAuthProvider
 
-: Google Play Integrity implementation of `IPPAuthProvider`. Used when the
-  user is not signed into FxA. Obtains a short-lived GPI token from the Android
-  layer via `EventDispatcher` and exchanges it for an Auth JWT with Guardian.
-  The JWT is cached in `browser.ipProtection.gpi.authJwt` so that subsequent
-  proxy starts require no network requests.
+: Google Play Integrity implementation of `IPPAuthProvider`. Used when
+  `GeckoViewIPProtection` is initialised with `gpi` and the user is not signed
+  into FxA, until GPI warm-up fails or an activation fails to enroll. Obtains a
+  short-lived GPI token from the Android layer via `EventDispatcher` and
+  exchanges it for an Auth JWT with Guardian. The JWT is cached in
+  `browser.ipProtection.gpi.authJwt` so that subsequent proxy starts require no
+  network requests.
 
 IPPAndroidSignInWatcher
 
-: Monitors the FxA sign-in state on Android by listening to
-  `IPP:AuthStateChanged` events from the Android layer. Exposes `isSignedIn`
-  and dispatches `IPPSignInWatcher:StateChanged` when the state changes.
+: Tracks the FxA sign-in state on Android. `GeckoViewIPProtection` calls
+  `notifySignInStateChanged()` when it receives
+  `GeckoView:IPProtection:AuthStateChanged` from the Android layer. Exposes
+  `isSignedIn` and dispatches `IPPSignInWatcher:StateChanged` when the state
+  changes.
 
 ## Android GeckoView entry point
 
 GeckoViewIPProtection
 
 : GeckoView module that owns the IP Protection lifecycle on Android. On
-  `GeckoView:IPProtection:Init` it reads the `toolkit.ipProtection.android.authProvider`
-  preference to determine which auth provider to activate: `IPPAndroidAuthProvider`
+  `GeckoView:IPProtection:Init` it reads the auth provider to use while no
+  account is signed in, `none` or `gpi`. It activates `IPPAndroidAuthProvider`
   (with its FxA helpers) when the user is signed in, or `IPPGpiAuthProvider`
-  otherwise. When the FxA sign-in state changes the Android layer clears the
-  preference and calls `Uninit` followed by `Init` so that the correct
-  provider is selected again.
+  with `gpi` once the user is reported signed out, and `IPPAndroidAuthProvider`
+  otherwise. When the FxA sign-in state changes it switches provider, and when
+  GPI warm-up fails or an activation fails to enroll it keeps
+  `IPPAndroidAuthProvider` until the app restarts.
 
 ## Browser components (`browser/components/ipprotection`)
 

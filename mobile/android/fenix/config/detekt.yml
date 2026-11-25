@@ -598,8 +598,10 @@ style:
         value: 'TODO:'
     allowedPatterns: ''
   ForbiddenImport:
-    active: false
-    imports: []
+    active: true
+    imports:
+      - value: 'mozilla.components.browser.menu.*'
+        reason: 'browser-menu is deprecated in Fenix. Use the compose-base DropdownMenu or the Compose main menu instead.'
     forbiddenPatterns: ''
   ForbiddenMethodCall:
     active: false
@@ -825,8 +827,6 @@ mozilla-detekt-rules:
   MozillaRunBlockingCheck:
     active: true
     excludes: ['**/test/**', '**/androidTest/**']
-  MozillaUseLazyMonitored:
-    active: true
 
 acorn-detekt-rules:
   active: true
@@ -847,3 +847,6 @@ acorn-detekt-rules:
   MaterialTypographyUsage:
     active: true
     appTypographyName: 'org.mozilla.fenix.theme.FirefoxTheme.typography'
+  DisplayedTextCasing:
+    active: true
+    excludes: ['**/test/**', '**/androidTest/**']

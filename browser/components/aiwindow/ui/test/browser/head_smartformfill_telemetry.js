@@ -199,6 +199,7 @@ async function withFormPage(overrides, callback) {
   sandbox
     .stub(SmartFormFillModel, "generateFormValues")
     .callsFake(overrides.generateFormValues ?? generateEveryValue);
+  const mockEngineManager = new MockEngineManager();
 
   const win = await openAIWindow();
 
@@ -229,6 +230,8 @@ async function withFormPage(overrides, callback) {
 
     BrowserTestUtils.removeTab(tab);
     await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
     sandbox.restore();
   }
 }
@@ -382,7 +385,10 @@ async function fillReviewedForm(reviewBrowser) {
   // Fill form only enables once the generated values have been scrolled
   // through.
   await scrollFormReviewFieldsToBottom(reviewBrowser);
-  await activateFormReviewButton(reviewBrowser, "ai-smart-form-fill-fill-form");
+  await activateFormReviewButton(
+    reviewBrowser,
+    "ai-smart-form-fill-fill-form-button"
+  );
 }
 
 /**
@@ -398,7 +404,7 @@ async function cancelFormReview(win, browser) {
   const closed = waitForFormReviewClose(win, dialog);
   await activateFormReviewButton(
     reviewBrowser,
-    "ai-smart-form-fill-cancel-review"
+    "ai-smart-form-fill-cancel-review-button"
   );
   await closed;
 }

@@ -17,6 +17,7 @@
 #    include "mozilla/a11y/nsWinUtils.h"
 #  endif
 #endif
+#include "mozilla/AntiTrackingUtils.h"
 #include "mozilla/AppShutdown.h"
 #include "mozilla/dom/CanonicalBrowsingContext.h"
 #include "mozilla/dom/BindingIPCUtils.h"
@@ -136,6 +137,11 @@ struct ParamTraits<mozilla::dom::PrefersReducedMotionOverride>
           mozilla::dom::PrefersReducedMotionOverride> {};
 
 template <>
+struct ParamTraits<mozilla::dom::PrefersContrastOverride>
+    : public mozilla::dom::WebIDLEnumSerializer<
+          mozilla::dom::PrefersContrastOverride> {};
+
+template <>
 struct ParamTraits<mozilla::dom::ExplicitActiveStatus>
     : public ContiguousEnumSerializer<
           mozilla::dom::ExplicitActiveStatus,
@@ -153,6 +159,31 @@ DEFINE_IPC_SERIALIZER_WITH_FIELDS(mozilla::dom::EmbedderColorSchemes, mUsed,
 
 }  // namespace IPC
 
+namespace geckoprofiler::markers {
+
+class NavigationRateLimitedMarker
+    : public mozilla::BaseMarkerType<NavigationRateLimitedMarker> {
+ public:
+  static constexpr const char* Name = "NavigationRateLimited";
+  static constexpr const char* Description =
+      "A location or history API call was ignored because the navigation rate "
+      "limit was reached.";
+
+  using MS = mozilla::MarkerSchema;
+  static constexpr MS::PayloadField PayloadFields[] = {
+      {"limit", MS::InputType::Uint32, "Limit", MS::Format::Integer},
+      {"timespan", MS::InputType::TimeDuration, "Timespan",
+       MS::Format::Duration}};
+
+  static constexpr MS::Location Locations[] = {MS::Location::MarkerChart,
+                                               MS::Location::MarkerTable};
+  static constexpr const char* TableLabel =
+      "Limit of {marker.data.limit} calls per {marker.data.timespan} reached";
+  static constexpr const char* ChartLabel = "{marker.name}";
+};
+
+}  // namespace geckoprofiler::markers
+
 namespace mozilla {
 namespace dom {
 
@@ -169,23 +200,27 @@ static LazyLogModule gBrowsingContextLog("BrowsingContext");
 static LazyLogModule gBrowsingContextSyncLog("BrowsingContextSync");
 
 typedef nsTHashMap<nsUint64HashKey, BrowsingContext*> BrowsingContextMap;
+using CurrentTopByBrowserIdMap =
+    nsTHashMap<nsUint64HashKey, WeakPtr<BrowsingContext>>;
 
 // All BrowsingContexts indexed by Id
 static StaticAutoPtr<BrowsingContextMap> sBrowsingContexts;
 // Top-level Content BrowsingContexts only, indexed by BrowserId instead of Id
-static StaticAutoPtr<BrowsingContextMap> sCurrentTopByBrowserId;
+static StaticAutoPtr<CurrentTopByBrowserIdMap> sCurrentTopByBrowserId;
 
 static bool gIPCEnabledAnnotation = false;
 static bool gFissionEnabledAnnotation = false;
 
-static void UnregisterBrowserId(BrowsingContext* aBrowsingContext) {
-  if (!aBrowsingContext->IsTopContent() || !sCurrentTopByBrowserId) {
+// static
+void BrowsingContext::UnregisterBrowserId(BrowsingContext* aBrowsingContext) {
+  const Maybe<uint64_t> key =
+      std::move(aBrowsingContext->mCurrentTopBrowserIdKey);
+  if (!key || !sCurrentTopByBrowserId) {
     return;
   }
 
   // Avoids an extra lookup
-  auto browserIdEntry =
-      sCurrentTopByBrowserId->Lookup(aBrowsingContext->BrowserId());
+  auto browserIdEntry = sCurrentTopByBrowserId->Lookup(*key);
   if (browserIdEntry && browserIdEntry.Data() == aBrowsingContext) {
     browserIdEntry.Remove();
   }
@@ -193,10 +228,7 @@ static void UnregisterBrowserId(BrowsingContext* aBrowsingContext) {
 
 static void Register(BrowsingContext* aBrowsingContext) {
   sBrowsingContexts->InsertOrUpdate(aBrowsingContext->Id(), aBrowsingContext);
-  if (aBrowsingContext->IsTopContent()) {
-    sCurrentTopByBrowserId->InsertOrUpdate(aBrowsingContext->BrowserId(),
-                                           aBrowsingContext);
-  }
+  BrowsingContext::UpdateCurrentTopByBrowserId(aBrowsingContext);
 
   aBrowsingContext->Group()->Register(aBrowsingContext);
 }
@@ -204,10 +236,16 @@ static void Register(BrowsingContext* aBrowsingContext) {
 // static
 void BrowsingContext::UpdateCurrentTopByBrowserId(
     BrowsingContext* aNewBrowsingContext) {
-  if (aNewBrowsingContext->IsTopContent()) {
-    sCurrentTopByBrowserId->InsertOrUpdate(aNewBrowsingContext->BrowserId(),
-                                           aNewBrowsingContext);
+  if (!aNewBrowsingContext->IsTopContent()) {
+    return;
   }
+
+  const uint64_t browserId = aNewBrowsingContext->BrowserId();
+  if (aNewBrowsingContext->mCurrentTopBrowserIdKey != Some(browserId)) {
+    UnregisterBrowserId(aNewBrowsingContext);
+  }
+  sCurrentTopByBrowserId->InsertOrUpdate(browserId, aNewBrowsingContext);
+  aNewBrowsingContext->mCurrentTopBrowserIdKey = Some(browserId);
 }
 
 BrowsingContext* BrowsingContext::GetParent() const {
@@ -262,7 +300,7 @@ WindowContext* BrowsingContext::GetTopWindowContext() const {
 void BrowsingContext::Init() {
   if (!sBrowsingContexts) {
     sBrowsingContexts = new BrowsingContextMap();
-    sCurrentTopByBrowserId = new BrowsingContextMap();
+    sCurrentTopByBrowserId = new CurrentTopByBrowserIdMap();
     ClearOnShutdown(&sBrowsingContexts);
     ClearOnShutdown(&sCurrentTopByBrowserId);
     CrashReporter::RegisterAnnotationBool(
@@ -294,7 +332,7 @@ already_AddRefed<BrowsingContext> BrowsingContext::GetCurrentTopByBrowserId(
   // The map is cleared on shutdown but callers may still run afterwards (e.g.
   // during cycle collector teardown), so mirror Get() and null-check it.
   if (sCurrentTopByBrowserId) {
-    return do_AddRef(sCurrentTopByBrowserId->Get(aBrowserId));
+    return do_AddRef(sCurrentTopByBrowserId->Get(aBrowserId).get());
   }
 
   return nullptr;
@@ -1189,7 +1227,8 @@ void BrowsingContext::Detach(bool aFromIPC) {
     if (XRE_IsParentProcess() && Canonical()->IsReplaced()) {
       why = u"replace";
     }
-    obs->NotifyObservers(ToSupports(this), "browsing-context-discarded", why);
+    obs->NotifyWhenScriptSafe(ToSupports(this), "browsing-context-discarded",
+                              why);
   }
 
   // NOTE: Doesn't use SetClosed, as it will be set in all processes
@@ -1262,9 +1301,9 @@ void BrowsingContext::SetOpener(BrowsingContext* aOpener) {
     // Inherit color scheme overrides from parent window. This is to inherit the
     // color scheme of dark themed PBM windows in dialogs opened by such
     // windows.
-    auto openerOverride = aOpener->Top()->PrefersColorSchemeOverride();
-    if (openerOverride != PrefersColorSchemeOverride()) {
-      MOZ_ALWAYS_SUCCEEDS(SetPrefersColorSchemeOverride(openerOverride));
+    if (auto* doc = aOpener->GetExtantDocument()) {
+      MOZ_ALWAYS_SUCCEEDS(SetPrefersColorSchemeOverride(
+          doc->GetOverriddenOrEmbedderColorScheme()));
     }
   }
 }
@@ -1306,9 +1345,22 @@ void BrowsingContext::SetIsEnteringBFCache(bool aIsEnteringBFCache) {
   mIsEnteringBFCache = aIsEnteringBFCache;
 }
 
-void BrowsingContext::DeactivateDocuments() {
+// https://html.spec.whatwg.org/#deactivate-a-document-for-a-cross-document-navigation
+void BrowsingContext::DeactivateDocuments(
+    const SessionHistoryInfo* aPageSwapTargetInfo,
+    NavigationType aNavigationType, bool aForUnload) {
   MOZ_RELEASE_ASSERT(mozilla::BFCacheInParent());
   MOZ_DIAGNOSTIC_ASSERT(IsTop());
+
+  if (aForUnload) {
+    // The old document can't enter BFCache. Only fire pageswap, since
+    // Destroy() unloads the document right after.
+    if (mDocShell) {
+      nsDocShell::Cast(mDocShell)->MaybeFirePageSwapOnDeactivate(
+          aPageSwapTargetInfo, aNavigationType);
+    }
+    return;
+  }
 
   if (XRE_IsContentProcess() && mDocShell) {
     nsDocShell::Cast(mDocShell)->MaybeDisconnectChildListenersOnPageHide();
@@ -1319,7 +1371,11 @@ void BrowsingContext::DeactivateDocuments() {
     aContext->SetIsEnteringBFCache(/* aIsEnteringBFCache */ true);
 
     if (shell) {
-      nsDocShell::Cast(shell)->FirePageHideShowNonRecursive(false);
+      // Only the top document fires pageswap.
+      const bool isTop = aContext == this;
+      nsDocShell::Cast(shell)->FirePageHideShowNonRecursive(
+          false, isTop ? aPageSwapTargetInfo : nullptr,
+          isTop ? aNavigationType : NavigationType::Push);
     }
   });
 
@@ -1340,19 +1396,8 @@ void BrowsingContext::DeactivateDocuments() {
   });
 }
 
-static void GetSubframeReactivationData(
-    BrowsingContext* aBrowsingContext,
-    Maybe<SessionHistoryInfo>& aReactivatedEntry,
-    nsTArray<SessionHistoryInfo>& aNewSHEs,
-    const Maybe<PreviousSessionHistoryInfo>& aPreviousEntryForActivation) {
-  // See bug 1991680
-  MOZ_LOG_FMT(gNavigationAPILog, LogLevel::Debug,
-              "We currently don't know how to reactivate subframes");
-}
-
 void BrowsingContext::ReactivateDocuments(
-    const Maybe<SessionHistoryInfo>& aReactivatedEntry,
-    const nsTArray<SessionHistoryInfo>& aNewSHEs,
+    const nsTArray<NavigationReactivationData>& aReactivationData,
     const Maybe<PreviousSessionHistoryInfo>& aPreviousEntryForActivation) {
   UpdateCurrentTopByBrowserId(this);
   PreOrderWalk(
@@ -1370,16 +1415,14 @@ void BrowsingContext::ReactivateDocuments(
         // We need to restore our navigation object state before calling
         // pageshow. This is ok, since we will fire any
         // NavigationHistoryEntry.dispose events async.
-        if (aContext->IsTop()) {
-          aContext->UpdateForReactivation(aReactivatedEntry, aNewSHEs,
-                                          aPreviousEntryForActivation);
-        } else {
-          Maybe<SessionHistoryInfo> reactivatedEntry;
-          nsTArray<SessionHistoryInfo> newSHEs;
-          GetSubframeReactivationData(aContext, reactivatedEntry, newSHEs,
-                                      aPreviousEntryForActivation);
-          aContext->UpdateForReactivation(reactivatedEntry, newSHEs,
-                                          aPreviousEntryForActivation);
+        for (auto& data : aReactivationData) {
+          if (data.context().ContextId() == aContext->Id()) {
+            aContext->UpdateForReactivation(
+                Some(data.reactivatedEntry()), data.newSHEs(),
+                aContext->IsTop() ? aPreviousEntryForActivation
+                                  : Maybe<PreviousSessionHistoryInfo>());
+            break;
+          }
         }
       });
 
@@ -1770,9 +1813,9 @@ JSObject* BrowsingContext::WrapObject(JSContext* aCx,
   return BrowsingContext_Binding::Wrap(aCx, this, aGivenProto);
 }
 
-bool BrowsingContext::WriteStructuredClone(JSContext* aCx,
+bool BrowsingContext::WriteStructuredClone(JSContext* /*aCx*/,
                                            JSStructuredCloneWriter* aWriter,
-                                           StructuredCloneHolder* aHolder) {
+                                           StructuredCloneHolder* /*aHolder*/) {
   MOZ_DIAGNOSTIC_ASSERT(mEverAttached);
   return (JS_WriteUint32Pair(aWriter, SCTAG_DOM_BROWSING_CONTEXT, 0) &&
           JS_WriteUint32Pair(aWriter, uint32_t(Id()), uint32_t(Id() >> 32)));
@@ -2011,9 +2054,7 @@ NS_IMETHODIMP BrowsingContext::GetUseTrackingProtection(
   *aUseTrackingProtection = false;
 
   if (GetForceEnableTrackingProtection() ||
-      StaticPrefs::privacy_trackingprotection_enabled() ||
-      (UsePrivateBrowsing() &&
-       StaticPrefs::privacy_trackingprotection_pbmode_enabled())) {
+      AntiTrackingUtils::IsTrackingProtectionEnabled(UsePrivateBrowsing())) {
     *aUseTrackingProtection = true;
     return NS_OK;
   }
@@ -2100,6 +2141,7 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(BrowsingContext)
     sBrowsingContexts->Remove(tmp->Id());
   }
   UnregisterBrowserId(tmp);
+  NS_IMPL_CYCLE_COLLECTION_UNLINK_WEAK_PTR
 
   if (tmp->GetIsPopupSpam()) {
     PopupBlocker::UnregisterOpenPopupSpam();
@@ -2536,6 +2578,9 @@ nsresult BrowsingContext::InternalLoad(nsDocShellLoadState* aLoadState) {
   // Same reason as for the sandbox flags.
   MOZ_TRY(CheckFramebusting(aLoadState));
 
+  // Ensure we don't keep a strong reference to the source element for too long.
+  aLoadState->SetSourceElement(nullptr);
+
   if (XRE_IsParentProcess()) {
     ContentParent* cp = Canonical()->GetContentParent();
     if (!cp || !cp->CanSend()) {
@@ -2756,11 +2801,11 @@ WindowProxyHolder BrowsingContext::Window() {
   return WindowProxyHolder(Self());
 }
 
-WindowProxyHolder BrowsingContext::GetFrames(ErrorResult& aError) {
+WindowProxyHolder BrowsingContext::GetFrames(ErrorResult& /*aError*/) {
   return Window();
 }
 
-void BrowsingContext::Close(CallerType aCallerType, ErrorResult& aError) {
+void BrowsingContext::Close(CallerType aCallerType, ErrorResult& /*aError*/) {
   if (mIsDiscarded) {
     return;
   }
@@ -2962,7 +3007,7 @@ std::tuple<bool, bool> BrowsingContext::CanFocusCheck(CallerType aCallerType) {
   return {canFocus, isActive};
 }
 
-void BrowsingContext::Focus(CallerType aCallerType, ErrorResult& aError) {
+void BrowsingContext::Focus(CallerType aCallerType, ErrorResult& /*aError*/) {
   // These checks need to happen before the RequestFrameFocus call, which
   // is why they are done in an untrusted process. If we wanted to enforce
   // these in the parent, we'd need to do the checks there _also_.
@@ -2995,7 +3040,7 @@ bool BrowsingContext::CanBlurCheck(CallerType aCallerType) {
          !Preferences::GetBool("dom.disable_window_flip", true);
 }
 
-void BrowsingContext::Blur(CallerType aCallerType, ErrorResult& aError) {
+void BrowsingContext::Blur(CallerType aCallerType, ErrorResult& /*aError*/) {
   if (!CanBlurCheck(aCallerType)) {
     return;
   }
@@ -3014,7 +3059,7 @@ Nullable<WindowProxyHolder> BrowsingContext::GetWindow() {
   return WindowProxyHolder(this);
 }
 
-Nullable<WindowProxyHolder> BrowsingContext::GetTop(ErrorResult& aError) {
+Nullable<WindowProxyHolder> BrowsingContext::GetTop(ErrorResult& /*aError*/) {
   if (mIsDiscarded) {
     return nullptr;
   }
@@ -3040,7 +3085,8 @@ void BrowsingContext::GetOpener(JSContext* aCx,
 
 // We never throw an error, but the implementation in nsGlobalWindow does and
 // we need to use the same signature.
-Nullable<WindowProxyHolder> BrowsingContext::GetParent(ErrorResult& aError) {
+Nullable<WindowProxyHolder> BrowsingContext::GetParent(
+    ErrorResult& /*aError*/) {
   if (mIsDiscarded) {
     return nullptr;
   }
@@ -3162,6 +3208,11 @@ BrowsingContext::IPCInitializer BrowsingContext::GetIPCInitializer() {
   IPCInitializer init;
   init.mId = Id();
   init.mParentId = mParentWindow ? mParentWindow->Id() : 0;
+  if (RefPtr<BrowsingContext> opener = GetOpener()) {
+    if (WindowContext* openerWindow = opener->GetCurrentWindowContext()) {
+      init.mOpenerInnerWindowId = openerWindow->Id();
+    }
+  }
   init.mWindowless = mWindowless;
   init.mUseRemoteTabs = mUseRemoteTabs;
   init.mUseRemoteSubframes = mUseRemoteSubframes;
@@ -3207,8 +3258,8 @@ nsresult BrowsingContext::ResetGVAutoplayRequestStatus() {
 }
 
 template <typename Callback>
-void BrowsingContext::WalkPresContexts(Callback&& aCallback) {
-  PreOrderWalk([&](BrowsingContext* aContext) {
+static void WalkPresContexts(BrowsingContext* aTop, Callback&& aCallback) {
+  aTop->PreOrderWalk([&](BrowsingContext* aContext) {
     if (nsIDocShell* shell = aContext->GetDocShell()) {
       if (RefPtr pc = shell->GetPresContext()) {
         aCallback(pc.get());
@@ -3217,8 +3268,19 @@ void BrowsingContext::WalkPresContexts(Callback&& aCallback) {
   });
 }
 
+static void MediaFeatureValuesChanged(BrowsingContext* aTop,
+                                      MediaFeatureChangeReason aReason) {
+  WalkPresContexts(aTop, [aReason](nsPresContext* aPc) {
+    aPc->MediaFeatureValuesChanged(
+        {aReason},
+        // We're already iterating through sub documents, so we don't need to
+        // propagate the change again.
+        MediaFeatureChangePropagation::JustThisDocument);
+  });
+}
+
 void BrowsingContext::PresContextAffectingFieldChanged() {
-  WalkPresContexts([&](nsPresContext* aPc) {
+  WalkPresContexts(this, [](nsPresContext* aPc) {
     aPc->RecomputeBrowsingContextDependentData();
   });
 }
@@ -3290,7 +3352,7 @@ void BrowsingContext::ActivenessChanged(bool aIsActive) {
 }
 
 void BrowsingContext::DidSet(FieldIndex<IDX_SessionStoreEpoch>,
-                             uint32_t aOldValue) {
+                             uint32_t /*aOldValue*/) {
   if (!mCurrentWindowContext) {
     return;
   }
@@ -3453,7 +3515,8 @@ void BrowsingContext::DidSet(FieldIndex<IDX_ForceDesktopViewport>,
   PresContextAffectingFieldChanged();
   if (nsIDocShell* shell = GetDocShell()) {
     if (RefPtr ps = shell->GetPresShell()) {
-      ps->MaybeRecreateMobileViewportManager(/* aAfterInitialization= */ true);
+      ps->MaybeRecreateMobileViewportManager(
+          PresShell::MobileViewportManagerUpdate::ManagerTypeMayChange);
     }
   }
 }
@@ -3466,7 +3529,8 @@ void BrowsingContext::DidSet(FieldIndex<IDX_PageAwakeRequestCount>,
   Group()->UpdateToplevelsSuspendedIfNeeded();
 }
 
-void BrowsingContext::DidSet(FieldIndex<IDX_AllowJavascript>, bool aOldValue) {
+void BrowsingContext::DidSet(FieldIndex<IDX_AllowJavascript>,
+                             bool /*aOldValue*/) {
   RecomputeCanExecuteScripts();
 }
 
@@ -3507,13 +3571,8 @@ void BrowsingContext::DidSet(FieldIndex<IDX_TouchEventsOverrideInternal>,
   if (GetTouchEventsOverrideInternal() == aOldValue) {
     return;
   }
-  WalkPresContexts([&](nsPresContext* aPc) {
-    aPc->MediaFeatureValuesChanged(
-        {MediaFeatureChangeReason::SystemMetricsChange},
-        // We're already iterating through sub documents, so we don't need to
-        // propagate the change again.
-        MediaFeatureChangePropagation::JustThisDocument);
-  });
+  MediaFeatureValuesChanged(this,
+                            MediaFeatureChangeReason::SystemMetricsChange);
 }
 
 void BrowsingContext::DidSet(FieldIndex<IDX_EmbedderColorSchemes>,
@@ -3556,14 +3615,16 @@ void BrowsingContext::DidSet(FieldIndex<IDX_PrefersReducedMotionOverride>,
   if (PrefersReducedMotionOverride() == aOldValue) {
     return;
   }
+  MediaFeatureValuesChanged(this, MediaFeatureChangeReason::PreferenceChange);
+}
 
-  WalkPresContexts([&](nsPresContext* aPc) {
-    aPc->MediaFeatureValuesChanged(
-        {MediaFeatureChangeReason::PreferenceChange},
-        // We're already iterating through sub documents, so we don't need to
-        // propagate the change again.
-        MediaFeatureChangePropagation::JustThisDocument);
-  });
+void BrowsingContext::DidSet(FieldIndex<IDX_PrefersContrastOverride>,
+                             dom::PrefersContrastOverride aOldValue) {
+  MOZ_ASSERT(IsTop());
+  if (PrefersContrastOverride() == aOldValue) {
+    return;
+  }
+  MediaFeatureValuesChanged(this, MediaFeatureChangeReason::PreferenceChange);
 }
 
 void BrowsingContext::DidSet(FieldIndex<IDX_AnimationsPlayBackRateMultiplier>,
@@ -3576,7 +3637,7 @@ void BrowsingContext::DidSet(FieldIndex<IDX_AnimationsPlayBackRateMultiplier>,
 }
 
 void BrowsingContext::DidSet(FieldIndex<IDX_LanguageOverride>,
-                             nsCString&& aOldValue) {
+                             nsCString&& /*aOldValue*/) {
   MOZ_ASSERT(IsTop());
 
   const nsCString& languageOverride = GetLanguageOverride();
@@ -3631,17 +3692,9 @@ void BrowsingContext::DidSet(FieldIndex<IDX_DisplayMode>,
   if (GetDisplayMode() == aOldValue) {
     return;
   }
-
-  WalkPresContexts([&](nsPresContext* aPc) {
-    aPc->MediaFeatureValuesChanged(
-        {MediaFeatureChangeReason::DisplayModeChange},
-        // We're already iterating through sub documents, so we don't need
-        // to propagate the change again.
-        //
-        // Images and other resources don't change their display-mode
-        // evaluation, display-mode is a property of the browsing context.
-        MediaFeatureChangePropagation::JustThisDocument);
-  });
+  // Images and other resources don't change their display-mode evaluation,
+  // display-mode is a property of the browsing context.
+  MediaFeatureValuesChanged(this, MediaFeatureChangeReason::DisplayModeChange);
 }
 
 void BrowsingContext::DidSet(FieldIndex<IDX_Muted>) {
@@ -3748,7 +3801,7 @@ auto BrowsingContext::LegacyRevertIfNotOwningOrParentProcess(
 }
 
 void BrowsingContext::DidSet(FieldIndex<IDX_IsActiveBrowserWindowInternal>,
-                             bool aOldValue) {
+                             bool /*aOldValue*/) {
   bool isActivateEvent = GetIsActiveBrowserWindowInternal();
   // The browser window containing this context has changed
   // activation state so update window inactive document states
@@ -3782,7 +3835,7 @@ void BrowsingContext::DidSet(FieldIndex<IDX_IsActiveBrowserWindowInternal>,
 
 bool BrowsingContext::CanSet(FieldIndex<IDX_OpenerPolicy>,
                              nsILoadInfo::CrossOriginOpenerPolicy aPolicy,
-                             ContentParent* aSource) {
+                             ContentParent* /*aSource*/) {
   // A potentially cross-origin isolated BC can't change opener policy, nor can
   // a BC become potentially cross-origin isolated. An unchanged policy is
   // always OK.
@@ -3796,13 +3849,13 @@ bool BrowsingContext::CanSet(FieldIndex<IDX_OpenerPolicy>,
 }
 
 auto BrowsingContext::CanSet(FieldIndex<IDX_AllowContentRetargeting>,
-                             const bool& aAllowContentRetargeting,
+                             const bool& /*aAllowContentRetargeting*/,
                              ContentParent* aSource) -> CanSetResult {
   return LegacyRevertIfNotOwningOrParentProcess(aSource);
 }
 
 auto BrowsingContext::CanSet(FieldIndex<IDX_AllowContentRetargetingOnChildren>,
-                             const bool& aAllowContentRetargetingOnChildren,
+                             const bool& /*aAllowContentRetargetingOnChildren*/,
                              ContentParent* aSource) -> CanSetResult {
   return LegacyRevertIfNotOwningOrParentProcess(aSource);
 }
@@ -3873,7 +3926,7 @@ void BrowsingContext::SetGeolocationServiceOverride(
   if (aGeolocationOverride.WasPassed()) {
     if (!mGeolocationServiceOverride) {
       mGeolocationServiceOverride = MakeRefPtr<GeolocationService>();
-      mGeolocationServiceOverride->Init();
+      mGeolocationServiceOverride->Init(/* aIsOverride = */ true);
     }
     mGeolocationServiceOverride->Update(aGeolocationOverride.Value());
   } else if (RefPtr<GeolocationService> serviceOverride =
@@ -3886,7 +3939,7 @@ void BrowsingContext::SetGeolocationServiceOverride(
 }
 
 void BrowsingContext::DidSet(FieldIndex<IDX_TimezoneOverride>,
-                             nsString&& aOldValue) {
+                             nsString&& /*aOldValue*/) {
   MOZ_ASSERT(IsTop());
 
   const nsString& timezoneOverride = GetTimezoneOverride();
@@ -3916,7 +3969,7 @@ void BrowsingContext::DidSet(FieldIndex<IDX_TimezoneOverride>,
 }
 
 auto BrowsingContext::CanSet(FieldIndex<IDX_DefaultLoadFlags>,
-                             const uint32_t& aDefaultLoadFlags,
+                             const uint32_t& /*aDefaultLoadFlags*/,
                              ContentParent* aSource) -> CanSetResult {
   // Bug 1623565 - Are these flags only used by the debugger, which makes it
   // possible that this field can only be settable by the parent process?
@@ -3940,14 +3993,14 @@ void BrowsingContext::DidSet(FieldIndex<IDX_DefaultLoadFlags>) {
 }
 
 auto BrowsingContext::CanSet(FieldIndex<IDX_UserAgentOverride>,
-                             const nsCString& aUserAgent,
+                             const nsCString& /*aUserAgent*/,
                              ContentParent* aSource) -> CanSetResult {
   return LegacyRevertIfNotOwningOrParentProcess(aSource);
 }
 
 auto BrowsingContext::CanSet(FieldIndex<IDX_PlatformOverride>,
-                             const nsString& aPlatform, ContentParent* aSource)
-    -> CanSetResult {
+                             const nsString& /*aPlatform*/,
+                             ContentParent* aSource) -> CanSetResult {
   return LegacyRevertIfNotOwningOrParentProcess(aSource);
 }
 
@@ -4014,13 +4067,17 @@ void BrowsingContext::DidSet(FieldIndex<IDX_CurrentInnerWindowId>) {
         Canonical()->MaybeScheduleSessionStoreUpdate();
         mCurrentWindowContext->Canonical()->DidBecomeCurrentWindowGlobal(true);
       }
+      if (prevWindowContext && mCurrentWindowContext) {
+        Canonical()->MaybeRebindActiveEntry(prevWindowContext->Canonical(),
+                                            mCurrentWindowContext->Canonical());
+      }
     }
     BrowserParent::UpdateFocusFromBrowsingContext();
   }
 }
 
 bool BrowsingContext::CanSet(FieldIndex<IDX_IsPopupSpam>, const bool& aValue,
-                             ContentParent* aSource) {
+                             ContentParent* /*aSource*/) {
   // Ensure that we only mark a browsing context as popup spam once and never
   // unmark it.
   return aValue && !GetIsPopupSpam();
@@ -4254,7 +4311,7 @@ bool BrowsingContext::CanSet(FieldIndex<IDX_BrowserId>, const uint64_t& aValue,
 }
 
 bool BrowsingContext::CanSet(FieldIndex<IDX_PendingInitialization>,
-                             bool aNewValue, ContentParent* aSource) {
+                             bool aNewValue, ContentParent* /*aSource*/) {
   // Can only be cleared from `true` to `false`, and should only ever be set on
   // the toplevel BrowsingContext.
   return GetPendingInitialization() && !aNewValue;
@@ -4429,7 +4486,7 @@ void BrowsingContext::SessionHistoryCommit(
 void BrowsingContext::SetActiveSessionHistoryEntry(
     const Maybe<nsPoint>& aPreviousScrollPos, SessionHistoryInfo* aInfo,
     SessionHistoryInfo* aPreviousActiveEntry, uint32_t aLoadType,
-    uint32_t aUpdatedCacheKey, bool aUpdateLength) {
+    uint32_t aUpdatedCacheKey) {
   if (XRE_IsContentProcess()) {
     // XXX Why we update cache key only in content process case?
     if (aUpdatedCacheKey != 0) {
@@ -4437,19 +4494,17 @@ void BrowsingContext::SetActiveSessionHistoryEntry(
     }
 
     nsID changeID = {};
-    if (aUpdateLength) {
-      RefPtr<ChildSHistory> shistory = Top()->GetChildSessionHistory();
-      if (shistory) {
-        // We try to mimic what will happen in
-        // CanonicalBrowsingContext::SendSetActiveSessionHistoryEntry
-        if (AddSHEntryWouldIncreaseLength(aPreviousActiveEntry)) {
-          changeID = shistory->AddPendingHistoryChange();
-        }
+    RefPtr<ChildSHistory> shistory = Top()->GetChildSessionHistory();
+    if (shistory) {
+      // We try to mimic what will happen in
+      // CanonicalBrowsingContext::SendSetActiveSessionHistoryEntry
+      if (AddSHEntryWouldIncreaseLength(aPreviousActiveEntry)) {
+        changeID = shistory->AddPendingHistoryChange();
       }
     }
     ContentChild::GetSingleton()->SendSetActiveSessionHistoryEntry(
-        this, aPreviousScrollPos, *aInfo, aLoadType, aUpdatedCacheKey,
-        changeID);
+        GetCurrentWindowContext(), aPreviousScrollPos, *aInfo, aLoadType,
+        aUpdatedCacheKey, changeID, aInfo->NewSharedStateRequest());
   } else {
     Canonical()->SetActiveSessionHistoryEntry(
         aPreviousScrollPos, aInfo, aLoadType, aUpdatedCacheKey, nsID());
@@ -4459,8 +4514,8 @@ void BrowsingContext::SetActiveSessionHistoryEntry(
 void BrowsingContext::ReplaceActiveSessionHistoryEntry(
     SessionHistoryInfo* aInfo) {
   if (XRE_IsContentProcess()) {
-    ContentChild::GetSingleton()->SendReplaceActiveSessionHistoryEntry(this,
-                                                                       *aInfo);
+    ContentChild::GetSingleton()->SendReplaceActiveSessionHistoryEntry(
+        GetCurrentWindowContext(), *aInfo, aInfo->NewSharedStateRequest());
   } else {
     Canonical()->ReplaceActiveSessionHistoryEntry(aInfo);
   }
@@ -4574,6 +4629,12 @@ bool BrowsingContext::CheckNavigationRateLimit(CallerType aCallerType) {
                                       "NavigationChangeFloodingPrevented");
     }
 
+    PROFILER_MARKER(
+        "Navigation rate limited", DOM,
+        MarkerOptions(MarkerStack::Capture(),
+                      MarkerInnerWindowId(GetCurrentInnerWindowId())),
+        NavigationRateLimitedMarker, limitCount, throttleSpan);
+
     return false;
   }
 
@@ -4673,7 +4734,8 @@ bool ParamTraits<MaybeDiscarded<BrowsingContext>>::Read(
 }
 
 IMPLEMENT_IPC_SERIALIZER_WITH_FIELDS(BrowsingContext::IPCInitializer, mId,
-                                     mParentId, mWindowless, mUseRemoteTabs,
+                                     mParentId, mOpenerInnerWindowId,
+                                     mWindowless, mUseRemoteTabs,
                                      mUseRemoteSubframes, mCreatedDynamically,
                                      mChildOffset, mOriginAttributes,
                                      mRequestContextId, mSessionHistoryIndex,

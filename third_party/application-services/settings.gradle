@@ -19,8 +19,6 @@ buildscript {
         }
     } else {
         // big copy/paste from mobile/android/shared-settings.gradle.
-        gradle.ext.mozconfig = gradle.root.mozconfig
-
         repositories {
             gradle.mozconfig.substs.GRADLE_MAVEN_REPOSITORIES.each { repository ->
                 maven {
@@ -79,7 +77,6 @@ def setupProject(name, projectProps, appServicesRootDir) {
             project.ext.publishDir = appServicesRootDir
 
             if (gradle.hasProperty("mozconfig")) {
-                project.buildDir = "${gradle.mozconfig.topobjdir}/gradle/build/application-services/android/$name"
                 project.ext.publishDir = "${gradle.mozconfig.topsrcdir}/mobile/android/android-components"
             }
         }
@@ -90,19 +87,6 @@ def yaml = new Yaml()
 def buildconfig = yaml.load(new File(appServicesRootDir, '.buildconfig-android.yml').newInputStream())
 buildconfig.projects.each { project ->
     setupProject(project.key, project.value, appServicesRootDir)
-}
-
-if (gradle.root.hasProperty("mozconfig")) {
-    // The mozilla-central android-components/fenix "second pass" build resolves
-    // these components as Maven AARs from target.maven.zip, so the geckoview
-    // archive build must publish every app-services component, not just the
-    // megazord. Aggregate their publish tasks behind a single task.
-    def appServicesPublishTasks = buildconfig.projects.keySet().collect { ":${it}:publish" }
-    gradle.rootProject { rootProject ->
-        rootProject.tasks.register("publishAppServicesAndroid") { task ->
-            task.dependsOn(appServicesPublishTasks)
-        }
-    }
 }
 
 Properties localProperties = new Properties();
@@ -119,11 +103,7 @@ if (file('local.properties').canRead()) {
 def calcVersion(buildconfig) {
     def local = gradle.rootProject.findProperty("local")
 
-    if (gradle.hasProperty("mozconfig")) {
-        // We are in m-c - XXX - this is temporary - once in m-c this will not be called, but this seems sane for now?
-        def buildid = file("${gradle.mozconfig.topobjdir}/buildid.h").getText('utf-8').split()[2]
-        return "${gradle.mozconfig.substs.MOZ_APP_VERSION}-${buildid}"
-    } else if (gradle.rootProject.hasProperty("nightlyVersion")) {
+    if (gradle.rootProject.hasProperty("nightlyVersion")) {
         // We are in app-services but building a "nightly" version to be consumed by Fenix.
         return gradle.rootProject.nightlyVersion
     } else if(local) {
@@ -136,14 +116,7 @@ def calcVersion(buildconfig) {
 }
 
 def calcGroupId(buildconfig) {
-    if (gradle.root.hasProperty("mozconfig")) {
-        // We are in m-c - always build `org.mozilla.appservices`.
-        return buildconfig.groupId
-    } else if (gradle.rootProject.hasProperty("nightlyVersion")) {
-        return buildconfig.groupId + ".nightly"
-    } else {
-        return buildconfig.groupId
-    }
+    return buildconfig.groupId + (gradle.rootProject.hasProperty("nightlyVersion") ? ".nightly" : "")
 }
 
 // This is a copy of the `Config` object used in moz-central (but with the addition of ndkVersion for UniFFI)
@@ -155,30 +128,36 @@ class Config {
     // semantic versioning (MAJOR.MINOR.PATCH). See https://semver.org/
     public final String componentsVersion
     public final String componentsGroupId
+    public final String appServicesGroupId
     public final Integer jvmTargetCompatibility
     public final Integer compileSdkMajorVersion
     public final Integer compileSdkMinorVersion
     public final Integer minSdkVersion
     public final Integer targetSdkVersion
+    public final String buildToolsVersion
     public final String ndkVersion
 
     Config(
             String componentsVersion,
             String componentsGroupId,
+            String appServicesGroupId,
             Integer jvmTargetCompatibility,
             Integer compileSdkMajorVersion,
             Integer compileSdkMinorVersion,
             Integer minSdkVersion,
             Integer targetSdkVersion,
+            String buildToolsVersion,
             String ndkVersion
     ) {
         this.componentsVersion = componentsVersion
         this.componentsGroupId = componentsGroupId
+        this.appServicesGroupId = appServicesGroupId
         this.jvmTargetCompatibility = jvmTargetCompatibility
         this.compileSdkMajorVersion = compileSdkMajorVersion
         this.compileSdkMinorVersion = compileSdkMinorVersion
         this.minSdkVersion = minSdkVersion
         this.targetSdkVersion = targetSdkVersion
+        this.buildToolsVersion = buildToolsVersion
         this.ndkVersion = ndkVersion
     }
 }
@@ -199,12 +178,14 @@ gradle.projectsLoaded { ->
             // but which is unlikely to be depended on by accident otherwise.
             calcVersion(buildconfig), // version,
             calcGroupId(buildconfig), // componentsGroupId
+            calcGroupId(buildconfig), // appServicesGroupId
             17, // jvmTargetCompatibility,
-            36, // compileSdkMajorVersion,
-            1,  // compileSdkMinorVersion,
+            37, // compileSdkMajorVersion,
+            2,  // compileSdkMinorVersion,
             26, // minSdkVersion,
-            36, // targetSdkVersion,
-            "29.0.14206865", // ndkVersion - Keep it in sync in TC Dockerfile.
+            37, // targetSdkVersion,
+            "37.0.0", // buildToolsVersion - Keep it in sync in TC Dockerfile.
+            "30.0.16248370", // ndkVersion - Keep it in sync in TC Dockerfile.
         )
     }
 }

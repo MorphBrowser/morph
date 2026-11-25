@@ -18,6 +18,7 @@
 #include "nsString.h"
 #include "nsTArray.h"
 
+class nsPIDOMWindowInner;
 class nsILoadInfo;
 
 namespace mozilla::ipc {
@@ -30,7 +31,7 @@ namespace mozilla::dom {
 // A parsed connection allowlist, holding the enforced and report-only
 // allowlists delivered by the `Connection-Allowlist` and
 // `Connection-Allowlist-Report-Only` response headers.
-// https://wicg.github.io/connection-allowlists/
+// https://w3c.github.io/connection-allowlists/
 class ConnectionAllowlists final {
  public:
   NS_INLINE_DECL_REFCOUNTING(ConnectionAllowlists)
@@ -54,6 +55,10 @@ class ConnectionAllowlists final {
 
   bool ShouldLoad(nsIURI* aURI, nsILoadInfo* aLoadInfo) const;
 
+  bool ShouldBlockConnection(nsIURI* aURI, uint64_t aInnerWindowID) const;
+  bool ShouldBlockRedirect(nsIURI* aOriginalURI, nsILoadInfo* aLoadInfo) const;
+  bool ShouldBlockWebRTC(nsPIDOMWindowInner* aWindow) const;
+
   void ToArgs(mozilla::ipc::ConnectionAllowlistsArgs& aArgs) const;
   static already_AddRefed<ConnectionAllowlists> FromArgs(
       const mozilla::ipc::ConnectionAllowlistsArgs& aArgs);
@@ -76,7 +81,7 @@ class ConnectionAllowlists final {
       std::unique_ptr<std::remove_pointer_t<UrlPatternGlue>, UrlPatternDeleter>;
 
   // A single parsed "connection allowlist" struct.
-  // https://wicg.github.io/connection-allowlists/#connection-allowlist
+  // https://w3c.github.io/connection-allowlists/#connection-allowlist
   struct Allowlist {
     // Parses |aSerializedPattern| and if successful appends it to
     // |aAllowlist|.
@@ -104,11 +109,27 @@ class ConnectionAllowlists final {
     WebRTC mWebRTC = WebRTC::Block;
   };
 
-  bool ShouldBlockURL(nsIURI* aURI, nsILoadInfo* aLoadInfo) const;
+  bool ShouldBlockURL(nsIURI* aURI, uint64_t aInnerWindowID,
+                      bool aReportToConsole) const;
 
-  static void ReportViolation(const Variant<nsIURI*, nsCString>& aResource,
-                              nsILoadInfo* aLoadInfo,
+  using Resource = Variant<nsIURI*, nsCString>;
+
+  // Reports a violation of |aAllowlist| by the connection to |aURI| to the
+  // reporting endpoint, and to the console if |aReportToConsole|.
+  // |aIsRedirect| is whether the request violated the allowlist by being
+  // redirected.
+  static void ReportBlockedRequest(nsIURI* aURI, uint64_t aInnerWindowID,
+                                   const Allowlist& aAllowlist,
+                                   bool aReportToConsole, bool aIsRedirect);
+
+  static void ReportViolation(const Resource& aResource,
+                              nsPIDOMWindowInner* aWindow,
                               const Allowlist& aAllowlist);
+
+  static void ReportToConsole(const Resource& aResource,
+                              uint64_t aInnerWindowID,
+                              const Allowlist& aAllowlist,
+                              bool aIsRedirect = false);
 
   static Maybe<Allowlist> ParseConnectionAllowlistHeader(
       const nsACString& aHeader, Disposition aDisposition);

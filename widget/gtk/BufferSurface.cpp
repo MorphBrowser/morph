@@ -121,6 +121,16 @@ void BufferSurface::ReleaseTextures() {
   mGL = nullptr;
 }
 
+bool BufferSurface::HasValidYUVSize() const {
+  return GetSurfaceType() != SURFACE_YUV ||
+         (GetWidth() >= 2 && GetHeight() >= 2);
+}
+
+bool BufferSurface::SupportsDirectComposition() {
+  return GdkIsWaylandDisplay() && HasValidYUVSize() &&
+         GetGlobalDMABufFormats()->SupportsDirectComposition(GetFormat());
+}
+
 bool BufferSurface::HasAlpha() const {
   return mFOURCCFormat == GBM_FORMAT_ARGB8888 ||
          mFOURCCFormat == GBM_FORMAT_ABGR8888 ||

@@ -56,21 +56,13 @@ class gfxMacFont final : public gfxFont {
  protected:
   ~gfxMacFont() override;
 
-  // override to prefer CoreText shaping with fonts that depend on AAT
-  bool ShapeText(const char16_t* aText, uint32_t aOffset, uint32_t aLength,
-                 Script aScript, nsAtom* aLanguage, bool aVertical,
-                 RoundingFlags aRounding, gfxShapedText* aShapedText) override;
-
-  void InitMetrics();
-  void InitMetricsFromPlatform();
+  bool InitMetricsFromPlatform() override;
+  void FinishInitFontMetrics() override;
 
   // Get width and glyph ID for a character; uses aConvFactor
   // to convert font units as returned by CG to actual dimensions
   gfxFloat GetCharWidth(CFDataRef aCmap, char16_t aUniChar, uint32_t* aGlyphID,
                         gfxFloat aConvFactor);
-
-  // Init some metrics that may be based on measuring glyphs.
-  void InitMetricsByGlyphMeasurement(CFDataRef aCmap, gfxFloat aConvFactor);
 
   // a strong reference to the CoreGraphics font
   CGFontRef mCGFont;
@@ -78,8 +70,6 @@ class gfxMacFont final : public gfxFont {
   // a Core Text font reference, created only if we're using CT to measure
   // glyph widths; otherwise null.
   CTFontRef mCTFont;
-
-  mozilla::UniquePtr<gfxFontShaper> mCoreTextShaper;
 
   bool mVariationFont;  // true if font has OpenType variations
 };

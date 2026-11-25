@@ -43,7 +43,6 @@ skip-if = [
 skip-if = [
   "http2",
   "http3",
-  "os == 'android' && ccov", # times out, bug 2070393
 ]
 
 ["test_group_displayport-2.html"]
@@ -145,7 +144,6 @@ run-if = [
 ["test_group_overscroll_behavior.html"]
 skip-if = [
   "os == 'android'", # getPanHandler() doesn't support Android
-  "os == 'linux'", # SpecialPowers.isHeadless is broken on Linux (bug 1889039)
 ]
 
 ["test_group_overscroll_handoff.html"]
@@ -259,7 +257,6 @@ run-if = [
   "os != 'android'", # mouse events not supported on mobile
 ]
 skip-if = [
-  "standalone", # Bug 2026600
   "os == 'linux' && os_version == '22.04' && arch == 'x86_64' && display == 'wayland'", # Bug 1857059
 ]
 

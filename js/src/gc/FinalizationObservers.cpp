@@ -390,6 +390,25 @@ void FinalizationObservers::traceWeakEdges(JSTracer* trc, JS::Zone* zone) {
   traceWeakFinalizationRegistryEdges(trc, zone);
 }
 
+static void ExposeObjectToActiveJSDuringCollection(GCRuntime* gc,
+                                                   JSObject* object) {
+  // Normally we don't allow any marking during sweeping but gray unmarking does
+  // not cause anything to become marked that was not marked already.
+
+  MOZ_ASSERT(!IsAboutToBeFinalizedUnbarriered(object));
+
+  if (IsInsideNursery(object) || object->isMarkedBlack()) {
+    return;
+  }
+
+  Zone* zone = object->zone();
+  if (zone->needsMarkingBarrier()) {
+    PerformIncrementalReadBarrier(&object->asTenured());
+  } else if (!zone->isGCPreparing() && object->isMarkedGray()) {
+    UnmarkGrayGCThingUnchecked(&gc->marker(), JS::GCCellPtr(object));
+  }
+}
+
 void FinalizationObservers::traceWeakFinalizationRegistryEdges(JSTracer* trc,
                                                                JS::Zone* zone) {
   // Sweep finalization registry data and queue finalization records for cleanup
@@ -457,12 +476,13 @@ void FinalizationObservers::traceWeakFinalizationRegistryEdges(JSTracer* trc,
         record->setInRecordMap(false);
         record->unlink();
 
-        // Move the record to the queue object. In theory this requires a read
-        // barrier since the record pointer is weak. However we have may have
-        // finished marking the record's zone at this point so this is not
-        // possible. Instead note that the record will be marked if the registry
-        // is alive. If not then we clear any queued records when we discover
-        // the the registry is dead above.
+        // Move the record to the queue object. This requires a read barrier
+        // since the record pointer is weak. We may have finished marking the
+        // record's zone at this point however the record will be already marked
+        // if the registry is alive (and would have been removed by the previous
+        // loop above if not).
+        ExposeObjectToActiveJSDuringCollection(gc, record);
+
         FinalizationQueueObject* queue = record->queue();
         queue->queueRecordToBeCleanedUp(record);
 
@@ -481,9 +501,9 @@ bool FinalizationObservers::shouldQueueFinalizationRegistryForCleanup(
     FinalizationQueueObject* queue) {
   // FinalizationRegistries and their targets may be in different zones and
   // therefore swept at different times during GC. If a target is observed to
-  // die but the registry's zone has not yet been swept then we don't whether we
-  // need to queue the registry for cleanup callbacks, as the registry itself
-  // might be dead.
+  // die but the registry's zone has not yet been swept then we don't know
+  // whether we need to queue the registry for cleanup callbacks, as the
+  // registry itself might be dead.
   //
   // In this case we defer queuing the registry and this happens when the
   // registry is swept.
@@ -503,6 +523,7 @@ void GCRuntime::queueFinalizationRegistryForCleanup(
     return;
   }
 
+  JSFunction* doCleanup = queue->doCleanupFunction();
   JSObject* incumbentGlobal = nullptr;
 
   if (JSObject* wrapped = queue->getIncumbentGlobalRepresentative()) {
@@ -518,11 +539,11 @@ void GCRuntime::queueFinalizationRegistryForCleanup(
     incumbentGlobal = &unwrappedIncumbentGlobalRepresentative->nonCCWGlobal();
   }
 
-  callHostCleanupFinalizationRegistryCallback(queue->doCleanupFunction(),
-                                              incumbentGlobal);
+  ExposeObjectToActiveJSDuringCollection(this, queue);
 
-  // The queue object may be gray, and that's OK.
-  AutoTouchingGrayThings atgt;
+  JS::AssertObjectIsNotGray(doCleanup);
+  JS::AssertObjectIsNotGray(incumbentGlobal);
+  callHostCleanupFinalizationRegistryCallback(doCleanup, incumbentGlobal);
 
   queue->setQueuedForCleanup(true);
 }
@@ -608,6 +629,29 @@ void FinalizationObservers::traceWeakWeakRefList(JSTracer* trc,
                  target.toGCThing());
       weakRef->setTargetUnbarriered(target);
     }
+  }
+}
+
+JS_PUBLIC_API void JS::NoteWeakRefTargets(
+    JSRuntime* runtime, JS::NoteWeakRefTargetCallback callback, void* data) {
+  MOZ_ASSERT(CurrentThreadCanAccessRuntime(runtime));
+  runtime->gc.noteWeakRefTargets(callback, data);
+}
+
+void GCRuntime::noteWeakRefTargets(JS::NoteWeakRefTargetCallback callback,
+                                   void* data) {
+  for (AllZonesIter zone(this); !zone.done(); zone.next()) {
+    FinalizationObservers* observers = zone->finalizationObservers();
+    if (observers) {
+      observers->noteWeakRefTargets(callback, data);
+    }
+  }
+}
+
+void FinalizationObservers::noteWeakRefTargets(
+    JS::NoteWeakRefTargetCallback callback, void* data) {
+  for (auto iter = weakRefMap.iter(); !iter.done(); iter.next()) {
+    callback(iter.get().key().toGCCellPtr(), data);
   }
 }
 

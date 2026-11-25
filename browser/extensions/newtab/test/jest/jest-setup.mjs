@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import "@testing-library/jest-dom"; // eslint-disable-line import/no-unassigned-import
+import "@testing-library/jest-dom"; // eslint-disable-line import-x/no-unassigned-import
 import { EventEmitter } from "test/jest/test-utils";
 
 // Firefox module-loader shims. System modules (lib/*.sys.mjs) resolve their
@@ -47,6 +47,12 @@ globalThis.ChromeUtils = {
   },
   generateQI: () => ({}),
 };
+
+// ImportHelper needs the real module, which the importESModule shim above
+// never returns.
+jest.mock("resource://newtab/lib/ImportHelper.sys.mjs", () => ({
+  ImportHelper: { import: moduleURI => jest.requireActual(moduleURI) },
+}));
 
 globalThis.XPCOMUtils = {
   defineLazyGlobalGetters: updateGlobalOrObject,
@@ -124,6 +130,21 @@ if (!globalThis.Element.prototype.setPointerCapture) {
   globalThis.Element.prototype.setPointerCapture = () => {};
   globalThis.Element.prototype.releasePointerCapture = () => {};
   globalThis.Element.prototype.hasPointerCapture = () => false;
+}
+
+if (!globalThis.Element.prototype.moveBefore) {
+  // jsdom has no moveBefore. This one throws where the real one does, and
+  // otherwise inserts, since jsdom has no iframe or focus state to keep.
+  const { insertBefore } = globalThis.Node.prototype;
+  globalThis.Element.prototype.moveBefore = function (node, anchor) {
+    if (node.getRootNode() !== this.getRootNode()) {
+      throw new globalThis.DOMException(
+        "moveBefore needs the node and the parent in the same tree",
+        "HierarchyRequestError"
+      );
+    }
+    insertBefore.call(this, node, anchor);
+  };
 }
 
 if (globalThis.performance && !globalThis.performance.getEntriesByType) {

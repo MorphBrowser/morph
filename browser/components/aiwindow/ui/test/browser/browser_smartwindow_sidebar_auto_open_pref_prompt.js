@@ -9,6 +9,10 @@ ChromeUtils.defineESModuleGetters(lazy, {
   ASRouter: "resource:///modules/asrouter/ASRouter.sys.mjs",
 });
 
+const { MockEngineManager } = ChromeUtils.importESModule(
+  "resource://testing-common/AIWindowTestUtils.sys.mjs"
+);
+
 const promptShowingSelector =
   "#feature-callout:not(.hidden) .SMARTWINDOW_SIDEBAR_AUTO_OPEN_PROMPT_CALLOUT";
 
@@ -19,12 +23,13 @@ const rejectedResultSelector =
   "#feature-callout:not(.hidden) .SMARTWINDOW_SIDEBAR_AUTO_OPEN_REJECTED_CALLOUT";
 
 describe("sidebar auto-open pref prompt", () => {
-  let win, askButton;
+  let win, askButton, mockEngineManager;
 
   beforeEach(async () => {
     Services.prefs.clearUserPref("browser.smartwindow.sidebar.emptyCloseCount");
     await lazy.ASRouter.resetMessageState();
 
+    mockEngineManager = new MockEngineManager();
     win = await openAIWindow();
     askButton = win.document.getElementById("smartwindow-ask-button-inner");
 
@@ -39,6 +44,8 @@ describe("sidebar auto-open pref prompt", () => {
 
     await lazy.ASRouter.resetMessageState();
     await BrowserTestUtils.closeWindow(win);
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
 
     win = null;
   });
@@ -193,6 +200,7 @@ describe("sidebar auto-open pref prompt", () => {
       );
       Assert.ok(currentAutoOpen, "openByDefault should start as true");
 
+      Services.fog.testResetFOG();
       const primaryButton = callout.querySelector("button.primary");
       primaryButton.click();
 
@@ -203,6 +211,24 @@ describe("sidebar auto-open pref prompt", () => {
       Assert.ok(
         !currentAutoOpen,
         "openByDefault should switch to false if user accepts prompt"
+      );
+
+      const changeEvents =
+        Glean.smartWindow.sidebarOpenByDefaultChange.testGetValue();
+      Assert.equal(
+        changeEvents.length,
+        1,
+        "One sidebarOpenByDefaultChange event was recorded"
+      );
+      Assert.equal(
+        changeEvents[0].extra.enabled,
+        "false",
+        "The event records the sidebar no longer opening by default"
+      );
+      Assert.equal(
+        Glean.smartWindow.sidebarOpenByDefault.testGetValue(),
+        false,
+        "sidebarOpenByDefault metric is false after accepting the prompt"
       );
     });
 

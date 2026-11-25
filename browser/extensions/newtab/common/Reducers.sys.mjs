@@ -5,11 +5,15 @@
 import { actionTypes as at } from "resource://newtab/common/Actions.mjs";
 import { Dedupe } from "resource:///modules/Dedupe.sys.mjs";
 
-export {
-  TOP_SITES_DEFAULT_ROWS,
-  TOP_SITES_MAX_ROWS,
-  TOP_SITES_MAX_SITES_PER_ROW,
-} from "resource:///modules/topsites/constants.mjs";
+/**
+ * @backward-compat { version 162 }
+ *
+ * Switch back to re-exporting these from
+ * moz-src:///browser/components/topsites/constants.mjs once 162 hits release.
+ */
+export const TOP_SITES_DEFAULT_ROWS = 1;
+export const TOP_SITES_MAX_SITES_PER_ROW = 8;
+export const TOP_SITES_MAX_ROWS = 4;
 
 const dedupe = new Dedupe(site => site && site.url);
 
@@ -30,6 +34,7 @@ export const INITIAL_STATE = {
     // specific wallpaper category (e.g. "firefox"), this holds that category id
     // so WallpaperCategories can open it. Cleared when the panel closes.
     customizePanelWallpaperCategory: null,
+    customizePanelSource: null,
   },
   Ads: {
     initialized: false,
@@ -142,6 +147,8 @@ export const INITIAL_STATE = {
     inferredInterests: {},
     coarseInferredInterests: {},
     coarsePrivateInferredInterests: {},
+    locationPrivateInferredInterests: null,
+    shouldUseLocationVector: false,
     debugFeatures: null,
     inferredTelemetrySettingsOverrides: {},
   },
@@ -194,17 +201,6 @@ export const INITIAL_STATE = {
     suggestedLocations: [],
   },
   // Widgets
-  Stocks: {
-    tickers: [],
-    lastUpdated: null,
-    error: false,
-    watchlistTickers: [],
-    watchlistReconciledSymbols: [],
-    searchResults: [],
-    searchStatus: "idle",
-    activeRequestId: null,
-    submittedQuery: "",
-  },
   PictureOfTheDay: {
     initialized: false,
     lastUpdated: null,
@@ -217,6 +213,7 @@ export const INITIAL_STATE = {
     author: "",
     licenseLabel: "",
     licenseUrl: "",
+    previous: null,
     error: null,
   },
   ListsWidget: {
@@ -255,6 +252,7 @@ export const INITIAL_STATE = {
   ExternalComponents: {
     components: [],
   },
+  ExtensionWidgets: {},
   PrivacyWidget: {
     initialized: false,
     // Count of trackers blocked today, fetched by PrivacyFeed.
@@ -307,6 +305,13 @@ export const INITIAL_STATE = {
      */
     engineName: "",
   },
+  Travel: {
+    initialized: false,
+    results: [],
+  },
+  // Framed widget documents from the Merino framed widgets manifest, keyed by
+  // widget id: { url, status }. See resolveWidgetFrame.
+  FramedWidgets: {},
 };
 
 function App(prevState = INITIAL_STATE.App, action) {
@@ -350,11 +355,13 @@ function App(prevState = INITIAL_STATE.App, action) {
       return Object.assign({}, prevState, {
         customizeMenuVisible: true,
         customizePanelWallpaperCategory: action.data?.wallpaperCategory ?? null,
+        customizePanelSource: action.data?.source ?? null,
       });
     case at.HIDE_PERSONALIZE:
       return Object.assign({}, prevState, {
         customizeMenuVisible: false,
         customizePanelWallpaperCategory: null,
+        customizePanelSource: null,
       });
     default:
       return prevState;
@@ -743,6 +750,9 @@ function InferredPersonalization(
         coarseInferredInterests: action.data.coarseInferredInterests,
         coarsePrivateInferredInterests:
           action.data.coarsePrivateInferredInterests,
+        locationPrivateInferredInterests:
+          action.data.locationPrivateInferredInterests ?? null,
+        shouldUseLocationVector: action.data.shouldUseLocationVector ?? false,
         inferredTelemetrySettingsOverrides:
           action.data.inferredTelemetrySettingsOverrides,
         lastUpdated: action.data.lastUpdated,
@@ -804,12 +814,13 @@ function DiscoveryStream(prevState = INITIAL_STATE.DiscoveryStream, action) {
       ...prevState.feeds,
       data: Object.keys(prevState.feeds.data).reduce(
         (accumulator, feed_url) => {
+          const feedData = prevState.feeds.data[feed_url].data;
           accumulator[feed_url] = {
             data: {
-              ...prevState.feeds.data[feed_url].data,
-              recommendations: handleSites(
-                prevState.feeds.data[feed_url].data.recommendations
-              ),
+              ...feedData,
+              recommendations: Array.isArray(feedData.recommendations)
+                ? handleSites(feedData.recommendations)
+                : feedData.recommendations,
             },
           };
           return accumulator;
@@ -1253,6 +1264,7 @@ const PictureOfTheDay = (prevState = INITIAL_STATE.PictureOfTheDay, action) => {
         author: action.data.author ?? "",
         licenseLabel: action.data.licenseLabel ?? "",
         licenseUrl: action.data.licenseUrl ?? "",
+        previous: action.data.previous ?? null,
         lastUpdated: action.data.lastUpdated ?? null,
         error: action.data.error ?? null,
         initialized: true,
@@ -1285,6 +1297,33 @@ function RecentSearches(prevState = INITIAL_STATE.RecentSearches, action) {
         ...prevState,
         ...action.data,
         initialized: prevState.initialized || "searches" in action.data,
+      };
+    default:
+      return prevState;
+  }
+}
+
+function FramedWidgets(prevState = INITIAL_STATE.FramedWidgets, action) {
+  switch (action.type) {
+    case at.FRAMED_WIDGETS_UPDATE:
+      return action.data;
+    // Dispatched in content when a widget's document fails to load. The
+    // marker hides the widget in that tab, even with a trainhop URL override,
+    // until the next manifest update replaces the state.
+    case at.FRAMED_WIDGET_UNAVAILABLE:
+      return { ...prevState, [action.data.id]: { unavailable: true } };
+    default:
+      return prevState;
+  }
+}
+
+function Travel(prevState = INITIAL_STATE.Travel, action) {
+  switch (action.type) {
+    case at.WIDGETS_TRAVEL_UPDATE:
+      return {
+        ...prevState,
+        ...action.data,
+        initialized: true,
       };
     default:
       return prevState;
@@ -1392,51 +1431,6 @@ function TimerWidget(prevState = INITIAL_STATE.TimerWidget, action) {
   }
 }
 
-function Stocks(prevState = INITIAL_STATE.Stocks, action) {
-  switch (action.type) {
-    case at.WIDGETS_STOCKS_UPDATE:
-      return {
-        ...prevState,
-        tickers: action.data.tickers,
-        lastUpdated: action.data.lastUpdated,
-        error: action.data.error ?? false,
-      };
-    case at.WIDGETS_STOCKS_WATCHLIST_UPDATE:
-      return {
-        ...prevState,
-        watchlistTickers: action.data.watchlistTickers,
-        watchlistReconciledSymbols: action.data.reconciledSymbols,
-      };
-    case at.WIDGETS_STOCKS_SEARCH_STARTED:
-      return {
-        ...prevState,
-        searchStatus: "loading",
-        searchResults: [],
-        activeRequestId: action.data.requestId,
-        submittedQuery: action.data.query,
-      };
-    case at.WIDGETS_STOCKS_SEARCH_RESPONSE:
-      if (action.data.requestId !== prevState.activeRequestId) {
-        return prevState;
-      }
-      return {
-        ...prevState,
-        searchStatus: action.data.status,
-        searchResults: action.data.matches || [],
-      };
-    case at.WIDGETS_STOCKS_SEARCH_CLEAR:
-      return {
-        ...prevState,
-        searchStatus: "idle",
-        searchResults: [],
-        activeRequestId: null,
-        submittedQuery: "",
-      };
-    default:
-      return prevState;
-  }
-}
-
 function ListsWidget(prevState = INITIAL_STATE.ListsWidget, action) {
   switch (action.type) {
     case at.WIDGETS_LISTS_SET:
@@ -1455,6 +1449,15 @@ function ExternalComponents(
   switch (action.type) {
     case at.REFRESH_EXTERNAL_COMPONENTS:
       return { ...prevState, components: action.data };
+    default:
+      return prevState;
+  }
+}
+
+function ExtensionWidgets(prevState = INITIAL_STATE.ExtensionWidgets, action) {
+  switch (action.type) {
+    case at.WIDGETS_EXTENSIONS_UPDATE:
+      return action.data;
     default:
       return prevState;
   }
@@ -1479,9 +1482,11 @@ export const reducers = {
   SectionsLayout,
   WebNotifications,
   Weather,
-  Stocks,
   ExternalComponents,
+  ExtensionWidgets,
   PrivacyWidget,
   PictureOfTheDay,
   RecentSearches,
+  Travel,
+  FramedWidgets,
 };

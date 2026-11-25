@@ -212,7 +212,8 @@ static bool CanFoldShiftIntoUse(MDefinition* shift) {
     return false;
   }
   MDefinition* use = node->toDefinition();
-  if (use->block() != shift->block() || use->type() != MIRType::Int32) {
+  if (use->block() != shift->block() || use->type() != MIRType::Int32 ||
+      use->isRecoveredOnBailout()) {
     return false;
   }
   if (!use->isAdd() && !use->isSub() && !use->isBitAnd() && !use->isBitOr() &&
@@ -240,6 +241,12 @@ void LIRGeneratorARM64::lowerForShift(LInstructionHelper<1, 2, 0>* ins,
     return;
   }
   lowerForALU(ins, mir, lhs, rhs);
+}
+
+// A constant zero is stored from the zero register.
+bool LIRGeneratorARM64::canStoreConstantWithoutRegister(MDefinition* value) {
+  return value->isConstant() &&
+         (value->toConstant()->isInt32(0) || value->toConstant()->isInt64(0));
 }
 
 bool LIRGeneratorARM64::lowerForALUWithShiftedOperand(JSOp op,
@@ -371,7 +378,7 @@ void LIRGeneratorARM64::lowerDivI64(MDiv* div) {
     int64_t rhs = div->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(mozilla::Abs(rhs))) {
-      int32_t shift = mozilla::FloorLog2(mozilla::Abs(rhs));
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
 
       auto* lir = new (alloc()) LDivPowTwoI64(lhs, shift, rhs < 0);
       define(lir, div);
@@ -393,7 +400,7 @@ void LIRGeneratorARM64::lowerModI64(MMod* mod) {
     int64_t rhs = mod->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(mozilla::Abs(rhs))) {
-      int32_t shift = mozilla::FloorLog2(mozilla::Abs(rhs));
+      int32_t shift = std::countr_zero(mozilla::Abs(rhs));
 
       LAllocation lhs = useRegisterAtStart(mod->lhs());
       auto* lir = new (alloc()) LModPowTwoI64(lhs, shift);
@@ -420,7 +427,7 @@ void LIRGeneratorARM64::lowerUDivI64(MDiv* div) {
     uint64_t rhs = div->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(rhs)) {
-      int32_t shift = mozilla::FloorLog2(rhs);
+      int32_t shift = std::countr_zero(rhs);
 
       auto* lir = new (alloc()) LDivPowTwoI64(lhs, shift, false);
       define(lir, div);
@@ -443,7 +450,7 @@ void LIRGeneratorARM64::lowerUModI64(MMod* mod) {
     uint64_t rhs = mod->rhs()->toConstant()->toInt64();
 
     if (std::has_single_bit(rhs)) {
-      int32_t shift = mozilla::FloorLog2(rhs);
+      int32_t shift = std::countr_zero(rhs);
 
       LAllocation lhs = useRegisterAtStart(mod->lhs());
       auto* lir = new (alloc()) LModPowTwoI64(lhs, shift);
@@ -1107,6 +1114,8 @@ bool MWasmTernarySimd128::canRelaxBitselect() { return false; }
 bool MWasmBinarySimd128::canPmaddubsw() { return false; }
 
 bool MWasmBinarySimd128::canTestBits() { return true; }
+
+bool MWasmReplaceLaneSimd128::canMoveLane() { return true; }
 #endif
 
 bool MWasmBinarySimd128::specializeForConstantRhs() {
@@ -1321,6 +1330,24 @@ void LIRGenerator::visitWasmReplaceLaneSimd128(MWasmReplaceLaneSimd128* ins) {
     auto* lir = new (alloc()) LWasmReplaceLaneSimd128(lhs, rhsAlloc);
     defineReuseInput(lir, ins, 0);
   }
+#else
+  MOZ_CRASH("No SIMD");
+#endif
+}
+
+void LIRGenerator::visitWasmMoveLaneSimd128(MWasmMoveLaneSimd128* ins) {
+#ifdef ENABLE_JIT_SIMD
+  // The output reuses lhs, and the allocator may copy lhs into it before the
+  // lane move reads rhs, so rhs must not share the output's register unless it
+  // is the same value as lhs.
+  MDefinition* lhs = ins->lhs();
+  MDefinition* rhs = ins->rhs();
+  LAllocation rhsAlloc = willHaveDifferentLIRNodes(lhs, rhs)
+                             ? useRegister(rhs)
+                             : useRegisterAtStart(rhs);
+  auto* lir =
+      new (alloc()) LWasmMoveLaneSimd128(useRegisterAtStart(lhs), rhsAlloc);
+  defineReuseInput(lir, ins, 0);
 #else
   MOZ_CRASH("No SIMD");
 #endif

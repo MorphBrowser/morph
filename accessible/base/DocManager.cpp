@@ -125,7 +125,7 @@ void DocManager::NotifyOfDocumentShutdown(DocAccessible* aDocument,
     // will shut down the accessibility service completely.
     bool anyPrintDocsRemain = false;
     for (const auto& entry : mDocAccessibleCache) {
-      DocAccessible* doc = entry.GetWeak();
+      DocAccessible* doc = entry.GetRawPtr();
       if (doc->IsPrintDoc()) {
         anyPrintDocsRemain = true;
         break;
@@ -183,7 +183,7 @@ xpcAccessibleDocument* DocManager::GetXPCDocument(DocAccessibleParent* aDoc) {
 #ifdef DEBUG
 bool DocManager::IsProcessingRefreshDriverNotification() const {
   for (const auto& entry : mDocAccessibleCache) {
-    DocAccessible* docAccessible = entry.GetWeak();
+    DocAccessible* docAccessible = entry.GetRawPtr();
     NS_ASSERTION(docAccessible,
                  "No doc accessible for the object in doc accessible cache!");
 
@@ -231,7 +231,7 @@ void DocManager::NotifyOfPrintDocument(dom::Document* aDoc) {
   AutoTArray<RefPtr<dom::Document>, 8> descendants;
   aDoc->CollectDescendantDocuments(
       descendants, dom::Document::IncludeSubResources::No,
-      [](const dom::Document* aDescDoc) { return true; });
+      [](const dom::Document* /*aDescDoc*/) { return true; });
   for (dom::Document* descDoc : descendants) {
     if (DocAccessible* descDocAcc =
             serv->CreateDocOrRootAccessible(descDoc, /* aAllowStatic */ true)) {
@@ -378,38 +378,43 @@ DocManager::OnStateChange(nsIWebProgress* aWebProgress, nsIRequest* aRequest,
 }
 
 NS_IMETHODIMP
-DocManager::OnProgressChange(nsIWebProgress* aWebProgress, nsIRequest* aRequest,
-                             int32_t aCurSelfProgress, int32_t aMaxSelfProgress,
-                             int32_t aCurTotalProgress,
-                             int32_t aMaxTotalProgress) {
+DocManager::OnProgressChange(nsIWebProgress* /*aWebProgress*/,
+                             nsIRequest* /*aRequest*/,
+                             int32_t /*aCurSelfProgress*/,
+                             int32_t /*aMaxSelfProgress*/,
+                             int32_t /*aCurTotalProgress*/,
+                             int32_t /*aMaxTotalProgress*/) {
   MOZ_ASSERT_UNREACHABLE("notification excluded in AddProgressListener(...)");
   return NS_OK;
 }
 
 NS_IMETHODIMP
-DocManager::OnLocationChange(nsIWebProgress* aWebProgress, nsIRequest* aRequest,
-                             nsIURI* aLocation, uint32_t aFlags) {
+DocManager::OnLocationChange(nsIWebProgress* /*aWebProgress*/,
+                             nsIRequest* /*aRequest*/, nsIURI* /*aLocation*/,
+                             uint32_t /*aFlags*/) {
   MOZ_ASSERT_UNREACHABLE("notification excluded in AddProgressListener(...)");
   return NS_OK;
 }
 
 NS_IMETHODIMP
-DocManager::OnStatusChange(nsIWebProgress* aWebProgress, nsIRequest* aRequest,
-                           nsresult aStatus, const char16_t* aMessage) {
+DocManager::OnStatusChange(nsIWebProgress* /*aWebProgress*/,
+                           nsIRequest* /*aRequest*/, nsresult /*aStatus*/,
+                           const char16_t* /*aMessage*/) {
   MOZ_ASSERT_UNREACHABLE("notification excluded in AddProgressListener(...)");
   return NS_OK;
 }
 
 NS_IMETHODIMP
-DocManager::OnSecurityChange(nsIWebProgress* aWebProgress, nsIRequest* aRequest,
-                             uint32_t aState) {
+DocManager::OnSecurityChange(nsIWebProgress* /*aWebProgress*/,
+                             nsIRequest* /*aRequest*/, uint32_t /*aState*/) {
   MOZ_ASSERT_UNREACHABLE("notification excluded in AddProgressListener(...)");
   return NS_OK;
 }
 
 NS_IMETHODIMP
-DocManager::OnContentBlockingEvent(nsIWebProgress* aWebProgress,
-                                   nsIRequest* aRequest, uint32_t aEvent) {
+DocManager::OnContentBlockingEvent(nsIWebProgress* /*aWebProgress*/,
+                                   nsIRequest* /*aRequest*/,
+                                   uint32_t /*aEvent*/) {
   MOZ_ASSERT_UNREACHABLE("notification excluded in AddProgressListener(...)");
   return NS_OK;
 }

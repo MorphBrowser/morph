@@ -1,0 +1,57 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/* Morph visual foundation. See docs/morph/ARCHITECTURE.md.
+ *
+ * Everything here is gated by browser.morph.enabled and only restyles the
+ * vertical tab strip. Colour overrides stay out of forced-colors and
+ * prefers-contrast because unlayered rules would outrank those token layers. */
+
+@media -moz-pref("browser.morph.enabled") and -moz-pref("sidebar.verticalTabs") {
+  :root {
+    --morph-motion-duration-short: 150ms;
+    --morph-shape-tab: var(--border-radius-medium);
+    --morph-shape-tab-selected: var(--border-radius-circle);
+    --morph-state-hover: 8%;
+    --morph-state-pressed: 12%;
+
+    --tab-border-radius: var(--morph-shape-tab);
+
+    &:not([uidensity]) {
+      --tab-min-height: max(36px, calc(var(--tab-label-line-height) * 1em));
+    }
+
+    @media not ((forced-colors) or (prefers-contrast)) {
+      &[theme-in-app] {
+        --morph-secondary-container: color-mix(in srgb, var(--color-accent-primary) 16%, var(--toolbar-background-color));
+
+        --morph-tab-background-color-pressed: color-mix(in srgb, currentColor var(--morph-state-pressed), transparent);
+
+        --tab-background-color-hover: color-mix(in srgb, currentColor var(--morph-state-hover), transparent);
+        --tab-background-color-selected: var(--morph-secondary-container);
+        --tab-border-color-selected: transparent;
+        --tab-border-color-accent: transparent;
+        --tab-box-shadow-selected: none;
+      }
+    }
+  }
+
+  #tabbrowser-tabs[orient="vertical"] .tab-background {
+    transition-property: background-color, border-radius;
+    transition-duration: var(--morph-motion-duration-short);
+    transition-timing-function: var(--motion-easing-standard);
+
+    .tabbrowser-tab:hover:active > .tab-stack > &:not([selected], [multiselected]) {
+      background-color: var(--morph-tab-background-color-pressed, var(--tab-background-color-hover));
+    }
+
+    &[selected] {
+      border-radius: var(--morph-shape-tab-selected);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      transition-duration: 0s;
+    }
+  }
+}

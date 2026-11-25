@@ -142,7 +142,12 @@ addAccessibleTask(
   <span id="aria_tree" role="tree"></span>
   <span id="aria_tree_mixed" role="tREe"></span>
   <span id="aria_treegrid" role="treegrid"></span>
-  <span id="aria_treegrid_mixed" role="tREEGRId"></span>`,
+  <span id="aria_treegrid_mixed" role="tREEGRId"></span>
+  <span role="sectionfooter" id="aria_sectionfooter">sectionfooter</span>
+  <span role="sECTIONFOOTEr" id="aria_sectionfooter_mixed">sectionfooter</span>
+  <span role="sectionheader" id="aria_sectionheader">sectionheader</span>
+  <span role="sECTIONHEADEr" id="aria_sectionheader_mixed">sectionheader</span>
+`,
   async function testARIARoleMap(browser, accDoc) {
     let getAcc = id => findAccessibleChildByID(accDoc, id);
     testRole(getAcc("aria_alert"), ROLE_ALERT);
@@ -177,8 +182,8 @@ addAccessibleTask(
     testRole(getAcc("aria_document_mixed"), ROLE_NON_NATIVE_DOCUMENT);
     testRole(getAcc("aria_form"), ROLE_TEXT);
     testRole(getAcc("aria_form_mixed"), ROLE_TEXT);
-    testRole(getAcc("aria_form_with_label"), ROLE_FORM);
-    testRole(getAcc("aria_form_with_label_mixed"), ROLE_FORM);
+    testRole(getAcc("aria_form_with_label"), ROLE_FORM_LANDMARK);
+    testRole(getAcc("aria_form_with_label_mixed"), ROLE_FORM_LANDMARK);
     testRole(getAcc("aria_feed"), ROLE_GROUPING);
     testRole(getAcc("aria_feed_mixed"), ROLE_GROUPING);
     testRole(getAcc("aria_figure"), ROLE_FIGURE);
@@ -277,6 +282,10 @@ addAccessibleTask(
     testRole(getAcc("aria_tree_mixed"), ROLE_OUTLINE);
     testRole(getAcc("aria_treegrid"), ROLE_TREE_TABLE);
     testRole(getAcc("aria_treegrid_mixed"), ROLE_TREE_TABLE);
+    testRole(getAcc("aria_sectionfooter"), ROLE_SECTION_FOOTER);
+    testRole(getAcc("aria_sectionfooter_mixed"), ROLE_SECTION_FOOTER);
+    testRole(getAcc("aria_sectionheader"), ROLE_SECTION_HEADER);
+    testRole(getAcc("aria_sectionheader_mixed"), ROLE_SECTION_HEADER);
   },
   { chrome: true, topLevel: true }
 );
@@ -375,8 +384,8 @@ addAccessibleTask(
     testRole(getAcc("articlemain_mixed"), ROLE_LANDMARK);
     testRole(getAcc("articleform"), ROLE_ARTICLE);
     testRole(getAcc("articleform_mixed"), ROLE_ARTICLE);
-    testRole(getAcc("articleform_label"), ROLE_FORM);
-    testRole(getAcc("articleform_label_mixed"), ROLE_FORM);
+    testRole(getAcc("articleform_label"), ROLE_FORM_LANDMARK);
+    testRole(getAcc("articleform_label_mixed"), ROLE_FORM_LANDMARK);
 
     // Test article exposed as article
     testRole(getAcc("testArticle"), ROLE_ARTICLE);
@@ -397,8 +406,8 @@ addAccessibleTask(
     testRole(getAcc("application_mixed"), ROLE_APPLICATION);
     testRole(getAcc("form"), ROLE_SECTION);
     testRole(getAcc("form_mixed"), ROLE_SECTION);
-    testRole(getAcc("form_label"), ROLE_FORM);
-    testRole(getAcc("form_label_mixed"), ROLE_FORM);
+    testRole(getAcc("form_label"), ROLE_FORM_LANDMARK);
+    testRole(getAcc("form_label_mixed"), ROLE_FORM_LANDMARK);
     testRole(getAcc("application_table"), ROLE_APPLICATION);
     testRole(getAcc("application_table_mixed"), ROLE_APPLICATION);
 

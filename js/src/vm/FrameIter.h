@@ -108,9 +108,6 @@ class JitFrameIter {
  protected:
   jit::JitActivation* act_ = nullptr;
   mozilla::MaybeOneOf<jit::JSJitFrameIter, wasm::WasmFrameIter> iter_ = {};
-  // Exit instance of the current wasm segment, recorded by settle() so GC
-  // traces it even when a return_call emptied the segment. See TraceJitFrames.
-  wasm::Instance* wasmExitInstance_ = nullptr;
   bool mustUnwindActivation_ = false;
 
   void settle();
@@ -118,8 +115,12 @@ class JitFrameIter {
  public:
   JitFrameIter() = default;
 
+  // When unwinding, |shadowStackPointer| is the value read on entry to the
+  // exception handler. It's passed to the JSJitFrameIter or WasmFrameIter, and
+  // handed over between them on transitions.
   explicit JitFrameIter(jit::JitActivation* activation,
-                        bool mustUnwindActivation = false);
+                        bool mustUnwindActivation = false,
+                        uintptr_t* shadowStackPointer = nullptr);
 
   explicit JitFrameIter(const JitFrameIter& another);
   JitFrameIter& operator=(const JitFrameIter& another);
@@ -128,7 +129,6 @@ class JitFrameIter {
   void reset() {
     MOZ_ASSERT(isSome());
     iter_.destroy();
-    wasmExitInstance_ = nullptr;
   }
 
   bool isJSJit() const {
@@ -146,7 +146,6 @@ class JitFrameIter {
   const wasm::WasmFrameIter& asWasm() const {
     return iter_.ref<wasm::WasmFrameIter>();
   }
-  wasm::Instance* wasmExitInstance() const { return wasmExitInstance_; }
 
   // Operations common to all frame iterators.
   const jit::JitActivation* activation() const { return act_; }
@@ -159,12 +158,17 @@ class JitFrameIter {
   // frame, once control returns to this frame.
   uint8_t* resumePCinCurrentFrame() const;
 
-  // Operations which have an effect only on JIT frames.
-  void skipNonScriptedJSFrames();
+  // Skip JS JIT frames that are not scripted, and hidden wasm frames, see
+  // WasmFrameIter::currentFrameIsReturnCallFallback.
+  void skipNonScriptedFrames();
 
   // Returns true iff this is a JIT frame with a self-hosted script. Note: be
   // careful, JitFrameIter does not consider functions inlined by Ion.
   bool isSelfHostedIgnoringInlining() const;
+
+  // Returns the tracked shadow stack pointer while unwinding, or nullptr if
+  // we're not unwinding or the shadow stack is disabled.
+  uintptr_t* shadowStackPointer() const;
 };
 
 // A JitFrameIter that skips all the non-JSJit frames, skipping interleaved

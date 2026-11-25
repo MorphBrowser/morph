@@ -12,7 +12,6 @@
 #include "WebGL2Context.h"
 #include "WebGLBuffer.h"
 #include "WebGLContext.h"
-#include "WebGLContextUtils.h"
 #include "WebGLFormats.h"
 #include "WebGLFramebuffer.h"
 #include "WebGLProgram.h"
@@ -29,6 +28,7 @@
 #include "jsfriendapi.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/StaticPrefs_webgl.h"
+#include "mozilla/Vector.h"
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/ImageData.h"
 #include "mozilla/dom/WebGLRenderingContextBinding.h"
@@ -1165,6 +1165,16 @@ webgl::ReadPixelsResult WebGLContext::ReadPixelsImpl(
 
   ////
 
+  // validate skipRows:
+  // - it is originally GLint but stored as uint32_t
+  // - here it has to be checked that it's not too large
+  const CheckedInt<GLint> skipRows = packing.skipRows;
+  if (!skipRows.isValid()) {
+    ErrorInvalidOperation("PACK_SKIP_ROWS must be in the range of [0..%d]",
+                          std::numeric_limits<int32_t>::max());
+    return {};
+  }
+
   int32_t readX, readY;
   int32_t writeX, writeY;
   int32_t rwWidth, rwHeight;
@@ -1181,7 +1191,7 @@ webgl::ReadPixelsResult WebGLContext::ReadPixelsImpl(
   if (IsWebGL2()) {
     gl->fPixelStorei(LOCAL_GL_PACK_ROW_LENGTH, packing.rowLength);
     gl->fPixelStorei(LOCAL_GL_PACK_SKIP_PIXELS, packing.skipPixels);
-    gl->fPixelStorei(LOCAL_GL_PACK_SKIP_ROWS, packing.skipRows);
+    gl->fPixelStorei(LOCAL_GL_PACK_SKIP_ROWS, skipRows.value());
   }
 
   if (!rwWidth || !rwHeight) {
@@ -1216,11 +1226,25 @@ webgl::ReadPixelsResult WebGLContext::ReadPixelsImpl(
   // Read only the in-bounds pixels.
 
   if (IsWebGL2()) {
+    const CheckedInt<GLint> packSkipRows = skipRows + writeY;
+
+    // ensure packSkipRows is not too large
+    if (!packSkipRows.isValid()) {
+      ErrorInvalidOperation("PACK_SKIP_ROWS + clipped rows is too large.");
+      return {};
+    }
+
+    // ensure packSkipRows is a positive number
+    if (packSkipRows.value() < 0) {
+      ErrorInvalidOperation("PACK_SKIP_ROWS + clipped rows is negative.");
+      return {};
+    }
+
     if (!packing.rowLength) {
       gl->fPixelStorei(LOCAL_GL_PACK_ROW_LENGTH, packing.skipPixels + size.x);
     }
     gl->fPixelStorei(LOCAL_GL_PACK_SKIP_PIXELS, packing.skipPixels + writeX);
-    gl->fPixelStorei(LOCAL_GL_PACK_SKIP_ROWS, packing.skipRows + writeY);
+    gl->fPixelStorei(LOCAL_GL_PACK_SKIP_ROWS, packSkipRows.value());
 
     auto desc2 = desc;
     desc2.srcOffset = {readX, readY};
@@ -1372,41 +1396,64 @@ void WebGLContext::UniformData(
 
   // -
 
-  const auto& samplerInfo = locInfo->samplerInfo;
-  if (samplerInfo) {
-    const auto idata = ReinterpretToSpan<const uint32_t>::From(data);
-    const auto maxTexUnits = GLMaxTextureUnits();
-    for (const auto& val : idata) {
-      if (val >= maxTexUnits) {
-        ErrorInvalidValue(
-            "This uniform location is a sampler, but %d"
-            " is not a valid texture unit.",
-            val);
-        return;
+  // copy uniforms data from shared memory
+  Vector<webgl::UniformDataVal, 8> uniformValues;
+  {
+    // this should most often be a pure stack operation, so quite fast
+    if (uniformValues.append(data.data(), data.size()) == false) {
+      ErrorOutOfMemory("Failed to copy sampler uniform data.");
+      return;
+    }
+  }
+
+  // validate that all uniform values do not exceed maximum texture units
+  {
+    if (locInfo->HasSampleUniformInformation()) {
+      const auto maxTexUnits = GLMaxTextureUnits();
+      for (const auto& u32UniformValue : uniformValues) {
+        if (u32UniformValue.u32 >= maxTexUnits) {
+          ErrorInvalidValue(
+              "This uniform location is a sampler, but %d"
+              " is not a valid texture unit.",
+              u32UniformValue.u32);
+          return;
+        }
       }
     }
   }
 
   // -
 
-  // This is a little galaxy-brain, sorry!
-  const auto ptr = static_cast<const void*>(data.data());
-  (*pfn)(*gl, static_cast<GLint>(loc), elemCount, transpose, ptr);
+  // upload values to GPU
+  {
+    // This is a little galaxy-brain, sorry!
+    const auto uniformValuesVoidPointer =
+        static_cast<const void*>(uniformValues.begin());
+    (*pfn)(*gl, static_cast<GLint>(loc), elemCount, transpose,
+           uniformValuesVoidPointer);
+  }
 
   // -
 
-  if (samplerInfo) {
-    auto& texUnits = samplerInfo->texUnits;
+  // cache the uniform values in the texture units
+  {
+    if (!locInfo->HasSampleUniformInformation()) {
+      return;
+    }
 
-    const auto srcBegin = reinterpret_cast<const uint32_t*>(data.data());
-    auto destIndex = locInfo->indexIntoUniform;
-    if (destIndex < texUnits.length()) {
-      // Only sample as many indexes as available tex units allow.
-      const auto destCount = std::min(elemCount, texUnits.length() - destIndex);
-      for (const auto& val : Span<const uint32_t>(srcBegin, destCount)) {
-        texUnits[destIndex] = AssertedCast<uint8_t>(val);
-        destIndex += 1;
+    auto& targetTextureUnits = locInfo->GetSamplerUnformInformation()->texUnits;
+    uint32_t targetIndex = locInfo->indexIntoUniform;
+
+    // try to cache all uniform values in texture unit positions
+    for (auto& uniformValue : uniformValues) {
+      // it can be that not all uniform values fit
+      if (targetIndex >= targetTextureUnits.length()) {
+        break;
       }
+
+      // convert the uint32_t to uint8_t and store in texUnits
+      targetTextureUnits[targetIndex] = AssertedCast<uint8_t>(uniformValue.u32);
+      targetIndex += 1;
     }
   }
 }
@@ -1424,8 +1471,6 @@ void WebGLContext::UseProgram(WebGLProgram* prog) {
     funcScope.mBindFailureGuard = false;
     return;
   }
-
-  if (!ValidateObject("prog", *prog)) return;
 
   if (!prog->UseProgram()) return;
 
@@ -1501,8 +1546,6 @@ void WebGLContext::Viewport(GLint x, GLint y, GLsizei width, GLsizei height) {
 void WebGLContext::CompileShader(WebGLShader& shader) {
   const FuncScope funcScope(*this, "compileShader");
   if (IsContextLost()) return;
-
-  if (!ValidateObject("shader", shader)) return;
 
   shader.CompileShader();
 }

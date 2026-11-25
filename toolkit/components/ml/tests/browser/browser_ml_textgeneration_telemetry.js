@@ -79,6 +79,11 @@ add_task(async function test_creation_records_success_and_download() {
     const created = only("engineCreationSuccessFlow");
     Assert.equal(created.engineId, "hwi-tel-create");
     Assert.equal(created.host_process, "hwinference");
+    Assert.equal(
+      created.device_kind,
+      "cpu",
+      "The creation records the device kind"
+    );
     Assert.greaterOrEqual(Number(created.duration), 0);
     Assert.equal(
       labeledCount("engineCreationSuccess", "hwi-tel-create"),
@@ -196,6 +201,32 @@ add_task(async function test_run_records_the_engine_run() {
   }
 });
 
+add_task(async function test_run_records_the_request_feature() {
+  const { cleanup } = await setup({ prefs: HWI_PREFS });
+  try {
+    const engine = await createEngine({
+      ...TINYSTORIES_ENGINE_OPTIONS,
+      engineId: "hwi-tel-feature",
+      featureId: "test-feature",
+    });
+    await engine.run(RUN_REQUEST);
+    await collectGeneratedText(engine.runWithGenerator(RUN_REQUEST));
+    await engine.run({ ...RUN_REQUEST, featureId: "hwi-prompt" });
+    await collectGeneratedText(
+      engine.runWithGenerator({ ...RUN_REQUEST, featureId: "hwi-prompt" })
+    );
+
+    Assert.deepEqual(
+      events("engineRun").map(({ extra }) => extra.feature_id),
+      ["test-feature", "test-feature", "hwi-prompt", "hwi-prompt"],
+      "A run records the request's feature id or falls back to the engine's"
+    );
+    await engine.terminate();
+  } finally {
+    await cleanup();
+  }
+});
+
 add_task(async function test_stream_records_the_chunk_metrics() {
   const { cleanup } = await setup({ prefs: HWI_PREFS });
   try {
@@ -227,6 +258,11 @@ add_task(async function test_stream_records_the_chunk_metrics() {
       Number(run.extra.character_count),
       text.length,
       "character_count is the streamed text length"
+    );
+    Assert.equal(
+      run.extra.device_kind,
+      "cpu",
+      "The run records the device kind"
     );
     Assert.greaterOrEqual(Number(run.extra.time_to_first_chunk), 0);
     Assert.notEqual(run.extra.average_chunk_time, null);
@@ -375,7 +411,6 @@ add_task(async function test_terminate_mid_generation() {
       ...TINYSTORIES_ENGINE_OPTIONS,
       engineId: "hwi-tel-terminate",
       featureId: "link-preview",
-      numContext: 4096,
     });
     await Assert.rejects(
       (async () => {

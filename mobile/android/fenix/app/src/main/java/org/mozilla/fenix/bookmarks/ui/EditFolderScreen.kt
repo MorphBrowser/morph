@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -25,6 +24,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import mozilla.appservices.places.BookmarkRoot
 import mozilla.components.compose.base.annotation.FlexibleWindowLightDarkPreview
@@ -41,6 +43,7 @@ import org.mozilla.fenix.bookmarks.BookmarksListSortOrder
 import org.mozilla.fenix.bookmarks.BookmarksSnackbarState
 import org.mozilla.fenix.bookmarks.BookmarksState
 import org.mozilla.fenix.bookmarks.BookmarksStore
+import org.mozilla.fenix.bookmarks.BookmarksTestTag.EDIT_BOOKMARK_FOLDER_TITLE_TEXT_FIELD
 import org.mozilla.fenix.bookmarks.DeletionDialogAction
 import org.mozilla.fenix.bookmarks.DeletionDialogState
 import org.mozilla.fenix.bookmarks.EditFolderAction
@@ -87,11 +90,15 @@ internal fun EditFolderScreen(
                     placeholder = "",
                     errorText = "",
                     modifier =
-                        Modifier.padding(
-                            start = 16.dp,
-                            end = 16.dp,
-                            top = 32.dp,
-                        ),
+                        Modifier.semantics {
+                                testTagsAsResourceId = true
+                                testTag = EDIT_BOOKMARK_FOLDER_TITLE_TEXT_FIELD
+                            }
+                            .padding(
+                                start = 16.dp,
+                                end = 16.dp,
+                                top = 32.dp,
+                            ),
                     label = stringResource(R.string.bookmark_name_label_normal_case),
                 )
 
@@ -114,7 +121,6 @@ internal fun EditFolderScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class) // TopAppBar
 @Composable
 private fun EditFolderTopBar(
     onBackClick: () -> Unit,

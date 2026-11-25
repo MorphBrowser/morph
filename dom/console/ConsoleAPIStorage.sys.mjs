@@ -17,19 +17,18 @@ const _isParentProcess =
  * @param string aId
  *        The inner window ID to check.
  * @returns boolean
- *          true if aId identifies a destroyed inner window. Always returns
- *          false in content processes.
+ *          true if aId identifies a destroyed inner window.
  */
 function _isDestroyedInnerWindow(aId) {
-  // Content processes rely on Nuking to sever references to destroyed-window
-  // globals, so _isDestroyedInnerWindow is only meaningful in the parent process.
-  if (!_isParentProcess) {
+  // Inner window IDs are positive; "" (a chrome call without a stack frame)
+  // would otherwise read as 0.
+  let innerId = Number(aId);
+  if (!Number.isInteger(innerId) || innerId <= 0) {
     return false;
   }
-  let innerId = Number(aId);
-  return (
-    Number.isInteger(innerId) && !WindowGlobalParent.getByInnerWindowId(innerId)
-  );
+  return _isParentProcess
+    ? !WindowGlobalParent.getByInnerWindowId(innerId)
+    : !WindowGlobalChild.getByInnerWindowId(innerId);
 }
 
 // NOTE: these listeners used to just be added as observers and notified via
@@ -183,13 +182,13 @@ ConsoleAPIStorageService.prototype = {
         _consoleStorage.set(aId, []);
       }
 
-      let storage = _consoleStorage.get(aId);
+      let events = _consoleStorage.get(aId);
 
-      storage.push(aEvent);
+      events.push(aEvent);
 
       // truncate
-      if (storage.length > STORAGE_MAX_EVENTS) {
-        storage.shift();
+      if (events.length > STORAGE_MAX_EVENTS) {
+        events.shift();
       }
     }
 

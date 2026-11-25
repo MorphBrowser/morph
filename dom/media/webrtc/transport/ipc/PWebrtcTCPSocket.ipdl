@@ -3,7 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 include protocol PNecko;
-include protocol PSocketProcess;
 
 include WebrtcProxyConfig;
 
@@ -15,13 +14,13 @@ namespace net {
 [ChildImpl=virtual, ParentImpl=virtual]
 async protocol PWebrtcTCPSocket
 {
-  manager PNecko or PSocketProcess;
+  manager PNecko;
 
 parent:
   async AsyncOpen(nsCString aHost,
-                  int32_t aPort,
+                  uint16_t aPort,
                   nsCString aLocalAddress,
-                  int32_t aLocalPort,
+                  uint16_t aLocalPort,
                   bool aUseTls,
                   WebrtcProxyConfig? aProxyConfig);
   async Write(uint8_t[] aWriteData);

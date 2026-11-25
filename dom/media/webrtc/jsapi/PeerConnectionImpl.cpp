@@ -82,11 +82,13 @@
 #include "mozilla/PublicSSL.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/dom/BrowserChild.h"
+#include "mozilla/dom/ConnectionAllowlists.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Event.h"
 #include "mozilla/dom/Location.h"
 #include "mozilla/dom/PeerConnectionImplBinding.h"
 #include "mozilla/dom/PluginCrashedEvent.h"
+#include "mozilla/dom/PolicyContainer.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/dom/RTCCertificate.h"
 #include "mozilla/dom/RTCDataChannelBinding.h"
@@ -177,9 +179,10 @@ class JSErrorResult : public binding_danger::TErrorResult<
 
 class WrappableJSErrorResult {
  public:
-  WrappableJSErrorResult() : mRv(MakeUnique<JSErrorResult>()), isCopy(false) {}
+  WrappableJSErrorResult()
+      : mRv(std::make_unique<JSErrorResult>()), isCopy(false) {}
   WrappableJSErrorResult(const WrappableJSErrorResult& other)
-      : mRv(MakeUnique<JSErrorResult>()), isCopy(true) {}
+      : mRv(std::make_unique<JSErrorResult>()), isCopy(true) {}
   ~WrappableJSErrorResult() {
     if (isCopy) {
       MOZ_ASSERT(NS_IsMainThread());
@@ -382,7 +385,7 @@ PeerConnectionImpl::PeerConnectionImpl(const GlobalObject* aGlobal)
       mSTSThread(nullptr),
       mForceIceTcp(false),
       mTransportHandler(nullptr),
-      mUuidGen(MakeUnique<PCUuidGenerator>()),
+      mUuidGen(std::make_unique<PCUuidGenerator>()),
       mIceRestartCount(0),
       mIceRollbackCount(0),
       mTrickle(true)  // TODO(ekr@rtfm.com): Use pref
@@ -491,6 +494,12 @@ nsresult PeerConnectionImpl::Initialize(PeerConnectionObserver& aObserver,
   mWindow = aWindow;
   NS_ENSURE_STATE(mWindow);
 
+  if (dom::ConnectionAllowlists* allowlists =
+          PolicyContainer::GetConnectionAllowlists(
+              aWindow->GetPolicyContainer())) {
+    mBlockedByConnectionAllowlists = allowlists->ShouldBlockWebRTC(mWindow);
+  }
+
   // Now rummage through the objects to get a usable origin
   nsCOMPtr<nsIScriptGlobalObject> sgo = do_QueryInterface(mWindow);
   NS_ENSURE_STATE(sgo);
@@ -534,8 +543,8 @@ nsresult PeerConnectionImpl::Initialize(PeerConnectionObserver& aObserver,
   mTransportHandler = std::move(transportHandler);
   mTransportHandler->CreateIceCtx("PC:" + GetName());
 
-  mJsepSession =
-      MakeUnique<JsepSessionImpl>(mName, MakeUnique<PCUuidGenerator>());
+  mJsepSession = std::make_unique<JsepSessionImpl>(
+      mName, std::make_unique<PCUuidGenerator>());
   mJsepSession->SetRtxIsAllowed(mRtxIsAllowed);
 
   res = mJsepSession->Init();
@@ -565,7 +574,7 @@ nsresult PeerConnectionImpl::Initialize(PeerConnectionObserver& aObserver,
                                   header.direction);
   }
 
-  if (XRE_IsContentProcess()) {
+  if (XRE_IsContentProcess() && !mBlockedByConnectionAllowlists) {
     mStunAddrsRequest =
         net::StunAddrsRequestChild::Create(new StunAddrsHandler(this));
   }
@@ -706,7 +715,7 @@ nsresult PeerConnectionImpl::GetDatachannelParameters(
 
   Maybe<const JsepTransceiver> datachannelTransceiver =
       mJsepSession->FindTransceiver([](const JsepTransceiver& aTransceiver) {
-        return aTransceiver.GetMediaType() == SdpMediaSection::kApplication;
+        return aTransceiver.GetMediaTypeInfo().IsDataChannel();
       });
 
   if (!datachannelTransceiver ||
@@ -798,7 +807,7 @@ already_AddRefed<RTCRtpTransceiver> PeerConnectionImpl::AddTransceiver(
     return nullptr;
   }
 
-  JsepTransceiver jsepTransceiver(*type, *mUuidGen);
+  JsepTransceiver jsepTransceiver({.type = *type}, *mUuidGen);
   jsepTransceiver.SetRtxIsAllowed(mRtxIsAllowed);
 
   // Do this last, since it is not possible to roll back.
@@ -956,7 +965,7 @@ bool PeerConnectionImpl::CheckNegotiationNeeded() {
   if (mDataConnection) {
     Maybe<const JsepTransceiver> dcTransceiver =
         mJsepSession->FindTransceiver([](const JsepTransceiver& aTransceiver) {
-          return aTransceiver.GetMediaType() == SdpMediaSection::kApplication;
+          return aTransceiver.GetMediaTypeInfo().IsDataChannel();
         });
     if (!dcTransceiver || !dcTransceiver->IsNegotiated()) {
       return true;
@@ -1071,15 +1080,15 @@ PeerConnectionImpl::CreateDataChannel(
 
   Maybe<JsepTransceiver> dcTransceiver =
       mJsepSession->FindTransceiver([](const JsepTransceiver& aTransceiver) {
-        return aTransceiver.GetMediaType() == SdpMediaSection::kApplication;
+        return aTransceiver.GetMediaTypeInfo().IsDataChannel();
       });
 
   if (dcTransceiver) {
     dcTransceiver->RestartDatachannelTransceiver();
     mJsepSession->SetTransceiver(*dcTransceiver);
   } else {
-    mJsepSession->AddTransceiver(
-        JsepTransceiver(SdpMediaSection::MediaType::kApplication, *mUuidGen));
+    mJsepSession->AddTransceiver(JsepTransceiver(
+        {.type = SdpMediaSection::MediaType::kApplication}, *mUuidGen));
   }
 
   RefPtr<RTCDataChannel> retval;
@@ -1265,8 +1274,7 @@ void PeerConnectionImpl::SyncFromJsep() {
   mJsepSession->ForEachTransceiver(
       [this, self = RefPtr<PeerConnectionImpl>(this)](
           const JsepTransceiver& jsepTransceiver) {
-        if (jsepTransceiver.GetMediaType() ==
-            SdpMediaSection::MediaType::kApplication) {
+        if (!jsepTransceiver.GetMediaTypeInfo().IsRtp()) {
           return;
         }
 
@@ -2431,10 +2439,13 @@ PeerConnectionImpl::Close() {
   if (mJsepSession) {
     mJsepSession->Close();
   }
+
+  nsTArray<RefPtr<GenericNonExclusivePromise>> preNetworkTeardownPromises;
+
   if (mDataConnection) {
     CSFLogInfo(LOGTAG, "%s: Destroying DataChannelConnection %p for %s",
                __FUNCTION__, (void*)mDataConnection.get(), mHandle.c_str());
-    mDataConnection->Destroy();
+    preNetworkTeardownPromises.EmplaceBack(mDataConnection->Destroy());
     mDataConnection =
         nullptr;  // it may not go away until the runnables are dead
   }
@@ -2483,19 +2494,16 @@ PeerConnectionImpl::Close() {
   mRtcpStateChangeListener.DisconnectIfExists();
 
   // Clear any resources held by libwebrtc through our Call instance.
-  RefPtr<GenericPromise> callDestroyPromise;
   if (mCall) {
     // Make sure the compiler does not get confused and try to acquire a
     // reference to this thread _after_ we null out mCall.
     auto callThread = mCall->mCallThread;
-    callDestroyPromise =
+    preNetworkTeardownPromises.EmplaceBack(
         InvokeAsync(callThread, __func__, [call = std::move(mCall)]() {
           call->Destroy();
-          return GenericPromise::CreateAndResolve(
+          return GenericNonExclusivePromise::CreateAndResolve(
               true, "PCImpl->WebRtcCallWrapper::Destroy");
-        });
-  } else {
-    callDestroyPromise = GenericPromise::CreateAndResolve(true, __func__);
+        }));
   }
 
   mFinalStatsQuery =
@@ -2513,15 +2521,23 @@ PeerConnectionImpl::Close() {
                                                                     __func__);
               });
 
+  preNetworkTeardownPromises.AppendElement(mFinalStatsQuery);
+
+  // In no particular order:
   // 1. Allow final stats query to complete.
   // 2. Tear down call, if necessary. We do this before we shut down the
   //    transport handler, so RTCP BYE can be sent.
-  // 3. Tear down the transport handler, and deregister from PeerConnectionCtx.
+  // 3. Tear down DataChannel/SCTP, if necessary. This involves sending an SCTP
+  //    ABORT, so we do this before tearing down the transport handler.
+  //
+  // ...after all three of those steps are done:
+  // 4. Tear down the transport handler, and deregister from PeerConnectionCtx.
   //    When we deregister from PeerConnectionCtx, our final stats (if any)
   //    will be stored.
-  mFinalStatsQuery
-      ->Then(GetMainThreadSerialEventTarget(), __func__,
-             [callDestroyPromise]() mutable { return callDestroyPromise; })
+  // TODO(https://bugzilla.mozilla.org/show_bug.cgi?id=2094129):
+  // We need to handle STS shutdown better here.
+  GenericNonExclusivePromise::AllSettled(GetMainThreadSerialEventTarget(),
+                                         preNetworkTeardownPromises)
       ->Then(
           GetMainThreadSerialEventTarget(), __func__,
           [this, self = RefPtr<PeerConnectionImpl>(this)]() mutable {
@@ -2564,12 +2580,14 @@ void PeerConnectionImpl::InvalidateLastReturnedParameters() {
   }
 }
 
-void PeerConnectionImpl::ParseIceServers(
+nsTArray<IceServerParser::ParsedIceServer> PeerConnectionImpl::ParseIceServers(
     const nsTArray<dom::RTCIceServer>& aIceServers, ErrorResult& aRv) {
   auto result = IceServerParser::Parse(aIceServers);
   if (result.isErr()) {
     aRv = result.unwrapErr();
+    return {};
   }
+  return result.unwrap();
 }
 
 static JsepRtcpMuxPolicy ToJsepRtcpMuxPolicy(dom::RTCRtcpMuxPolicy aPolicy) {
@@ -2601,18 +2619,26 @@ void PeerConnectionImpl::SetConfiguration(
     return;
   }
 
-  ParseIceServers(aConfiguration.mIceServers, aRv);
+  nsTArray<IceServerParser::ParsedIceServer> parsedIceServers =
+      ParseIceServers(aConfiguration.mIceServers, aRv);
   if (aRv.Failed()) {
     return;
   }
 
-  aRv = SetConfiguration(aConfiguration);
+  aRv = SetConfiguration(aConfiguration, std::move(parsedIceServers));
 }
 
 nsresult PeerConnectionImpl::SetConfiguration(
-    const RTCConfiguration& aConfiguration) {
-  nsresult rv = mTransportHandler->SetIceConfig(
-      aConfiguration.mIceServers, aConfiguration.mIceTransportPolicy);
+    const RTCConfiguration& aConfiguration,
+    nsTArray<IceServerParser::ParsedIceServer> aParsedIceServers) {
+  // All ICE servers are administratively prohibited, but they should still be
+  // visible in getConfiguration().
+  nsresult rv =
+      mBlockedByConnectionAllowlists
+          ? mTransportHandler->SetIceConfig(nsTArray<dom::RTCIceServer>(),
+                                            aConfiguration.mIceTransportPolicy)
+          : mTransportHandler->SetIceConfig(aConfiguration.mIceServers,
+                                            aConfiguration.mIceTransportPolicy);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
   }
@@ -2654,6 +2680,63 @@ nsresult PeerConnectionImpl::SetConfiguration(
       aConfiguration.mAlwaysNegotiateDataChannels);
   // Store the configuration for about:webrtc
   StoreConfigurationForAboutWebrtc(aConfiguration);
+
+  const bool iceServersChanged = aParsedIceServers != mParsedIceServers;
+  mParsedIceServers = std::move(aParsedIceServers);
+
+  const uint8_t poolSize = aConfiguration.mIceCandidatePoolSize;
+
+  // RFC 9429 section 4.1.18 only lets either of these reach the pool while no
+  // local description has been applied: the pool size must not change after
+  // that, and by then the pool belongs to the first offer/answer exchange
+  // (section 3.5.4). A change to the ICE transport policy deliberately does
+  // not reach the pool at all, since pooled candidates can still be filtered
+  // when a stream takes them. With every address administratively prohibited
+  // there is nothing to pool, just as there is nothing to gather.
+  if (!mBlockedByConnectionAllowlists &&
+      (poolSize != mIceCandidatePoolSize || iceServersChanged) &&
+      mJsepSession->GetLocalDescription(kJsepDescriptionPendingOrCurrent)
+          .empty()) {
+    if (iceServersChanged || poolSize == 0) {
+      // Whatever the pool holds was gathered from the old servers, so it has
+      // to be replaced rather than resized; and a pool resized to nothing is
+      // just a pool released.
+      EmptyCandidatePool();
+    }
+
+    if (poolSize > 0) {
+      mIceCandidatePoolSize = poolSize;
+      // As in GatherIfReady, ask for the local addresses before queueing, so
+      // that the resize waits for them instead of running without any.
+      if (!mStunAddrs.Length()) {
+        InitLocalAddrs();
+      }
+      nsCOMPtr<nsIRunnable> runnable(NS_NewRunnableFunction(
+          __func__,
+          [this, self = RefPtr<PeerConnectionImpl>(this), size = poolSize,
+           defaultRouteOnly = GetPrefDefaultAddressOnly(),
+           obfuscate = GetPrefObfuscateHostAddresses()]() {
+            // As in EnsureIceGathering: with no addresses from the parent
+            // process, nICEr would enumerate them itself, which the content
+            // process sandbox does not allow. Nothing is pooled then.
+            if (!mStunAddrs.Length() && XRE_IsContentProcess()) {
+              CSFLogInfo(LOGTAG,
+                         "SetConfiguration: No STUN addresses returned from "
+                         "parent process, not gathering a candidate pool");
+              return;
+            }
+            // The pool gathers before EnsureIceGathering has run, so it needs
+            // the default route target set up here; otherwise a pool gathered
+            // with defaultRouteOnly would pick the default route without it.
+            EnsureTargetForDefaultLocalAddressLookup();
+            // Resizes rather than re-gathers, so a pool that grew keeps what
+            // it already gathered and one that shrank only drops the excess.
+            mTransportHandler->SetCandidatePoolSize(size, defaultRouteOnly,
+                                                    obfuscate, mStunAddrs);
+          }));
+      PerformOrEnqueueIceCtxOperation(runnable);
+    }
+  }
 
   return NS_OK;
 }
@@ -3459,9 +3542,9 @@ void PeerConnectionImpl::IceConnectionStateChange(
   } else if (oldPair && aSelectedPair.isSome()) {
     // Compare against the internal (un-redacted) candidate strings.
     noChange = oldPair->Local()->CandidateInternal().EqualsASCII(
-                   aSelectedPair->local().get()) &&
+                   aSelectedPair->local.get()) &&
                oldPair->Remote()->CandidateInternal().EqualsASCII(
-                   aSelectedPair->remote().get());
+                   aSelectedPair->remote.get());
   }
 
   if (!noChange) {
@@ -3473,10 +3556,10 @@ void PeerConnectionImpl::IceConnectionStateChange(
     if (aSelectedPair.isSome()) {
       nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(mWindow);
       RefPtr<RTCIceCandidate> local = RTCIceCandidate::FromAttribute(
-          global, aSelectedPair->local(),
+          global, aSelectedPair->local,
           /*aHidePrflx=*/GetPrefObfuscateHostAddresses());
       RefPtr<RTCIceCandidate> remote = RTCIceCandidate::FromAttribute(
-          global, aSelectedPair->remote(), /*aHidePrflx=*/true);
+          global, aSelectedPair->remote, /*aHidePrflx=*/true);
       newCandidatePair = new RTCIceCandidatePair(global, local, remote);
     }
 
@@ -3671,6 +3754,29 @@ void PeerConnectionImpl::OnCandidateError(
                                    ObString(aErrorInfo.mErrorText.c_str()), rv);
 }
 
+// RFC 9429 section 3.5.4: the candidate pool is only consulted for the first
+// offer/answer exchange, "after which the candidate pool is emptied and no
+// longer used". Only the first gather can take from it, so anything left in it
+// once gathering has started is holding a socket (and any TURN allocation)
+// open for nothing.
+void PeerConnectionImpl::EmptyCandidatePool() {
+  if (!mIceCandidatePoolSize) {
+    return;
+  }
+
+  mIceCandidatePoolSize = 0;
+  // A resize asked for by SetConfiguration may still be waiting in
+  // mQueuedIceCtxOperations for the local addresses, so emptying goes through
+  // the same queue to stay behind it. Otherwise the queued resize would run
+  // afterwards and create a pool that nothing releases. When the queue isn't
+  // waiting, this runs right away, as before.
+  nsCOMPtr<nsIRunnable> runnable(NS_NewRunnableFunction(
+      __func__, [self = RefPtr<PeerConnectionImpl>(this)]() {
+        self->mTransportHandler->EmptyCandidatePool();
+      }));
+  PerformOrEnqueueIceCtxOperation(runnable);
+}
+
 void PeerConnectionImpl::IceGatheringStateChange(
     const std::string& aTransportId, dom::RTCIceGathererState state) {
   MOZ_ASSERT(NS_IsMainThread(), "Wrong thread");
@@ -3827,7 +3933,7 @@ RefPtr<dom::RTCStatsPromise> PeerConnectionImpl::GetDataChannelStats(
         ->Then(GetMainThreadSerialEventTarget(), __func__,
                [](DataChannelConnection::StatsPromise::ResolveOrRejectValue&&
                       aResult) {
-                 auto report = MakeUnique<dom::RTCStatsCollection>();
+                 auto report = std::make_unique<dom::RTCStatsCollection>();
                  if (aResult.IsResolve()) {
                    if (!report->mDataChannelStats.AppendElements(
                            aResult.ResolveValue(), fallible)) {
@@ -3984,8 +4090,7 @@ RefPtr<dom::RTCStatsReportPromise> PeerConnectionImpl::GetStats(
     return mFinalStatsQuery->Then(
         GetMainThreadSerialEventTarget(), __func__,
         [this, self = RefPtr<PeerConnectionImpl>(this)]() {
-          UniquePtr<dom::RTCStatsReportInternal> finalStats =
-              MakeUnique<dom::RTCStatsReportInternal>();
+          auto finalStats = std::make_unique<dom::RTCStatsReportInternal>();
           // Might not be set if this encountered some error.
           if (mFinalStats) {
             *finalStats = *mFinalStats;
@@ -4053,7 +4158,7 @@ RefPtr<dom::RTCStatsReportPromise> PeerConnectionImpl::GetStats(
     promises.AppendElement(GetDataChannelStats(now));
   }
 
-  auto pcStatsCollection = MakeUnique<dom::RTCStatsCollection>();
+  auto pcStatsCollection = std::make_unique<dom::RTCStatsCollection>();
   RTCPeerConnectionStats pcStats;
   pcStats.mTimestamp.Construct(now);
   pcStats.mType.Construct(RTCStatsType::Peer_connection);
@@ -4069,7 +4174,7 @@ RefPtr<dom::RTCStatsReportPromise> PeerConnectionImpl::GetStats(
 
   // This is what we're going to return; all the stuff in |promises| will be
   // accumulated here.
-  auto report = MakeUnique<dom::RTCStatsReportInternal>();
+  auto report = std::make_unique<dom::RTCStatsReportInternal>();
   report->mPcid = NS_ConvertASCIItoUTF16(mName.c_str());
   if (mWindow && mWindow->GetBrowsingContext()) {
     report->mBrowserId = mWindow->GetBrowsingContext()->BrowserId();
@@ -4178,6 +4283,9 @@ void PeerConnectionImpl::StoreConfigurationForAboutWebrtc(
     mJsConfiguration.mSdpSemantics.Construct(aConfig.mSdpSemantics.Value());
   }
 
+  mJsConfiguration.mIceCandidatePoolSize.Reset();
+  mJsConfiguration.mIceCandidatePoolSize.Construct(
+      aConfig.mIceCandidatePoolSize);
   mJsConfiguration.mIceTransportPolicy.Reset();
   mJsConfiguration.mIceTransportPolicy.Construct(aConfig.mIceTransportPolicy);
   mJsConfiguration.mBundlePolicy.Reset();
@@ -4350,11 +4458,12 @@ void PeerConnectionImpl::UpdateRTCDtlsTransports() {
           mTransportIdToRTCDtlsTransport.GetOrInsertNew(key, GetParentObject());
     }
 
-    if (jsepTransceiver.GetMediaType() == SdpMediaSection::kApplication) {
+    const auto mediaTypeInfo = jsepTransceiver.GetMediaTypeInfo();
+    if (mediaTypeInfo.IsDataChannel()) {
       if (mSctpTransport) {
         mSctpTransport->SetTransport(dtlsTransport.get());
       }
-    } else {
+    } else if (mediaTypeInfo.IsRtp()) {
       RefPtr<dom::RTCRtpTransceiver> domTransceiver =
           GetTransceiver(jsepTransceiver.GetUuid());
       if (domTransceiver) {
@@ -4624,6 +4733,13 @@ void PeerConnectionImpl::AddIceCandidate(const std::string& aCandidate,
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(!aTransportId.empty());
 
+  // All remote candidates are administratively prohibited. They still end up
+  // in the remote description, but ICE never learns about them. We still pass
+  // along end-of-candidates.
+  if (mBlockedByConnectionAllowlists && !aCandidate.empty()) {
+    return;
+  }
+
   bool obfuscate_host_addresses = Preferences::GetBool(
       "media.peerconnection.ice.obfuscate_host_addresses", false);
 
@@ -4777,15 +4893,26 @@ nsresult PeerConnectionImpl::SetTargetForDefaultLocalAddressLookup() {
   return NS_OK;
 }
 
+void PeerConnectionImpl::EnsureTargetForDefaultLocalAddressLookup() {
+  if (mTargetForDefaultLocalAddressLookupIsSet) {
+    return;
+  }
+
+  nsresult rv = SetTargetForDefaultLocalAddressLookup();
+  if (NS_FAILED(rv)) {
+    NS_WARNING("Unable to set target for default local address lookup");
+  }
+  mTargetForDefaultLocalAddressLookupIsSet = true;
+}
+
 void PeerConnectionImpl::EnsureIceGathering(bool aDefaultRouteOnly,
                                             bool aObfuscateHostAddresses) {
-  if (!mTargetForDefaultLocalAddressLookupIsSet) {
-    nsresult rv = SetTargetForDefaultLocalAddressLookup();
-    if (NS_FAILED(rv)) {
-      NS_WARNING("Unable to set target for default local address lookup");
-    }
-    mTargetForDefaultLocalAddressLookupIsSet = true;
+  // All local addresses are administratively prohibited.
+  if (mBlockedByConnectionAllowlists) {
+    return;
   }
+
+  EnsureTargetForDefaultLocalAddressLookup();
 
   // Make sure we don't call StartIceGathering if we're in e10s mode
   // and we received no STUN addresses from the parent process.  In the
@@ -4795,11 +4922,15 @@ void PeerConnectionImpl::EnsureIceGathering(bool aDefaultRouteOnly,
   if (!mStunAddrs.Length() && XRE_IsContentProcess()) {
     CSFLogInfo(LOGTAG, "%s: No STUN addresses returned from parent process",
                __FUNCTION__);
+    EmptyCandidatePool();
     return;
   }
 
   mTransportHandler->StartIceGathering(aDefaultRouteOnly,
                                        aObfuscateHostAddresses, mStunAddrs);
+  // The streams take what they need from the pool as they start gathering,
+  // which StartIceGathering does before this reaches the transport.
+  EmptyCandidatePool();
 }
 
 already_AddRefed<dom::RTCRtpTransceiver> PeerConnectionImpl::CreateTransceiver(

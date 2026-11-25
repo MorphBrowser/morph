@@ -7,14 +7,19 @@
 use std::{
     cell::RefCell,
     fmt::{self, Debug, Display, Formatter},
+    num::NonZeroUsize,
     rc::Rc,
-    str::from_utf8,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use neqo_common::{Bytes, Encoder, Header, MessageType, Role, qdebug, qtrace};
-use neqo_transport::{AppError, Connection, DatagramTracking, StreamId, streams::SendGroupId};
+use neqo_common::{Bytes, Encoder, Header, MessageType, Role, to_u64};
+use neqo_transport::{
+    AppError, Connection, DatagramQueueCapacity, DatagramQueueOutcome, DatagramTracking, StreamId,
+    StreamType,
+    streams::{SendGroupId, SendOrder},
+};
 use rustc_hash::FxHashSet as HashSet;
+use tracing::{debug, trace};
 
 use crate::{
     CloseType, Error, Http3StreamType, HttpRecvStream, Priority, ReceiveOutput, RecvStream, Res,
@@ -64,6 +69,8 @@ pub(crate) struct Session {
     /// Set when a datagram capsule was refused with `FlowControlLimit`, so a
     /// resume event fires once the control stream is writable again.
     datagram_capsule_blocked: bool,
+    anticipated_incoming_uni: u16,
+    anticipated_incoming_bidi: u16,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -108,7 +115,7 @@ impl Session {
                 },
                 qpack_decoder,
                 Box::new(Rc::clone(&stream_event_listener)),
-                PriorityHandler::new(Priority::default()),
+                PriorityHandler::new(Priority::default(), false),
             )),
             control_stream_send: Box::new(SendMessage::new(
                 MessageType::Request,
@@ -124,6 +131,8 @@ impl Session {
             protocol,
             draining: false,
             datagram_capsule_blocked: false,
+            anticipated_incoming_uni: 0,
+            anticipated_incoming_bidi: 0,
         }
     }
 
@@ -155,6 +164,8 @@ impl Session {
             protocol,
             draining: false,
             datagram_capsule_blocked: false,
+            anticipated_incoming_uni: 0,
+            anticipated_incoming_bidi: 0,
         })
     }
 
@@ -168,6 +179,21 @@ impl Session {
         self.id
     }
 
+    pub(crate) const fn set_anticipated_incoming(&mut self, stream_type: StreamType, value: u16) {
+        match stream_type {
+            StreamType::UniDi => self.anticipated_incoming_uni = value,
+            StreamType::BiDi => self.anticipated_incoming_bidi = value,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn anticipated_incoming(&self, stream_type: StreamType) -> u16 {
+        match stream_type {
+            StreamType::UniDi => self.anticipated_incoming_uni,
+            StreamType::BiDi => self.anticipated_incoming_bidi,
+        }
+    }
+
     /// Mark session as draining. Returns `true` if this was the first call
     /// (i.e. the session was not already draining).
     pub(crate) const fn set_draining(&mut self) -> bool {
@@ -178,7 +204,7 @@ impl Session {
     ///
     /// The function can only fail if supplied headers are not valid http headers.
     pub(crate) fn send_request(&mut self, headers: &[Header], conn: &mut Connection) -> Res<()> {
-        qdebug!("[{self}]: send_request {headers:?}");
+        debug!("[{self}]: send_request {headers:?}");
         self.control_stream_send
             .http_stream()
             .ok_or(Error::Internal)?
@@ -186,7 +212,7 @@ impl Session {
     }
 
     fn receive(&mut self, conn: &mut Connection, now: Instant) -> Res<(ReceiveOutput, bool)> {
-        qtrace!("[{self}] receive control data");
+        trace!("[{self}] receive control data");
         let (out, _) = self.control_stream_recv.receive(conn, now)?;
         debug_assert_eq!(out, ReceiveOutput::NoOutput);
         self.maybe_check_headers()?;
@@ -243,7 +269,7 @@ impl Session {
         // was refused, tell the sender it can resume.
         if self.datagram_capsule_blocked {
             self.datagram_capsule_blocked = false;
-            self.events.capsule_space_available();
+            self.events.capsule_space_available(self.id);
         }
     }
 
@@ -251,7 +277,7 @@ impl Session {
         if self.state.closing_state() {
             return;
         }
-        qdebug!("[{self}]: close session type={close_type:?}");
+        debug!("[{self}]: close session type={close_type:?}");
         self.state = State::Done;
         if !close_type.locally_initiated() {
             self.events.session_end(
@@ -274,7 +300,7 @@ impl Session {
             fin,
         }) = self.stream_event_listener.borrow_mut().get_headers()
         {
-            qtrace!("ExtendedConnect response headers {headers:?}, fin={fin}");
+            trace!("ExtendedConnect response headers {headers:?}, fin={fin}");
 
             if interim {
                 if fin {
@@ -294,7 +320,7 @@ impl Session {
                     .iter()
                     .find_map(|h| {
                         if h.name() == ":status" {
-                            from_utf8(h.value()).ok()?.parse::<u16>().ok()
+                            str::from_utf8(h.value()).ok()?.parse::<u16>().ok()
                         } else {
                             None
                         }
@@ -357,6 +383,11 @@ impl Session {
         matches!(self.state, State::Active)
     }
 
+    #[must_use]
+    pub(crate) const fn is_closing(&self) -> bool {
+        self.state.closing_state()
+    }
+
     pub(crate) fn take_sub_streams(&mut self) -> (HashSet<StreamId>, HashSet<StreamId>) {
         self.protocol.take_sub_streams()
     }
@@ -365,16 +396,29 @@ impl Session {
     ///
     /// It may return an error if the frame is not correctly decoded.
     pub(crate) fn read_control_stream(&mut self, conn: &mut Connection, now: Instant) -> Res<()> {
-        qdebug!("[{self}]: read_control_stream");
+        if self.state == State::Done {
+            return Ok(());
+        }
+        debug!("[{self}]: read_control_stream");
         if let Some(new_state) = self.protocol.read_control_stream(
             conn,
             &mut self.events,
             &mut self.control_stream_recv,
             now,
         )? {
-            self.state = new_state;
+            self.enter_state(new_state, conn, now);
         }
         Ok(())
+    }
+
+    /// Change state; on the first move into a closing state, expire and drop
+    /// this session's queued datagrams, as none of them can be sent anymore.
+    fn enter_state(&mut self, state: State, conn: &mut Connection, now: Instant) {
+        if state.closing_state() && !self.state.closing_state() {
+            self.expire_datagrams(conn, now);
+            self.drop_queued_datagrams(conn);
+        }
+        self.state = state;
     }
 
     /// # Errors
@@ -388,8 +432,8 @@ impl Session {
         message: &str,
         now: Instant,
     ) -> Res<()> {
-        qdebug!("[{self}]: close_session");
-        self.state = State::Done;
+        debug!("[{self}]: close_session");
+        self.enter_state(State::Done, conn, now);
 
         if let Some(close_frame) = self.protocol.close_frame(error, message) {
             self.control_stream_send
@@ -410,29 +454,47 @@ impl Session {
     }
 
     /// Send a datagram, as a QUIC datagram or, when the peer offers no QUIC
-    /// datagram support, an HTTP DATAGRAM Capsule. Returns `Ok(false)` when the
-    /// outgoing QUIC datagram queue is full.
+    /// datagram support, an HTTP DATAGRAM Capsule (connect-udp only).
     ///
     /// # Errors
     ///
-    /// `Error::Unavailable` if the session is not Active; other errors if
-    /// sending the datagram or capsule fails.
+    /// Returns an error if:
+    /// - The session is not in Active state (`Error::Unavailable`).
+    /// - The peer supports neither QUIC DATAGRAM nor the HTTP DATAGRAM Capsule fallback
+    ///   (`Error::Transport(neqo_transport::Error::NotAvailable)`).
+    /// - `send_group_id` is neither `SendGroupId::new(0)` (ungrouped) nor a group already
+    ///   registered for this session (`Error::InvalidInput`).
+    /// - The encoded datagram (including the session-id/protocol prefix) is longer than the peer's
+    ///   datagram limit (`Error::Transport(neqo_transport::Error::TooMuchData)`). This compares the
+    ///   payload, not the whole DATAGRAM frame; see `Connection::enqueue_datagram`.
+    /// - HTTP DATAGRAM Capsule sending fails.
+    ///
+    /// On success, returns the queue's backpressure signal (see
+    /// [`DatagramQueueOutcome`]) so the caller can throttle further writes.
     pub(crate) fn send_datagram<I: Into<DatagramTracking>>(
         &mut self,
         conn: &mut Connection,
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool> {
-        qtrace!("[{self}] send_datagram state={:?}", self.state);
+        send_group_id: SendGroupId,
+        send_order: SendOrder,
+    ) -> Res<DatagramQueueOutcome> {
+        trace!("[{self}] send_datagram state={:?}", self.state);
         if self.state != State::Active {
-            qdebug!("[{self}]: cannot send datagram in {:?} state.", self.state);
-            debug_assert!(false);
+            debug!("[{self}]: cannot send datagram in {:?} state.", self.state);
             return Err(Error::Unavailable);
         }
 
-        if conn.remote_datagram_size() == 0 && self.protocol.datagram_capsule_support() {
-            qtrace!("[{self}] remote_datagram_size is 0, trying HTTP DATAGRAM Capsule");
+        if conn.remote_datagram_size() == 0 {
+            if !self.protocol.datagram_capsule_support() {
+                // WebTransport only negotiates with a peer that supports QUIC
+                // DATAGRAM, and connect-udp always has the Capsule fallback.
+                debug_assert!(false, "no datagram path to the peer");
+                debug!("[{self}]: peer supports neither QUIC DATAGRAM nor the Capsule fallback");
+                return Err(Error::Transport(neqo_transport::Error::NotAvailable));
+            }
+            trace!("[{self}] remote_datagram_size is 0, trying HTTP DATAGRAM Capsule");
             // The Capsule path errors when the control stream's flow-control
             // window is exhausted, then emits a resume event once the stream is
             // writable again (see `stream_writable`).
@@ -442,23 +504,134 @@ impl Session {
             if matches!(res, Err(Error::FlowControlLimit)) {
                 self.datagram_capsule_blocked = true;
             }
-            // Fullness is reported by the error above, never as `Ok(false)`.
-            return res.map(|()| true);
+            res?;
+            // Bypasses the queue, so count it sent now.
+            self.protocol.record_sent_outgoing_datagrams(1);
+            return Ok(DatagramQueueOutcome::Ok);
         }
 
-        let mut dgram_data = Encoder::default();
-        dgram_data.encode_varint(self.id.as_u64() / 4);
-        self.protocol.write_datagram_prefix(&mut dgram_data);
+        if send_group_id != SendGroupId::new(0) && !self.validate_send_group(send_group_id) {
+            debug!("[{self}]: rejecting datagram with unregistered send group {send_group_id:?}");
+            return Err(Error::InvalidInput);
+        }
+
+        // Sized exactly: the queue charges the buffer's capacity against its
+        // byte budget, and growing from empty would bill the growth slack.
+        let quarter_stream_id = self.id.as_u64() / 4;
+        let prefix = self.protocol.datagram_prefix();
+        let mut dgram_data = Encoder::with_capacity(
+            Encoder::varint_len(quarter_stream_id)
+                + prefix.map_or(0, Encoder::varint_len)
+                + buf.len(),
+        );
+        dgram_data.encode_varint(quarter_stream_id);
+        if let Some(context_id) = prefix {
+            dgram_data.encode_varint(context_id);
+        }
         dgram_data.encode(buf);
 
-        let has_space = conn.send_datagram(dgram_data.into(), id)?;
-        qtrace!("[{self}] sent datagram via QUIC datagram, has_space={has_space}");
-        Ok(has_space)
+        let id = match id.into() {
+            DatagramTracking::None => None,
+            DatagramTracking::Id(v) => Some(v),
+        };
+        let outcome = conn.enqueue_datagram(
+            self.id,
+            dgram_data.into(),
+            id,
+            now,
+            send_group_id,
+            send_order,
+        )?;
+        trace!("[{self}] enqueued datagram: {outcome:?}");
+        match &outcome {
+            DatagramQueueOutcome::Ok | DatagramQueueOutcome::MaxBufferedReached => {}
+            DatagramQueueOutcome::Rejected => self.report_dropped(1),
+            DatagramQueueOutcome::Overflowed { dropped } => self.report_dropped(*dropped),
+        }
+        Ok(outcome)
+    }
+
+    fn report_dropped(&mut self, count: usize) {
+        self.protocol
+            .record_dropped_outgoing_datagrams(to_u64(count));
+    }
+
+    /// Drop this session's queue, recording its remaining datagrams and counts.
+    pub(crate) fn drop_queued_datagrams(&mut self, conn: &mut Connection) {
+        let dropped = conn.drop_session_datagrams(self.id);
+        self.protocol.record_sent_outgoing_datagrams(dropped.sent);
+        self.protocol
+            .record_expired_outgoing_datagrams(dropped.expired);
+        self.protocol
+            .record_dropped_outgoing_datagrams(dropped.too_big);
+        self.protocol
+            .record_dropped_outgoing_datagrams(dropped.queued);
+    }
+
+    /// Set the outgoing-datagram queue's `outgoingMaxBufferedDatagrams`, or
+    /// clear it back to no limit with `None`.  Ignored once closing: the
+    /// queue is already dropped, and setting it would recreate it.
+    pub(crate) fn set_max_buffered_datagrams(
+        &self,
+        conn: &mut Connection,
+        mark: Option<NonZeroUsize>,
+    ) {
+        if self.state.closing_state() {
+            return;
+        }
+        conn.set_max_buffered_datagrams(self.id, mark);
+    }
+
+    /// Set the outgoing-datagram queue's `outgoingMaxAge`, or clear it back
+    /// to the implementation-defined default with `None`. Shrinking the
+    /// limit can immediately push already-queued datagrams past it; those
+    /// are expired on the spot and counted here rather than at the next
+    /// sweep, so the stats a caller reads right after reflect them.
+    /// Ignored once closing, as for [`Self::set_max_buffered_datagrams`].
+    pub(crate) fn set_datagram_max_age(
+        &mut self,
+        conn: &mut Connection,
+        max_age: Option<Duration>,
+        now: Instant,
+    ) {
+        if self.state.closing_state() {
+            return;
+        }
+        conn.set_datagram_max_age(self.id, max_age, now);
+        self.protocol
+            .record_expired_outgoing_datagrams(conn.take_session_expired_datagrams(self.id));
+    }
+
+    #[must_use]
+    pub(crate) fn datagram_queue_capacity(&self, conn: &Connection) -> DatagramQueueCapacity {
+        conn.datagram_queue_capacity(self.id)
+    }
+
+    /// Expire stale queued datagrams, counting them against this session's
+    /// stats, and return how many expired. See
+    /// `Connection::expire_session_datagrams`.
+    ///
+    /// Scoped to this session: a connection can carry several
+    /// extended-CONNECT sessions (`datagrams_multiple_session` covers two),
+    /// and a connection-wide sweep would hand whichever session swept first
+    /// every other session's expiries, to count as its own.
+    pub(crate) fn expire_datagrams(&mut self, conn: &mut Connection, now: Instant) -> u64 {
+        let expired = conn.expire_session_datagrams(self.id, now);
+        self.protocol.record_expired_outgoing_datagrams(expired);
+        expired
+    }
+
+    /// Record the sent and too-big counts since the last call.
+    pub(crate) fn report_sent_datagrams(&mut self, conn: &mut Connection) {
+        let sent = conn.take_session_sent_datagrams(self.id);
+        self.protocol.record_sent_outgoing_datagrams(sent);
+        let too_big = conn.take_session_too_big_datagrams(self.id);
+        self.protocol.record_dropped_outgoing_datagrams(too_big);
     }
 
     pub(crate) fn datagram(&self, datagram: Bytes) {
         if self.state != State::Active {
-            qdebug!("[{self}]: received datagram on {:?} session.", self.state);
+            debug!("[{self}]: received datagram on {:?} session.", self.state);
             return;
         }
 
@@ -469,7 +642,7 @@ impl Session {
                     .new_datagram(self.id, slice, self.protocol.connect_type());
             }
             Err(e) => {
-                qdebug!("[{self}]: received datagram with invalid context identifier: {e}");
+                debug!("[{self}]: received datagram with invalid context identifier: {e}");
             }
         }
     }
@@ -622,20 +795,20 @@ pub(crate) trait Protocol: Debug + Display {
         _state: State,
     ) -> Res<()> {
         let msg = "Protocol does not support adding streams";
-        qdebug!("{msg}");
+        debug!("{msg}");
         debug_assert!(false, "{msg}");
         Ok(())
     }
 
     fn remove_recv_stream(&mut self, _stream_id: StreamId) {
         let msg = "Protocol does not support removing recv streams";
-        qdebug!("{msg}");
+        debug!("{msg}");
         debug_assert!(false, "{msg}");
     }
 
     fn remove_send_stream(&mut self, _stream_id: StreamId) {
         let msg = "Protocol does not support removing send streams";
-        qdebug!("{msg}");
+        debug!("{msg}");
         debug_assert!(false, "{msg}");
     }
 
@@ -660,6 +833,18 @@ pub(crate) trait Protocol: Debug + Display {
         None
     }
 
+    /// Record that `count` outgoing datagrams were sent.
+    /// A no-op default for protocols that don't track [`SessionStats`].
+    fn record_sent_outgoing_datagrams(&mut self, _count: u64) {}
+
+    /// Record that `count` outgoing datagrams expired before being sent.
+    /// A no-op default for protocols that don't track [`SessionStats`].
+    fn record_expired_outgoing_datagrams(&mut self, _count: u64) {}
+
+    /// Record that `count` outgoing datagrams were dropped unsent.
+    /// A no-op default for protocols that don't track [`SessionStats`].
+    fn record_dropped_outgoing_datagrams(&mut self, _count: u64) {}
+
     fn protocol(&self) -> Option<&str> {
         None
     }
@@ -672,7 +857,9 @@ pub(crate) trait Protocol: Debug + Display {
         false
     }
 
-    fn write_datagram_prefix(&self, encoder: &mut Encoder);
+    /// The varint this protocol puts on every HTTP Datagram between the
+    /// quarter stream ID and the payload (connect-udp's context ID), if any.
+    fn datagram_prefix(&self) -> Option<u64>;
 
     fn dgram_context_id(&self, datagram: Bytes) -> Result<Bytes, DgramContextIdError>;
 

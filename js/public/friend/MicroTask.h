@@ -44,7 +44,8 @@ namespace JS {
 // be run by calling RunJSMicroTask, while in the realm specified by the global
 // returned by asJS().executionGlobal(), e.g
 //
-//    Rooted<mozilla::Maybe<MicroTask>> task(cx, JS::DequeueNextMicroTask(cx));
+//    Rooted<mozilla::Maybe<MicroTask>> task(cx);
+//    JS::DequeueNextMicroTask(cx, &task);
 //    if (task.isSome() && task->isJS()) {
 //      JSObject* global = task->asJS().executionGlobal();
 //      if (global) {
@@ -63,8 +64,9 @@ class JSMicroTaskRef;
 //
 // The kind is tracked so consumers (such as Gecko's CycleCollectedJSContext)
 // can dispatch on the task kind without having to inspect the value itself.
-// A JS microtask is created by the engine and always backed by a JSObject; an
-// Embedder microtask is an arbitrary value enqueued through the embedder API.
+// A JS microtask is created by the engine, and its contents are opaque to
+// embedders. An Embedder microtask is an arbitrary value enqueued through
+// the embedder API.
 //
 // A MicroTask always holds a task. Where there may be no task (e.g. the result
 // of dequeueing from an empty queue) a mozilla::Maybe<MicroTask> is used.
@@ -167,8 +169,27 @@ class MicroTask {
     MOZ_ASSERT(kind_ < Kind::EndJSKind);
   }
 
+  MicroTask(Kind kind, uint32_t jsBits, const JS::Value& value,
+            const JS::Value& extra0, const JS::Value& extra1,
+            const JS::Value& extra2, const JS::Value& extra3, uint64_t flowId)
+      : kind_(kind),
+        jsBits_(jsBits),
+        value_(value),
+        extra_{extra0, extra1, extra2, extra3},
+        flowId_(flowId) {
+    MOZ_ASSERT(kind_ >= Kind::FirstJSKind && kind_ < Kind::EndJSKind);
+  }
+
+  // Keep kind_ and jsBits_ together before the 8-byte fields to minimize
+  // padding.
   Kind kind_;
+  uint32_t jsBits_ = 0;
   JS::Value value_;
+  // Additional payload, used only by JS kinds which carry their job inline
+  // rather than in a job object.
+  JS::Value extra_[4];
+  // Profiler flow id for JS kinds without a job object, or 0 if none.
+  uint64_t flowId_ = 0;
 };
 
 }  // namespace JS
@@ -226,8 +247,9 @@ class MOZ_TEMPORARY_CLASS JSMicroTaskRef {
   JS_PUBLIC_API JSObject* maybeGetPromise() &&;
 
   // Get the flow id from a JS microtask for profiler markers.
-  // This only returns false if the task has become a dead wrapper,
-  // in which case the microtask doesn't run anyhow.
+  // Returns false if the task has become a dead wrapper, in which case the
+  // microtask doesn't run anyhow, or if the task has no flow because it was
+  // enqueued while the profiler was disabled.
   JS_PUBLIC_API bool getFlowId(uint64_t* uid) &&;
 
  private:
@@ -279,30 +301,29 @@ JS_PUBLIC_API bool EnqueueMicroTask(JSContext* cx, const MicroTask& entry);
 JS_PUBLIC_API bool EnqueueDebugMicroTask(JSContext* cx, const MicroTask& entry);
 JS_PUBLIC_API bool PrependMicroTask(JSContext* cx, const MicroTask& entry);
 
-// Dequeue the next MicroTask. If there are no MicroTasks of the appropriate
-// kind, each of the below API returns Nothing.
+// Dequeue the next MicroTask into |out|, which is overwritten with Nothing if
+// there are no MicroTasks of the appropriate kind. Writing into the caller's
+// rooted storage avoids copying the task through temporaries. These can't GC.
 //
 // The generic DequeueNext will always pull a debugger microtask first,
 // if one exists, then a regular microtask if one exists.
 // - DequeueNextDebuggerMicroTask only pulls from the debugger queue.
 // - DequeueNextRegularMicroTask only pulls from the regular queue.
 //
-// Internally, these basically do
-//
-//    if (HasXMicroTask()) { return Some(X.popFront()); } return Nothing()
-//
-// so checking for emptiness before calling these is not required, and is
-// very slightly less efficient.
-JS_PUBLIC_API mozilla::Maybe<MicroTask> DequeueNextMicroTask(JSContext* cx);
-JS_PUBLIC_API mozilla::Maybe<MicroTask> DequeueNextDebuggerMicroTask(
-    JSContext* cx);
-JS_PUBLIC_API mozilla::Maybe<MicroTask> DequeueNextRegularMicroTask(
-    JSContext* cx);
+// Checking for emptiness before calling these is not required, and is very
+// slightly less efficient.
+JS_PUBLIC_API void DequeueNextMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<MicroTask>> out);
+JS_PUBLIC_API void DequeueNextDebuggerMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<MicroTask>> out);
+JS_PUBLIC_API void DequeueNextRegularMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<MicroTask>> out);
 
-// Peek at the next MicroTask without removing it from the queue.
-// Returns Nothing if there are no MicroTasks.
+// Peek at the next MicroTask without removing it from the queue, writing it
+// (or Nothing if there are no MicroTasks) into |out|.
 // Checks debugger queue first, then regular queue.
-JS_PUBLIC_API mozilla::Maybe<MicroTask> PeekNextMicroTask(JSContext* cx);
+JS_PUBLIC_API void PeekNextMicroTask(
+    JSContext* cx, JS::MutableHandle<mozilla::Maybe<MicroTask>> out);
 
 // Returns true if there are -any- microtasks pending in the queue.
 JS_PUBLIC_API bool HasAnyMicroTasks(JSContext* cx);

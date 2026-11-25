@@ -51,8 +51,9 @@ namespace gl {
 
 StaticMutex GLLibraryEGL::sMutex;
 StaticRefPtr<GLLibraryEGL> GLLibraryEGL::sInstance;
+StaticRefPtr<GLLibraryEGL> GLLibraryEGL::sNativeInstance;
 
-// should match the order of EGLExtensions, and be null-terminated.
+// should match the order of EGLLibExtension, and be null-terminated.
 static const char* sEGLLibraryExtensionNames[] = {
     "EGL_ANDROID_get_native_client_buffer",
     "EGL_ANGLE_device_creation",
@@ -61,13 +62,15 @@ static const char* sEGLLibraryExtensionNames[] = {
     "EGL_ANGLE_platform_angle",
     "EGL_ANGLE_platform_angle_d3d",
     "EGL_ANGLE_platform_angle_metal",
+    "EGL_ANGLE_platform_angle_opengl",
+    "EGL_ANGLE_platform_angle_display_key",
     "EGL_ANGLE_platform_angle_device_id",
     "EGL_EXT_device_enumeration",
     "EGL_EXT_device_query",
     "EGL_EXT_platform_device",
     "EGL_MESA_platform_surfaceless"};
 
-// should match the order of EGLExtensions, and be null-terminated.
+// should match the order of EGLExtension, and be null-terminated.
 static const char* sEGLExtensionNames[] = {
     "EGL_KHR_image_base",
     "EGL_KHR_image_pixmap",
@@ -100,6 +103,12 @@ static const char* sEGLExtensionNames[] = {
     "EGL_ANGLE_metal_commands_scheduled_sync",
     "EGL_ANGLE_metal_shared_event_sync",
     "EGL_ANGLE_wait_until_work_scheduled",
+};
+
+// should match the order of EGLDeviceExtension, and be null-terminated.
+static const char* sEGLDeviceExtensionNames[] = {
+    "EGL_ANGLE_device_d3d",
+    "EGL_ANGLE_device_metal",
 };
 
 PRLibrary* LoadApitraceLibrary() {
@@ -373,6 +382,42 @@ std::shared_ptr<EglDisplay> GLLibraryEGL::CreateDisplayForMetalDevice(
   return EglDisplay::Create(*this, display, false, lock);
 }  // namespace gl
 
+#ifdef MOZ_WIDGET_ANDROID
+std::shared_ptr<EglDisplay> GLLibraryEGL::CreateDisplayForWebRenderAndroidGLES(
+    nsACString* const out_failureId) {
+  StaticMutexAutoLock lock(sMutex);
+  // Get() may return system EGL after failing to initialize bundled ANGLE.
+  if (!IsANGLE() ||
+      !IsExtensionSupported(EGLLibExtension::ANGLE_platform_angle_opengl)) {
+    *out_failureId = "FEATURE_FAILURE_WR_ANGLE_GL_UNSUPPORTED"_ns;
+    return nullptr;
+  }
+  if (!IsExtensionSupported(
+          EGLLibExtension::ANGLE_platform_angle_display_key)) {
+    *out_failureId = "FEATURE_FAILURE_WR_ANGLE_DISPLAY_KEY_UNSUPPORTED"_ns;
+    return nullptr;
+  }
+
+  // WebGL uses the default key (0). Keep WebRender's display separate even
+  // when both use the same ANGLE backend and underlying GPU.
+  const EGLAttrib attribs[] = {LOCAL_EGL_PLATFORM_ANGLE_TYPE_ANGLE,
+                               LOCAL_EGL_PLATFORM_ANGLE_TYPE_OPENGLES_ANGLE,
+                               LOCAL_EGL_PLATFORM_ANGLE_DISPLAY_KEY_ANGLE, 1,
+                               LOCAL_EGL_NONE};
+  const EGLDisplay display = fGetPlatformDisplay(LOCAL_EGL_PLATFORM_ANGLE_ANGLE,
+                                                 EGL_DEFAULT_DISPLAY, attribs);
+  if (!display) {
+    *out_failureId = "FEATURE_FAILURE_WR_ANGLE_GET_DISPLAY"_ns;
+    return nullptr;
+  }
+  auto egl = EglDisplay::Create(*this, display, false, lock);
+  if (!egl) {
+    *out_failureId = "FEATURE_FAILURE_WR_ANGLE_INIT_DISPLAY"_ns;
+  }
+  return egl;
+}
+#endif
+
 static bool IsAccelAngleSupported(nsACString* const out_failureId) {
   if (!gfx::gfxVars::AllowWebglAccelAngle()) {
     if (out_failureId->IsEmpty()) {
@@ -502,25 +547,108 @@ Maybe<SymbolLoader> GLLibraryEGL::GetSymbolLoader() const {
 
 /* static */
 RefPtr<GLLibraryEGL> GLLibraryEGL::Get(nsACString* const out_failureId) {
+  return GetImpl(LibraryType::Default, out_failureId);
+}
+
+#ifdef MOZ_WIDGET_ANDROID
+/* static */
+RefPtr<GLLibraryEGL> GLLibraryEGL::GetNative(nsACString* const out_failureId) {
+  return GetImpl(LibraryType::Native, out_failureId);
+}
+
+/* static */
+bool GLLibraryEGL::IsANGLEAvailable() {
+  nsCString failureId;
+  const auto lib = Get(&failureId);
+  return lib && lib->IsANGLE();
+}
+#endif
+
+/* static */
+RefPtr<GLLibraryEGL> GLLibraryEGL::GetImpl(LibraryType type,
+                                           nsACString* const out_failureId) {
   StaticMutexAutoLock lock(sMutex);
-  if (!sInstance) {
-    sInstance = new GLLibraryEGL;
-    if (NS_WARN_IF(!sInstance->Init(out_failureId))) {
-      sInstance = nullptr;
+
+  const auto ensureInitialized =
+      [&](StaticRefPtr<GLLibraryEGL>& instance,
+          LibraryType libraryType) -> RefPtr<GLLibraryEGL> {
+    if (!instance) {
+      RefPtr<GLLibraryEGL> lib = new GLLibraryEGL;
+      if (NS_WARN_IF(!lib->Init(libraryType, out_failureId))) {
+        return nullptr;
+      }
+      instance = lib;
     }
+    return instance.get();
+  };
+
+  // Keep the selected default implementation until Shutdown().
+  if (type == LibraryType::Default && sInstance) {
+    return sInstance;
   }
+
+#ifdef MOZ_WIDGET_ANDROID
+  if (type == LibraryType::Native || !gfx::gfxVars::UseWebRenderANGLE()) {
+    auto lib = ensureInitialized(sNativeInstance, LibraryType::Native);
+    if (type == LibraryType::Default) {
+      sInstance = lib;
+    }
+    return lib;
+  }
+  // Preserve the backend decision through initialization, even if gfxVars
+  // changes before the library is loaded or its extensions are queried.
+  type = LibraryType::ANGLE;
+#endif
+
+  if (ensureInitialized(sInstance, type)) {
+    return sInstance;
+  }
+
+#ifdef MOZ_WIDGET_ANDROID
+  gfxCriticalNote << "Failed to initialize bundled ANGLE; using native EGL: "
+                  << nsCString(*out_failureId).get();
+
+  out_failureId->Truncate();
+  sInstance = ensureInitialized(sNativeInstance, LibraryType::Native);
+#endif
+
   return sInstance;
 }
 
 /* static */ void GLLibraryEGL::Shutdown() {
   StaticMutexAutoLock lock(sMutex);
   sInstance = nullptr;
+  sNativeInstance = nullptr;
 }
 
-bool GLLibraryEGL::Init(nsACString* const out_failureId) {
+bool GLLibraryEGL::Init(LibraryType type, nsACString* const out_failureId) {
   MOZ_RELEASE_ASSERT(!mSymbols.fTerminate);
 
   mozilla::ScopedGfxFeatureReporter reporter("EGL");
+
+#ifndef MOZ_WIDGET_ANDROID
+  // The explicit native entry point is currently implemented only for Android.
+  if (type == LibraryType::Native) {
+    *out_failureId = "FEATURE_FAILURE_NATIVE_EGL_UNSUPPORTED"_ns;
+    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+    return false;
+  }
+#else
+  MOZ_ASSERT(type != LibraryType::Default);
+  const bool useANGLE = type == LibraryType::ANGLE;
+  if (useANGLE) {
+    // Load the default ANGLE implementation as a matching EGL/GLES pair.
+    mGLLibrary = PR_LoadLibrary("libGLESv2_angle.so");
+    if (mGLLibrary) {
+      mEGLLibrary = PR_LoadLibrary("libEGL_angle.so");
+    }
+    if (!mEGLLibrary || !mGLLibrary) {
+      *out_failureId = "FEATURE_FAILURE_ANGLE_EGL_LOAD"_ns;
+      gfxCriticalNote << "Failed to load ANGLE";
+      return false;
+    }
+  }
+#endif
 
 #ifdef XP_WIN
   if (!mEGLLibrary) {
@@ -664,7 +792,7 @@ bool GLLibraryEGL::Init(nsACString* const out_failureId) {
 
   // -
 
-  InitLibExtensions();
+  InitLibExtensions(type);
 
   const SymbolLoader pfnLoader(mSymbols.fGetProcAddress);
 
@@ -678,9 +806,13 @@ bool GLLibraryEGL::Init(nsACString* const out_failureId) {
 
   // Check the ANGLE support the system has
   mIsANGLE = IsExtensionSupported(EGLLibExtension::ANGLE_platform_angle);
-  mIsD3DANGLE = IsExtensionSupported(EGLLibExtension::ANGLE_platform_angle_d3d);
-  mIsMetalANGLE =
-      IsExtensionSupported(EGLLibExtension::ANGLE_platform_angle_metal);
+
+#ifdef MOZ_WIDGET_ANDROID
+  if (useANGLE && !mIsANGLE) {
+    *out_failureId = "FEATURE_FAILURE_EGL_NOT_ANGLE"_ns;
+    return false;
+  }
+#endif
 
   // Client exts are ready. (But not display exts!)
 
@@ -900,6 +1032,22 @@ EglDisplay::EglDisplay(const PrivateUseOnly&, GLLibraryEGL& lib,
   MarkExtensions(rawExtString, shouldDumpExts, "display", sEGLExtensionNames,
                  &mAvailableExtensions);
 
+  if (mLib->IsExtensionSupported(EGLLibExtension::EXT_device_query)) {
+    EGLAttrib device = 0;
+    if (fQueryDisplayAttribEXT(LOCAL_EGL_DEVICE_EXT, &device)) {
+      auto rawDeviceExtString = mLib->fQueryDeviceStringEXT(
+          reinterpret_cast<EGLDeviceEXT>(device), LOCAL_EGL_EXTENSIONS);
+      if (!rawDeviceExtString) {
+        NS_WARNING("Failed to query EGL device extensions!");
+        rawDeviceExtString = "";
+      }
+      MarkExtensions(rawDeviceExtString, shouldDumpExts, "device",
+                     sEGLDeviceExtensionNames, &mAvailableDeviceExtensions);
+    } else {
+      NS_WARNING("Failed to query EGL device!");
+    }
+  }
+
   // -
 
   if (!HasKHRImageBase()) {
@@ -1013,6 +1161,44 @@ std::shared_ptr<EglDisplay> GLLibraryEGL::CreateDisplayLocked(
         return nullptr;
       }
     }
+  } else if (IsANGLE()) {
+    MOZ_ASSERT(!aFlags.mForceSoftware,
+               "Software rendering not supported by EGL on this platform");
+    if (!aFlags.mForceSoftware) {
+      AutoTArray<EGLAttrib, 5> attrib_list;
+
+#ifdef MOZ_WIDGET_ANDROID
+      // On Android, ANGLE may be compiled with multiple backends, so
+      // explicitly request the GLES backend.
+      if (!IsExtensionSupported(EGLLibExtension::ANGLE_platform_angle_opengl)) {
+        *out_failureId = "FEATURE_FAILURE_ANGLE_GL_UNSUPPORTED"_ns;
+        return nullptr;
+      }
+      attrib_list.AppendElement(LOCAL_EGL_PLATFORM_ANGLE_TYPE_ANGLE);
+      attrib_list.AppendElement(LOCAL_EGL_PLATFORM_ANGLE_TYPE_OPENGLES_ANGLE);
+#endif
+
+      if (IsExtensionSupported(
+              EGLLibExtension::ANGLE_display_power_preference)) {
+        // The docs state "if this extension is advertised and this display
+        // creation attribute is not specified, the default value is
+        // EGL_LOW_POWER_ANGLE."
+        // In testing, however, it was found that EGL_LOW_POWER_ANGLE had to be
+        // specifically requested in order to obtain a low power display.
+        attrib_list.AppendElement(LOCAL_EGL_POWER_PREFERENCE_ANGLE);
+        attrib_list.AppendElement(aFlags.mPreferHighPower
+                                      ? LOCAL_EGL_HIGH_POWER_ANGLE
+                                      : LOCAL_EGL_LOW_POWER_ANGLE);
+      }
+
+      attrib_list.AppendElement(LOCAL_EGL_NONE);
+      const EGLDisplay display =
+          fGetPlatformDisplay(LOCAL_EGL_PLATFORM_ANGLE_ANGLE,
+                              EGL_DEFAULT_DISPLAY, attrib_list.Elements());
+      if (display) {
+        ret = EglDisplay::Create(*this, display, false, aProofOfLock);
+      }
+    }
   } else {
     void* nativeDisplay = EGL_DEFAULT_DISPLAY;
 #ifdef MOZ_WIDGET_GTK
@@ -1037,30 +1223,7 @@ std::shared_ptr<EglDisplay> GLLibraryEGL::CreateDisplayLocked(
       }
     }
 #  endif
-#elif defined(XP_MACOSX)
-    MOZ_ASSERT(!aFlags.mForceSoftware,
-               "Software rendering not supported by EGL on macOS");
 #endif
-
-    // Initialize a display selecting a power preference, if supported.
-    if (!ret && !aFlags.mForceSoftware &&
-        IsExtensionSupported(EGLLibExtension::ANGLE_display_power_preference)) {
-      // The docs state "if this extension is advertised and this display
-      // creation attribute is not specified, the default value is
-      // EGL_LOW_POWER_ANGLE."
-      // In testing, however, it was found that EGL_LOW_POWER_ANGLE had to be
-      // specifically requested in order to obtain a low power display.
-      const EGLAttrib attrib_list[] = {LOCAL_EGL_POWER_PREFERENCE_ANGLE,
-                                       aFlags.mPreferHighPower
-                                           ? LOCAL_EGL_HIGH_POWER_ANGLE
-                                           : LOCAL_EGL_LOW_POWER_ANGLE,
-                                       LOCAL_EGL_NONE};
-      const EGLDisplay display = fGetPlatformDisplay(
-          LOCAL_EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY, attrib_list);
-      if (display) {
-        ret = EglDisplay::Create(*this, display, false, aProofOfLock);
-      }
-    }
 
     if (!ret && !aFlags.mForceSoftware) {
       ret = GetAndInitDisplay(*this, nativeDisplay, aProofOfLock);
@@ -1078,18 +1241,21 @@ std::shared_ptr<EglDisplay> GLLibraryEGL::CreateDisplayLocked(
   return ret;
 }
 
-void GLLibraryEGL::InitLibExtensions() {
+void GLLibraryEGL::InitLibExtensions(LibraryType type) {
   const bool shouldDumpExts = GLContext::ShouldDumpExts();
 
   const char* rawExtString = nullptr;
 
-#ifndef ANDROID
-  // Bug 1209612: Crashes on a number of android drivers.
-  // Ideally we would only blocklist this there, but for now we don't need the
-  // client extension list on ANDROID (we mostly need it on ANGLE), and we'd
-  // rather not crash.
-  rawExtString = fQueryString(nullptr, LOCAL_EGL_EXTENSIONS);
+#ifdef MOZ_WIDGET_ANDROID
+  // Bug 1209612: Querying client extensions can crash Android system drivers.
+  // Query only when Init() loaded bundled ANGLE. This decision must use the
+  // selected library type rather than the current gfxVars value, which may
+  // have changed since GetImpl(). Native fallback also skips this query.
+  if (type != LibraryType::ANGLE) {
+    return;
+  }
 #endif
+  rawExtString = fQueryString(nullptr, LOCAL_EGL_EXTENSIONS);
 
   if (!rawExtString) {
     if (shouldDumpExts) {

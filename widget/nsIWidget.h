@@ -18,6 +18,7 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/TimeStamp.h"
+#include "mozilla/TouchSwipeState.h"
 #include "mozilla/TypedEnumBits.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/gfx/Matrix.h"
@@ -25,6 +26,7 @@
 #include "mozilla/image/Resolution.h"
 #include "mozilla/layers/LayersTypes.h"
 #include "mozilla/layers/ScrollableLayerGuid.h"
+#include "mozilla/layers/TouchCounter.h"
 #include "mozilla/layers/ZoomConstraints.h"
 #include "mozilla/widget/IMEData.h"
 #include "mozilla/widget/InitData.h"
@@ -72,6 +74,7 @@ class WidgetGUIEvent;
 class WidgetInputEvent;
 class WidgetKeyboardEvent;
 enum ScreenRotation : uint8_t;
+enum class SwipeInputSource : uint8_t;
 enum class ColorScheme : uint8_t;
 enum class NativeKeyBindingsType : uint8_t;
 enum class WindowButtonType : uint8_t;
@@ -285,6 +288,25 @@ enum nsCursor {  ///(normal cursor,       usually rendered as an arrow)
  * After the OS wakes up, this topic is notified.
  */
 #define NS_WIDGET_WAKE_OBSERVER_TOPIC "wake_notification"
+
+/**
+ * After the user session's screen gets locked, this topic is notified.
+ * Currently only notified on macOS and Windows.
+ */
+#define NS_WIDGET_SCREEN_LOCK_OBSERVER_TOPIC "screen_lock_notification"
+
+/**
+ * After the user session's screen gets unlocked, this topic is notified.
+ * Currently only notified on macOS and Windows.
+ */
+#define NS_WIDGET_SCREEN_UNLOCK_OBSERVER_TOPIC "screen_unlock_notification"
+
+/**
+ * After the screensaver starts, this topic is notified. The screen may or may
+ * not get locked later on. Currently only notified on macOS.
+ */
+#define NS_WIDGET_SCREENSAVER_START_OBSERVER_TOPIC \
+  "screensaver_start_notification"
 
 /**
  * Before the OS suspends the current process, this topic is notified.  Some
@@ -1100,6 +1122,15 @@ class nsIWidget : public nsSupportsWeakReference {
    */
   virtual void SetSupportsNativeFullscreen(bool aSupportsNativeFullscreen) {}
 
+  /**
+   * Keep the user from switching to another application while this window
+   * hides the OS chrome in fullscreen, as a locked down kiosk window does.
+   * Quitting stays available, so the machine can always be recovered.
+   *
+   * Ignored on child widgets and on non-Mac platforms.
+   */
+  virtual void SetPreventAppSwitching(bool aShouldPreventAppSwitching) {}
+
   enum WindowAnimationType {
     eGenericWindowAnimation,
     eDocumentWindowAnimation
@@ -1256,7 +1287,8 @@ class nsIWidget : public nsSupportsWeakReference {
 
   void TrackScrollEventAsSwipe(const mozilla::PanGestureInput& aSwipeStartEvent,
                                uint32_t aAllowedDirections,
-                               uint64_t aInputBlockId);
+                               uint64_t aInputBlockId,
+                               mozilla::SwipeInputSource aInputSource);
   struct SwipeInfo {
     bool wantsSwipe;
     uint32_t allowedDirections;
@@ -1291,6 +1323,23 @@ class nsIWidget : public nsSupportsWeakReference {
    * Internal methods
    */
   virtual void* GetNativeData(uint32_t aDataType) = 0;
+
+  /**
+   * Called when APZ tells the swipable directions of the touch block
+   * |aInputBlockId|, which it could not tell synchronously when it received
+   * an input of that block.
+   */
+  void ReceiveTouchSwipableDirections(uint64_t aInputBlockId,
+                                      mozilla::SideBits aSwipableDirections);
+
+  // A structure that groups the statuses from APZ dispatch and content
+  // dispatch.
+  struct ContentAndAPZEventStatus {
+    // Either of these may not be set if the event was not dispatched
+    // to APZ or to content.
+    nsEventStatus mApzStatus = nsEventStatus_eIgnore;
+    nsEventStatus mContentStatus = nsEventStatus_eIgnore;
+  };
 
  protected:
   nsIWidget();
@@ -1352,7 +1401,16 @@ class nsIWidget : public nsSupportsWeakReference {
    * be called from the main thread, and if APZ is enabled, that must also be
    * the APZ controller thread.
    */
-  void DispatchTouchInput(mozilla::MultiTouchInput& aInput);
+  ContentAndAPZEventStatus DispatchTouchInput(mozilla::MultiTouchInput& aInput);
+
+  void MayStartSwipeForTouchInput(
+      const mozilla::MultiTouchInput& aInput,
+      const mozilla::layers::APZEventResult& aResult);
+  void HandleTouchInputAsSwipe(const mozilla::MultiTouchInput& aInput);
+  bool IsTouchSwipeEnabled() const;
+  bool MayTriggerSwipe(const mozilla::MultiTouchInput& aInput);
+  void HandleTouchInputForSwipe(const mozilla::MultiTouchInput& aInput,
+                                const mozilla::layers::APZEventResult& aResult);
 
   /**
    * Dispatch the given PanGestureInput through APZ to Gecko (if APZ is enabled)
@@ -1476,15 +1534,6 @@ class nsIWidget : public nsSupportsWeakReference {
    */
   virtual bool DispatchWindowEvent(mozilla::WidgetGUIEvent& event);
 
-  // A structure that groups the statuses from APZ dispatch and content
-  // dispatch.
-  struct ContentAndAPZEventStatus {
-    // Either of these may not be set if the event was not dispatched
-    // to APZ or to content.
-    nsEventStatus mApzStatus = nsEventStatus_eIgnore;
-    nsEventStatus mContentStatus = nsEventStatus_eIgnore;
-  };
-
   /**
    * Dispatches an event that must be handled by APZ first, when APZ is
    * enabled. If invoked in the child process, it is forwarded to the
@@ -1534,6 +1583,13 @@ class nsIWidget : public nsSupportsWeakReference {
   virtual void SetWindowClass(const nsAString& xulWinType,
                               const nsAString& xulWinClass,
                               const nsAString& xulWinName) {}
+
+  /**
+   * Changes the window class given to SetWindowClass, leaving the window type
+   * and name as they are. Used when the window class changes after the window
+   * has been shown.
+   */
+  virtual void UpdateWindowClass(const nsAString& aXulWinClass) {}
 
   virtual void SetIsEarlyBlankWindow(bool) {}
 
@@ -1695,12 +1751,14 @@ class nsIWidget : public nsSupportsWeakReference {
    *                          In device pixels, the origin at the top left of
    *                          the primary display.
    * @param aNativeMessage    Platform native message.
-   * @param aDeltaX           The delta value for X direction.  If the native
-   *                          message doesn't indicate X direction scrolling,
+   * @param aDeltaX           The delta value for X direction, positive when
+   *                          scrolling to the left.  If the native message
+   *                          doesn't indicate X direction scrolling, this
    *                          this may be ignored.
-   * @param aDeltaY           The delta value for Y direction.  If the native
-   *                          message doesn't indicate Y direction scrolling,
-   *                          this may be ignored.
+   * @param aDeltaY           The delta value for Y direction, positive when
+   *                          scrolling up.  If the native message doesn't
+   *                          indicate Y direction scrolling, this may be
+   *                          ignored.
    * @param aDeltaZ           The delta value for Z direction.  If the native
    *                          message doesn't indicate Z direction scrolling,
    *                          this may be ignored.
@@ -1719,7 +1777,7 @@ class nsIWidget : public nsSupportsWeakReference {
   }
 
   /*
-   * TouchpadGesturePhase states for SynthesizeNativeTouchPadPinch and
+   * TouchpadGesturePhase states for SynthesizeNativeTouchpadPinch and
    * SynthesizeNativeTouchpadPan. Match phase states in nsIDOMWindowUtils.idl.
    */
   enum TouchpadGesturePhase {
@@ -1752,10 +1810,10 @@ class nsIWidget : public nsSupportsWeakReference {
   /*
    * See nsIDOMWindowUtils.sendNativeTouchpadPinch().
    */
-  virtual nsresult SynthesizeNativeTouchPadPinch(
+  virtual nsresult SynthesizeNativeTouchpadPinch(
       TouchpadGesturePhase aEventPhase, float aScale,
       LayoutDeviceIntPoint aPoint, int32_t aModifierFlags) {
-    MOZ_CRASH("SynthesizeNativeTouchPadPinch not implemented on this platform");
+    MOZ_CRASH("SynthesizeNativeTouchpadPinch not implemented on this platform");
     return NS_ERROR_UNEXPECTED;
   }
 
@@ -1996,6 +2054,17 @@ class nsIWidget : public nsSupportsWeakReference {
    */
   virtual nsresult GetNativeMenuItemKeyEquivalent(const nsAString& aElementId,
                                                   nsAString& aResult) {
+    return NS_ERROR_NOT_IMPLEMENTED;
+  }
+
+  /**
+   * This is used for native menu system testing.
+   *
+   * Returns the title of the native menu item built from the element with id
+   * aElementId. Fails if no menu item was built from that element.
+   */
+  virtual nsresult GetNativeMenuItemTitle(const nsAString& aElementId,
+                                          nsAString& aResult) {
     return NS_ERROR_NOT_IMPLEMENTED;
   }
 
@@ -2304,10 +2373,6 @@ class nsIWidget : public nsSupportsWeakReference {
       const nsTArray<mozilla::FontRange>& aFontRangeArray,
       const bool aIsVertical, const LayoutDeviceIntPoint& aPoint) {}
 
-  virtual void RequestFxrOutput() {
-    MOZ_ASSERT(false, "This function should only execute in Windows");
-  }
-
   /**
    * NotifyCompositorScrollUpdates notify widget about an update to the
    * composited scroll offset and zoom
@@ -2426,6 +2491,7 @@ class nsIWidget : public nsSupportsWeakReference {
   PopupType mPopupType;
   SizeConstraints mSizeConstraints;
   bool mHasRemoteContent;
+  mozilla::TouchSwipeState mTouchSwipeState;
 
   struct FullscreenSavedState {
     DesktopRect windowRect;

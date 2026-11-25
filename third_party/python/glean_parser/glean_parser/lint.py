@@ -20,6 +20,7 @@ from typing import (
 )  # noqa
 
 
+from . import flows
 from . import metrics
 from . import parser
 from . import pings
@@ -369,6 +370,19 @@ def check_redundant_ping(
             yield ("The word 'custom' is redundant.")
 
 
+def check_ohttp_and_info(
+    ping: pings.Ping, parser_config: Dict[str, Any]
+) -> LintGenerator:
+    """
+    Ensure pings with uploader_capabilities containing "ohttp" have metadata.include_info_sections: false
+    """
+    if "ohttp" in ping.uploader_capabilities and (
+        "include_info_sections" not in ping.metadata
+        or ping.metadata["include_info_sections"]
+    ):
+        yield ("OHTTP requires `metadata.include_info_sections: false`.")
+
+
 def check_unknown_ping(
     check_name: str,
     check_type: CheckType,
@@ -478,6 +492,45 @@ PING_CHECKS: Dict[
     "BUG_NUMBER": (check_bug_number, CheckType.error),
     "TAGS_REQUIRED": (check_tags_required, CheckType.error),
     "REDUNDANT_PING": (check_redundant_ping, CheckType.error),
+    "NO_INFO_FOR_OHTTP": (check_ohttp_and_info, CheckType.error),
+}
+
+
+def check_empty_ends_on(
+    flow: flows.Flow, parser_config: Dict[str, Any]
+) -> LintGenerator:
+    if not flow.ends_on:
+        yield (
+            "The flow has no `ends_on` events, so once an instance of it opens, it "
+            "can only close by timing out or when its session ends, and can never "
+            "record a conclusive outcome. Until it closes, recording a `starts_on` "
+            "event again does not open a new instance: if the user starts the task "
+            "over, their new run is counted as part of the instance that is still "
+            "open."
+        )
+
+
+def check_unresolved_flow_event(
+    flow: flows.Flow, parser_config: Dict[str, Any]
+) -> LintGenerator:
+    roles = flow.events()
+    for event in sorted(flow.unresolved):
+        yield (
+            f"'{event}' in `{roles[event]}` is not defined in the metrics given to "
+            "glean_parser, so it is assumed to be defined elsewhere, such as in a "
+            "library built separately. Its existence, type, and `in_session` setting "
+            "were not checked. If it is a typo, it will never match; a test that "
+            "records it and checks its `flows` entry will catch that."
+        )
+
+
+# The checks that operate on individual flows:
+#     {NAME: (function, is_error)}
+FLOW_CHECKS: Dict[
+    str, Tuple[Callable[[flows.Flow, dict], LintGenerator], CheckType]
+] = {
+    "EMPTY_ENDS_ON": (check_empty_ends_on, CheckType.warning),
+    "UNRESOLVED_FLOW_EVENT": (check_unresolved_flow_event, CheckType.warning),
 }
 
 ALL_OBJECT_CHECKS: Dict[
@@ -532,7 +585,7 @@ def _lint_item_tags(
 
 
 def _lint_pings(
-    category: Dict[str, Union[metrics.Metric, pings.Ping, tags.Tag]],
+    category: Dict[str, Union[metrics.Metric, pings.Ping, tags.Tag, flows.Flow]],
     parser_config: Dict[str, Any],
     valid_tag_names: List[str],
 ) -> List[GlinterNit]:
@@ -564,17 +617,44 @@ def _lint_pings(
     return nits
 
 
+def _lint_flows(
+    category: Dict[str, flows.Flow], parser_config: Dict[str, Any]
+) -> List[GlinterNit]:
+    nits: List[GlinterNit] = []
+
+    for flow_name, flow in sorted(category.items()):
+        for check_name, (check_func, check_type) in FLOW_CHECKS.items():
+            if check_name in flow.no_lint:
+                continue
+            nits.extend(
+                GlinterNit(check_name, flow_name, msg, check_type)
+                for msg in check_func(flow, parser_config)
+            )
+    return nits
+
+
 def _lint_all_objects(
-    objects: Dict[str, Dict[str, Union[metrics.Metric, pings.Ping, tags.Tag]]],
+    objects: Dict[
+        str, Dict[str, Union[metrics.Metric, pings.Ping, tags.Tag, flows.Flow]]
+    ],
     parser_config: Dict[str, Any],
 ) -> List[GlinterNit]:
     nits: List[GlinterNit] = []
 
-    pings = objects.get("pings")
+    pings = {}
+    metrics = {}
+
+    for key, item in objects.items():
+        if key == "pings":
+            pings.update(item)
+        elif key == "tags":
+            pass
+        else:
+            metrics.update(item)
+
     if not pings:
         return []
 
-    metrics = objects.get("all_metrics")
     if not metrics:
         return []
 
@@ -628,6 +708,11 @@ def lint_metrics(
 
         if category_name == "tags":
             # currently we have no linting for tags
+            continue
+
+        category_flows = flows.flows_in({category_name: category})
+        if category_flows:
+            nits.extend(_lint_flows(category_flows, parser_config))
             continue
 
         # The information for whether there's duplicate metrics found within the

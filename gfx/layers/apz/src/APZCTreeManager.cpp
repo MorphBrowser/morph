@@ -176,7 +176,7 @@ class APZCTreeManager::CheckerboardFlushObserver : public nsIObserver {
 
   explicit CheckerboardFlushObserver(APZCTreeManager* aTreeManager)
       : mTreeManager(aTreeManager) {
-    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_RELEASE_ASSERT(NS_IsMainThread());
     nsCOMPtr<nsIObserverService> obsSvc =
         mozilla::services::GetObserverService();
     MOZ_ASSERT(obsSvc);
@@ -186,7 +186,7 @@ class APZCTreeManager::CheckerboardFlushObserver : public nsIObserver {
   }
 
   void Unregister() {
-    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_RELEASE_ASSERT(NS_IsMainThread());
     nsCOMPtr<nsIObserverService> obsSvc =
         mozilla::services::GetObserverService();
     if (obsSvc) {
@@ -208,7 +208,7 @@ NS_IMETHODIMP
 APZCTreeManager::CheckerboardFlushObserver::Observe(nsISupports* aSubject,
                                                     const char* aTopic,
                                                     const char16_t*) {
-  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_RELEASE_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(mTreeManager.get());
 
   RecursiveMutexAutoLock lock(mTreeManager->mTreeLock);
@@ -226,7 +226,7 @@ APZCTreeManager::CheckerboardFlushObserver::Observe(nsISupports* aSubject,
       (void)gpu->SendFlushActiveCheckerboardReportsDone();
     }
   } else {
-    MOZ_ASSERT(XRE_IsParentProcess());
+    MOZ_RELEASE_ASSERT(XRE_IsParentProcess());
     nsCOMPtr<nsIObserverService> obsSvc =
         mozilla::services::GetObserverService();
     if (obsSvc) {
@@ -278,7 +278,14 @@ APZCTreeManager::APZCTreeManager(LayersId aRootLayersId,
                                  CSSToLayoutDeviceScale aWidgetScale,
                                  UniquePtr<IAPZHitTester> aHitTester)
     : mTestSampleTime(Nothing(), "APZCTreeManager::mTestSampleTime"),
-      mInputQueue(new InputQueue()),
+      mInputQueue(new InputQueue([aRootLayersId](uint64_t aInputBlockId,
+                                                 SideBits aSwipableDirections) {
+        if (RefPtr<GeckoContentController> controller =
+                GetContentController(aRootLayersId)) {
+          controller->NotifyTouchSwipableDirections(aInputBlockId,
+                                                    aSwipableDirections);
+        }
+      })),
       mMapLock("APZCMapLock"),
       mRootLayersId(aRootLayersId),
       mSampler(nullptr),
@@ -302,7 +309,7 @@ APZCTreeManager::APZCTreeManager(LayersId aRootLayersId,
   mApzcTreeLog.ConditionOnPrefFunction(StaticPrefs::apz_printtree);
 
   if (!mHitTester) {
-    mHitTester = MakeUnique<WRHitTester>();
+    mHitTester = std::make_unique<WRHitTester>();
   }
   mHitTester->Initialize(this);
 }
@@ -354,20 +361,6 @@ void APZCTreeManager::NotifyLayerTreeAdopted(
   // Resetting the focus state avoids this (the state will sync with content
   // on the next focus update).
   mFocusState.Reset();
-
-  UniquePtr<APZTestData> adoptedData;
-  if (aOldApzcTreeManager) {
-    MutexAutoLock lock(aOldApzcTreeManager->mTestDataLock);
-    auto it = aOldApzcTreeManager->mTestData.find(aLayersId);
-    if (it != aOldApzcTreeManager->mTestData.end()) {
-      adoptedData = std::move(it->second);
-      aOldApzcTreeManager->mTestData.erase(it);
-    }
-  }
-  if (adoptedData) {
-    MutexAutoLock lock(mTestDataLock);
-    mTestData[aLayersId] = std::move(adoptedData);
-  }
 }
 
 void APZCTreeManager::NotifyLayerTreeRemoved(LayersId aLayersId) {
@@ -467,7 +460,7 @@ std::vector<LayersId> APZCTreeManager::UpdateHitTestingTree(
   const bool testLoggingEnabled = StaticPrefs::apz_test_logging_enabled();
   if (testLoggingEnabled) {
     MutexAutoLock lock(mTestDataLock);
-    UniquePtr<APZTestData> ptr = MakeUnique<APZTestData>();
+    auto ptr = std::make_unique<APZTestData>();
     auto result =
         mTestData.insert(std::make_pair(aOriginatingLayersId, std::move(ptr)));
     testData = result.first->second.get();
@@ -933,8 +926,11 @@ void APZCTreeManager::SampleForWebRender(const Maybe<VsyncId>& aVsyncId,
       if (RefPtr<UiCompositorControllerParent> uiController =
               UiCompositorControllerParent::GetFromRootLayerTreeId(
                   mRootLayersId)) {
-        uiController->NotifyCompositorScrollUpdates(
-            apzc->GetCompositorScrollUpdates());
+        nsTArray<CompositorScrollUpdate> updates =
+            apzc->GetCompositorScrollUpdates();
+        if (!updates.IsEmpty()) {
+          uiController->NotifyCompositorScrollUpdates(std::move(updates));
+        }
       }
     }
   }
@@ -1812,7 +1808,7 @@ APZEventResult APZCTreeManager::ReceiveInputEvent(
       // to duplicate this EventStateManager code or something. See the call to
       // GetUserPrefsForWheelEvent in APZBridge.cpp for why these fields
       // are stored separately.
-      MOZ_ASSERT(NS_IsMainThread());
+      MOZ_RELEASE_ASSERT(NS_IsMainThread());
       WidgetWheelEvent wheelEvent = panInput.ToWidgetEvent(nullptr);
       EventStateManager::GetUserPrefsForWheelEvent(
           &wheelEvent, &panInput.mUserDeltaMultiplierX,
@@ -3366,6 +3362,42 @@ AsyncPanZoomController* APZCTreeManager::FindRootApzcFor(
 
   HitTestingTreeNode* resultNode = FindRootNodeForLayersId(aLayersId);
   return resultNode ? resultNode->GetApzc() : nullptr;
+}
+
+AsyncPanZoomController* APZCTreeManager::FindDoubleTapHandlerFor(
+    AsyncPanZoomController* aApzc) {
+  RecursiveMutexAutoLock lock(mTreeLock);
+
+  // aApzc is either:
+  //  a) an APZC in the top level content document, i.e. the root content APZC
+  //     or a sub scroll container sharing the document's layers id,
+  //  b) an APZC in the browser window's chrome document (browser.xhtml), or
+  //  c) an APZC having a different layers id, i.e. a scroll container in an
+  //     out-of-process iframe.
+  //
+  // a) wants the root content APZC it is a descendant of, or the one its fixed
+  // content is fixed to. The walk stays within the layers id, so b) doesn't
+  // reach the root content APZC of a top level content document loaded in the
+  // parent process, such as about:license, even though it shares
+  // browser.xhtml's layers id, and c) doesn't reach the root content APZC of
+  // the document embedding the iframe.
+  LayersId layersId = aApzc->GetLayersId();
+  AsyncPanZoomController* apzc = aApzc;
+  while (!apzc->IsRootContent()) {
+    AsyncPanZoomController* parent = FindHandoffParent(apzc).mApzc;
+    if (!parent) {
+      // b)'s root APZC has no enclosing document.
+      return nullptr;
+    }
+    if (parent->GetLayersId() != layersId) {
+      // The root APZC of c)'s layers id hands the zoom off to the root content
+      // APZC of the enclosing document.
+      MOZ_ASSERT(apzc->IsRootForLayersId());
+      return apzc;
+    }
+    apzc = parent;
+  }
+  return apzc;
 }
 
 AsyncPanZoomController* APZCTreeManager::FindRootContentApzcForLayersId(

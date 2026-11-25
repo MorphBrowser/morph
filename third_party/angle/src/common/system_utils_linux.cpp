@@ -16,7 +16,16 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#include <pthread_np.h>
+#endif
+
 #include <array>
+
+#ifndef CLOCK_MONOTONIC_RAW
+// CLOCK_MONOTONIC_RAW is undefined on Solaris.
+#    define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
+#endif
 
 namespace angle
 {
@@ -51,8 +60,15 @@ const char *GetSharedLibraryExtension()
 double GetCurrentSystemTime()
 {
     struct timespec currentTime;
-    clock_gettime(CLOCK_MONOTONIC, &currentTime);
+    clock_gettime(CLOCK_MONOTONIC_RAW, &currentTime);
     return currentTime.tv_sec + currentTime.tv_nsec * 1e-9;
+}
+
+uint64_t GetCurrentSystemTimeNs()
+{
+    struct timespec currentTime;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &currentTime);
+    return static_cast<uint64_t>(currentTime.tv_sec) * 1000'000'000 + currentTime.tv_nsec;
 }
 
 void SetCurrentThreadName(const char *name)
@@ -60,6 +76,10 @@ void SetCurrentThreadName(const char *name)
     // There's a 15-character (16 including '\0') limit.  If the name is too big (and ERANGE is
     // returned), name will be ignored.
     ASSERT(strlen(name) < 16);
+#if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+    pthread_set_name_np(pthread_self(), name);
+#else
     pthread_setname_np(pthread_self(), name);
+#endif
 }
 }  // namespace angle

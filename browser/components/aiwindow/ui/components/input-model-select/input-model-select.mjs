@@ -8,48 +8,43 @@ import {
   repeat,
 } from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+import { getModelIconSrc } from "chrome://browser/content/aiwindow/modules/ModelIcons.mjs";
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-button.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/panel-list.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-badge.mjs";
 
 const { XPCOMUtils } = ChromeUtils.importESModule(
   "resource://gre/modules/XPCOMUtils.sys.mjs"
 );
 
-// TODO Bug 2053495: remove with mistral release pref
-const MISTRAL_RELEASE_PREF = "browser.smartwindow.mistralRelease";
-const { getModelDisplayOrder } = window.IS_STORYBOOK
-  ? // TODO Bug 2053495: ensure TypeError doesn't occur in Storybook once pref gating has been removed
-    { getModelDisplayOrder: () => ["1", "2", "3"] }
-  : ChromeUtils.importESModule(
-      "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs"
-    );
+const CUSTOM_MODEL_NAME_PREF = "browser.smartwindow.model";
+const { getModelDisplayOrder, AUTO_MODEL_CHOICE_ID, isAutoModelEnabled } =
+  window.IS_STORYBOOK
+    ? {
+        getModelDisplayOrder: () => ["3", "1", "2"],
+        AUTO_MODEL_CHOICE_ID: "4",
+        isAutoModelEnabled: () => false,
+      }
+    : ChromeUtils.importESModule(
+        "moz-src:///browser/components/aiwindow/models/Utils.sys.mjs"
+      );
 
-// TODO Bug 2053495: remove with mistral release pref — delete
-// MODEL_ICONS and make MODEL_ICONS_V2 the only set.
-// Icon URL and l10n ID inlined as full URLs so they stay greppable
-
-const MODEL_ICONS = {
-  0: "chrome://browser/content/aiwindow/assets/model-choice-0.svg",
-  1: "chrome://browser/content/aiwindow/assets/model-choice-1.svg",
-  2: "chrome://browser/content/aiwindow/assets/model-choice-2.svg",
-  3: "chrome://browser/content/aiwindow/assets/model-choice-3.svg",
-};
-
-const MODEL_ICONS_V2 = {
-  0: "chrome://browser/content/aiwindow/assets/model-choice-0.svg",
-  1: "chrome://browser/content/aiwindow/assets/model-choice-gemini.svg",
-  2: "chrome://browser/content/aiwindow/assets/model-choice-qwen.svg",
-  3: "chrome://browser/content/aiwindow/assets/model-choice-mistral.svg",
-};
 const BUTTON_LABEL_L10N_IDS = {
   0: "aiwindow-input-model-select-button-label-custom",
   1: "aiwindow-input-model-select-button-label-fast",
   2: "aiwindow-input-model-select-button-label-allpurpose",
   3: "aiwindow-input-model-select-button-label-personal",
+  4: "aiwindow-input-model-select-button-label-auto",
+};
+const AUTO_MODEL_DETAILS_L10N_IDS = {
+  ...BUTTON_LABEL_L10N_IDS,
+  1: "aiwindow-input-model-select-fast-description",
+  2: "aiwindow-input-model-select-flexible-description",
+  3: "aiwindow-input-model-select-personal-description",
+  4: "aiwindow-input-model-select-auto-description",
 };
 
 /**
@@ -81,19 +76,18 @@ export class InputModelSelect extends MozLitElement {
     this.panelOpen = false;
     this.sidebarMode = false;
     this._menuId = `models-menu-${crypto.randomUUID()}`;
-    // TODO Bug 2053495: remove with mistral release pref. Caches the pref and
-    // re-renders the whole component when it changes (e.g. Nimbus enrollment
-    // mid-session), so labels, order, and icons all update in place.
-    XPCOMUtils.defineLazyPreferenceGetter(
-      this,
-      "mistralRelease",
-      MISTRAL_RELEASE_PREF,
-      false,
-      () => this.requestUpdate()
-    );
-    // defineLazyPreferenceGetter registers its pref observer on first read, so
-    // touch the value here to arm the onUpdate callback above.
-    void this.mistralRelease;
+    if (window.IS_STORYBOOK) {
+      this.customModelName = "";
+    } else {
+      XPCOMUtils.defineLazyPreferenceGetter(
+        this,
+        "customModelName",
+        CUSTOM_MODEL_NAME_PREF,
+        null,
+        () => this.requestUpdate()
+      );
+      void this.customModelName;
+    }
   }
 
   get #caretIcon() {
@@ -168,28 +162,40 @@ export class InputModelSelect extends MozLitElement {
     return BUTTON_LABEL_L10N_IDS[choiceId];
   }
 
-  #getDescriptionL10nId(choiceId) {
-    if (choiceId === "0") {
-      return "aiwindow-input-model-select-menu-item-description-custom";
-    }
-    if (this.mistralRelease) {
-      return BUTTON_LABEL_L10N_IDS[choiceId];
-    }
-    return "aiwindow-input-model-select-menu-item-description";
+  #modelName(item) {
+    return item.index === "0" ? this.customModelName : item.shortName;
   }
 
-  #iconSrc(index) {
-    return (this.mistralRelease ? MODEL_ICONS_V2 : MODEL_ICONS)[index];
+  #modelBrandName(item) {
+    return item.index === "0" ? this.#shortCustomModelName() : item.brandName;
+  }
+
+  /**
+   * Reduces a custom model ID to its first word, dropping any namespace or
+   * path, e.g. `hf.co/user/Llama-3.2-1B-GGUF:Q4_K_M` becomes `Llama`.
+   */
+  #shortCustomModelName() {
+    const lastSegment =
+      this.customModelName
+        .split(/[\\/]/)
+        .findLast(Boolean)
+        ?.replace(/\.gguf$/i, "") ?? "";
+    return lastSegment.split(/[-_:]/).find(Boolean) ?? "";
   }
 
   render() {
-    if (!this.#modelsList.length || !this.#selectedModel) {
+    const selectedModel = this.#selectedModel;
+    if (!this.#modelsList.length || !selectedModel) {
       return html``;
     }
 
+    const buttonLabel = this.#modelBrandName(selectedModel);
+    const detailsL10nIds = isAutoModelEnabled()
+      ? AUTO_MODEL_DETAILS_L10N_IDS
+      : BUTTON_LABEL_L10N_IDS;
+
     const panelListTemplate = html`<panel-list
       id=${this._menuId}
-      mistral-release=${this.mistralRelease}
       @shown=${this.#onPanelShown}
       @hidden=${this.#onPanelHidden}
     >
@@ -207,19 +213,26 @@ export class InputModelSelect extends MozLitElement {
                 class="model-item-icon${item.index === "0"
                   ? " model-item-icon--custom"
                   : ""}"
-                src=${this.#iconSrc(item.index)}
-                alt=${this.mistralRelease ? item.shortName : nothing}
+                src=${getModelIconSrc(item.index)}
+                alt=${this.#modelName(item)}
             /></span>
             <span class="model-item-content">
               <span class="model-item-header">
-                ${this.mistralRelease && item.shortName
+                ${this.#modelName(item)
                   ? html`<span class="model-item-label"
-                      >${item.shortName}</span
+                      >${this.#modelName(item)}</span
                     >`
                   : html`<span
                       class="model-item-label"
                       data-l10n-id=${this.#getButtonLabelL10nId(item.index)}
                     ></span>`}
+                ${item.index === AUTO_MODEL_CHOICE_ID &&
+                item.index !== this.defaultModelChoiceId
+                  ? html`<moz-badge
+                      type="new"
+                      data-l10n-id="aiwindow-input-model-select-recommended-badge"
+                    ></moz-badge>`
+                  : ""}
                 ${item.index === this.defaultModelChoiceId
                   ? html`<moz-badge
                       type="new"
@@ -227,19 +240,10 @@ export class InputModelSelect extends MozLitElement {
                     ></moz-badge>`
                   : ""}
               </span>
-              ${this.mistralRelease
-                ? html`<span
-                    class="model-item-details"
-                    data-l10n-id=${this.#getButtonLabelL10nId(item.index)}
-                  ></span>`
-                : html`<span
-                    class="model-item-details"
-                    data-l10n-id=${this.#getDescriptionL10nId(item.index)}
-                    data-l10n-args=${JSON.stringify({
-                      model: item.model,
-                      ownerName: item.ownerName,
-                    })}
-                  ></span>`}
+              <span
+                class="model-item-details"
+                data-l10n-id=${detailsL10nIds[item.index]}
+              ></span>
             </span>
             ${item.model === this.selectedModelId
               ? html`<img
@@ -274,12 +278,11 @@ export class InputModelSelect extends MozLitElement {
         type="default"
         class="input-model-select-button"
         .menuId=${this._menuId}
-        data-l10n-id=${this.mistralRelease && this.#selectedModel.brandName
+        data-l10n-id=${buttonLabel
           ? nothing
-          : this.#getButtonLabelL10nId(this.#selectedModel.index)}
-        label=${this.mistralRelease && this.#selectedModel.brandName
-          ? this.#selectedModel.brandName
-          : nothing}
+          : this.#getButtonLabelL10nId(selectedModel.index)}
+        label=${buttonLabel || nothing}
+        .title=${selectedModel.index === "0" ? this.customModelName : ""}
         .iconSrc=${this.#caretIcon}
         iconPosition="end"
       >

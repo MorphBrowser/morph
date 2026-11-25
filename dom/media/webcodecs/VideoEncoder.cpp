@@ -13,7 +13,6 @@
 #include "mozilla/Maybe.h"
 #include "mozilla/dom/EncodedVideoChunk.h"
 #include "mozilla/dom/EncodedVideoChunkBinding.h"
-#include "mozilla/dom/ImageUtils.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/dom/VideoColorSpace.h"
 #include "mozilla/dom/VideoColorSpaceBinding.h"
@@ -279,8 +278,8 @@ EncoderConfig VideoEncoderConfigInternal::ToEncoderConfig() const {
   // common format and is set as the default. Otherwise, Gecko's preferred
   // format, BGRA, is assumed.
   EncoderConfig::SampleFormat format(usage == Usage::Realtime
-                                         ? dom::ImageBitmapFormat::YUV420P
-                                         : dom::ImageBitmapFormat::BGRA32);
+                                         ? ImagePixelFormat::I420
+                                         : ImagePixelFormat::BGRA);
   if (usage == Usage::Realtime) {
     format.mColorSpace.mRange.emplace(gfx::ColorRange::LIMITED);
   }

@@ -16,7 +16,6 @@ from operator import itemgetter
 # Skip all tests which use features not supported in SpiderMonkey.
 UNSUPPORTED_FEATURES = set([
     "tail-call-optimization",
-    "import-defer",
     "nonextensible-applies-to-private",  # Bug 1991478
     "ShadowRealm",
 ])
@@ -40,7 +39,7 @@ FEATURE_CHECK_NEEDED = {
 RELEASE_OR_BETA = set([
     "legacy-regexp",
     "import-bytes",
-    "regexp-buffer-boundaries",
+    "import-defer",
 ])
 SHELL_OPTIONS = {
     "symbols-as-weakmap-keys": "--enable-symbols-as-weakmap-keys",
@@ -51,6 +50,7 @@ SHELL_OPTIONS = {
     "Atomics.waitAsync": "--setpref=atomics_wait_async",
     "immutable-arraybuffer": "--enable-arraybuffer-immutable",
     "import-bytes": "--enable-import-bytes",
+    "import-defer": "--enable-defer-import-eval",
     "await-dictionary": "--enable-promise-allkeyed",
     "source-phase-imports": "--enable-source-phase-imports",
     "source-phase-imports-module-source": "--enable-source-phase-imports-test262-module-source",

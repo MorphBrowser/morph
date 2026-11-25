@@ -5,14 +5,15 @@
 #include "DataChannelDcSctp.h"
 
 #include <algorithm>
+#include <memory>
 
 #include "DataChannelLog.h"
 #include "mozilla/Components.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/RandomNum.h"
 #include "mozilla/TimeStamp.h"
-#include "mozilla/dom/PMediaTransport.h"
 #include "mozilla/dom/RTCErrorBinding.h"
+#include "transport/MediaTransportTypes.h"
 #include "transport/runnable_utils.h"
 
 namespace mozilla {
@@ -35,19 +36,13 @@ uint16_t DataChannelConnectionDcSctp::GetStreamIdCeiling() const {
   return kDcSctpMaxStreams;
 }
 
-void DataChannelConnectionDcSctp::Destroy() {
-  MOZ_ASSERT(NS_IsMainThread());
+void DataChannelConnectionDcSctp::CloseAssociation() {
+  MOZ_ASSERT(mSTS->IsOnCurrentThread());
   DC_DEBUG(("%s: %p", __func__, this));
-  DataChannelConnection::Destroy();
-  mSTS->Dispatch(NS_NewRunnableFunction(
-      "DataChannelConnectionDcSctp::Destroy",
-      [this, self = RefPtr<DataChannelConnectionDcSctp>(this)]() {
-        if (mDcSctp) {
-          mDcSctp->Close();
-          // Do we do this now?
-          mDcSctp = nullptr;
-        }
-      }));
+  if (mDcSctp) {
+    mDcSctp->Close();
+    mDcSctp = nullptr;
+  }
 }
 
 bool DataChannelConnectionDcSctp::RaiseStreamLimitTo(uint16_t aNewLimit) {
@@ -200,7 +195,7 @@ SendPacketStatus DataChannelConnectionDcSctp::SendPacketWithStatus(
     std::span<const uint8_t> aData) {
   MOZ_ASSERT(mSTS->IsOnCurrentThread());
   DC_DEBUG(("%s: %p", __func__, this));
-  std::unique_ptr<MediaPacket> packet(new MediaPacket);
+  auto packet = std::make_unique<MediaPacket>();
   packet->SetType(MediaPacket::SCTP);
   packet->Copy(aData.data(), aData.size());
 
@@ -319,9 +314,9 @@ void DataChannelConnectionDcSctp::OnAborted(ErrorKind aError,
   // "sctp-failure" RTCError on the data channels. dcSCTP exposes only its own
   // ErrorKind (not a numeric SCTP cause code), so sctpCauseCode is left unset.
   dom::RTCErrorParams params;
-  params.errorInit().mErrorDetail = dom::RTCErrorDetailType::Sctp_failure;
-  params.message() = nsCString(aMessage.data(), aMessage.length());
-  CloseAll_s(Some(std::move(params)));
+  params.errorInit.mErrorDetail = dom::RTCErrorDetailType::Sctp_failure;
+  params.message = nsCString(aMessage.data(), aMessage.length());
+  CloseChannels_s(Some(std::move(params)));
 }
 
 void DataChannelConnectionDcSctp::OnConnected() {
@@ -364,7 +359,7 @@ void DataChannelConnectionDcSctp::OnConnected() {
 void DataChannelConnectionDcSctp::OnClosed() {
   MOZ_ASSERT(mSTS->IsOnCurrentThread());
   DC_DEBUG(("%s: %p", __func__, this));
-  CloseAll_s();
+  CloseChannels_s();
 }
 
 void DataChannelConnectionDcSctp::OnConnectionRestarted() {

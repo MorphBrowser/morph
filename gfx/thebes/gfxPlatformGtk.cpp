@@ -225,6 +225,13 @@ void gfxPlatformGtk::InitDmabufConfig() {
       feature.ForceDisable(FeatureStatus::Failed, "Failed to configure",
                            failureId);
     }
+    status = nsIGfxInfo::FEATURE_STATUS_UNKNOWN;
+    gfxVars::SetUseDMABufYUVDirectComposition(
+        NS_SUCCEEDED(gfxInfo->GetFeatureStatus(
+            nsIGfxInfo::FEATURE_DMABUF_YUV_DIRECT_COMPOSITION, failureId,
+            &status)) &&
+        status == nsIGfxInfo::FEATURE_STATUS_OK);
+
     // Make sure we have DMABuf formats available.
     (void)GetGlobalDMABufFormats();
   }
@@ -256,6 +263,7 @@ void gfxPlatformGtk::InitPlatformHardwareVideoConfig() {
   FeatureState& featureZeroCopy =
       gfxConfig::GetFeature(Feature::HW_DECODED_VIDEO_ZERO_COPY);
 
+  featureZeroCopy.Reset();
   featureZeroCopy.EnableByDefault();
   uint32_t state =
       StaticPrefs::media_ffmpeg_vaapi_force_surface_zero_copy_AtStartup();
@@ -322,15 +330,17 @@ void gfxPlatformGtk::InitWebRenderConfig() {
 #endif
 
   gfxVars::SetUseWebRenderCompositor(feature.IsEnabled());
-}
 
-void gfxPlatformGtk::InitPlatformGPUProcessPrefs() {
 #ifdef MOZ_WAYLAND
-  if (IsWaylandDisplay()) {
+  // The GPU process can't draw into Wayland widget surfaces, so it requires
+  // the native compositor.
+  if (IsWaylandDisplay() && !feature.IsEnabled()) {
     FeatureState& gpuProc = gfxConfig::GetFeature(Feature::GPU_PROCESS);
-    gpuProc.ForceDisable(FeatureStatus::Blocked,
-                         "Wayland does not work in the GPU process",
-                         "FEATURE_FAILURE_WAYLAND"_ns);
+    if (gpuProc.IsEnabled()) {
+      gpuProc.ForceDisable(FeatureStatus::Blocked,
+                           "Wayland GPU process requires the native compositor",
+                           "FEATURE_FAILURE_WAYLAND_NO_NATIVE_COMPOSITOR"_ns);
+    }
   }
 #endif
 }

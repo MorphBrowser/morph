@@ -991,12 +991,17 @@ void nsLineLayout::ReflowFrame(nsIFrame* aFrame, nsReflowStatus& aReflowStatus,
       if (nsIFrame* kidNextInFlow = aFrame->GetNextInFlow()) {
         if (StaticPrefs::layout_abspos_fragment_aware_inline_cb_enabled()) {
           if (nsInlineFrame* inlineFrame = do_QueryFrame(aFrame)) {
-            // Before removing aFrame's next-in-flows, pull any absolute
-            // children's first-in-flows in the next-in-flows into aFrame to
-            // prevent those children from being destroyed.
+            // Before removing aFrame's next-in-flows, pull all the absolute
+            // children in those next-in-flows into the first inline
+            // continuation in the current fragmentainer.
+            nsIFrame* first =
+                AbsoluteContainingBlock::FirstInlineContinuationInFragmentainer(
+                    inlineFrame);
             if (AbsoluteContainingBlock* absCB =
-                    inlineFrame->GetAbsoluteContainingBlock()) {
-              absCB->PrepareAbsoluteFrames(inlineFrame);
+                    first->GetAbsoluteContainingBlock()) {
+              absCB->PrepareAbsoluteFrames(
+                  static_cast<nsInlineFrame*>(first),
+                  AbsoluteContainingBlock::PrepareReason::Destroy);
             }
           }
         }
@@ -1261,7 +1266,7 @@ bool nsLineLayout::CanPlaceFrame(PerFrameData* pfd, bool aNotSafeToBreak,
 
   // When it doesn't fit, check for a few special conditions where we
   // allow it to fit anyway.
-  if (0 == startMargin + pfd->mBounds.ISize(lineWM) + endMargin) {
+  if (0 == pfd->mBounds.ISize(lineWM) && 0 == startMargin + endMargin) {
     // Empty frames always fit right where they are
 #ifdef NOISY_CAN_PLACE_FRAME
     printf("   ==> empty frame fits\n");

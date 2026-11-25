@@ -63,6 +63,7 @@ for (const type of [
   "DISCOVERY_STREAM_DEV_IMPRESSIONS",
   "DISCOVERY_STREAM_DEV_REFRESH_CACHE",
   "DISCOVERY_STREAM_DEV_SHOW_PLACEHOLDER",
+  "DISCOVERY_STREAM_DEV_STAGING_ADS",
   "DISCOVERY_STREAM_DEV_SYNC_RS",
   "DISCOVERY_STREAM_DEV_SYSTEM_TICK",
   "DISCOVERY_STREAM_EXPERIMENT_DATA",
@@ -91,6 +92,8 @@ for (const type of [
   "DWELL_LINK_OPENED",
   "FILL_SEARCH_TERM",
   "FOLLOW_SECTION",
+  "FRAMED_WIDGETS_UPDATE",
+  "FRAMED_WIDGET_UNAVAILABLE",
   "HIDE_PERSONALIZE",
   "HIDE_TOAST_MESSAGE",
   "INFERRED_PERSONALIZATION_CLEAR_INTEREST_VECTOR",
@@ -252,6 +255,7 @@ for (const type of [
   "WIDGETS_CONTAINER_ACTION",
   "WIDGETS_ENABLED",
   "WIDGETS_ERROR",
+  "WIDGETS_EXTENSIONS_UPDATE",
   "WIDGETS_HIDE_ALL",
   "WIDGETS_IMPRESSION",
   "WIDGETS_LISTS_CHANGE_SELECTED",
@@ -266,15 +270,10 @@ for (const type of [
   "WIDGETS_PRIVACY_MARK_CELEBRATED",
   "WIDGETS_PRIVACY_UPDATE",
   "WIDGETS_PRIVACY_VISIBLE",
+  "WIDGETS_READY",
   "WIDGETS_RECENT_SEARCHES_OPEN_LINK",
   "WIDGETS_RECENT_SEARCHES_REMOVE_SEARCH",
   "WIDGETS_RECENT_SEARCHES_UPDATE",
-  "WIDGETS_STOCKS_SEARCH_CLEAR",
-  "WIDGETS_STOCKS_SEARCH_REQUEST",
-  "WIDGETS_STOCKS_SEARCH_RESPONSE",
-  "WIDGETS_STOCKS_SEARCH_STARTED",
-  "WIDGETS_STOCKS_UPDATE",
-  "WIDGETS_STOCKS_WATCHLIST_UPDATE",
   "WIDGETS_TIMER_END",
   "WIDGETS_TIMER_PAUSE",
   "WIDGETS_TIMER_PLAY",
@@ -284,6 +283,7 @@ for (const type of [
   "WIDGETS_TIMER_SET_TYPE",
   "WIDGETS_TIMER_USER_EVENT",
   "WIDGETS_TIMER_USER_IMPRESSION",
+  "WIDGETS_TRAVEL_UPDATE",
   "WIDGETS_USER_EVENT",
 ]) {
   actionTypes[type] = type;
@@ -361,7 +361,7 @@ function BroadcastToContent(action, options) {
  *
  * @param  {object} action Any redux action (required)
  * @param  {string} target The id of a content port
- * @param  {boolean} skipMain Used by OnlyToOneContent to skip the main process
+ * @param  {boolean} [skipMain] Used by OnlyToOneContent to skip the main process
  * @return {object} An action with added .meta properties
  */
 function AlsoToOneContent(action, target, skipMain) {

@@ -17,7 +17,6 @@ import { GeckoViewActorParent } from "resource://gre/modules/GeckoViewActorParen
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
-  PdfJsPrint: "resource://pdf.js/PdfJsPrint.sys.mjs",
   PdfJsTelemetry: "resource://pdf.js/PdfJsTelemetry.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
 });
@@ -196,6 +195,7 @@ class FileSaver {
       "PDFJS:Child:handleEvent",
       {
         type: "save",
+        detail: { flatten: !!aData?.flatten },
       },
       "GeckoViewPdfJs"
     );
@@ -241,17 +241,21 @@ class FileSaver {
 }
 
 class SignatureHandler {
-  #browser;
+  #actor;
 
-  constructor(aBrowser) {
-    this.#browser = aBrowser;
+  constructor(aActor) {
+    this.#actor = aActor;
   }
 
   onEvent(aEvent, aData, aCallback) {
     debug`onEvent: name=${aEvent}, data=${aData}`;
 
+    if (!this.#actor.manager?.isCurrentGlobal) {
+      return;
+    }
+
     if (
-      this.#browser.contentPrincipal.spec !==
+      this.#actor.browser.contentPrincipal.spec !==
       "resource://pdf.js/web/viewer.html"
     ) {
       aCallback.onError("The document is not a PDF.");
@@ -259,8 +263,15 @@ class SignatureHandler {
     }
 
     if (aEvent === "GeckoView:PdfViewer:AddSignature") {
-      // Bug 2069045 will add a real connection.
-      aCallback.onSuccess();
+      this.#actor
+        .sendQuery("PDFJS:Child:handleEvent", {
+          type: "addsignature",
+          detail: { text: aData.text },
+        })
+        .then(
+          () => aCallback.onSuccess(),
+          e => aCallback.onError(`Could not add the signature: ${e}.`)
+        );
     }
   }
 }
@@ -290,8 +301,6 @@ export class GeckoViewPdfJsParent extends GeckoViewActorParent {
         return this.#recordExposure();
       case "PDFJS:Parent:reportTelemetry":
         return this.#reportTelemetry(aMsg);
-      case "PDFJS:Parent:printToPDF":
-        return this.#printToPDF(aMsg);
       default:
         break;
     }
@@ -334,7 +343,7 @@ export class GeckoViewPdfJsParent extends GeckoViewActorParent {
       "GeckoView:PDFSave",
     ]);
 
-    this.#signatureHandler = new SignatureHandler(this.browser);
+    this.#signatureHandler = new SignatureHandler(this);
     this.eventDispatcher.registerListener(this.#signatureHandler, [
       "GeckoView:PdfViewer:AddSignature",
     ]);
@@ -394,15 +403,6 @@ export class GeckoViewPdfJsParent extends GeckoViewActorParent {
 
   #reportTelemetry(aMsg) {
     lazy.PdfJsTelemetry.report(aMsg.data);
-  }
-
-  #printToPDF({ data: { id, width, height } }) {
-    return lazy.PdfJsPrint.printToPDF(
-      this.browsingContext,
-      BrowsingContext.get(id),
-      width,
-      height
-    );
   }
 }
 

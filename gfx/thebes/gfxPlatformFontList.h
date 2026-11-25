@@ -393,22 +393,21 @@ class gfxPlatformFontList : public gfxFontInfoLoader {
   }
 
   // Create a handle for a single shmem block (identified by index) ready to
-  // be shared to the given processId.
+  // be shared to a child process.
   void ShareFontListShmBlockToProcess(
-      uint32_t aGeneration, uint32_t aIndex, base::ProcessId aPid,
+      uint32_t aGeneration, uint32_t aIndex,
       mozilla::ipc::ReadOnlySharedMemoryHandle* aOut);
 
   // Populate the array aBlocks with the complete list of shmem handles ready
-  // to be shared to the given processId.
+  // to be shared to a child process.
   void ShareFontListToProcess(
-      nsTArray<mozilla::ipc::ReadOnlySharedMemoryHandle>* aBlocks,
-      base::ProcessId aPid);
+      nsTArray<mozilla::ipc::ReadOnlySharedMemoryHandle>* aBlocks);
 
   void ShmBlockAdded(uint32_t aGeneration, uint32_t aIndex,
                      mozilla::ipc::ReadOnlySharedMemoryHandle aHandle);
 
   mozilla::ipc::ReadOnlySharedMemoryHandle ShareShmBlockToProcess(
-      uint32_t aIndex, base::ProcessId aPid);
+      uint32_t aIndex);
 
   void SetCharacterMap(uint32_t aGeneration, uint32_t aFamilyIndex, bool aAlias,
                        uint32_t aFaceIndex, const gfxSparseBitSet& aMap);
@@ -554,11 +553,16 @@ class gfxPlatformFontList : public gfxFontInfoLoader {
   // Keep track of userfont sets to notify when global fontlist changes occur.
   void AddUserFontSet(gfxUserFontSet* aUserFontSet) {
     AutoLock lock(mLock);
-    mUserFontSetList.Insert(aUserFontSet);
+    if (!aUserFontSet->mDestroying) {
+      mUserFontSetList.Insert(aUserFontSet);
+    }
   }
 
+  // Called from the font-set destructor, to notify that the set is being
+  // destroyed and should no longer be tracked here.
   void RemoveUserFontSet(gfxUserFontSet* aUserFontSet) {
     AutoLock lock(mLock);
+    aUserFontSet->mDestroying = true;
     mUserFontSetList.Remove(aUserFontSet);
   }
 
@@ -1116,7 +1120,7 @@ class gfxPlatformFontList : public gfxFontInfoLoader {
   nsRefPtrHashtable<nsPtrHashKey<const mozilla::fontlist::Face>, gfxFontEntry>
       mFontEntries MOZ_GUARDED_BY(mLock);
 
-  mozilla::UniquePtr<FontPrefs> mFontPrefs;
+  mozilla::UniquePtr<FontPrefs> mFontPrefs MOZ_GUARDED_BY(mLock);
 
   RefPtr<gfxFontEntry> mDefaultFontEntry MOZ_GUARDED_BY(mLock);
 

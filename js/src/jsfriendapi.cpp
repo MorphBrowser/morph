@@ -14,7 +14,6 @@
 #include "builtin/MapObject.h"
 #include "builtin/ModuleObject.h"
 #include "builtin/TestingFunctions.h"
-#include "frontend/FrontendContext.h"  // FrontendContext
 #include "gc/PublicIterators.h"
 #include "gc/WeakMap.h"
 #include "js/ColumnNumber.h"  // JS::LimitedColumnNumberOneOrigin
@@ -363,11 +362,6 @@ js::AutoCheckRecursionLimit::stackKindForCurrentPrincipal(JSContext* cx) const {
   return cx->stackKindForCurrentPrincipal();
 }
 
-JS::NativeStackLimit AutoCheckRecursionLimit::getStackLimit(
-    FrontendContext* fc) const {
-  return fc->stackLimit();
-}
-
 JS_PUBLIC_API JSFunction* js::DefineFunctionWithReserved(
     JSContext* cx, JSObject* objArg, const char* name, JSNative call,
     unsigned nargs, unsigned attrs) {
@@ -679,23 +673,6 @@ JS::AutoCTypesActivityCallback::AutoCTypesActivityCallback(
   }
 }
 
-JS_PUBLIC_API void js::SetAllocationMetadataBuilder(
-    JSContext* cx, const AllocationMetadataBuilder* callback) {
-  cx->realm()->setAllocationMetadataBuilder(callback);
-}
-
-JS_PUBLIC_API JSObject* js::GetAllocationMetadata(JSObject* obj) {
-  ObjectRealm::ObjectMetadataTable* map =
-      ObjectRealm::get(obj).objectMetadataTable.get();
-  if (map) {
-    auto ptr = map->lookup(obj);
-    if (ptr) {
-      return ptr->value();
-    }
-  }
-  return nullptr;
-}
-
 JS_PUBLIC_API bool js::ReportIsNotFunction(JSContext* cx, HandleValue v) {
   cx->check(v);
   return ReportIsNotFunction(cx, v, -1);
@@ -808,4 +785,13 @@ bool JS::AddMozDisplayNamesConstructor(JSContext* cx, JS::HandleObject intl) {
 
 JS_PUBLIC_API JS::Zone* js::GetObjectZoneFromAnyThread(const JSObject* obj) {
   return MaybeForwarded(obj)->zoneFromAnyThread();
+}
+
+js::AutoAllowScriptInInterrupt::AutoAllowScriptInInterrupt(JSContext* cx)
+    : realm_(cx->realm()), wasHandling_(realm_->handlingInterrupt()) {
+  realm_->setHandlingInterrupt(false);
+}
+
+js::AutoAllowScriptInInterrupt::~AutoAllowScriptInInterrupt() {
+  realm_->setHandlingInterrupt(wasHandling_);
 }

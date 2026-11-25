@@ -130,9 +130,8 @@ add_task(async function terminateScriptTest() {
 
   let buttons =
     notification.currentNotification.buttonContainer.getElementsByTagName(
-      "button"
+      "moz-button"
     );
-  // Debug button is only shown if DevTools are open.
   is(buttons.length, 1, "Only one button displayed");
 
   // Click the "Stop" button, we should get a terminate script callback
@@ -162,9 +161,8 @@ add_task(async function waitForScriptTest() {
 
   let buttons =
     notification.currentNotification.buttonContainer.getElementsByTagName(
-      "button"
+      "moz-button"
     );
-  // Debug button is only shown if DevTools are open.
   is(buttons.length, 1, "Only one button displayed");
 
   await pushPrefs(["browser.hangNotification.waitPeriod", 1000]);

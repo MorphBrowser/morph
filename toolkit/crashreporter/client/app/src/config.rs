@@ -8,7 +8,7 @@ use crate::std::borrow::Cow;
 use crate::std::ffi::{OsStr, OsString};
 use crate::std::path::{Path, PathBuf};
 use crate::std::process::Command;
-use crate::{lang, logging::LogTarget, std};
+use crate::{lang, logging::LogTarget, prefs::Prefs, std};
 use anyhow::Context;
 use once_cell::sync::Lazy;
 
@@ -127,6 +127,8 @@ pub struct Config {
     pub delete_dump: bool,
     /// Whether to run memtest while ui is shown
     pub run_memtest: bool,
+    /// The type of memory tests that should be run, all if not present
+    pub memtest_kinds: Option<String>,
     /// The data directory.
     pub data_dir: Option<PathBuf>,
     /// The events directory.
@@ -149,6 +151,8 @@ pub struct Config {
     pub strings: Option<lang::LangStrings>,
     /// The log target.
     pub log_target: Option<LogTarget>,
+    /// The loaded prefs data.
+    pub prefs: Prefs,
 }
 
 pub struct ConfigStringBuilder<'a>(lang::LangStringBuilder<'a>);
@@ -171,13 +175,18 @@ impl Config {
         Self::default()
     }
 
+    /// Load the prefs from the installation directory.
+    pub fn read_app_prefs(&mut self) {
+        self.prefs.update_from_app_dir(installation_path());
+        self.update_memtest_settings();
+    }
+
     /// Load a configuration from the application environment.
     #[cfg_attr(mock, allow(unused))]
     pub fn read_from_environment(&mut self) {
         self.auto_submit = env_bool(ekey!("AUTO_SUBMIT"));
         self.dump_all_threads = env_bool(ekey!("DUMP_ALL_THREADS"));
         self.delete_dump = !env_bool(ekey!("NO_DELETE_DUMP"));
-        self.run_memtest = env_bool(ekey!("RUN_MEMTEST"));
         self.data_dir = env_path(ekey!("DATA_DIRECTORY"));
         self.events_dir = env_path(ekey!("EVENTS_DIRECTORY"));
         self.app_file = std::env::var_os(ekey!("RESTART_XUL_APP_FILE"));
@@ -213,6 +222,8 @@ impl Config {
         }
 
         self.strings = Some(lang::load());
+
+        self.read_app_prefs();
     }
 
     /// Get the localized string for the given index.
@@ -292,6 +303,7 @@ impl Config {
     /// Load the profile directory from the extra file information.
     ///
     /// This also loads the following information that relies on the profile directory:
+    /// * profile-specific prefs
     /// * localization strings from langpacks
     fn load_profile_directory_from_extra(&mut self, extra: &serde_json::Value) {
         let Some(profile_dir) = extra
@@ -305,11 +317,14 @@ impl Config {
             return;
         }
 
+        self.prefs.update_from_profile_dir(&profile_dir);
         self.profile_dir = Some(profile_dir);
+        self.update_memtest_settings();
 
         // Update the localization information.
         if let Some(strings) = self.strings.as_mut() {
             if let Err(e) = strings.add_langpack(
+                &self.prefs,
                 self.profile_dir.as_deref().unwrap(),
                 extra.get("useragent_locale").and_then(|v| v.as_str()),
             ) {
@@ -456,6 +471,13 @@ impl Config {
         if let (Some(log_target), Some(data_dir)) = (&self.log_target, &self.data_dir) {
             log_target.set_file(&data_dir.join("submit.log"));
         }
+    }
+
+    /// Update the memory testing settings according to the prefs
+    fn update_memtest_settings(&mut self) {
+        // If the pref isn't set default to running the tests.
+        self.run_memtest = self.prefs.memtest_enabled().unwrap_or(true);
+        self.memtest_kinds = self.prefs.memtest_kinds().map(|s| String::from(s));
     }
 
     #[cfg(all(target_os = "linux", any(not(mock), test)))]
@@ -674,6 +696,52 @@ fn self_path() -> &'static Path {
         PathBuf::from(std::env::args_os().next().expect("failed to get argv[0]"))
     });
     &*PATH
+}
+
+#[cfg(target_os = "linux")]
+pub mod linux {
+    #![cfg_attr(mock, allow(unused))]
+
+    #[cfg(mock)]
+    use crate::std::mock::MockKey;
+    use crate::std::{mock::mocked_static, path::Path};
+    use once_cell::sync::Lazy;
+
+    struct IsRunningUnderFlatpak {
+        inner: Lazy<bool>,
+    }
+
+    impl IsRunningUnderFlatpak {
+        const fn new() -> Self {
+            Self {
+                inner: Lazy::new(|| {
+                    // https://gitlab.gnome.org/GNOME/gtk/-/blob/4300a5c609306ce77cbc8a3580c19201dccd8d13/gdk/gdk.c#L472
+                    Path::new("/.flatpak-info").exists()
+                }),
+            }
+        }
+    }
+
+    impl IsRunningUnderFlatpak {
+        fn get(&self) -> bool {
+            *self.inner
+        }
+    }
+
+    mocked_static! {
+        static IS_RUNNING_UNDER_FLATPAK: IsRunningUnderFlatpak = IsRunningUnderFlatpak::new();
+        mocked type = bool;
+
+        impl IS_RUNNING_UNDER_FLATPAK {
+            fn get(&self) -> bool {
+                Self.try_get(|v| *v).unwrap_or(false)
+            }
+        }
+    }
+
+    pub fn is_running_under_flatpak() -> bool {
+        IS_RUNNING_UNDER_FLATPAK.get()
+    }
 }
 
 fn env_bool<K: AsRef<OsStr>>(name: K) -> bool {

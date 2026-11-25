@@ -185,7 +185,9 @@ public class TestCrashHandler extends Service {
     private String mExpectedProcessType;
     private String mExpectedRemoteType;
 
-    MessageHandler() {}
+    MessageHandler() {
+      super(Looper.myLooper());
+    }
 
     @Override
     public void handleMessage(final Message msg) {
@@ -250,6 +252,16 @@ public class TestCrashHandler extends Service {
     return new JSONObject(contents);
   }
 
+  private static boolean hasMinidumpHeader(final File file) {
+    final byte[] signature = new byte[4];
+    try (FileInputStream inputStream = new FileInputStream(file)) {
+      return inputStream.read(signature) == signature.length
+          && new String(signature, "US-ASCII").equals("MDMP");
+    } catch (final IOException e) {
+      return false;
+    }
+  }
+
   private EvalResult evalCrashInfo(final Intent intent) {
     if (!intent.getAction().equals(GeckoRuntime.ACTION_CRASHED)) {
       return new EvalResult(false, "Action should match");
@@ -257,16 +269,21 @@ public class TestCrashHandler extends Service {
 
     final File dumpFile = new File(intent.getStringExtra(GeckoRuntime.EXTRA_MINIDUMP_PATH));
     final boolean dumpFileExists = dumpFile.exists();
+    final boolean dumpFileValid = hasMinidumpHeader(dumpFile);
     dumpFile.delete();
 
     final File extrasFile = new File(intent.getStringExtra(GeckoRuntime.EXTRA_EXTRAS_PATH));
     final boolean extrasFileExists = extrasFile.exists();
     try {
       final JSONObject annotations = readExtraFile(extrasFile.getPath());
-      final String moz_crash_reason = annotations.getString("MozCrashReason");
 
-      if (!moz_crash_reason.startsWith("MOZ_CRASH(")) {
+      if (!annotations.getString("MozCrashReason").startsWith("MOZ_CRASH(")) {
         return new EvalResult(false, "Missing or invalid child crash annotations");
+      }
+
+      final String dumperError = annotations.optString("DumperError");
+      if (!dumperError.isEmpty()) {
+        return new EvalResult(false, "Minidump writer error: " + dumperError);
       }
 
       extrasFile.delete();
@@ -276,6 +293,10 @@ public class TestCrashHandler extends Service {
 
     if (!dumpFileExists) {
       return new EvalResult(false, "Dump file should exist");
+    }
+
+    if (!dumpFileValid) {
+      return new EvalResult(false, "Dump file should be a minidump");
     }
 
     if (!extrasFileExists) {

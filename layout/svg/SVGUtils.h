@@ -12,6 +12,7 @@
 
 #include "DrawMode.h"
 #include "ImgDrawResult.h"
+#include "Units.h"
 #include "gfx2DGlue.h"
 #include "gfxMatrix.h"
 #include "gfxPoint.h"
@@ -577,6 +578,9 @@ class SVGUtils final {
   };
 
   static float ComputeOpacity(const nsIFrame* aFrame, bool aHandleOpacity);
+
+  // Whether clip paths can be rendered with WebRender path clips.
+  static bool UseWebRenderPaths();
 
   /**
    * SVG frames expect to paint in SVG user units, which are equal to CSS px

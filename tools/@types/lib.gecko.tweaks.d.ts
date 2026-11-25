@@ -6,6 +6,8 @@
 interface CanonicalBrowsingContext extends LoadContextMixin {
   embedderElement: MozBrowser;
   currentWindowContext: WindowGlobalParent;
+  // Set by tabbrowser.
+  nonWebControlledLoadingURI?: nsIURI;
   parent: CanonicalBrowsingContext;
   parentWindowContext: WindowGlobalParent;
   top: CanonicalBrowsingContext;
@@ -20,6 +22,12 @@ declare namespace ChromeUtils {
     aOptions?: ImportESModuleOptionsDictionary
   ): Modules[T];
 }
+
+// Defined by SystemGlobal, see XPCRuntimeService.cpp.
+declare var locks: LockManager;
+
+// Defined by SystemGlobal, see XPCRuntimeService.cpp.
+declare var storage: StorageManager;
 
 interface ChromeWindow extends Window {
   isChromeWindow: true;

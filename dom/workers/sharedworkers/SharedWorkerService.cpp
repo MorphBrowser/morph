@@ -86,7 +86,7 @@ class WorkerManagerCreatedRunnable final : public Runnable {
     if (NS_WARN_IF(
             !mActor->CanSend() ||
             !mManagerWrapper->Manager()->MaybeCreateRemoteWorker(
-                mData, mWindowID, mPortIdentifier, mActor->OtherPid()))) {
+                mData, mWindowID, mPortIdentifier, mActor->OtherChildID()))) {
       // Letting mPortIdentifier force-close the port would create a
       // PBackgroundChild on this thread, blocking its shutdown.
       MessagePortIdentifier port = mPortIdentifier.release();
@@ -259,9 +259,8 @@ void SharedWorkerService::GetOrCreateWorkerManagerOnMainThread(
     effectiveStoragePrincipal = loadingPrincipal;
   }
 
-  nsCOMPtr<nsIURI> resolvedScriptURL =
-      DeserializeURI(aData.resolvedScriptURL());
-  if (!resolvedScriptURL) {
+  nsCOMPtr<nsIURI> resolvedScriptURL(aData.resolvedScriptURL());
+  if (!resolvedScriptURL || !aData.baseScriptURL()) {
     ErrorPropagationOnMainThread(aBackgroundEventTarget, aActor,
                                  NS_ERROR_FAILURE);
     return;

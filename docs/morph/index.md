@@ -34,12 +34,16 @@ The browser chrome does **not** depend on `@m3e/web` or another web component ru
 ```{toctree}
 :maxdepth: 1
 
+PRODUCT
+ROADMAP
 DESIGN
+INTERACTIONS
 MOTION
 SHAPES
 VERTICAL_TABS
 ARCHITECTURE
+FIREFOX_BASELINE
 UPSTREAM
 ```
 
-These documents describe intended behaviour, not a claim that every item is already implemented.
+These documents describe intended behaviour, not a claim that every item is already implemented. `ROADMAP.md` records what has actually shipped, and `INTERACTIONS.md` marks every interaction as a proposal until it lands.

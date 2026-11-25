@@ -1,6 +1,8 @@
 ChromeUtils.defineESModuleGetters(this, {
+  MockRegistrar: "resource://testing-common/MockRegistrar.sys.mjs",
   PlacesTestUtils: "resource://testing-common/PlacesTestUtils.sys.mjs",
   TelemetryTestUtils: "resource://testing-common/TelemetryTestUtils.sys.mjs",
+  WindowLock: "moz-src:///browser/modules/WindowLock.sys.mjs",
 });
 
 /**
@@ -169,20 +171,6 @@ function getPopupNotificationNode() {
   return popupNotifications[0];
 }
 
-/**
- * Disable non-release page actions (that are tested elsewhere).
- *
- * @return void
- */
-async function disableNonReleaseActions() {
-  if (!["release", "esr"].includes(AppConstants.MOZ_UPDATE_CHANNEL)) {
-    SpecialPowers.Services.prefs.setBoolPref(
-      "extensions.webcompat-reporter.enabled",
-      false
-    );
-  }
-}
-
 function assertActivatedPageActionPanelHidden() {
   Assert.ok(
     !document.getElementById(BrowserPageActions._activatedActionPanelID)
@@ -292,12 +280,82 @@ async function promisePageActionViewChildrenVisible(panelViewNode) {
 }
 
 async function initPageActionsTest() {
-  await disableNonReleaseActions();
-
   // Make the main button visible. It's not unless the window is narrow. This
   // test isn't concerned with that behavior. We have other tests for that.
   BrowserPageActions.mainButtonNode.style.display = "flex";
   registerCleanupFunction(() => {
     BrowserPageActions.mainButtonNode.style.removeProperty("display");
+  });
+}
+
+const WINDOW_LOCK_PREF = "browser.privatebrowsing.lockOnScreenLock.enabled";
+const WINDOW_LOCK_FEATURE_GATE_PREF =
+  "browser.privatebrowsing.lockOnScreenLock.featureGate";
+
+function getLockDialog(win) {
+  return win.document.getElementById("window-lock-dialog");
+}
+
+function isWindowLocked(win) {
+  return WindowLock.isWindowLocked(win);
+}
+
+function authErrorShown(win) {
+  return !getLockDialog(win).querySelector(".window-lock-error").hidden;
+}
+
+function commandsDisabled(win) {
+  return win.document
+    .getElementById("cmd_newNavigatorTab")
+    .hasAttribute("disabled");
+}
+
+// Outcomes of the mocked OS reauthentication prompt.
+const ReauthResult = Object.freeze({
+  SUCCESS: "success",
+  CANCELED: "canceled",
+  ERROR: "error",
+});
+let gReauthResult = ReauthResult.CANCELED;
+let gOnReauth = null;
+
+const mockReauthenticator = {
+  QueryInterface: ChromeUtils.generateQI(["nsIOSReauthenticator"]),
+  async asyncReauthenticateUser() {
+    gOnReauth?.();
+    if (gReauthResult == ReauthResult.ERROR) {
+      throw new Components.Exception(
+        "Simulated OS reauthentication error",
+        Cr.NS_ERROR_FAILURE
+      );
+    }
+    return [gReauthResult == ReauthResult.SUCCESS ? 1 : 0, 0];
+  },
+};
+
+async function unlockWith(win, result) {
+  gReauthResult = result;
+  let reauthPromise = new Promise(resolve => (gOnReauth = resolve));
+  getLockDialog(win).querySelector(".window-lock-button").click();
+  await reauthPromise;
+  gOnReauth = null;
+  await TestUtils.waitForTick();
+}
+
+async function setLockPrivateWindows(enabled) {
+  await SpecialPowers.pushPrefEnv({ set: [[WINDOW_LOCK_PREF, enabled]] });
+}
+
+/**
+ * Replaces the OS reauthentication prompt with mockReauthenticator for the
+ * duration of the test.
+ */
+function registerMockReauthenticator() {
+  let cid = MockRegistrar.register(
+    "@mozilla.org/security/osreauthenticator;1",
+    mockReauthenticator
+  );
+  registerCleanupFunction(() => {
+    MockRegistrar.unregister(cid);
   });
 }

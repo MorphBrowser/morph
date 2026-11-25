@@ -47,7 +47,7 @@ import org.robolectric.RobolectricTestRunner
 class BrowserMenuTest {
     private val tab = createTab("https://mozilla.org", id = "tab", private = true)
     private val browserState = BrowserState(tabs = listOf(tab), selectedTabId = tab.id)
-    private val appState = AppState(screen = Screen.Home)
+    private val appState = AppState(screen = Screen.Home())
     private val action = Action("Report broken site…", true, null, null, null, null) {}
     private val extension =
         WebExtensionState(
@@ -166,7 +166,7 @@ class BrowserMenuTest {
         val state = browserState.copy(extensions = mapOf(extension.id to extension))
         val item = menu(state).currentMenuGroups().flatMap { it.items }.item(Item.ReportSiteIssue)
 
-        assertEquals(Text.String("Report broken site…"), item.title)
+        assertEquals(Text.String("Report broken site…"), item.title.text)
         assertEquals(action, state.webCompatReporterAction())
     }
 
@@ -217,7 +217,7 @@ class BrowserMenuTest {
         assertEquals(override, state.webCompatReporterAction())
         assertEquals(
             Text.String("Report this tab"),
-            menu(state).currentMenuGroups().flatMap { it.items }.item(Item.ReportSiteIssue).title,
+            menu(state).currentMenuGroups().flatMap { it.items }.item(Item.ReportSiteIssue).title.text,
         )
 
         val disabledOverride = extension.copy(pageAction = override.copy(enabled = false))

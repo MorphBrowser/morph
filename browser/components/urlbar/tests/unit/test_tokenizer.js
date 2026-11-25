@@ -100,40 +100,12 @@ add_task(async function test_tokenizer() {
       ],
     },
     {
-      desc: "double boundary restriction char",
-      searchString: `${RESTRICT_TOKENS.BOOKMARK}test${RESTRICT_TOKENS.TITLE}`,
-      expectedTokens: [
-        {
-          value: RESTRICT_TOKENS.BOOKMARK,
-          type: TOKEN_TYPE.RESTRICT_BOOKMARK,
-        },
-        {
-          value: `test${RESTRICT_TOKENS.TITLE}`,
-          type: TOKEN_TYPE.TEXT,
-        },
-      ],
-    },
-    {
       desc: "do not separate boundary search restriction char at end when using using a double non-combinable restriction char with a single-character string",
       searchString: `t${RESTRICT_TOKENS.BOOKMARK}${RESTRICT_TOKENS.SEARCH}`,
       expectedTokens: [
         {
           value: `t${RESTRICT_TOKENS.BOOKMARK}${RESTRICT_TOKENS.SEARCH}`,
           type: TOKEN_TYPE.TEXT,
-        },
-      ],
-    },
-    {
-      desc: "only boundary restriction chars",
-      searchString: `${RESTRICT_TOKENS.BOOKMARK}${RESTRICT_TOKENS.TITLE}`,
-      expectedTokens: [
-        {
-          value: RESTRICT_TOKENS.BOOKMARK,
-          type: TOKEN_TYPE.RESTRICT_BOOKMARK,
-        },
-        {
-          value: RESTRICT_TOKENS.TITLE,
-          type: TOKEN_TYPE.RESTRICT_TITLE,
         },
       ],
     },
@@ -147,13 +119,57 @@ add_task(async function test_tokenizer() {
         },
       ],
     },
-    // Some restriction chars may be # or ?, that are also valid path parts.
-    // The next 2 tests will check we consider those as part of url paths.
+    {
+      desc: "# is not a restriction char at the beginning",
+      searchString: "# test",
+      expectedTokens: [
+        { value: "#", type: TOKEN_TYPE.TEXT },
+        { value: "test", type: TOKEN_TYPE.TEXT },
+      ],
+    },
+    {
+      desc: "# is not a restriction char at the end",
+      searchString: "test #",
+      expectedTokens: [
+        { value: "test", type: TOKEN_TYPE.TEXT },
+        { value: "#", type: TOKEN_TYPE.TEXT },
+      ],
+    },
+    {
+      desc: "$ is not a restriction char at the beginning",
+      searchString: "$ test",
+      expectedTokens: [
+        { value: "$", type: TOKEN_TYPE.TEXT },
+        { value: "test", type: TOKEN_TYPE.TEXT },
+      ],
+    },
+    {
+      desc: "$ is not a restriction char at the end",
+      searchString: "test $",
+      expectedTokens: [
+        { value: "test", type: TOKEN_TYPE.TEXT },
+        { value: "$", type: TOKEN_TYPE.TEXT },
+      ],
+    },
+    {
+      desc: "# and $ do not combine with a type restriction char",
+      searchString: `${RESTRICT_TOKENS.BOOKMARK} test # $`,
+      expectedTokens: [
+        {
+          value: RESTRICT_TOKENS.BOOKMARK,
+          type: TOKEN_TYPE.RESTRICT_BOOKMARK,
+        },
+        { value: "test", type: TOKEN_TYPE.TEXT },
+        { value: "#", type: TOKEN_TYPE.TEXT },
+        { value: "$", type: TOKEN_TYPE.TEXT },
+      ],
+    },
     {
       desc: "boundary # char on path",
       searchString: "test/#",
       expectedTokens: [{ value: "test/#", type: TOKEN_TYPE.POSSIBLE_URL }],
     },
+    // Some restriction chars may be ? that are also valid path parts.
     {
       desc: "boundary ? char on path",
       searchString: "test/?",
@@ -496,6 +512,29 @@ add_task(async function test_tokenizer() {
 
     Services.prefs.clearUserPref(
       "browser.urlbar.allowSearchSuggestionsForSimpleOrigins"
+    );
+  }
+});
+
+add_task(function test_getOriginInfo() {
+  const tests = [
+    ["example.com", { host: "example.com", path: "" }],
+    ["Example.COM/Foo%20bar", { host: "example.com", path: "/Foo%20bar" }],
+    ["https://www.example.com/a/b", { host: "example.com", path: "/a/b" }],
+    ["http://example.com", { host: "example.com", path: "" }],
+    ["example.com:8080/foo", { host: "example.com", path: "/foo" }],
+    ["ftp://example.com/foo", null],
+    ["user:pass@example.com/foo", null],
+    ["example", null],
+    ["example.com.", { host: "example.com", path: "" }],
+    ["www.example.com./foo", { host: "example.com", path: "/foo" }],
+  ];
+  for (let [searchString, expected] of tests) {
+    let [token] = UrlbarTokenizer.tokenize(createContext(searchString));
+    Assert.deepEqual(
+      UrlbarTokenizer.getOriginInfo(token),
+      expected,
+      `Origin info for "${searchString}"`
     );
   }
 });

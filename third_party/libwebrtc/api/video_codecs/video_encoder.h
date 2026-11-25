@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -161,6 +162,9 @@ class RTC_EXPORT VideoEncoder {
 
     EncoderInfo();
     EncoderInfo(const EncoderInfo&);
+    EncoderInfo(EncoderInfo&&);
+    EncoderInfo& operator=(const EncoderInfo&);
+    EncoderInfo& operator=(EncoderInfo&&);
 
     ~EncoderInfo();
 
@@ -315,6 +319,9 @@ class RTC_EXPORT VideoEncoder {
     bool operator!=(const RateControlParameters& rhs) const;
   };
 
+  // Deprecated: Loss notification (goog-lntf) support is removed.
+  // TODO: bugs.webrtc.org/42220722 - Remove once downstream callers are
+  // updated.
   struct LossNotification {
     // The timestamp of the last decodable frame *prior* to the last received.
     // (The last received - described below - might itself be decodable or not.)
@@ -336,18 +343,26 @@ class RTC_EXPORT VideoEncoder {
     std::optional<bool> last_received_decodable;
   };
 
-  // Negotiated capabilities which the VideoEncoder may expect the other
-  // side to use.
+  // Deprecated: Loss notification (goog-lntf) support is removed.
+  // TODO: bugs.webrtc.org/42220722 - Remove once downstream callers are
+  // updated.
   struct Capabilities {
-    explicit Capabilities(bool loss_notification)
+    constexpr explicit Capabilities(bool loss_notification)
         : loss_notification(loss_notification) {}
     bool loss_notification;
   };
 
   struct Settings {
-    Settings(const Capabilities& capabilities,
-             int number_of_cores,
-             size_t max_payload_size)
+    constexpr Settings(int number_of_cores, size_t max_payload_size)
+        : capabilities(/*loss_notification=*/false),
+          number_of_cores(number_of_cores),
+          max_payload_size(max_payload_size) {}
+    // Deprecated: Loss notification (goog-lntf) support is removed.
+    // TODO: bugs.webrtc.org/42220722 - Remove once downstream callers migrate
+    // to the two-argument constructor.
+    constexpr Settings(const Capabilities& capabilities,
+                       int number_of_cores,
+                       size_t max_payload_size)
         : capabilities(capabilities),
           number_of_cores(number_of_cores),
           max_payload_size(max_payload_size) {}
@@ -358,6 +373,11 @@ class RTC_EXPORT VideoEncoder {
     // Experimental API - currently only supported by LibvpxVp8Encoder and
     // the OpenH264 encoder. If set, limits the number of encoder threads.
     std::optional<int> encoder_thread_limit;
+  };
+
+  enum class ComplexityControlMode {
+    kConstant,  // Fixed speed setting, intended for testing purposes.
+    kVariable   // Variable speed based on e.g. quality and encode duration.
   };
 
   static VideoCodecVP8 GetDefaultVp8Settings();
@@ -431,6 +451,27 @@ class RTC_EXPORT VideoEncoder {
   // the next call to SetRates().
   virtual void SetRates(const RateControlParameters& parameters) = 0;
 
+  // Sets the desired encoding complexity per spatial or simulcast layer, on a
+  // best-effort basis. The order index into this vector is the same as for
+  // `VideoCodec::simulcastStream` and `VideoCodec::spatialLayers`, depending on
+  // which type is used. Values outside the configured layer count are ignored.
+  // If fewer elements are provided than the number of configured layers,
+  // remaining layers are assigned the value of the highest layer in
+  // `complexity_by_spatial_layer`, or `kComplexityNormal` if the span is empty.
+  // Note that `InitEncode()` (re)sets the default complexity, using a variety
+  // of heuristics. When called, this method overrides those settings. If a
+  // fixed complexity is specified, it is unconditionally set (regardless of
+  // e.g. the resolution used, etc). If a variable complexity is specified, the
+  // complexity given is treated as target - but a lower complexity may be
+  // used if e.g. the quality is already high (avoiding spending CPU cycles for
+  // imperceptible quality gains) or if the encode time is too high relative to
+  // the target frame rate.
+  virtual void SetComplexity(
+      std::span<const VideoCodecComplexity> complexity_by_spatial_layer,
+      ComplexityControlMode complexity_control_mode) {
+    // Default implementation does nothing.
+  }
+
   // Inform the encoder when the packet loss rate changes.
   //
   // Input:   - packet_loss_rate  : The packet loss rate (0.0 to 1.0).
@@ -441,7 +482,10 @@ class RTC_EXPORT VideoEncoder {
   // Input:   - rtt_ms            : The new RTT, in milliseconds.
   virtual void OnRttUpdate(int64_t rtt_ms);
 
-  // Called when a loss notification is received.
+  // Deprecated: Loss notification (goog-lntf) support is removed; never called
+  // by WebRTC.
+  // TODO: bugs.webrtc.org/42220722 - Remove once downstream overrides are
+  // removed.
   virtual void OnLossNotification(const LossNotification& loss_notification);
 
   // Returns meta-data about the encoder, such as implementation name.

@@ -13,8 +13,9 @@ const { FxAccountsWebChannel, FxAccountsWebChannelHelpers } =
     "resource://gre/modules/FxAccountsWebChannel.sys.mjs"
   );
 
-const { PREF_LAST_FXA_USER_EMAIL, PREF_LAST_FXA_USER_UID } =
-  ChromeUtils.importESModule("resource://gre/modules/FxAccountsCommon.sys.mjs");
+const { PREF_LAST_FXA_USER_UID } = ChromeUtils.importESModule(
+  "resource://gre/modules/FxAccountsCommon.sys.mjs"
+);
 
 const URL_STRING = "https://example.com";
 
@@ -570,52 +571,26 @@ add_task(async function test_helpers_login_without_customize_sync() {
   );
 });
 
-add_task(async function test_helpers_login_set_previous_account_hash() {
+add_task(async function test_helpers_login_no_previous_account_hash() {
   let helpers = new FxAccountsWebChannelHelpers({
     fxAccounts: {
       _internal: {
-        getUserAccountData() {
-          return Promise.resolve(null);
+        async getUserAccountData() {
+          return null;
         },
-        setSignedInUser() {
-          return new Promise(resolve => {
-            // previously signed in user preference is updated.
-            Assert.equal(
-              Services.prefs.getStringPref(PREF_LAST_FXA_USER_UID),
-              CryptoUtils.sha256Base64("new_uid")
-            );
-            Assert.equal(
-              Services.prefs.getStringPref(PREF_LAST_FXA_USER_EMAIL, ""),
-              ""
-            );
-            resolve();
-          });
-        },
+        async setSignedInUser() {},
       },
       telemetry: {
         recordConnection() {},
       },
     },
-    weaveXPCOM: {
-      whenLoaded() {},
-      Weave: {
-        Service: {
-          configure() {},
-        },
-      },
-    },
   });
+  Services.prefs.clearUserPref(PREF_LAST_FXA_USER_UID);
 
-  // ensure the previous account pref is overwritten.
-  helpers.setPreviousAccountHashPref("last_uid");
+  await helpers.login({ uid: "new_uid", email: "newuser@testuser.com" });
 
-  await helpers.login({
-    uid: "new_uid",
-    email: "newuser@testuser.com",
-    verifiedCanLinkAccount: true,
-    customizeSync: false,
-    verified: true,
-  });
+  // Not written by .login(), bug 2069716.
+  Assert.ok(!Services.prefs.prefHasUserValue(PREF_LAST_FXA_USER_UID));
 });
 
 add_task(async function test_helpers_login_another_user_signed_in() {
@@ -1001,8 +976,13 @@ add_task(async function test_helpers_oauth_login_defers_sync_without_keys() {
     },
   });
 
+  Services.prefs.clearUserPref(PREF_LAST_FXA_USER_UID);
   await helpers.oauthLogin({ code: "code", state: "state" });
 
+  Assert.equal(
+    Services.prefs.getStringPref(PREF_LAST_FXA_USER_UID),
+    CryptoUtils.sha256Base64("uid123")
+  );
   Assert.ok(setScopedKeys.notCalled);
   Assert.ok(updateUserAccountData.calledOnce);
   Assert.deepEqual(
@@ -1032,6 +1012,9 @@ add_test(function test_helpers_open_sync_preferences() {
 add_task(async function test_helpers_getFxAStatus_engines_oauth() {
   let helpers = new FxAccountsWebChannelHelpers({
     fxAccounts: {
+      keys: {
+        hasKeysForScope: () => Promise.resolve(true),
+      },
       _internal: {
         getUserAccountData() {
           return Promise.resolve({
@@ -1118,6 +1101,87 @@ add_task(async function test_helpers_getFxAStatus_pairing_capabilities() {
   Services.prefs.clearUserPref(PREF_PAIRING_VERSION);
 });
 
+add_task(async function test_helpers_getFxAStatus_has_sync_key() {
+  let requestedScopes = [];
+  let hasSyncKey = true;
+  let helpers = new FxAccountsWebChannelHelpers({
+    fxAccounts: {
+      keys: {
+        hasKeysForScope: scope => {
+          requestedScopes.push(scope);
+          return Promise.resolve(hasSyncKey);
+        },
+      },
+      _internal: {
+        getUserAccountData() {
+          return Promise.resolve({
+            email: "testuser@testuser.com",
+            sessionToken: "sessionToken",
+            uid: "uid",
+            verified: true,
+          });
+        },
+      },
+    },
+    privateBrowsingUtils: {
+      isBrowserPrivate: () => false,
+    },
+  });
+
+  let { signedInUser } = await helpers.getFxaStatus("sync", mockSendingContext);
+  Assert.strictEqual(signedInUser.hasSyncKey, true, "reports the sync key");
+  Assert.deepEqual(requestedScopes, [SCOPE_APP_SYNC], "checks the sync scope");
+  Assert.strictEqual(
+    signedInUser.primaryPasswordLocked,
+    false,
+    "no Primary Password is set"
+  );
+
+  hasSyncKey = false;
+  ({ signedInUser } = await helpers.getFxaStatus("sync", mockSendingContext));
+  Assert.strictEqual(
+    signedInUser.hasSyncKey,
+    false,
+    "reports the missing sync key"
+  );
+});
+
+add_task(async function test_helpers_getFxAStatus_primary_password_locked() {
+  let helpers = new FxAccountsWebChannelHelpers({
+    fxAccounts: {
+      keys: {
+        hasKeysForScope: () => Promise.resolve(false),
+      },
+      _internal: {
+        getUserAccountData() {
+          return Promise.resolve({
+            email: "testuser@testuser.com",
+            sessionToken: "sessionToken",
+            uid: "uid",
+            verified: true,
+          });
+        },
+      },
+    },
+    privateBrowsingUtils: {
+      isBrowserPrivate: () => false,
+    },
+  });
+  helpers._isPrimaryPasswordLocked = () => true;
+
+  let { signedInUser } = await helpers.getFxaStatus("sync", mockSendingContext);
+  Assert.strictEqual(
+    signedInUser.primaryPasswordLocked,
+    true,
+    "reports the locked Primary Password"
+  );
+  Assert.strictEqual(
+    signedInUser.hasSyncKey,
+    false,
+    "the sync key is unreadable while locked"
+  );
+});
+
 add_task(async function test_helpers_getFxaStatus_allowed_signedInUser() {
   let wasCalled = {
     getUserAccountData: false,
@@ -1126,6 +1190,9 @@ add_task(async function test_helpers_getFxaStatus_allowed_signedInUser() {
 
   let helpers = new FxAccountsWebChannelHelpers({
     fxAccounts: {
+      keys: {
+        hasKeysForScope: () => Promise.resolve(true),
+      },
       _internal: {
         getUserAccountData() {
           wasCalled.getUserAccountData = true;

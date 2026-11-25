@@ -49,7 +49,7 @@ export const WASM_BACKENDS = [BACKENDS.onnx];
 
 /**
  * @constant
- * @type {string}
+ * @type {RegExp}
  * @description Matches filenames with subdirectories, starting with alphanumeric or underscore,
                 and optionally ending with a dot followed by a 2-9 letter extension.
 
@@ -250,6 +250,11 @@ export const FEATURES = {
   "agent-monitor": {
     engineId: "agent-monitor-engine",
   },
+  // Its own engine id, so a suggestion never replaces a running check's.
+  // see browser/components/aiwindow/models/agents/MonitorSetup.sys.mjs
+  "agent-monitor-setup": {
+    engineId: "agent-monitor-setup-engine",
+  },
   // see browser/components/aiwindow/models/search/SearchAgent.sys.mjs
   "search-answer-generation": {
     engineId: "smart-openai",
@@ -261,6 +266,9 @@ export const FEATURES = {
   },
   aitab: {
     engineId: "aitab-engine",
+  },
+  "widget-generation": {
+    engineId: "smart-openai",
   },
   // see dom/media/webspeech/recognition/SpeechRecognition.cpp
   "speech-recognition": {
@@ -396,18 +404,6 @@ export const KVCacheQuantizationLevel = {
   F16: "f16",
   // Full precision  (32-bit floating point) (`'_f32'`)
   F32: "f32",
-};
-
-/**
- * Enum for the device used for inference.
- *
- * @readonly
- * @enum {string}
- */
-export const InferenceDevice = {
-  GPU: "gpu",
-  WASM: "wasm",
-  CPU: "cpu",
 };
 
 /**
@@ -576,9 +572,9 @@ export class PipelineOptions {
   runtimeFilename = null;
 
   /**
-   * Device used for inference
+   * Where a llama.cpp model loads, by device id or kind, @see HWInferencePlacement.
    *
-   * @type {InferenceDevice | null}
+   * @type {?HWInferencePlacement}
    */
   device = null;
 
@@ -613,25 +609,11 @@ export class PipelineOptions {
   kvCacheDtype = null;
 
   /**
-   * Maximum context size
+   * Tokens per decode call; sets llama.cpp n_batch and n_ubatch.
    *
    * @type {?number}
    */
-  numContext = 1024;
-
-  /**
-   * Number of tokens processed in a single forward pass.
-   *
-   * @type {?number}
-   */
-  numBatch = 2048;
-
-  /**
-   * Token batch size
-   *
-   * @type {?number}
-   */
-  numUbatch = 512;
+  numBatch = 512;
 
   /**
    * Whether to use flash attention
@@ -754,7 +736,7 @@ export class PipelineOptions {
   /**
    * Private method to validate enum fields.
    *
-   * @param {string} field - The field being validated (e.g., 'dtype', 'device', 'executionPriority').
+   * @param {string} field - The field being validated (e.g., 'dtype', 'executionPriority').
    * @param {*} value - The value being checked against the enum.
    * @throws {Error} Throws an error if the value is not valid.
    * @private
@@ -762,7 +744,6 @@ export class PipelineOptions {
   #validateEnum(field, value) {
     const enums = {
       dtype: QuantizationLevel,
-      device: InferenceDevice,
       executionPriority: ExecutionPriority,
       logLevel: LogLevel,
       modelHub: ModelHub,
@@ -922,9 +903,7 @@ export class PipelineOptions {
       "executionPriority",
       "useExternalDataFormat",
       "kvCacheDtype",
-      "numContext",
       "numBatch",
-      "numUbatch",
       "flashAttn",
       "useMmap",
       "useMlock",
@@ -997,7 +976,6 @@ export class PipelineOptions {
         [
           "modelHub",
           "dtype",
-          "device",
           "executionPriority",
           "logLevel",
           "kvCacheDtype",
@@ -1022,7 +1000,7 @@ export class PipelineOptions {
         this.#validateModelFile(key, options[key]);
       }
 
-      if (["numContext", "numBatch", "numUbatch"].includes(key)) {
+      if (key === "numBatch") {
         this.#validateIntegerRange(key, options[key], 1, 10000000);
       }
 
@@ -1072,9 +1050,7 @@ export class PipelineOptions {
       executionPriority: this.executionPriority,
       useExternalDataFormat: this.useExternalDataFormat,
       kvCacheDtype: this.kvCacheDtype,
-      numContext: this.numContext,
       numBatch: this.numBatch,
-      numUbatch: this.numUbatch,
       flashAttn: this.flashAttn,
       useMmap: this.useMmap,
       useMlock: this.useMlock,

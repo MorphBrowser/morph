@@ -28,7 +28,6 @@ void RenderTextureHostWrapper::EnsureTextureHost() const {
   }
 
   mTextureHost = RenderThread::Get()->GetRenderTexture(mExternalImageId);
-  MOZ_ASSERT(mTextureHost);
   if (!mTextureHost) {
     gfxCriticalNoteOnce << "Failed to get RenderTextureHost for extId:"
                         << AsUint64(mExternalImageId);
@@ -155,11 +154,11 @@ RenderTextureHostSWGL* RenderTextureHostWrapper::AsRenderTextureHostSWGL() {
   return mTextureHost->AsRenderTextureHostSWGL();
 }
 
-RenderDMABUFTextureHost* RenderTextureHostWrapper::AsRenderDMABUFTextureHost() {
+RenderLinuxTextureHost* RenderTextureHostWrapper::AsRenderLinuxTextureHost() {
   if (!mTextureHost) {
     return nullptr;
   }
-  return mTextureHost->AsRenderDMABUFTextureHost();
+  return mTextureHost->AsRenderLinuxTextureHost();
 }
 
 RenderAndroidHardwareBufferTextureHost*

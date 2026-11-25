@@ -10,7 +10,7 @@
 # Tests in the other wrench reftest directories run with enable-compositor-clips
 # so they never exercise the compositor clip code path.
 
-options(enable-compositor-clips) color_targets(3) == rounded-corners-1.yaml rounded-corners-1-ref.yaml
+options(enable-compositor-clips) if(not(platform(swgl)),color_targets(2)) if(platform(swgl),color_targets(3)) == rounded-corners-1.yaml rounded-corners-1-ref.yaml
 # options(enable-compositor-clips) color_targets(2) == rounded-corners-2.yaml rounded-corners-2-ref.yaml
 options(enable-compositor-clips) == rounded-corners-3.yaml rounded-corners-3-ref.yaml
 # options(enable-compositor-clips) fuzzy(2,106) == rounded-corners-4.yaml rounded-corners-4-ref.yaml
@@ -20,6 +20,7 @@ options(enable-compositor-clips) scale(*) == rounded-rgb-surface.yaml rounded-rg
 options(enable-compositor-clips) == tile-occlusion.yaml tile-occlusion-ref.yaml
 options(enable-compositor-clips) color_targets(1) == rounded-clip.yaml rounded-clip-ref.yaml
 options(enable-compositor-clips) fuzzy(1,50) == per-corner-radius.yaml per-corner-radius-ref.yaml
+options(enable-compositor-clips) fuzzy(1,50) == single-radius-zero-corners.yaml single-radius-zero-corners-ref.yaml
 options(enable-compositor-clips) fuzzy(1,50) == radius-clamped.yaml radius-clamped-ref.yaml
 options(enable-compositor-clips) fuzzy(1,50) == fractional-radius.yaml fractional-radius-ref.yaml
 options(enable-compositor-clips) fuzzy(1,50) == two-clips-combined.yaml two-clips-combined-ref.yaml
@@ -33,3 +34,4 @@ options(enable-compositor-clips) == corner-shape.yaml corner-shape-ref.yaml
 options(enable-compositor-clips) fuzzy(1,50) == scrolled-clip.yaml scrolled-clip-ref.yaml
 options(enable-compositor-clips) fuzzy(1,50) == nested-clip.yaml nested-clip-ref.yaml
 options(enable-compositor-clips) scale(1,2) fuzzy(1,400) == rounded-clip.yaml rounded-clip-ref.yaml
+options(enable-compositor-clips) == preserve-3d-backdrop-clip.yaml preserve-3d-backdrop-clip-ref.yaml

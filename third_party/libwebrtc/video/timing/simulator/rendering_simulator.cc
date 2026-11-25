@@ -230,7 +230,7 @@ class RenderingSimulatorStream : public RtcEventLogDriver::StreamInterface {
     RenderingSimulator::Stream stream = collector_.GetStream();
     if (!stream.IsEmpty()) {
       RTC_DCHECK_NE(stream.ssrc, 0u);
-      results_.streams.push_back(stream);
+      results_.streams.push_back(std::move(stream));
     }
   }
 
@@ -245,7 +245,8 @@ class RenderingSimulatorStream : public RtcEventLogDriver::StreamInterface {
 
 }  // namespace
 
-RenderingSimulator::RenderingSimulator(Config config) : config_(config) {}
+RenderingSimulator::RenderingSimulator(Config config)
+    : config_(std::move(config)) {}
 
 RenderingSimulator::~RenderingSimulator() = default;
 
@@ -262,9 +263,8 @@ RenderingSimulator::Results RenderingSimulator::Simulate(
                                                       rtx_ssrc, &results);
   };
   RtcEventLogDriver rtc_event_log_simulator(
-      {.reuse_streams = config_.reuse_streams,
-       .ssrc_filter = config_.ssrc_filter},
-      &parsed_log, config_.field_trials_string, std::move(stream_factory));
+      {.ssrc_filter = config_.ssrc_filter}, &parsed_log,
+      config_.field_trials_string, std::move(stream_factory));
   rtc_event_log_simulator.Simulate();
 
   // Return.

@@ -43,6 +43,31 @@ export const DESCRIPTION_PARTS_MAP = {
     ];
   },
   connectionFailureDescription(context) {
+    if (context.loopback) {
+      const dataL10nArgs = { port: context.loopback.port };
+      const parts = [
+        {
+          tag: "li",
+          dataL10nId: "neterror-loopback-refused-not-running",
+          dataL10nArgs,
+        },
+        {
+          tag: "li",
+          dataL10nId: "neterror-loopback-refused-wrong-port",
+          dataL10nArgs,
+        },
+      ];
+      // Names such as localhost resolve to both 127.0.0.1 and ::1 and both
+      // are tried before the error is reported, so address hints only
+      // apply to IP literals.
+      if (context.loopback.isIPLiteral) {
+        parts.push({
+          tag: "li",
+          dataL10nId: "neterror-loopback-refused-address",
+        });
+      }
+      return parts;
+    }
     const parts = [
       { tag: "li", dataL10nId: "neterror-load-error-try-again" },
       { tag: "li", dataL10nId: "neterror-load-error-connection" },
@@ -103,6 +128,29 @@ export const NET_ERRORS = [
       whyDidThisHappenL10nArgs: { hostname: null },
       learnMoreL10nId: "certerror-coop-learn-more",
       learnMoreSupportPage: COOP_MDN_DOCS,
+      showErrorCode: true,
+    },
+    hasNoUserFix: true,
+  },
+  {
+    id: "blockedByConnectionAllowlist",
+    errorCode: "NS_ERROR_CONNECTION_ALLOWLIST_VIOLATION",
+    category: "blocked",
+    introContent: {
+      // TODO(Bug 2089542): Update strings
+      dataL10nId: "fp-neterror-coop-coep-intro",
+    },
+    descriptionParts: [
+      { tag: "p", dataL10nId: "certerror-blocked-by-corp-headers-description" },
+    ],
+    buttons: {
+      showTryAgain: false,
+      showGoBack: true,
+    },
+    customNetError: {
+      titleL10nId: "fp-certerror-body-title",
+      whyDidThisHappenL10nId: "fp-neterror-coop-coep-why-did-this-happen-body",
+      whyDidThisHappenL10nArgs: { hostname: null },
       showErrorCode: true,
     },
     hasNoUserFix: true,
@@ -176,6 +224,28 @@ export const NET_ERRORS = [
     hasNoUserFix: false,
   },
   {
+    id: "httpAuthSchemeDisabled",
+    errorCode: "NS_ERROR_HTTP_AUTH_SCHEME_DISABLED",
+    category: "net",
+    bodyTitleL10nId: "neterror-http-auth-scheme-disabled-title",
+    introContent: {
+      dataL10nId: "fp-neterror-http-auth-scheme-disabled-intro",
+      dataL10nArgs: { hostname: null },
+    },
+    descriptionParts: [
+      { tag: "li", dataL10nId: "neterror-http-auth-scheme-disabled" },
+    ],
+    buttons: {
+      showTryAgain: false,
+      showGoBack: true,
+    },
+    customNetError: {
+      titleL10nId: "neterror-http-auth-scheme-disabled-title",
+      whatCanYouDoItems: ["neterror-http-auth-scheme-disabled"],
+    },
+    hasNoUserFix: true,
+  },
+  {
     id: "nssBadCert",
     errorCode: "nssBadCert",
     category: "cert",
@@ -228,6 +298,21 @@ export const NET_ERRORS = [
     customNetError: {
       titleL10nId: "connectionFailure-title",
       whatCanYouDoItems(context) {
+        if (context.loopback) {
+          const args = { port: context.loopback.port };
+          const items = [
+            { id: "neterror-loopback-refused-not-running", args },
+            { id: "neterror-loopback-refused-wrong-port", args },
+          ];
+
+          // Names such as localhost resolve to both 127.0.0.1 and ::1 and both
+          // are tried before the error is reported, so address hints only
+          // apply to IP literals.
+          if (context.loopback.isIPLiteral) {
+            items.push("neterror-loopback-refused-address");
+          }
+          return items;
+        }
         const items = [
           "neterror-load-error-try-again",
           "neterror-load-error-connection",
@@ -800,6 +885,7 @@ export const NET_ERRORS = [
 
     buttons: {
       showTryAgain: true,
+      showContinueWithoutVPN: true,
     },
     customNetError: {
       titleL10nId: "fp-neterror-vpn-error-title",

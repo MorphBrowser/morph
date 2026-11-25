@@ -9,10 +9,12 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
+  PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
   TabStateFlusher:
     "moz-src:///browser/components/sessionstore/TabStateFlusher.sys.mjs",
   MiniWindowUtils:
     "moz-src:///browser/components/miniwindow/MiniWindowUtils.sys.mjs",
+  URILoadingHelper: "resource:///modules/URILoadingHelper.sys.mjs",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "prefs", () => {
@@ -40,7 +42,7 @@ ChromeUtils.defineLazyGetter(lazy, "prefs", () => {
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", () =>
   console.createInstance({
-    prefix: "MiniWindow",
+    logModule: "MiniWindow",
     maxLogLevel: Services.prefs.getBoolPref("browser.mini-window.log", false)
       ? "Debug"
       : "Error",
@@ -61,20 +63,23 @@ const WINDOW_EVENTS = ["unload", "activate"];
 const TOOLBAR_HIDE_DELAY_FIRST_OPEN_MS = 2500;
 
 /**
- * One always-on-top popup hosting a live moved tab. The tab keeps its
- * browsing context across the move, so the page is never reloaded, and
- * teardown adopts it back into its origin window rather than discarding it.
+ * One always-on-top popup hosting either a live moved tab or a URL opened
+ * straight into it. A moved tab keeps its browsing context across the move,
+ * so the page is never reloaded. Either way, teardown adopts the tab into the
+ * origin window rather than discarding it.
  */
 export class MiniWindow {
   /**
-   * The tab being popped out of its origin window into this popup.
+   * The tab being popped out of its origin window into this popup, or null
+   * when a URL is opened into it instead.
    *
-   * @type {MozTabbrowserTab}
+   * @type {MozTabbrowserTab|null}
    */
   #sourceTab;
 
   /**
-   * The index #sourceTab held in originWin.
+   * The index in originWin the tab returns to: the one #sourceTab held, or
+   * just after the selected tab for an opened URL.
    *
    * @type {number}
    */
@@ -156,13 +161,6 @@ export class MiniWindow {
   #toolbarHeightObserver = null;
 
   /**
-   * Re-frames the crop when the window's size changes.
-   *
-   * @type {ResizeObserver|null}
-   */
-  #frameResizeObserver = null;
-
-  /**
    * Aborts all the toolbox listeners at once on teardown.
    *
    * @type {AbortController|null}
@@ -187,18 +185,20 @@ export class MiniWindow {
   /**
    * @param {object} manager - The MiniWindowManager singleton.
    * @param {ChromeWindow} originWin - The tab's source window.
-   * @param {MozTabbrowserTab} sourceTab - The tab to move.
+   * @param {MozTabbrowserTab|null} [sourceTab] - The tab to move. This can be null
+   *  if the mini window is being opened with a URL instead of a tab.
    * @param {object|null} [cropInfo] - The page region to frame, in content CSS
    *   px. Carries left/top/width/height plus the viewport size and fullZoom it
    *   was captured against; see MiniWindowUtils. Null makes a full-tab mini
    *   window.
    */
-  constructor(manager, originWin, sourceTab, cropInfo = null) {
+  constructor(manager, originWin, sourceTab = null, cropInfo = null) {
     this.manager = manager;
     this.originWin = originWin;
     this.#sourceTab = sourceTab;
     this.#cropped = !!cropInfo;
-    let browser = sourceTab.linkedBrowser;
+    let browser =
+      sourceTab?.linkedBrowser ?? originWin.gBrowser.selectedBrowser;
     if (cropInfo) {
       this._cropInfo = cropInfo;
     } else {
@@ -215,12 +215,11 @@ export class MiniWindow {
         fullZoom: browser.fullZoom,
       };
     }
-    this.#originTabIndex = originWin.gBrowser.tabs.indexOf(sourceTab);
+    this.#originTabIndex = sourceTab
+      ? originWin.gBrowser.tabs.indexOf(sourceTab)
+      : originWin.gBrowser.tabs.indexOf(originWin.gBrowser.selectedTab) + 1;
     this.miniWin = null;
     this._state = MiniWindowState.OPENING;
-    this._crop = null;
-    this._pageWidth = 0;
-    this._pageHeight = 0;
   }
 
   /**
@@ -239,6 +238,19 @@ export class MiniWindow {
    */
   get isCropped() {
     return this.#cropped;
+  }
+
+  /**
+   * The flavour of this Mini Window: "fragment" for a cropped region,
+   * "url" for one opened from a URL, or "full_tab" for a popped tab.
+   *
+   * @returns {string}
+   */
+  get type() {
+    if (this.#cropped) {
+      return "fragment";
+    }
+    return this.#sourceTab ? "full_tab" : "url";
   }
 
   /**
@@ -262,6 +274,26 @@ export class MiniWindow {
   }
 
   /**
+   * Window features for a new mini window, sized and placed for the crop.
+   *
+   * @returns {object}
+   */
+  #windowFeatures() {
+    let rect = lazy.MiniWindowUtils.computeWindowRect(
+      this.originWin,
+      this._cropInfo
+    );
+    return {
+      alwaysontop: 1,
+      lockaspectratio: this.#cropped ? 1 : 0,
+      outerWidth: rect.width,
+      outerHeight: rect.height,
+      screenX: rect.left,
+      screenY: rect.top,
+    };
+  }
+
+  /**
    * Moves the source tab out into a new always-on-top popup and frames the
    * crop in it.
    *
@@ -270,45 +302,86 @@ export class MiniWindow {
    *   Resolves with null without waiting if the tab could not be moved out,
    *   in which case the Mini Window is left CLOSED.
    */
-  async open() {
-    lazy.logConsole.debug("open", { crop: this._cropInfo });
+  async move() {
+    lazy.logConsole.debug("move", { crop: this._cropInfo });
     let gBrowser = this.originWin.gBrowser;
-    let rect = lazy.MiniWindowUtils.computeWindowRect(
-      this.originWin,
-      this._cropInfo
-    );
 
     // Pop the tab out like a normal move-to-window.
 
-    let features = {
-      alwaysontop: 1,
-      lockaspectratio: this.#cropped ? 1 : 0,
+    let extraOptions = Cc["@mozilla.org/hash-property-bag;1"].createInstance(
+      Ci.nsIWritablePropertyBag2
+    );
+    extraOptions.setPropertyAsBool("mini-window", true);
+    if (this.#cropped) {
+      extraOptions.setPropertyAsBool("cropped-mini-window", true);
+    }
+    this.#setIsMiniWindow(this.#sourceTab, true);
+
+    let options = {
+      extraOptions,
       replaceLastTab: true,
-      outerWidth: rect.width,
-      outerHeight: rect.height,
-      screenX: rect.left,
-      screenY: rect.top,
+      ...this.#windowFeatures(),
     };
 
-    // Mark the tab being moved out to make sure styling is correct.
-    this.#sourceTab.setAttribute("mini-window", "true");
-    if (this.#cropped) {
-      this.#sourceTab.setAttribute("cropped-mini-window", "true");
-    }
-
-    this.miniWin = gBrowser.replaceTabWithWindow(this.#sourceTab, features);
+    this.miniWin = gBrowser.replaceTabWithWindow(this.#sourceTab, options);
 
     if (!this.miniWin) {
       lazy.logConsole.error(
-        "open: Something went horribly wrong when opening \
+        "move: Something went horribly wrong when opening \
           the mini window - replaceTabWithWindow returned null"
       );
-      this.#sourceTab.removeAttribute("mini-window");
-      this.#sourceTab.removeAttribute("cropped-mini-window");
+      this.#setIsMiniWindow(this.#sourceTab, false);
       this._state = MiniWindowState.CLOSED;
       return null;
     }
 
+    return this.#activate();
+  }
+
+  /**
+   * Opens `url` in a new always-on-top full-tab popup.
+   *
+   * @param {string} url
+   * @param {object} loadParams - openLinkIn params for the load; see
+   *   MiniWindowManager.openURL.
+   * @returns {Promise<DOMWindow|null>} Resolves once the popup has finished
+   *   delayed startup and reached state ACTIVE. Resolves with null if the
+   *   window could not be opened.
+   */
+  async open(url, loadParams) {
+    lazy.logConsole.debug("open", { url });
+    let features = Object.entries(this.#windowFeatures())
+      .map(([key, value]) => `${key}=${value}`)
+      .join(",");
+    try {
+      lazy.URILoadingHelper.openLinkIn(this.originWin, url, "window", {
+        ...loadParams,
+        private: lazy.PrivateBrowsingUtils.isWindowPrivate(this.originWin),
+        miniWindow: true,
+        features,
+        resolveOnNewWindowCreated: win => {
+          this.miniWin = win;
+        },
+      });
+    } catch (e) {
+      lazy.logConsole.error("open: openLinkIn failed", e);
+    }
+
+    if (!this.miniWin) {
+      this._state = MiniWindowState.CLOSED;
+      return null;
+    }
+
+    return this.#activate();
+  }
+
+  /**
+   * Waits for the freshly-opened popup to finish starting up, then frames it
+   * and wires up its mini window UI.
+   *
+   * @returns {Promise<DOMWindow>}
+   */
+  async #activate() {
     await lazy.BrowserUtils.promiseObserved(
       "browser-delayed-startup-finished",
       subject => subject == this.miniWin
@@ -316,10 +389,10 @@ export class MiniWindow {
     if (this.#cropped) {
       // Only a crop needs the framing and the wheel panning that substitutes
       // for scrolling.
-      await this.#frame();
+      this.#frame();
     }
     this._state = MiniWindowState.FRAMED;
-    lazy.logConsole.debug("open: state -> FRAMED");
+    lazy.logConsole.debug("#activate: state -> FRAMED");
 
     this.#avoidOtherWindows();
 
@@ -333,7 +406,7 @@ export class MiniWindow {
     }
 
     this._state = MiniWindowState.ACTIVE;
-    lazy.logConsole.debug("open: state -> ACTIVE");
+    lazy.logConsole.debug("#activate: state -> ACTIVE");
 
     // Now that the tab is settled in the mini window, watch for it navigating away.
     this.#attachHistoryListener();
@@ -443,6 +516,11 @@ export class MiniWindow {
       "key_closeWindow",
       "key_toggleMute",
     ]);
+    const ALLOWED_COMMANDS = new Set([
+      "cmd_fullZoomReduce",
+      "cmd_fullZoomEnlarge",
+      "cmd_fullZoomReset",
+    ]);
     // A crop frames one specific page, so history navigation only makes sense
     // in a full-tab mini window.
     if (!this.#cropped) {
@@ -452,7 +530,11 @@ export class MiniWindow {
     }
     let keyset = this.miniWin.document.getElementById("mainKeyset");
     for (let key of keyset ? [...keyset.children] : []) {
-      if (key.localName === "key" && !ALLOWED_KEYS.has(key.id)) {
+      if (
+        key.localName === "key" &&
+        !ALLOWED_KEYS.has(key.id) &&
+        !ALLOWED_COMMANDS.has(key.getAttribute("command"))
+      ) {
         key.setAttribute("disabled", "true");
       }
     }
@@ -485,12 +567,15 @@ export class MiniWindow {
 
     closeButton?.removeAttribute("hidden");
     restoreButton?.removeAttribute("hidden");
-    closeButton?.addEventListener("command", () => this.close(), { signal });
+    if (restoreButton && !this.#sourceTab) {
+      doc.l10n.setAttributes(restoreButton, "mini-window-link-restore-button");
+    }
     restoreButton?.addEventListener(
       "command",
       () => this.returnToOriginWin(true),
       { signal }
     );
+    closeButton?.addEventListener("command", () => this.close(), { signal });
 
     this.#wireAudioButton();
   }
@@ -571,6 +656,8 @@ export class MiniWindow {
         }
       },
     };
+
+    this.#edgeSuppressed = true;
     win.MousePosTracker.addListener(this.#edgeListener);
 
     this.#trackToolbarHeight(toolbox);
@@ -769,8 +856,6 @@ export class MiniWindow {
     this.#cancelHoverReveal();
     this.#toolbarHeightObserver?.disconnect();
     this.#toolbarHeightObserver = null;
-    this.#frameResizeObserver?.disconnect();
-    this.#frameResizeObserver = null;
     if (this.#progressListener) {
       this.miniWin?.gBrowser?.removeTabsProgressListener(
         this.#progressListener
@@ -803,56 +888,42 @@ export class MiniWindow {
   }
 
   /**
-   * Lay the browser out at the full page size with scroll normalized to 0,0,
-   * then frame the crop with a chrome-side CSS transform.
-   * Page size comes from the content actor, clamped up to the crop's own viewport
-   * so a crop can never exceed it.
+   * Frame the crop with the native APZ zoom. The content keeps laying out at the
+   * viewport size the crop was captured against, so the page never reflows,
+   * while its visual viewport follows the popup. The content then keeps the
+   * visual viewport zoomed onto the crop as the popup resizes.
    *
-   * @returns {Promise<void>} Resolves once the browser has been sized and the
-   *   transform applied. Waits on the content actor for the page size, and
-   *   falls back to the crop's viewport if the actor is gone or the query
-   *   fails, so this resolves rather than rejecting on a dead actor.
    */
-  async #frame() {
-    let { browser, _cropInfo: cropInfo } = this;
-    this._crop = {
-      left: cropInfo.left,
-      top: cropInfo.top,
-      width: cropInfo.width,
-      height: cropInfo.height,
-    };
-
+  #frame() {
     let actor = this.#getActor();
     if (!actor) {
       lazy.logConsole.warn(
-        "No MiniWindow actor available; falling back to cropInfo viewport size"
+        "No MiniWindow actor available; can't zoom the crop"
       );
+      return;
     }
-    let size = await actor?.sendQuery("GetSize").catch(() => null);
-    let zoom = cropInfo.fullZoom || 1;
-    let box = lazy.MiniWindowUtils.computeFrameBox(cropInfo, size, zoom);
-    this._pageWidth = box.pageWidth;
-    this._pageHeight = box.pageHeight;
-    lazy.logConsole.debug("#frame", {
-      pageWidth: this._pageWidth,
-      pageHeight: this._pageHeight,
-      crop: this._crop,
-    });
 
-    let container = browser.closest(".browserStack") || browser.parentNode;
-    if (container) {
-      container.style.overflow = "hidden";
-    }
-    browser.style.minWidth = "0";
-    browser.style.minHeight = "0";
-    browser.style.width = box.boxWidth + "px";
-    browser.style.height = box.boxHeight + "px";
-    browser.style.transformOrigin = "0 0";
+    this.#setWindowMinSize();
+    actor.sendAsyncMessage("ApzFrame", this.#apzFrameData());
+    lazy.logConsole.debug("#frame", { crop: this._cropInfo });
+  }
 
-    actor?.sendAsyncMessage("ScrollTo", { x: 0, y: 0 });
-
-    this.#applyTransform();
-    this.#trackWindowResize();
+  /**
+   * @returns {object} The ApzFrame message data, in content CSS px: the crop,
+   *   and the layout viewport size to hold the page at.
+   */
+  #apzFrameData() {
+    let cropInfo = this._cropInfo;
+    return {
+      crop: {
+        left: cropInfo.left,
+        top: cropInfo.top,
+        width: cropInfo.width,
+        height: cropInfo.height,
+      },
+      layoutWidth: cropInfo.innerWidth || cropInfo.viewportWidth,
+      layoutHeight: cropInfo.innerHeight || cropInfo.viewportHeight,
+    };
   }
 
   /**
@@ -866,44 +937,24 @@ export class MiniWindow {
   }
 
   /**
-   * Re-frame the crop against the popup's current width. A no-op until #frame
-   * has computed the crop.
-   *
-   * @param {number} [innerWidth] The window's inner width, when the caller
-   *   already has it. Otherwise it is read without flushing layout.
+   * Hold the popup at a crop-aspect minimum size via a CSS min-width/min-height
+   * on its root element, so it can't be resized off the crop's aspect.
    */
-  #applyTransform(innerWidth) {
-    if (!this._crop) {
+  #setWindowMinSize() {
+    let { width, height } = this._cropInfo;
+    if (!(width > 0) || !(height > 0)) {
       return;
     }
-    innerWidth ??= this.miniWin.windowUtils.getBoundsWithoutFlushing(
-      this.miniWin.document.documentElement
-    ).width;
-    let { scale, tx, ty } = lazy.MiniWindowUtils.computeTransform(
-      innerWidth,
-      this._crop,
-      this._cropInfo.fullZoom || 1
-    );
-    this.browser.style.transform = `scale(${scale}) translate(${tx}px, ${ty}px)`;
-  }
 
-  /**
-   * Re-frame the crop whenever the window changes size.
-   *
-   */
-  #trackWindowResize() {
+    const FLOOR_WIDTH = 100;
+    const FLOOR_HEIGHT = 100;
+    let aspect = width / height;
+    let minWidth = Math.max(FLOOR_WIDTH, Math.round(FLOOR_HEIGHT * aspect));
+    let minHeight = Math.round(minWidth / aspect);
     let root = this.miniWin.document.documentElement;
-    this.#frameResizeObserver = new this.miniWin.ResizeObserver(entries => {
-      let width = entries.at(-1)?.contentBoxSize?.[0]?.inlineSize;
-      if (width) {
-        this.#applyTransform(width);
-      }
-    });
-    this.#frameResizeObserver.observe(root);
+    root.style.minWidth = `${minWidth}px`;
+    root.style.minHeight = `${minHeight}px`;
   }
-
-  // TODO: Scrolling horizontally won't work as is right now, a later commit in the stack
-  // handles this by introducing panning.
 
   /**
    * When unloading, we want to preserve the tab in the originWin's history. Instead of
@@ -1004,6 +1055,11 @@ export class MiniWindow {
    *   and the window it landed in, or nulls if it could not be adopted.
    */
   #returnTabToOrigin(selectTab) {
+    // Undo the framing (viewport override and zoom) before the tab goes home, or
+    // it stays framed there.
+    this.#getActor()?.sendAsyncMessage("ResetApzFrame");
+    this.#getActor()?.sendAsyncMessage("DisableScrollReveal");
+
     let tab = this.tab;
     let { originWin } = this;
     let target = originWin && !originWin.closed ? originWin : null;
@@ -1016,11 +1072,26 @@ export class MiniWindow {
     if (!tab || !target) {
       return { tab: null, win: null };
     }
+    this.#setIsMiniWindow(tab, false);
     let tabIndex = Math.min(this.#originTabIndex, target.gBrowser.tabs.length);
     return {
       tab: target.gBrowser.adoptTab(tab, { tabIndex, selectTab }),
       win: target,
     };
+  }
+
+  /**
+   * Flag the tab's browsing context so that web content can't move or resize
+   * the always-on-top window it is shown in.
+   *
+   * @param {MozTabbrowserTab} tab
+   * @param {boolean} value
+   */
+  #setIsMiniWindow(tab, value) {
+    let bc = tab.linkedBrowser?.browsingContext;
+    if (bc) {
+      bc.isMiniWindow = value;
+    }
   }
 
   /**
@@ -1035,7 +1106,7 @@ export class MiniWindow {
     }
 
     try {
-      let flavour = this.#cropped ? "fragment" : "full_tab";
+      let flavour = this.type;
       let openDuration = Math.round(ChromeUtils.now() - this.#createdAt);
       Glean.miniWindow.closed.record({
         type: flavour,

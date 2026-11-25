@@ -4,6 +4,31 @@
 
 package org.mozilla.gecko.annotationProcessors;
 
+import com.android.tools.lint.LintCliClient;
+import com.android.tools.lint.checks.ApiLookup;
+import com.android.tools.lint.client.api.LintClient;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Locale;
+import org.mozilla.gecko.annotationProcessors.classloader.AnnotatableEntity;
+import org.mozilla.gecko.annotationProcessors.classloader.ClassWithOptions;
+import org.mozilla.gecko.annotationProcessors.utils.Utils;
+
 /**
  * Generate C++ bindings for SDK classes using a config file.
  *
@@ -54,32 +79,6 @@ package org.mozilla.gecko.annotationProcessors;
  * <p># Generate a getter instead of a literal for certain runtime constants
  * [android.os.Build$VERSION = skip:true] SDK_INT = noLiteral:true
  */
-import com.android.tools.lint.LintCliClient;
-import com.android.tools.lint.checks.ApiLookup;
-import com.android.tools.lint.client.api.LintClient;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.FileReader;
-import java.io.IOException;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.Member;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.Locale;
-import org.mozilla.gecko.annotationProcessors.classloader.AnnotatableEntity;
-import org.mozilla.gecko.annotationProcessors.classloader.ClassWithOptions;
-import org.mozilla.gecko.annotationProcessors.utils.Utils;
-
-/** Processor for generating SDK bindings from JAR files. */
 public class SDKProcessor {
   /** Comment header added to all generated files. */
   public static final String GENERATED_COMMENT =
@@ -94,6 +93,8 @@ public class SDKProcessor {
   private static int sMaxSdkVersion;
 
   private static class ParseException extends Exception {
+    private static final long serialVersionUID = 1L;
+
     public ParseException(final String message) {
       super(message);
     }
@@ -225,7 +226,10 @@ public class SDKProcessor {
     final String outdir = args[2];
 
     final LintCliClient lintClient = new LintCliClient(LintClient.CLIENT_CLI);
-    sApiLookup = ApiLookup.get(lintClient);
+    sApiLookup = ApiLookup.getOrNull(lintClient, null);
+    if (sApiLookup == null) {
+      throw new IllegalStateException("Could not load the lint API database");
+    }
 
     for (int argIndex = 3; argIndex < args.length; argIndex += 2) {
       final String configFile = args[argIndex];
@@ -309,11 +313,14 @@ public class SDKProcessor {
 
   private static int getAPIVersion(Class<?> cls, Member m) {
     if (m instanceof Method || m instanceof Constructor) {
-      return sApiLookup.getMethodVersion(
-          cls.getName().replace('.', '/'), Utils.getMemberName(m), Utils.getSignature(m));
+      return sApiLookup
+          .getMethodVersions(
+              cls.getName().replace('.', '/'), Utils.getMemberName(m), Utils.getSignature(m))
+          .min();
     } else if (m instanceof Field) {
-      return sApiLookup.getFieldVersion(
-          Utils.getClassDescriptor(m.getDeclaringClass()), m.getName());
+      return sApiLookup
+          .getFieldVersions(Utils.getClassDescriptor(m.getDeclaringClass()), m.getName())
+          .min();
     } else {
       throw new IllegalArgumentException("expected member to be Method, Constructor, or Field");
     }

@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.StrictMode
 import androidx.annotation.VisibleForTesting
+import mozilla.appservices.fxaclient.contentUrl
 import mozilla.components.feature.intent.ext.sanitize
 import mozilla.components.feature.intent.processing.IntentProcessor
 import mozilla.components.feature.intent.processing.TabIntentProcessor.Companion.EXTRA_APP_LINK_LAUNCH_TYPE
@@ -21,13 +22,18 @@ import mozilla.components.support.utils.INTENT_TYPE_PDF
 import mozilla.components.support.utils.ext.packageManagerCompatHelper
 import mozilla.components.support.utils.toSafeIntent
 import org.mozilla.fenix.GleanMetrics.Events
+import org.mozilla.fenix.GleanMetrics.SyncAuth
 import org.mozilla.fenix.HomeActivity.Companion.PRIVATE_BROWSING_MODE
+import org.mozilla.fenix.components.FxaServer
 import org.mozilla.fenix.components.IntentProcessorType
+import org.mozilla.fenix.components.accounts.createPairingAuthCustomTabIntent
+import org.mozilla.fenix.components.accounts.isFxaPairingLink
 import org.mozilla.fenix.components.getType
 import org.mozilla.fenix.ext.components
 import org.mozilla.fenix.ext.isIntentInternal
 import org.mozilla.fenix.perf.MarkersActivityLifecycleCallbacks
 import org.mozilla.fenix.perf.StartupTimeline
+import org.mozilla.fenix.settings.account.AuthCustomTabActivity
 import org.mozilla.fenix.shortcut.NewTabShortcutIntentProcessor
 import org.mozilla.fenix.shortcut.UninstallShortcutIntentProcessor
 
@@ -72,6 +78,12 @@ class IntentReceiverActivity : Activity() {
     }
 
     fun processIntent(intent: Intent) {
+        val data = intent.toSafeIntent().data
+        if (intent.action == Intent.ACTION_VIEW && data != null && isFxaPairingLink(data, fxaServerUrl())) {
+            processPairingLink(data)
+            return
+        }
+
         // Call process for side effects, short on the first that returns true
 
         var private = components.settings.openLinksInAPrivateTab
@@ -92,7 +104,7 @@ class IntentReceiverActivity : Activity() {
             val referrerIsFenix = this.isIntentInternal()
             Events.openedExtPdf.record(Events.OpenedExtPdfExtra(referrerIsFenix))
             if (!referrerIsFenix) {
-                intent.toSafeIntent().data?.let(::persistUriReadPermission)
+                data?.let(::persistUriReadPermission)
             }
         }
 
@@ -105,6 +117,35 @@ class IntentReceiverActivity : Activity() {
 
         launch(intent, intentProcessorType)
     }
+
+    /**
+     * Opens a Firefox Accounts pairing link in the pairing flow if onboarding is complete. Otherwise, the link is
+     * dropped and onboarding is shown instead.
+     */
+    private fun processPairingLink(data: Uri) {
+        if (hasCompletedOnboarding()) {
+            SyncAuth.pairingLinkOpened.record(
+                SyncAuth.PairingLinkOpenedExtra(
+                    campaignAttributed = components.settings.isUserPairingCampaignAttributed
+                )
+            )
+            launchAuthCustomTab(data)
+        } else {
+            launchHome()
+        }
+    }
+
+    /** Opens [HomeActivity] without forwarding the incoming intent. */
+    private fun launchHome() {
+        startActivityAndFinish(Intent(this, HomeActivity::class.java))
+    }
+
+    /** Returns whether onboarding is complete. If onboarding is disabled, it is treated as onboarded. */
+    private fun hasCompletedOnboarding(): Boolean =
+        components.fenixOnboarding.userHasBeenOnboarded() || !components.settings.onboardingFeatureEnabled
+
+    /** Returns the configured Firefox Accounts server URL. */
+    private fun fxaServerUrl(): String = FxaServer.config(this).server.contentUrl()
 
     private fun persistUriReadPermission(uri: Uri) {
         try {
@@ -125,11 +166,26 @@ class IntentReceiverActivity : Activity() {
                 intentProcessorType.shouldOpenToBrowser(intent),
             )
         }
+        startActivityAndFinish(intent)
+    }
+
+    /** Opens a scanned Firefox Accounts pairing link in [AuthCustomTabActivity]. */
+    @VisibleForTesting
+    internal fun launchAuthCustomTab(pairingUrl: Uri) {
+        val intent =
+            createPairingAuthCustomTabIntent(this, pairingUrl)
+                .putExtra(AuthCustomTabActivity.EXTRA_OPEN_HOME_ON_AUTHENTICATED, true)
+        startActivityAndFinish(intent)
+    }
+
+    private fun startActivityAndFinish(intent: Intent) {
         // StrictMode violation on certain devices such as Samsung
         components.strictMode.allowViolation(StrictMode::allowThreadDiskReads) {
             startActivity(intent)
         }
-        finish() // must finish() after starting the other activity
+        // Finish after starting the next activity, or intents from other apps won't reuse the existing activity
+        // (https://github.com/mozilla-mobile/fenix/issues/8544).
+        finish()
     }
 
     private fun getIntentProcessors(private: Boolean): List<IntentProcessor> {

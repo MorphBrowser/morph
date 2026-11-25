@@ -263,11 +263,13 @@ void nsHTMLFramesetFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
       // Clear the lazy bits in the remaining children.  Also clear
       // the restyle flags, like nsCSSFrameConstructor::ProcessChildren does.
       for (; child; child = child->GetNextSibling()) {
-        child->UnsetFlags(NODE_DESCENDANTS_NEED_FRAMES | NODE_NEEDS_FRAME);
+        child->UnsetStyleFlags(NodeStyleFlags::DescendantsNeedFrames |
+                               NodeStyleFlags::NeedsFrame);
       }
       break;
     }
-    child->UnsetFlags(NODE_DESCENDANTS_NEED_FRAMES | NODE_NEEDS_FRAME);
+    child->UnsetStyleFlags(NodeStyleFlags::DescendantsNeedFrames |
+                           NodeStyleFlags::NeedsFrame);
 
     // IMPORTANT: This must match the conditions in
     // nsCSSFrameConstructor::ContentAppended/Inserted/Removed
@@ -320,8 +322,8 @@ void nsHTMLFramesetFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
 
     // XXX the blank frame is using the content of its parent - at some point it
     // should just have null content, if we support that
-    nsHTMLFramesetBlankFrame* blankFrame = new (presShell)
-        nsHTMLFramesetBlankFrame(pseudoComputedStyle, PresContext());
+    nsHTMLFramesetBlankFrame* blankFrame =
+        new nsHTMLFramesetBlankFrame(pseudoComputedStyle, PresContext());
 
     blankFrame->Init(mContent, this, nullptr);
 
@@ -887,7 +889,7 @@ void nsHTMLFramesetFrame::Reflow(nsPresContext* aPresContext,
         pseudoComputedStyle = styleSet->ResolveNonInheritingAnonymousBoxStyle(
             PseudoStyleType::MozHframesetBorder);
 
-        borderFrame = new (presShell) nsHTMLFramesetBorderFrame(
+        borderFrame = new nsHTMLFramesetBorderFrame(
             pseudoComputedStyle, PresContext(), borderWidth, false, false);
         borderFrame->Init(mContent, this, nullptr);
         mChildCount++;
@@ -918,7 +920,7 @@ void nsHTMLFramesetFrame::Reflow(nsPresContext* aPresContext,
                 styleSet->ResolveNonInheritingAnonymousBoxStyle(
                     PseudoStyleType::MozVframesetBorder);
 
-            borderFrame = new (presShell) nsHTMLFramesetBorderFrame(
+            borderFrame = new nsHTMLFramesetBorderFrame(
                 pseudoComputedStyle, PresContext(), borderWidth, true, false);
             borderFrame->Init(mContent, this, nullptr);
             mChildCount++;
@@ -1235,7 +1237,7 @@ void nsHTMLFramesetFrame::MouseDrag(nsPresContext* aPresContext,
       GenerateRowCol(aPresContext, width, colSpecs, mColSizes, newColAttr);
       // Setting the attr will trigger a reflow
       mContent->AsElement()->SetAttr(kNameSpaceID_None, nsGkAtoms::cols,
-                                     newColAttr, true);
+                                     newColAttr, true, IsKnownNewAttr::No);
     }
   } else {
     change = aPresContext->DevPixelsToAppUnits(aEvent->mRefPoint.y -
@@ -1259,7 +1261,7 @@ void nsHTMLFramesetFrame::MouseDrag(nsPresContext* aPresContext,
       GenerateRowCol(aPresContext, height, rowSpecs, mRowSizes, newRowAttr);
       // Setting the attr will trigger a reflow
       mContent->AsElement()->SetAttr(kNameSpaceID_None, nsGkAtoms::rows,
-                                     newRowAttr, true);
+                                     newRowAttr, true, IsKnownNewAttr::No);
     }
   }
 
@@ -1277,8 +1279,7 @@ void nsHTMLFramesetFrame::EndMouseDrag(nsPresContext* aPresContext) {
 
 nsIFrame* NS_NewHTMLFramesetFrame(PresShell* aPresShell,
                                   ComputedStyle* aStyle) {
-  return new (aPresShell)
-      nsHTMLFramesetFrame(aStyle, aPresShell->GetPresContext());
+  return new nsHTMLFramesetFrame(aStyle, aPresShell->GetPresContext());
 }
 
 NS_IMPL_FRAMEARENA_HELPERS(nsHTMLFramesetFrame)

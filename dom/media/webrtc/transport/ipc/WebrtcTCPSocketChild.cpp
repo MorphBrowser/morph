@@ -8,7 +8,6 @@
 #include "WebrtcTCPSocketCallback.h"
 #include "WebrtcTCPSocketLog.h"
 #include "mozilla/net/NeckoChild.h"
-#include "mozilla/net/SocketProcessChild.h"
 
 using namespace mozilla::ipc;
 
@@ -56,8 +55,8 @@ WebrtcTCPSocketChild::~WebrtcTCPSocketChild() {
 }
 
 void WebrtcTCPSocketChild::AsyncOpen(
-    const nsACString& aHost, const int& aPort, const nsACString& aLocalAddress,
-    const int& aLocalPort, bool aUseTls,
+    const nsACString& aHost, const uint16_t& aPort,
+    const nsACString& aLocalAddress, const uint16_t& aLocalPort, bool aUseTls,
     const std::shared_ptr<NrSocketProxyConfig>& aProxyConfig) {
   LOG("WebrtcTCPSocketChild::AsyncOpen {} {}:{}\n", fmt::ptr(this),
       PromiseFlatCString(aHost).get(), aPort);
@@ -74,10 +73,6 @@ void WebrtcTCPSocketChild::AsyncOpen(
   if (IsNeckoChild()) {
     // We're on a content process
     gNeckoChild->SendPWebrtcTCPSocketConstructor(this, tabId);
-  } else if (IsSocketProcessChild()) {
-    // We're on a socket process
-    SocketProcessChild::GetSingleton()->SendPWebrtcTCPSocketConstructor(this,
-                                                                        tabId);
   }
 
   SendAsyncOpen(aHost, aPort, aLocalAddress, aLocalPort, aUseTls, proxyConfig);

@@ -29,10 +29,10 @@ The xpcshell test harness automatically starts the moz-http2.js server when test
 
 ### 3. moz-http2.js (Node Server)
 
-This is the main Node.js HTTP/2 server that:
+This Node.js process hosts the servers that tests start. It doesn't serve test
+requests itself: every test starts the servers it needs. It:
 
 - Listens on the port specified in `MOZNODE_EXEC_PORT`
-- Handles test requests and DNS resolution
 - Provides special endpoints for process management:
   - `/fork` - Spawns a new Node.js child process
   - `/execute/{id}` - Executes code in a forked process
@@ -171,6 +171,46 @@ await server.start();
 // Check session count
 let count = await server.sessionCount();
 ```
+
+To also accept HTTP/1.1 clients, set `allowHTTP1` before starting the server:
+
+```javascript
+let server = new NodeHTTP2Server();
+server.allowHTTP1 = true;
+await server.start();
+```
+
+### NodeLegacyHTTP2Server
+
+HTTP/2 over TLS server built on the vendored node-http2 library
+(`testing/xpcshell/node-http2`) instead of Node's `http2` module. The library
+can be patched to produce protocol errors on demand, such as illegal HPACK
+encodings, so use this server only for tests that rely on such quirks.
+`NodeHTTP2Server` is the right choice otherwise.
+
+```javascript
+const { NodeLegacyHTTP2Server } = ChromeUtils.importESModule(
+  "resource://testing-common/NodeServer.sys.mjs"
+);
+
+let server = new NodeLegacyHTTP2Server();
+await server.start();
+
+// Path handlers work as for the other servers. Alternatively, handle every
+// request that isn't a CONNECT in one function:
+await server.setRequestHandler((req, res) => {
+  res.writeHead(200);
+  res.end("ok");
+});
+
+// Handle CONNECT requests, making the server act as an HTTP/2 proxy:
+await server.setConnectHandler((req, res) => {
+  res.writeHead(200);
+  res.end();
+});
+```
+
+Exceptions thrown by handlers are caught, and the server answers with a 500.
 
 ### HTTP/3 Server
 
@@ -665,7 +705,15 @@ rather than served can hold that side itself:
 ```javascript
 await server.startWithNoResponseUdpPort();
 let port = server.port(); // TCP served, UDP never answers
+
+// A server that needs a different start step passes it in:
+await proxy.startWithNoResponseUdpPort(() => proxy.startWithoutProxyFilter());
 ```
+
+To put two servers on one port number, use `startOnSharedPort(start, claim, stop)`.
+It runs `start()`, then `claim()` on the port that `start()` got, and on failure
+runs `stop()` and retries. `create_masque_proxy_server()` in `head_http3.js` uses it
+to start an HTTP/2 proxy on the MASQUE proxy's port.
 
 ### Scope Issues in Handlers
 

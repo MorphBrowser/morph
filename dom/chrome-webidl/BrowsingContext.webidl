@@ -73,6 +73,17 @@ enum PrefersReducedMotionOverride {
 };
 
 /**
+ * CSS prefers-contrast values override.
+ */
+enum PrefersContrastOverride {
+  "none",
+  "no-preference",
+  "more",
+  "less",
+  "custom",
+};
+
+/**
  * Allowed overrides of platform/pref default behaviour for touch events.
  */
 enum TouchEventsOverride {
@@ -165,6 +176,12 @@ interface BrowsingContext {
   [SetterThrows] attribute boolean isAppTab;
 
   /**
+   * Whether this top level browsing context is shown in a Mini Window. Web
+   * content may not move or resize such a window.
+   */
+  [SetterThrows] attribute boolean isMiniWindow;
+
+  /**
    * Sets whether this is BC has siblings **at the toplevel** (e.g. in a tabbed
    * browser environment). Used to determine if web content can resize the top
    * window. Never set correctly for non-top BCs.
@@ -254,6 +271,9 @@ interface BrowsingContext {
 
   // Forced-colors simulation, for DevTools
   [SetterThrows] attribute ForcedColorsOverride forcedColorsOverride;
+
+  // Contrast simulation, for DevTools.
+  [SetterThrows] attribute PrefersContrastOverride prefersContrastOverride;
 
   // Animation playbackRate multiplier, for Devtools
   [SetterThrows] attribute double animationsPlayBackRateMultiplier;

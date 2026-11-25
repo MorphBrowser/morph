@@ -1,6 +1,7 @@
 [DEFAULT]
 prefs = [
   "sidebar.revamp=false",
+  "sidebar.verticalTabs=false",
 ]
 
 ["browser_sidebar_adopt.js"]

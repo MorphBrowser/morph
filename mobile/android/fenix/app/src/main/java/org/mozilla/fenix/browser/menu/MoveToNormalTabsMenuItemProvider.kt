@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.compose.base.text.Text
 import mozilla.components.compose.menu.data.MenuItem
+import mozilla.components.compose.menu.data.MenuItemTitle
 import mozilla.components.compose.menu.data.StandardMenuItem
 import mozilla.components.compose.menu.store.MenuEvent
 import mozilla.components.compose.menu.ui.MenuItemIconRes
@@ -18,40 +19,58 @@ import org.mozilla.fenix.R
 import org.mozilla.fenix.components.menu.MenuHost
 import org.mozilla.fenix.components.menu.MenuItemProvider
 import org.mozilla.fenix.components.menu.MenuTarget
+import org.mozilla.fenix.components.menu.MenuTarget.CustomizeMenu
+import org.mozilla.fenix.components.menu.MenuTarget.Preview
 import org.mozilla.fenix.components.menu.store.MenuAction
 
 /**
  * [MenuItemProvider] for the menu item allowing to move the current private tab to a non-private tab. Only shown when
- * the current tab is private.
+ * the current tab is private, or when customizing or previewing the menu in private browsing.
  *
  * @param browserStore The [BrowserStore] to get the current tab from.
  * @param target [MenuTarget] for which this menu item would be shown for.
  * @param migratePrivateTab [TabsUseCases.MigratePrivateTabUseCase] for moving the current tab to a non-private tab.
+ * @param inPrivateBrowsing Whether the user is in private browsing. Only used when customizing or previewing the menu,
+ *   which do not belong to a tab.
  */
 class MoveToNormalTabsMenuItemProvider(
     private val browserStore: BrowserStore,
     private val target: MenuTarget,
     private val migratePrivateTab: TabsUseCases.MigratePrivateTabUseCase,
+    inPrivateBrowsing: Boolean,
 ) : MenuItemProvider {
-    override val itemFlow: StateFlow<MenuItem?> =
-        MutableStateFlow(
-            if (target.browserSessionFrom(browserStore.state)?.content?.private == true) {
-                StandardMenuItem(
-                    title = Text.Resource(R.string.browser_menu_move_to_non_private_tab),
-                    icon = MenuItemIconRes(iconsR.drawable.mozac_ic_external_link_24),
-                    onClickEvent = MenuAction.MoveToNonPrivateTab,
-                )
-            } else {
-                null
+    override val itemsFlow: StateFlow<List<MenuItem>> = run {
+        val shouldShow =
+            when (target) {
+                CustomizeMenu,
+                Preview -> inPrivateBrowsing
+                else -> target.browserSessionFrom(browserStore.state)?.content?.private == true
             }
-        )
 
-    override fun handles(event: MenuEvent) = event == MenuAction.MoveToNonPrivateTab
+        val item =
+            if (target == CustomizeMenu) {
+                DEFAULT_MENU_ITEM
+            } else {
+                DEFAULT_MENU_ITEM.copy(onClickEvent = MenuAction.MoveToNonPrivateTab)
+            }
+
+        MutableStateFlow(listOfNotNull(item.takeIf { shouldShow }))
+    }
+
+    override fun handles(event: MenuEvent) = target != Preview && (event == MenuAction.MoveToNonPrivateTab)
 
     override fun onEvent(event: MenuEvent, menu: MenuHost) {
         val tabId = target.browserSessionFrom(browserStore.state)?.id ?: return
 
         menu.dismiss()
         migratePrivateTab(tabId)
+    }
+
+    companion object {
+        private val DEFAULT_MENU_ITEM =
+            StandardMenuItem(
+                title = MenuItemTitle(Text.Resource(R.string.browser_menu_move_to_non_private_tab)),
+                icon = MenuItemIconRes(iconsR.drawable.mozac_ic_external_link_24),
+            )
     }
 }

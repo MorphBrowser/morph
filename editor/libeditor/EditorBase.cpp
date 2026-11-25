@@ -977,6 +977,18 @@ nsresult EditorBase::GetSelection(SelectionType aSelectionType,
   return NS_WARN_IF(!*aSelection) ? NS_ERROR_FAILURE : NS_OK;
 }
 
+Selection* EditorBase::GetExistingSelection(
+    SelectionType aSelectionType) const {
+  if (aSelectionType == SelectionType::eNormal && IsEditActionDataAvailable()) {
+    return &SelectionRef();
+  }
+  nsISelectionController* sc = GetSelectionController();
+  if (!sc) {
+    return nullptr;
+  }
+  return sc->GetExistingSelection(ToRawSelectionType(aSelectionType));
+}
+
 nsFrameSelection* EditorBase::GetEditableFrameSelection() const {
   EditContext* editContext = GetEditActionEditContext();
   return editContext && editContext->IsCanvas()
@@ -1166,6 +1178,10 @@ nsresult EditorBase::UndoAsAction(uint32_t aCount, nsIPrincipal* aPrincipal) {
                          "CanHandleAndMaybeDispatchBeforeInputEvent() failed");
     return EditorBase::ToGenericNSResult(rv);
   }
+  if (editActionData.GetEditContext()) {
+    // Only fire beforeinput for EditContext, don't actually undo.
+    return NS_OK;
+  }
 
   AutoUpdateViewBatch preventSelectionChangeEvent(*this, __FUNCTION__);
 
@@ -1230,6 +1246,10 @@ nsresult EditorBase::RedoAsAction(uint32_t aCount, nsIPrincipal* aPrincipal) {
     NS_WARNING_ASSERTION(rv == NS_ERROR_EDITOR_ACTION_CANCELED,
                          "CanHandleAndMaybeDispatchBeforeInputEvent() failed");
     return EditorBase::ToGenericNSResult(rv);
+  }
+  if (editActionData.GetEditContext()) {
+    // Only fire beforeinput for EditContext, don't actually redo.
+    return NS_OK;
   }
 
   AutoUpdateViewBatch preventSelectionChangeEvent(*this, __FUNCTION__);
@@ -1519,7 +1539,8 @@ NS_IMETHODIMP EditorBase::GetDocumentModified(bool* aOutDocModified) {
   return NS_OK;
 }
 
-NS_IMETHODIMP EditorBase::GetDocumentCharacterSet(nsACString& aCharacterSet) {
+NS_IMETHODIMP EditorBase::GetDocumentCharacterSet(
+    nsACString& /*aCharacterSet*/) {
   return NS_ERROR_NOT_AVAILABLE;
 }
 
@@ -1533,7 +1554,7 @@ nsresult EditorBase::GetDocumentCharsetInternal(nsACString& aCharset) const {
 }
 
 NS_IMETHODIMP EditorBase::SetDocumentCharacterSet(
-    const nsACString& aCharacterSet) {
+    const nsACString& /*aCharacterSet*/) {
   return NS_ERROR_NOT_AVAILABLE;
 }
 
@@ -2953,8 +2974,9 @@ Result<CreateElementResult, nsresult> EditorBase::InsertBRElement(
                                        : InterlinePosition::EndOfLine));
 }
 
-NS_IMETHODIMP EditorBase::DeleteNode(nsINode* aNode, bool aPreserveSelection,
-                                     uint8_t aOptionalArgCount) {
+NS_IMETHODIMP EditorBase::DeleteNode(nsINode* /*aNode*/,
+                                     bool /*aPreserveSelection*/,
+                                     uint8_t /*aOptionalArgCount*/) {
   MOZ_ASSERT_UNREACHABLE("Do not use this API with TextEditor");
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -3018,7 +3040,7 @@ nsresult EditorBase::DeleteNodeWithTransaction(nsIContent& aContent) {
 NS_IMETHODIMP EditorBase::NotifySelectionChanged(Document* aDocument,
                                                  Selection* aSelection,
                                                  int16_t aReason,
-                                                 int32_t aAmount) {
+                                                 int32_t /*aAmount*/) {
   if (NS_WARN_IF(!aDocument) || NS_WARN_IF(!aSelection)) {
     return NS_ERROR_INVALID_ARG;
   }
@@ -6254,7 +6276,7 @@ nsresult EditorBase::HandleInlineSpellCheck(
   return rv;
 }
 
-Element* EditorBase::FindSelectionRoot(const nsINode& aNode) const {
+Element* EditorBase::FindSelectionRoot(const nsINode& /*aNode*/) const {
   return GetRoot();
 }
 
@@ -6983,7 +7005,7 @@ void EditorBase::UndefineCaretBidiLevel() const {
   }
 }
 
-NS_IMETHODIMP EditorBase::GetTextLength(uint32_t* aCount) {
+NS_IMETHODIMP EditorBase::GetTextLength(uint32_t* /*aCount*/) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 

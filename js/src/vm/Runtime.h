@@ -15,8 +15,6 @@
 #include "mozilla/TimeStamp.h"
 #include "mozilla/XorShift128PlusRNG.h"
 
-#include <utility>
-
 #ifdef JS_HAS_INTL_API
 #  include "builtin/intl/SharedIntlData.h"
 #endif
@@ -516,7 +514,8 @@ struct JSRuntime {
   };
 
   // A cache for a self-hosted function's JitCode (managed through a
-  // BaselineScript) keyed by script name and debuggee status.
+  // BaselineScript) keyed by script name and debuggee status. Entries are
+  // always allocated in the atoms zone.
   js::MainThreadData<js::GCHashMap<JitCacheKey, js::jit::BaselineScript*,
                                    JitCacheKeyHasher, js::SystemAllocPolicy>>
       selfHostJitCache;
@@ -683,19 +682,8 @@ struct JSRuntime {
   /* Code coverage output. */
   js::UnprotectedData<js::coverage::LCovRuntime> lcovOutput_;
 
-  /* Functions to call, together with data, when the runtime is being torn down.
-   */
-  js::MainThreadData<mozilla::Vector<std::pair<void (*)(void*), void*>, 4>>
-      cleanupClosures;
-
  public:
   js::coverage::LCovRuntime& lcovOutput() { return lcovOutput_.ref(); }
-
-  /* Register a cleanup function to be called during runtime shutdown. Do not
-   * depend on the ordering of cleanup calls. */
-  bool atExit(void (*function)(void*), void* data) {
-    return cleanupClosures.ref().append(std::pair(function, data));
-  }
 
  private:
   js::UnprotectedData<js::jit::JitRuntime*> jitRuntime_;

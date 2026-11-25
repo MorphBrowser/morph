@@ -33,10 +33,12 @@
 #include "nsIAccessibleTypes.h"
 #include "nsIContentInlines.h"
 #include "nsIDocShell.h"
+#include "nsIFrame.h"
 #include "nsIObserverService.h"
 #include "nsISelectionController.h"
 #include "nsISimpleEnumerator.h"
 #include "nsPresContext.h"
+#include "nsStyleStruct.h"
 #include "nsTreeColumns.h"
 #include "nsXULElement.h"
 
@@ -595,29 +597,11 @@ bool nsCoreUtils::CanCreateAccessibleWithoutFrame(nsIContent* aContent,
   if (!element) {
     return false;
   }
-  // <option> and <optgroup> can create an accessible for comboboxes, if our
-  // select can also create an accessible (even if they're display: none)
-  if (auto* option = dom::HTMLOptionElement::FromNode(element)) {
-    if (auto* select = option->GetSelect(); select && select->IsCombobox()) {
-      element = select;
-    }
-  } else if (auto* optgroup = dom::HTMLOptGroupElement::FromNode(element)) {
-    if (auto* select = optgroup->GetSelect(); select && select->IsCombobox()) {
-      element = select;
-    }
-  } else if (element->GetPseudoElementType() == PseudoStyleType::Picker) {
-    if (auto* select =
-            dom::HTMLSelectElement::FromNode(element->GetFlattenedTreeParent());
-        select && select->IsCombobox()) {
-      element = select;
-    }
-  }
 
-  // If we aren't display: contents or option/optgroup we can't create an
-  // accessible without frame. Our select combobox code relies on the latter.
-  // Note that we need to check primary frame explicitly for the <select> case
-  // above.
-  if (!element->GetPrimaryFrame() && !element->IsDisplayContents()) {
+  MOZ_ASSERT(!element->GetPrimaryFrame(), "Element should not have a frame");
+
+  // If we aren't display: contents we can't create an accessible without frame.
+  if (!element->IsDisplayContents()) {
     // Nothing in aContent's subtree can ever render in this case, regardless of
     // any ancestor.
     if (aIsSubtreeHidden) {
@@ -713,6 +697,70 @@ bool nsCoreUtils::IsTrimmedWhitespaceBeforeHardLineBreak(nsIFrame* aFrame) {
       0, UINT32_MAX, nsIFrame::TextOffsetType::OffsetsInContentText,
       nsIFrame::TrailingWhitespace::Trim);
   return text.mString.IsEmpty();
+}
+
+Maybe<nsString> nsCoreUtils::GetCssAltContent(nsIContent* aContent) {
+  if (!aContent) {
+    return Nothing();
+  }
+
+  nsIFrame* frame = aContent->GetPrimaryFrame();
+  if (!frame) {
+    return Nothing();
+  }
+  Element* pseudoElement = nullptr;
+  // Check if this is for a pseudo-element.
+  if (IsPseudoElement(aContent)) {
+    // If there are children, we want to expose the alt text on those instead,
+    // so ignore it for the pseudo-element itself. The exception is ::marker,
+    // since a list bullet is a single Accessible for the ::marker element and
+    // its children are never exposed.
+    if (aContent->HasChildren() &&
+        !aContent->IsGeneratedContentContainerForMarker()) {
+      return Nothing();
+    }
+    // No children only happens when there is alt text with an empty content
+    // string; e.g. content: "" / "alt"
+    // In this case, we need to expose the alt text on the pseudo-element
+    // itself.
+    pseudoElement = aContent->AsElement();
+  } else if (aContent->IsInNativeAnonymousSubtree()) {
+    if (!frame->IsReplaced()) {
+      return Nothing();
+    }
+    Element* parent = aContent->GetParentElement();
+    if (parent && IsPseudoElement(parent)) {
+      // aContent is a child of a pseudo-element.
+      pseudoElement = parent;
+      // We need the frame from the pseudo-element to get the content style.
+      frame = parent->GetPrimaryFrame();
+      if (!frame) {
+        return Nothing();
+      }
+    }
+  }
+  if (pseudoElement) {
+    if (!pseudoElement->GetParentElement()) {
+      return Nothing();
+    }
+  } else if (!aContent->IsElement() || !frame->IsReplaced()) {
+    // CSS alt content doesn't apply because this is neither a pseudo-element
+    // nor an element which has its content replaced using CSS content.
+    return Nothing();
+  }
+  Span<const StyleContentItem> items = frame->StyleContent()->AltContentItems();
+  if (items.IsEmpty()) {
+    return Nothing();
+  }
+
+  nsString text;
+  // There can be multiple alt text items.
+  for (const auto& item : items) {
+    if (item.IsString()) {
+      AppendUTF8toUTF16(item.AsString().AsString(), text);
+    }
+  }
+  return Some(std::move(text));
 }
 
 const nsIFrame* nsCoreUtils::GetAnchorForPositionedFrame(

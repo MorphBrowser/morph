@@ -24,7 +24,6 @@
 #include "SandboxPolicyGPU.h"
 #include "SandboxPolicyHWInference.h"
 #include "SandboxPolicyRDD.h"
-#include "SandboxPolicySocket.h"
 #include "SandboxPolicyUtility.h"
 #if defined(MOZ_PROFILE_GENERATE)
 #  include "SandboxPolicyPGO.h"
@@ -184,7 +183,6 @@ void MacSandboxInfo::AppendAsParams(std::vector<std::string>& aParams) const {
 #endif
       break;
     case MacSandboxType_RDD:
-    case MacSandboxType_Socket:
     case MacSandboxType_Utility:
       break;
     case MacSandboxType_GMP:
@@ -193,6 +191,7 @@ void MacSandboxInfo::AppendAsParams(std::vector<std::string>& aParams) const {
       this->AppendReadPathParams(aParams);
       break;
     case MacSandboxType_GPU:
+      this->AppendWindowServerParam(aParams);
       break;
     default:
       // Before supporting a new process type, add a case statement
@@ -350,18 +349,6 @@ bool StartMacSandbox(MacSandboxInfo const& aInfo, std::string& aErrorMessage) {
       params.push_back("CRASH_PORT");
       params.push_back(aInfo.crashServerPort.c_str());
     }
-  } else if (aInfo.type == MacSandboxType_Socket) {
-    profile = const_cast<char*>(SandboxPolicySocket);
-    params.push_back("SHOULD_LOG");
-    params.push_back(aInfo.shouldLog ? "TRUE" : "FALSE");
-    params.push_back("APP_PATH");
-    params.push_back(aInfo.appPath.c_str());
-    if (!aInfo.crashServerPort.empty()) {
-      params.push_back("CRASH_PORT");
-      params.push_back(aInfo.crashServerPort.c_str());
-    }
-    params.push_back("HOME_PATH");
-    params.push_back(getenv("HOME"));
   } else if (aInfo.type == MacSandboxType_GMP) {
     profile = const_cast<char*>(SandboxPolicyGMP);
     params.push_back("SHOULD_LOG");
@@ -463,8 +450,8 @@ bool StartMacSandbox(MacSandboxInfo const& aInfo, std::string& aErrorMessage) {
     }
   } else if (aInfo.type == MacSandboxType_GPU) {
     profile = const_cast<char*>(SandboxPolicyGPU);
-    if (ProcessIsX86_64()) {
-      profile.append(SandboxPolicyGPUx86_64Addend);
+    if (aInfo.hasWindowServer) {
+      profile.append(SandboxPolicyGPUWindowServerAddend);
     }
     params.push_back("SHOULD_LOG");
     params.push_back(aInfo.shouldLog ? "TRUE" : "FALSE");
@@ -776,11 +763,6 @@ bool GetUtilitySandboxParamsFromArgs(int aArgc, char** aArgv,
   return true;
 }
 
-bool GetSocketSandboxParamsFromArgs(int aArgc, char** aArgv,
-                                    MacSandboxInfo& aInfo) {
-  return GetUtilitySandboxParamsFromArgs(aArgc, aArgv, aInfo, false);
-}
-
 bool GetPluginSandboxParamsFromArgs(int aArgc, char** aArgv,
                                     MacSandboxInfo& aInfo) {
   // Ensure we find these paramaters in the command
@@ -860,6 +842,12 @@ bool GetRDDSandboxParamsFromArgs(int aArgc, char** aArgv,
 
 bool GetGPUSandboxParamsFromArgs(int aArgc, char** aArgv,
                                  MacSandboxInfo& aInfo) {
+  for (int i = 0; i < aArgc; i++) {
+    if (strcmp(aArgv[i], "-sbAllowWindowServer") == 0) {
+      aInfo.hasWindowServer = true;
+      break;
+    }
+  }
   return GetUtilitySandboxParamsFromArgs(aArgc, aArgv, aInfo, false);
 }
 
@@ -910,11 +898,6 @@ bool StartMacSandboxIfEnabled(const MacSandboxType aSandboxType, int aArgc,
       break;
     case MacSandboxType_RDD:
       if (!GetRDDSandboxParamsFromArgs(aArgc, aArgv, info)) {
-        return false;
-      }
-      break;
-    case MacSandboxType_Socket:
-      if (!GetSocketSandboxParamsFromArgs(aArgc, aArgv, info)) {
         return false;
       }
       break;

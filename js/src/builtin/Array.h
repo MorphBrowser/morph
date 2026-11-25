@@ -98,7 +98,7 @@ extern bool ToLength(JSContext* cx, HandleValue v, uint64_t* out);
 extern bool GetLengthProperty(JSContext* cx, HandleObject obj,
                               uint64_t* lengthp);
 
-extern bool SetLengthProperty(JSContext* cx, HandleObject obj, uint32_t length);
+extern bool SetLengthProperty(JSContext* cx, HandleObject obj, uint64_t length);
 
 /*
  * Copy 'length' elements from aobj to vp.
@@ -166,17 +166,18 @@ extern bool IsCrossRealmArrayConstructor(JSContext* cx, JSObject* obj,
 
 extern bool ObjectMayHaveExtraIndexedOwnProperties(JSObject* obj);
 
-extern bool ObjectMayHaveExtraIndexedProperties(JSObject* obj);
+inline bool ObjectMayHaveExtraIndexedProperties(JSObject* obj);
+extern bool ObjectMayHaveExtraIndexedPropertiesSlow(JSObject* obj);
 
 extern bool PrototypeMayHaveIndexedProperties(NativeObject* obj);
 
 // JS::IsArray has multiple overloads, use js::IsArrayFromJit to disambiguate.
 extern bool IsArrayFromJit(JSContext* cx, HandleObject obj, bool* isArray);
 
-extern bool ArrayLengthGetter(JSContext* cx, HandleObject obj, HandleId id,
+extern bool ArrayLengthGetter(JSContext* cx, Handle<ArrayObject*> arr,
                               MutableHandleValue vp);
 
-extern bool ArrayLengthSetter(JSContext* cx, HandleObject obj, HandleId id,
+extern bool ArrayLengthSetter(JSContext* cx, Handle<ArrayObject*> arr,
                               HandleValue v, ObjectOpResult& result);
 
 extern ArraySortResult ArraySortFromJit(

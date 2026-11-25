@@ -67,7 +67,7 @@ async function setupLabsTest() {
   await ExperimentAPI._rsLoader.updateRecipes("test");
 
   return async function cleanup() {
-    await NimbusTestUtils.removeStore(ExperimentAPI.manager.store);
+    await NimbusTestUtils.assert.storeIsEmpty();
     await SpecialPowers.popPrefEnv();
   };
 }
@@ -274,7 +274,6 @@ add_task(async function test_pages() {
     });
     for (let i = 0; i < numTabPress; i++) {
       EventUtils.synthesizeKey("KEY_Tab", {}, window);
-      await flakyWaitForManyIdles();
     }
     EventUtils.synthesizeKey("KEY_Enter", {}, window);
 

@@ -18,6 +18,7 @@
 #include "nsIContent.h"
 #include "nsIContentPolicy.h"
 #include "nsMenuItemX.h"
+#include "nsMenuX.h"
 #include "nsNameSpaceManager.h"
 #include "nsObjCExceptions.h"
 
@@ -45,6 +46,11 @@ nsMenuItemIconX::~nsMenuItemIconX() {
 
 void nsMenuItemIconX::SetupIcon(nsIContent* aContent) {
   NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
+
+  mHasDeferredLoad = nsMenuX::sSimulatedOpeningLevel > 0;
+  if (mHasDeferredLoad) {
+    return;
+  }
 
   bool shouldHaveIcon = StartIconLoad(aContent);
   if (!shouldHaveIcon) {
@@ -101,7 +107,7 @@ nsresult nsMenuItemIconX::OnComplete(imgIContainer* aImage) {
   RefPtr<nsPresContext> pc = mPresContext.get();
   UniquePtr<SVGImageContext> svgContext;
   if (pc && mComputedStyle) {
-    svgContext = MakeUnique<SVGImageContext>();
+    svgContext = std::make_unique<SVGImageContext>();
     SVGImageContext::MaybeStoreContextPaint(*svgContext, *pc, *mComputedStyle,
                                             aImage);
   }

@@ -84,17 +84,17 @@ first startup experiment? The answer is subtle.
 During Firefox launch, [`final-ui-startup` is
 notified](https://searchfox.org/mozilla-central/rev/a965e3c683ecc035dee1de72bd33a8d91b1203ed/toolkit/xre/nsAppRunner.cpp#5764-5765),
 and in response `SessionStore` is initialized. Additionally,
-Nimbus/Normandy initialization is [started but not
-awaited](https://searchfox.org/mozilla-central/rev/a965e3c683ecc035dee1de72bd33a8d91b1203ed/browser/components/BrowserGlue.sys.mjs#1487).
+Nimbus initialization is [started but not
+awaited](https://searchfox.org/firefox-main/rev/a9a644f66adb0cbb132f042bb7df24032f56346a/browser/components/BrowserGlue.sys.mjs#450-452).
 
 Then the [command line is
 handled](https://searchfox.org/mozilla-central/rev/a965e3c683ecc035dee1de72bd33a8d91b1203ed/toolkit/xre/nsAppRunner.cpp#5775-5778).
 When `--first-startup` is passed, we [spin the event loop to allow
-Nimbus/Normandy time to complete its initialization and first
+Nimbus time to complete its initialization and first
 fetch](https://searchfox.org/mozilla-central/rev/a965e3c683ecc035dee1de72bd33a8d91b1203ed/browser/components/BrowserContentHandler.sys.mjs#677)
 before continuing to process the command line. See [the
 `FirstStartup`
-module](https://firefox-source-docs.mozilla.org/toolkit/modules/toolkit_modules/FirstStartup.html).
+module](/toolkit/modules/toolkit_modules/FirstStartup.md).
 (Important caveat: `--first-startup` is only used on Windows; see [Bug
 1872934](https://bugzilla.mozilla.org/show_bug.cgi?id=1872934), for
 example.)

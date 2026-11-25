@@ -10,6 +10,7 @@
 #include <limits>
 #include <utility>
 
+#include "MainThreadUtils.h"
 #include "ThebesRLBoxTypes.h"
 #include "gfxFontFeatures.h"
 #include "gfxFontUtils.h"
@@ -64,6 +65,10 @@ namespace fontlist {
 struct Face;
 struct Family;
 }  // namespace fontlist
+namespace gfx {
+class FontPalette;
+class PaletteCache;
+}  // namespace gfx
 }  // namespace mozilla
 
 typedef struct gr_face gr_face;
@@ -318,6 +323,9 @@ class gfxFontEntry {
   }
 
   inline bool HasCharacter(uint32_t ch) MOZ_EXCLUDES(mLock) {
+    if (mUnusable) {
+      return false;
+    }
     if (const auto* map = GetShmemCharacterMap()) {
       return map->test(ch);
     }
@@ -353,6 +361,13 @@ class gfxFontEntry {
   // can be safely dereferenced.
   virtual nsresult ReadCMAP(FontInfoData* aFontInfoData = nullptr);
 
+  // Marks the font as unusable, e.g. after its font file turned out to be
+  // unreadable, so that font selection skips it: HasCharacter returns false
+  // for every character from then on, FindOrMakeFont returns null, and none
+  // of its fonts is Valid() any more.
+  void MarkUnusable() { mUnusable = true; }
+  bool IsUnusable() const { return mUnusable; }
+
   bool TryGetSVGData(const gfxFont* aFont);
   bool HasSVGGlyph(uint32_t aGlyphId);
   bool GetSVGGlyphExtents(DrawTarget* aDrawTarget, uint32_t aGlyphId,
@@ -365,6 +380,10 @@ class gfxFontEntry {
   void NotifyGlyphsChanged();
 
   bool TryGetColorGlyphs();
+
+  already_AddRefed<mozilla::gfx::FontPalette> GetPalette(
+      nsAtom* aPaletteName,
+      mozilla::gfx::FontPaletteValueSet* aPaletteValueSet);
 
   bool HasColorBitmapTable() {
     LazyFlag flag = mHasColorBitmapTable;
@@ -594,7 +613,7 @@ class gfxFontEntry {
   already_AddRefed<gfxCharacterMap> GetCharacterMapAddRefed() const
       MOZ_EXCLUDES(mLock) {
     mozilla::AutoReadLock lock(mLock);
-    RefPtr map = static_cast<gfxCharacterMap*>(mCharacterMap);
+    RefPtr map = mCharacterMap.load();
     return map.forget();
   }
 
@@ -614,13 +633,21 @@ class gfxFontEntry {
     return mShmemCharacterMap;
   }
 
+  // Set by MarkUnusable(), and never cleared.
+  mozilla::Atomic<bool, mozilla::Relaxed> mUnusable{false};
+
   mozilla::Atomic<const uint8_t*> mUVSData;
   const uint8_t* GetUVSData() const { return mUVSData; }
 
   mozilla::UniquePtr<gfxUserFontData> mUserFontData;
 
-  mozilla::Atomic<gfxSVGGlyphs*> mSVGGlyphs;
-  gfxSVGGlyphs* GetSVGGlyphs() const { return mSVGGlyphs; }
+  // SVG glyphs are only supported on the main thread, see TryGetSVGData.
+  mozilla::UniquePtr<gfxSVGGlyphs> mSVGGlyphs
+      MOZ_GUARDED_BY(mozilla::sMainThreadCapability);
+  gfxSVGGlyphs* GetSVGGlyphs() const {
+    mozilla::AssertIsOnMainThread();
+    return mSVGGlyphs.get();
+  }
 
   // list of gfxFonts that are using SVG glyphs
   nsTArray<const gfxFont*> mFontsUsingSVGGlyphs MOZ_GUARDED_BY(mLock);
@@ -638,6 +665,8 @@ class gfxFontEntry {
   mozilla::Atomic<hb_blob_t*> mCPAL;
   hb_blob_t* GetCOLR() const { return mCOLR; }
   hb_blob_t* GetCPAL() const { return mCPAL; }
+
+  mozilla::Atomic<mozilla::gfx::PaletteCache*> mPaletteCache;
 
   // bitvector of substitution space features per script, one each
   // for default and non-default features
@@ -745,15 +774,14 @@ class gfxFontEntry {
   // (virtual) InitSkrifaFontFace() if necessary. The Init call is only
   // attempted once; if it fails, no Skrifa font ref is available for this
   // entry.
-  const SkrifaFontRef* GetSkrifaFont() {
+  const SkrifaFontRef* GetSkrifaFont() MOZ_EXCLUDES(mLock) {
     if (const SkrifaFontRef* f = mSkrifaFontFace) {
       return f;
     }
     if (!mSkrifaFontInitialized) {
       mozilla::AutoWriteLock lock(mLock);
       if (!mSkrifaFontInitialized) {
-        if (mozilla::StaticPrefs::
-                gfx_font_rendering_fontations_enabled_AtStartup()) {
+        if (mozilla::StaticPrefs::gfx_font_rendering_fontations_enabled()) {
           InitSkrifaFontFace();
         }
         mSkrifaFontInitialized = true;
@@ -771,19 +799,20 @@ class gfxFontEntry {
   // Protected destructor, to discourage deletion outside of Release():
   virtual ~gfxFontEntry();
 
-  virtual gfxFont* CreateFontInstance(const gfxFontStyle* aFontStyle) = 0;
+  virtual gfxFont* CreateFontInstance(const gfxFontStyle* aFontStyle)
+      MOZ_EXCLUDES(mLock) = 0;
 
-  inline bool CheckForGraphiteTables() {
+  inline bool CheckForGraphiteTables() MOZ_EXCLUDES(mLock) {
     return HasFontTable(TRUETYPE_TAG('S', 'i', 'l', 'f'));
   }
 
-  virtual bool HasVariationsInternal() { return false; };
+  virtual bool HasVariationsInternal() MOZ_EXCLUDES(mLock) { return false; };
 
   virtual void GetVariationAxesInternal(
-      nsTArray<gfxFontVariationAxis>& aVariationAxes) {};
+      nsTArray<gfxFontVariationAxis>& aVariationAxes) MOZ_EXCLUDES(mLock) {};
 
   virtual void GetVariationInstancesInternal(
-      nsTArray<gfxFontVariationInstance>& aInstances) {};
+      nsTArray<gfxFontVariationInstance>& aInstances) MOZ_EXCLUDES(mLock) {};
 
   // The default implementation uses CopyFontTable to get the data
   // into a byte array, and maintains a cache of loaded tables.
@@ -800,12 +829,12 @@ class gfxFontEntry {
   virtual hb_blob_t* GetFontTableInternal(uint32_t aTag) MOZ_EXCLUDES(mLock);
 
   // Check for presence of a given table.
-  virtual bool HasFontTableInternal(uint32_t aTableTag);
+  virtual bool HasFontTableInternal(uint32_t aTableTag) MOZ_EXCLUDES(mLock);
 
   // Copy a font table into aBuffer.
   // The caller will be responsible for ownership of the data.
-  virtual nsresult CopyFontTable(uint32_t aTableTag,
-                                 nsTArray<uint8_t>& aBuffer) {
+  virtual nsresult CopyFontTable(uint32_t aTableTag, nsTArray<uint8_t>& aBuffer)
+      MOZ_EXCLUDES(mLock) {
     MOZ_ASSERT_UNREACHABLE(
         "forgot to override either GetFontTable or "
         "CopyFontTable?");
@@ -840,15 +869,16 @@ class gfxFontEntry {
   // are discarded.
   // Returns true if the font was set, false if it was discarded.
   bool SetSkrifaFont(SkrifaFontRef* aSkrifaFont,
-                     mozilla::MemoryMappedFile&& aSkrifaFontFile);
+                     mozilla::MemoryMappedFile&& aSkrifaFontFile)
+      MOZ_REQUIRES(mLock);
 
   // Set the Skrifa font ref with no memmap'd file. Used for webfonts when
   // mIsDataUserFont is true.
-  bool SetSkrifaFont(SkrifaFontRef* aSkrifaFont);
+  bool SetSkrifaFont(SkrifaFontRef* aSkrifaFont) MOZ_REQUIRES(mLock);
 
   // Attempt to initialize a SkrifaFontRef for this resource, and record it
   // via SetSkrifaFont.
-  virtual void InitSkrifaFontFace() {}
+  virtual void InitSkrifaFontFace() MOZ_REQUIRES(mLock) {}
 
   mozilla::Atomic<SkrifaFontRef*> mSkrifaFontFace;
   mozilla::MemoryMappedFile mSkrifaFontFile;

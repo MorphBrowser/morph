@@ -18,6 +18,7 @@ import mozilla.components.browser.state.store.BrowserStore
 import mozilla.components.compose.base.text.Text
 import mozilla.components.compose.menu.data.MenuItem
 import mozilla.components.compose.menu.data.MenuItemBadge
+import mozilla.components.compose.menu.data.MenuItemTitle
 import mozilla.components.compose.menu.data.MenuItemsGroup
 import mozilla.components.compose.menu.data.StandardMenuItem
 import mozilla.components.compose.menu.ui.MenuItemIconDrawable
@@ -114,29 +115,34 @@ private fun MenuStatus.navigationItems(): List<MenuItem> =
             icon = iconsR.drawable.mozac_ic_back_24,
             item = ToolbarMenu.Item.Back,
             state = if (canGoBack) MenuItemState.DEFAULT else MenuItemState.DISABLED,
+            showText = false,
         ),
         menuItem(
             title = R.string.content_description_forward,
             icon = iconsR.drawable.mozac_ic_forward_24,
             item = ToolbarMenu.Item.Forward,
             state = if (canGoForward) MenuItemState.DEFAULT else MenuItemState.DISABLED,
+            showText = false,
         ),
         menuItem(
             title = R.string.menu_share,
             icon = iconsR.drawable.mozac_ic_share_android_24,
             item = ToolbarMenu.Item.Share,
+            showText = false,
         ),
         if (isLoading) {
             menuItem(
                 title = R.string.content_description_stop,
                 icon = iconsR.drawable.mozac_ic_cross_24,
                 item = ToolbarMenu.Item.Stop,
+                showText = false,
             )
         } else {
             menuItem(
                 title = R.string.content_description_reload,
                 icon = iconsR.drawable.mozac_ic_arrow_clockwise_24,
                 item = ToolbarMenu.Item.Reload,
+                showText = false,
             )
         },
     )
@@ -188,7 +194,7 @@ private fun MenuStatus.desktopSiteItem(): MenuItem? {
 
 private fun MenuStatus.reportSiteIssueItem(): MenuItem? = reportSiteIssueTitle?.let { title ->
     StandardMenuItem(
-        title = Text.String(title),
+        title = MenuItemTitle(Text.String(title)),
         icon = reportSiteIssueIcon?.let { MenuItemIconDrawable(it) },
         onClickEvent = MenuItemTapped(ToolbarMenu.Item.ReportSiteIssue),
     )
@@ -225,9 +231,11 @@ private fun menuItem(
     item: ToolbarMenu.Item,
     state: MenuItemState = MenuItemState.DEFAULT,
     badge: MenuItemBadge? = null,
+    showText: Boolean = true,
 ): MenuItem =
     StandardMenuItem(
-        title = Text.Resource(title),
+        title = MenuItemTitle(if (showText) Text.Resource(title) else Text.String("")),
+        contentDescription = if (showText) null else Text.Resource(title),
         icon = MenuItemIconRes(iconRes = icon),
         onClickEvent = MenuItemTapped(item),
         badge = badge,

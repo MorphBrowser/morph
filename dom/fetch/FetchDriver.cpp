@@ -4,6 +4,8 @@
 
 #include "mozilla/dom/FetchDriver.h"
 
+#include <memory>
+
 #include "Fetch.h"
 #include "FetchLog.h"
 #include "FetchUtil.h"
@@ -364,6 +366,10 @@ already_AddRefed<PreloaderBase> FetchDriver::FindPreload(nsIURI* aURI) {
     // Preloads are mapped on the document, no document, no preload.
     return nullptr;
   }
+  if (mRequest->ContentPolicyType() != nsIContentPolicy::TYPE_FETCH) {
+    // Only plain fetch() requests can consume an as=fetch preload.
+    return nullptr;
+  }
   CORSMode cors;
   switch (mRequest->Mode()) {
     case RequestMode::No_cors:
@@ -445,8 +451,7 @@ nsresult FetchDriver::Fetch(AbortSignalImpl* aSignalImpl,
   MOZ_RELEASE_ASSERT(!mRequest->IsSynchronous(),
                      "Synchronous fetch not supported");
 
-  UniquePtr<mozilla::ipc::PrincipalInfo> principalInfo(
-      new mozilla::ipc::PrincipalInfo());
+  auto principalInfo = std::make_unique<mozilla::ipc::PrincipalInfo>();
   nsresult rv = PrincipalToPrincipalInfo(mPrincipal, principalInfo.get());
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
@@ -691,28 +696,20 @@ nsresult FetchDriver::HttpFetch(
   // If the fetch is created by FetchEvent.request or NavigationPreload request,
   // corresponding InterceptedHttpChannel information need to propagate to the
   // channel of the fetch.
-  if (mRequest->GetInterceptionTriggeringPrincipalInfo()) {
-    auto principalOrErr = mozilla::ipc::PrincipalInfoToPrincipal(
-        *(mRequest->GetInterceptionTriggeringPrincipalInfo().get()));
-    if (!principalOrErr.isErr()) {
-      nsCOMPtr<nsIPrincipal> principal = principalOrErr.unwrap();
-
-      nsTArray<nsCOMPtr<nsIRedirectHistoryEntry>> redirectChain;
-      if (!mRequest->InterceptionRedirectChain().IsEmpty()) {
-        for (const RedirectHistoryEntryInfo& entryInfo :
-             mRequest->InterceptionRedirectChain()) {
-          nsCOMPtr<nsIRedirectHistoryEntry> entry =
-              mozilla::ipc::RHEntryInfoToRHEntry(entryInfo);
-          redirectChain.AppendElement(entry);
-        }
-      }
-
-      nsCOMPtr<nsILoadInfo> loadInfo = chan->LoadInfo();
-      MOZ_ASSERT(loadInfo);
-      loadInfo->SetInterceptionInfo(new mozilla::net::InterceptionInfo(
-          principal, mRequest->InterceptionContentPolicyType(), redirectChain,
-          mRequest->InterceptionFromThirdParty()));
+  if (nsIPrincipal* principal =
+          mRequest->GetInterceptionTriggeringPrincipal()) {
+    nsTArray<nsCOMPtr<nsIRedirectHistoryEntry>> redirectChain;
+    for (const RedirectHistoryEntryInfo& entryInfo :
+         mRequest->InterceptionRedirectChain()) {
+      redirectChain.AppendElement(
+          mozilla::ipc::RHEntryInfoToRHEntry(entryInfo));
     }
+
+    nsCOMPtr<nsILoadInfo> loadInfo = chan->LoadInfo();
+    MOZ_ASSERT(loadInfo);
+    loadInfo->SetInterceptionInfo(new mozilla::net::InterceptionInfo(
+        principal, mRequest->InterceptionContentPolicyType(), redirectChain,
+        mRequest->InterceptionFromThirdParty()));
   }
 
   // Insert ourselves into the notification callbacks chain so we can set
@@ -726,11 +723,26 @@ nsresult FetchDriver::HttpFetch(
 #endif
   chan->SetNotificationCallbacks(this);
 
+  const RequestDestination destination =
+      mRequest->GetInterceptionTriggeringPrincipal()
+          ? mRequest->InterceptionDestination()
+          : mRequest->Destination();
+
   nsCOMPtr<nsIClassOfService> cos(do_QueryInterface(chan));
-  // Mark channel as urgent-start if the Fetch is triggered by user input
-  // events.
-  if (cos && UserActivation::IsHandlingUserInput()) {
-    cos->AddClassFlags(nsIClassOfService::UrgentStart);
+  if (cos) {
+    // Like XHR, never let fetch be blocked by head CSS/JS loads, to avoid a
+    // deadlock where the server generates the CSS/JS only after a fetch.
+    // Other destinations, for example an image that a service worker fetches
+    // for an intercepted request, keep their class of service.
+    if (destination == RequestDestination::_empty) {
+      cos->AddClassFlags(nsIClassOfService::Unblocked);
+    }
+
+    // Mark channel as urgent-start if the Fetch is triggered by user input
+    // events.
+    if (UserActivation::IsHandlingUserInput()) {
+      cos->AddClassFlags(nsIClassOfService::UrgentStart);
+    }
   }
 
   // Step 3.5 begins "HTTP network or cache fetch".
@@ -835,14 +847,10 @@ nsresult FetchDriver::HttpFetch(
 
       // Streaming uploads (ReadableStream) require HTTP/2 or HTTP/3.
       // Since browsers only use HTTP/2 over TLS, reject non-https URLs early.
-      if (mRequest->HasStreamBody()) {
-        bool isHttps = false;
-        rv = uri->SchemeIs("https", &isHttps);
-        if (NS_SUCCEEDED(rv) && !isHttps) {
-          // Reject streaming upload on non-https (which implies HTTP/1.1)
-          FailWithNetworkError(NS_ERROR_DOM_NETWORK_ERR);
-          return NS_ERROR_DOM_NETWORK_ERR;
-        }
+      if (mRequest->HasStreamBody() && !uri->SchemeIs("https")) {
+        // Reject streaming upload on non-https (which implies HTTP/1.1)
+        FailWithNetworkError(NS_ERROR_DOM_NETWORK_ERR);
+        return NS_ERROR_DOM_NETWORK_ERR;
       }
 
       // Mark the channel as streaming BEFORE calling ExplicitSetUploadStream
@@ -877,8 +885,10 @@ nsresult FetchDriver::HttpFetch(
   }
 
   if (mIsTrackingFetch && StaticPrefs::network_http_tailing_enabled() && cos) {
+    // TailAllowed overrules Unblocked, like for XHR.
     cos->AddClassFlags(nsIClassOfService::Throttleable |
-                       nsIClassOfService::Tail);
+                       nsIClassOfService::Tail |
+                       nsIClassOfService::TailAllowed);
   }
 
   const auto fetchPriority = ToFetchPriority(mRequest->GetPriorityMode());
@@ -895,10 +905,7 @@ nsresult FetchDriver::HttpFetch(
       // request’s priority, initiator, destination, and render-blocking are
       // used in an implementation-defined manner to set the internal priority.
       // See corresponding preferences in StaticPrefList.yaml for more context.
-      const int32_t supportsPriorityDelta = [this, &fetchPriority]() {
-        auto destination = mRequest->GetInterceptionTriggeringPrincipalInfo()
-                               ? mRequest->InterceptionDestination()
-                               : mRequest->Destination();
+      const int32_t supportsPriorityDelta = [&destination, &fetchPriority]() {
         switch (destination) {
           case RequestDestination::Font:
             return FETCH_PRIORITY_ADJUSTMENT_FOR(link_preload_font,
@@ -1173,8 +1180,7 @@ FetchDriver::OnStartRequest(nsIRequest* aRequest) MOZ_CAN_RUN_SCRIPT_BOUNDARY {
     response = MakeSafeRefPtr<InternalResponse>(responseStatus, statusText,
                                                 mRequest->GetCredentialsMode());
 
-    UniquePtr<mozilla::ipc::PrincipalInfo> principalInfo(
-        new mozilla::ipc::PrincipalInfo());
+    auto principalInfo = std::make_unique<mozilla::ipc::PrincipalInfo>();
     nsresult rv = PrincipalToPrincipalInfo(mPrincipal, principalInfo.get());
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return rv;
@@ -1392,7 +1398,7 @@ FetchDriver::OnStartRequest(nsIRequest* aRequest) MOZ_CAN_RUN_SCRIPT_BOUNDARY {
     SRICheck::IntegrityMetadata(mRequest->GetIntegrity(), sourceUri, reporter,
                                 &mSRIMetadata);
     mSRIDataVerifier =
-        MakeUnique<SRICheckDataVerifier>(mSRIMetadata, channel, reporter);
+        std::make_unique<SRICheckDataVerifier>(mSRIMetadata, channel, reporter);
 
     // Do not retarget off main thread when using SRI API.
     return NS_OK;

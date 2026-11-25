@@ -13,6 +13,7 @@ import org.mozilla.fenix.customannotations.SmokeTest
 import org.mozilla.fenix.helpers.Constants
 import org.mozilla.fenix.helpers.TestAssetHelper.downloadPageAsset
 import org.mozilla.fenix.helpers.TestAssetHelper.loremIpsumAsset
+import org.mozilla.fenix.helpers.TestAssetHelper.waitingTime
 import org.mozilla.fenix.ui.efficiency.helpers.BaseTest
 import org.mozilla.fenix.ui.efficiency.selectors.DownloadsSelectors
 import org.mozilla.fenix.ui.efficiency.selectors.NotificationSelectors
@@ -96,6 +97,33 @@ class DownloadTest : BaseTest() {
         on.downloads.navigateToPage().mozVerifyElementsByGroup(DownloadsSelectors.Group.EMPTY_DOWNLOADS)
     }
 
+    // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/2298616
+    @Critical
+    @Test
+    fun verifyDownloadCompleteNotificationTest() {
+        val downloadTestPage = mockWebServer.downloadPageAsset.url.toString()
+        val downloadFile = "png_image.png"
+
+        on.browserPage
+            .navigateToPage(downloadTestPage)
+            .clickDownloadLink(downloadFile, downloadTestPage)
+            .verifyDownloadPrompt()
+            .clickDownloadPromptConfirmButton()
+            .verifyDownloadCompleteSnackbar(downloadFile)
+
+        on.notification
+            .openNotificationTray()
+            .verifyNotificationExists(NotificationSelectors.DOWNLOAD_COMPLETED_NOTIFICATION)
+            .clickNotification(NotificationSelectors.DOWNLOAD_COMPLETED_NOTIFICATION)
+            // UIAutomator check, not Espresso: the system fires the notification's intent, so Firefox is
+            // backgrounded and Espresso's intended() would throw NoActivityResumedException.
+            .mozVerifyNativeAppOpens(Constants.PackageName.GOOGLE_APPS_PHOTOS)
+        on.notification
+            .openNotificationTray()
+            .verifyNotificationDoesNotExist(NotificationSelectors.DOWNLOAD_COMPLETED_NOTIFICATION)
+            .closeNotificationTray()
+    }
+
     // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/1114970
     @Critical
     @Test
@@ -120,5 +148,137 @@ class DownloadTest : BaseTest() {
             .verifyDownloadedFileExistsInDownloadsList(downloadFile)
             .deleteDownloadedFile(downloadFile)
             .mozVerifyElementsByGroup(DownloadsSelectors.Group.EMPTY_DOWNLOADS)
+    }
+
+    // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/3978402
+    @Critical
+    @Test
+    fun verifyAskWhenIDeleteFilesFirstChoiceTest() {
+        val downloadTestPage = mockWebServer.downloadPageAsset.url.toString()
+        val downloadFile = "zip_small.zip"
+
+        on.browserPage
+            .navigateToPage(downloadTestPage)
+            .clickDownloadLink(downloadFile, downloadTestPage)
+            .verifyDownloadPrompt()
+            .clickDownloadPromptConfirmButton()
+        on.downloads
+            .navigateToPage()
+            .verifyDownloadedFileExistsInDownloadsList(downloadFile)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_BUTTON)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_DELETE_BUTTON)
+            .mozVerifyElementsByGroup(DownloadsSelectors.Group.DELETE_DOWNLOADED_ITEM_DIALOG)
+            .mozClick(DownloadsSelectors.DELETE_FILE_DIALOG_CANCEL_BUTTON)
+            .mozVerifyElementsByGroupAbsent(DownloadsSelectors.Group.DELETE_DOWNLOADED_ITEM_DIALOG)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_BUTTON)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_DELETE_BUTTON)
+            .mozVerifyElementsByGroup(DownloadsSelectors.Group.DELETE_DOWNLOADED_ITEM_DIALOG)
+            .mozClick(DownloadsSelectors.DELETE_FILE_DIALOG_CONFIRM_BUTTON)
+            .mozVerify(DownloadsSelectors.DELETE_DOWNLOAD_SNACKBAR_MESSAGE(downloadFile))
+            .mozVerifyElementsByGroup(DownloadsSelectors.Group.EMPTY_DOWNLOADS)
+        on.downloads.verifyDownloadedFileIsDeletedFromStorage(downloadFile)
+    }
+
+    // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/3978403
+    @Critical
+    @Test
+    fun verifyAskWhenIDeleteFilesSecondChoiceTest() {
+        val downloadTestPage = mockWebServer.downloadPageAsset.url.toString()
+        val downloadFile = "zip_small.zip"
+
+        on.browserPage
+            .navigateToPage(downloadTestPage)
+            .clickDownloadLink(downloadFile, downloadTestPage)
+            .verifyDownloadPrompt()
+            .clickDownloadPromptConfirmButton()
+        on.downloads
+            .navigateToPage()
+            .verifyDownloadedFileExistsInDownloadsList(downloadFile)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_BUTTON)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_DELETE_BUTTON)
+            .mozVerifyElementsByGroup(DownloadsSelectors.Group.DELETE_DOWNLOADED_ITEM_DIALOG)
+            .mozClick(DownloadsSelectors.DELETE_FILE_DIALOG_ONLY_REMOVE_FROM_DOWNLOAD_HISTORY_OPTION)
+            .mozClick(DownloadsSelectors.DELETE_FILE_DIALOG_CONFIRM_BUTTON)
+            .mozClick(DownloadsSelectors.UNDO_DELETE_SNACKBAR_BUTTON)
+        on.downloads
+            .verifyDownloadedFileExistsInDownloadsList(downloadFile)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_BUTTON)
+            .mozClick(DownloadsSelectors.MORE_OPTIONS_DELETE_BUTTON)
+            .mozVerifyElementsByGroup(DownloadsSelectors.Group.DELETE_DOWNLOADED_ITEM_DIALOG)
+            .mozClick(DownloadsSelectors.DELETE_FILE_DIALOG_ONLY_REMOVE_FROM_DOWNLOAD_HISTORY_OPTION)
+            .mozClick(DownloadsSelectors.DELETE_FILE_DIALOG_CONFIRM_BUTTON)
+            .mozVerify(DownloadsSelectors.DELETE_DOWNLOAD_SNACKBAR_MESSAGE(downloadFile))
+            .mozVerifyElementsByGroup(DownloadsSelectors.Group.EMPTY_DOWNLOADS)
+        on.downloads.verifyDownloadedFileStillExistsOnStorage(downloadFile)
+    }
+
+    // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/2298617
+    @Critical
+    @Test
+    fun cancelTheDownloadFromPromptTest() {
+        val downloadTestPage = mockWebServer.downloadPageAsset.url.toString()
+        val downloadFile = "zip_small.zip"
+
+        on.browserPage
+            .navigateToPage(downloadTestPage)
+            .clickDownloadLink(downloadFile, downloadTestPage)
+            .verifyDownloadPrompt()
+            .mozClick(DownloadsSelectors.DOWNLOAD_DIALOG_CANCEL_BUTTON)
+        on.downloads.navigateToPage().mozVerifyElementsByGroup(DownloadsSelectors.Group.EMPTY_DOWNLOADS)
+    }
+
+    // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/3016011
+    @Critical
+    @Test
+    fun verifyTheSearchDownloadsOptionTest() {
+        val downloadTestPage = mockWebServer.downloadPageAsset.url.toString()
+        val firstDownloadedFile = "zip_small.zip"
+        val secondDownloadedFile = "png_image.png"
+
+        on.browserPage
+            .navigateToPage(downloadTestPage)
+            .clickDownloadLink(firstDownloadedFile, downloadTestPage)
+            .verifyDownloadPrompt()
+            .clickDownloadPromptConfirmButton()
+            .clickDownloadLink(secondDownloadedFile, downloadTestPage)
+            .verifyDownloadPrompt()
+            .clickDownloadPromptConfirmButton()
+        on.downloads.navigateToPage().mozVerify(DownloadsSelectors.TODAY_DOWNLOAD_HEADER)
+        on.downloads
+            .verifyDownloadedFileExistsInDownloadsList(firstDownloadedFile)
+            .verifyDownloadedFileExistsInDownloadsList(secondDownloadedFile)
+            .mozClick(DownloadsSelectors.SEARCH_DOWNLOADS_BUTTON)
+            .mozVerifyElementsByGroup(DownloadsSelectors.Group.SEARCH_DOWNLOADS_SEARCH_BAR)
+            .mozEnterText("zip", DownloadsSelectors.SEARCH_DOWNLOADS_TEXT_FIELD)
+            .mozVerify(DownloadsSelectors.DOWNLOADED_FILE_LIST_ITEM(firstDownloadedFile), timeout = waitingTime)
+            .mozVerifyElementAbsent(DownloadsSelectors.DOWNLOADED_FILE_LIST_ITEM(secondDownloadedFile))
+            .mozClick(DownloadsSelectors.CLEAR_SEARCH_BUTTON)
+            .mozVerify(DownloadsSelectors.SEARCH_DOWNLOADS_PLACEHOLDER)
+            .mozVerifyKeyboardVisible()
+            .mozEnterText("android", DownloadsSelectors.SEARCH_DOWNLOADS_TEXT_FIELD)
+            .mozVerifyElementAbsent(DownloadsSelectors.DOWNLOADED_FILE_LIST_ITEM(firstDownloadedFile))
+            .mozVerifyElementAbsent(DownloadsSelectors.DOWNLOADED_FILE_LIST_ITEM(secondDownloadedFile))
+            .mozClick(DownloadsSelectors.BACK_AND_SEARCH_BUTTON)
+            .mozVerify(DownloadsSelectors.DOWNLOADS_TOOLBAR_TITLE)
+    }
+
+    // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/2485039
+    @Critical
+    @Test
+    fun privateBrowsingDownloadsCanBeAccessedOnlyOnDeviceStorageAfterClosingAllTabsTest() {
+        val downloadTestPage = mockWebServer.downloadPageAsset.url.toString()
+        val downloadFile = "zip_small.zip"
+
+        on.home.navigateToPage()
+        on.home.switchToPrivateBrowsingMode()
+        on.browserPage
+            .navigateToPage(downloadTestPage)
+            .clickDownloadLink(downloadFile, downloadTestPage)
+            .verifyDownloadPrompt()
+            .clickDownloadPromptConfirmButton()
+        on.tabDrawer.navigateToPage().closeAllTabs()
+        on.home.navigateToPage()
+        on.downloads.navigateToPage().mozVerifyElementAbsent(DownloadsSelectors.DOWNLOADED_FILE_LIST_ITEM(downloadFile))
+        on.downloads.verifyDownloadedFileStillExistsOnStorage(downloadFile)
     }
 }

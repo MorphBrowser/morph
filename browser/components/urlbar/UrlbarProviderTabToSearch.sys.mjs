@@ -11,10 +11,9 @@ import {
   UrlbarProvider,
   UrlbarUtils,
 } from "moz-src:///browser/components/urlbar/UrlbarUtils.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-const lazy = {};
-
-ChromeUtils.defineESModuleGetters(lazy, {
+const lazy = XPCOMUtils.declareLazy({
   ActionsProviderContextualSearch:
     "moz-src:///browser/components/urlbar/ActionsProviderContextualSearch.sys.mjs",
   UrlbarPrefs: "moz-src:///browser/components/urlbar/UrlbarPrefs.sys.mjs",
@@ -36,54 +35,47 @@ const VIEW_TEMPLATE = {
   },
   children: [
     {
-      name: "no-wrap",
+      name: "icon",
+      tag: "img",
+      classList: ["urlbarView-favicon"],
+    },
+    {
+      name: "text-container",
       tag: "span",
-      classList: ["urlbarView-no-wrap"],
       children: [
         {
-          name: "icon",
-          tag: "img",
-          classList: ["urlbarView-favicon"],
-        },
-        {
-          name: "text-container",
+          name: "first-row-container",
           tag: "span",
           children: [
             {
-              name: "first-row-container",
+              name: "title",
               tag: "span",
+              classList: ["urlbarView-title"],
               children: [
                 {
-                  name: "title",
-                  tag: "span",
-                  classList: ["urlbarView-title"],
-                  children: [
-                    {
-                      name: "titleStrong",
-                      tag: "strong",
-                    },
-                  ],
-                },
-                {
-                  name: "title-separator",
-                  tag: "span",
-                  classList: ["urlbarView-title-separator"],
-                },
-                {
-                  name: "action",
-                  tag: "span",
-                  classList: ["urlbarView-action"],
-                  attributes: {
-                    "slide-in": true,
-                  },
+                  name: "titleStrong",
+                  tag: "strong",
                 },
               ],
             },
             {
-              name: "description",
+              name: "title-separator",
               tag: "span",
+              classList: ["urlbarView-title-separator"],
+            },
+            {
+              name: "action",
+              tag: "span",
+              classList: ["urlbarView-action"],
+              attributes: {
+                "slide-in": true,
+              },
             },
           ],
+        },
+        {
+          name: "description",
+          tag: "span",
         },
       ],
     },
@@ -113,8 +105,9 @@ export class UrlbarProviderTabToSearch extends UrlbarProvider {
    * with this provider, to save on resources.
    *
    * @param {UrlbarQueryContext} queryContext The query context object
+   * @param {UrlbarParentController} controller
    */
-  async isActive(queryContext) {
+  async isActive(queryContext, controller) {
     return (
       queryContext.searchString &&
       queryContext.tokens.length == 1 &&
@@ -124,7 +117,7 @@ export class UrlbarProviderTabToSearch extends UrlbarProvider {
         (await this.queryInstance
           .getProvider(lazy.UrlbarProviderGlobalActions.name)
           ?.isActive(queryContext)) &&
-        lazy.ActionsProviderContextualSearch.isActive(queryContext)
+        lazy.ActionsProviderContextualSearch.isActive(queryContext, controller)
       )
     );
   }

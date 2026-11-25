@@ -448,7 +448,7 @@ already_AddRefed<CDMProxy> MediaKeys::CreateCDMProxy() {
           mConfig.mPersistentState == MediaKeysRequirement::Required);
     } else {
       proxy = RemoteMediaManagerChild::CreateCDM(
-          RemoteMediaIn::RddProcess, this, mKeySystem,
+          this, mKeySystem,
           mConfig.mDistinctiveIdentifier == MediaKeysRequirement::Required,
           mConfig.mPersistentState == MediaKeysRequirement::Required);
     }
@@ -600,6 +600,11 @@ already_AddRefed<DetailedPromise> MediaKeys::Init(ErrorResult& aRv) {
           topLevelOrigin.get());
 
   mProxy = CreateCDMProxy();
+  if (!mProxy) {
+    promise->MaybeRejectWithNotSupportedError(
+        "Couldn't create a CDM proxy in MediaKeys::Init");
+    return promise.forget();
+  }
 
   // The CDMProxy's initialization is asynchronous. The MediaKeys is
   // refcounted, and its instance is returned to JS by promise once

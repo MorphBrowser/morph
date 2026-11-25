@@ -319,13 +319,41 @@ class ContentDelegateTest : BaseSessionTest() {
         )
     }
 
+    private fun assertDownloadFileName(contentDisposition: String, expected: String) {
+        mainSession.loadTestPath(withContentDisposition(HELLO_HTML_PATH, contentDisposition))
+
+        sessionRule.waitUntilCalled(
+            object : ContentDelegate {
+                @AssertCalled(count = 1)
+                override fun onExternalResponse(session: GeckoSession, response: WebResponse) {
+                    assertThat(
+                        "Content-Disposition filename is validated by Gecko",
+                        response.headers["content-disposition"],
+                        equalTo("attachment; filename=\"$expected\""),
+                    )
+                }
+            }
+        )
+    }
+
+    @Test
+    fun downloadFileNameReplacesBidiOverride() {
+        assertDownloadFileName("attachment; filename*=UTF-8''file%E2%80%AEtxt.html", "file_txt.html")
+    }
+
+    @Test
+    fun downloadFileNameReplacesPathSeparators() {
+        assertDownloadFileName("attachment; filename=\"dir/sub\\\\name.html\"", "dir_sub_name.html")
+    }
+
+    @Test
+    fun downloadFileNameReplacesIllegalCharacters() {
+        assertDownloadFileName("attachment; filename=\"a:b*c?d.html\"", "a_b_c_d.html")
+    }
+
     @IgnoreCrash
     @Test
     fun crashContent() {
-        // TODO: bug 1710940
-        assumeThat(sessionRule.env.isIsolatedProcess, equalTo(false))
-        assumeThat(sessionRule.env.isAppZygoteProcess, equalTo(false))
-
         mainSession.loadUri(CONTENT_CRASH_URL)
         mainSession.waitUntilCalled(
             object : ContentDelegate {
@@ -357,10 +385,6 @@ class ContentDelegateTest : BaseSessionTest() {
     @WithDisplay(width = 10, height = 10)
     @Test
     fun crashContent_tapAfterCrash() {
-        // TODO: bug 1710940
-        assumeThat(sessionRule.env.isIsolatedProcess, equalTo(false))
-        assumeThat(sessionRule.env.isAppZygoteProcess, equalTo(false))
-
         mainSession.delegateUntilTestEnd(
             object : ContentDelegate {
                 override fun onCrash(session: GeckoSession) {
@@ -883,8 +907,6 @@ class ContentDelegateTest : BaseSessionTest() {
 
     @Test
     fun closeWatcherForDialog() {
-        sessionRule.setPrefsUntilTestEnd(mapOf("dom.closewatcher.enabled" to true))
-
         mainSession.loadTestPath(DIALOG_HTML_PATH)
         mainSession.waitForPageStop()
 
@@ -932,8 +954,6 @@ class ContentDelegateTest : BaseSessionTest() {
     @WithDisplay(width = 100, height = 100)
     @Test
     fun closeWatcherForPopover() {
-        sessionRule.setPrefsUntilTestEnd(mapOf("dom.closewatcher.enabled" to true))
-
         mainSession.loadTestPath(POPOVER_HTML_PATH)
         mainSession.waitForPageStop()
 

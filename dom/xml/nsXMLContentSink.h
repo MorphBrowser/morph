@@ -137,20 +137,16 @@ class nsXMLContentSink : public nsContentSink,
   MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual nsresult ProcessStyleLinkFromHeader(
       const nsAString& aHref, bool aAlternate, const nsAString& aTitle,
       const nsAString& aIntegrity, const nsAString& aType,
-      const nsAString& aMedia, const nsAString& aReferrerPolicy,
+      const nsAString& aMedia, const nsAString& aCrossOrigin,
+      const nsAString& aReferrerPolicy,
       const nsAString& aFetchPriority) override;
 
-  // Try to handle an XSLT style link.  If NS_OK is returned and aWasXSLT is not
-  // null, *aWasXSLT will be set to whether we processed this link as XSLT.
-  //
-  // aProcessingInstruction can be null if this information comes from a Link
-  // header; otherwise it will be the xml-styleshset XML PI that the loading
-  // information comes from.
+  // Try to handle an XSLT style link from an xml-stylesheet XML PI.
   virtual nsresult MaybeProcessXSLTLink(
       mozilla::dom::ProcessingInstruction* aProcessingInstruction,
       const nsAString& aHref, bool aAlternate, const nsAString& aTitle,
       const nsAString& aType, const nsAString& aMedia,
-      const nsAString& aReferrerPolicy, bool* aWasXSLT = nullptr);
+      const nsAString& aReferrerPolicy);
 
   nsresult LoadXSLStyleSheet(nsIURI* aUrl);
 

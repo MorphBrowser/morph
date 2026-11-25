@@ -4,6 +4,8 @@
 
 #include "txMozillaXSLTProcessor.h"
 
+#include <memory>
+
 #include "XPathResult.h"
 #include "jsapi.h"
 #include "mozilla/AutoRestore.h"
@@ -78,8 +80,8 @@ nsresult txToDocHandlerFactory::createHandlerWith(
     }
 
     case eHTMLOutput: {
-      UniquePtr<txMozillaXMLOutput> handler(
-          new txMozillaXMLOutput(mSourceDocument, aFormat, mObserver));
+      auto handler = std::make_unique<txMozillaXMLOutput>(mSourceDocument,
+                                                          aFormat, mObserver);
 
       nsresult rv = handler->createResultDocument(
           u""_ns, kNameSpaceID_None, mSourceDocument, mDocumentIsData);
@@ -91,8 +93,8 @@ nsresult txToDocHandlerFactory::createHandlerWith(
     }
 
     case eTextOutput: {
-      UniquePtr<txMozillaTextOutput> handler(
-          new txMozillaTextOutput(mSourceDocument, mObserver));
+      auto handler =
+          std::make_unique<txMozillaTextOutput>(mSourceDocument, mObserver);
 
       nsresult rv = handler->createResultDocument(mDocumentIsData);
       if (NS_SUCCEEDED(rv)) {
@@ -120,8 +122,8 @@ nsresult txToDocHandlerFactory::createHandlerWith(
 
     case eXMLOutput:
     case eHTMLOutput: {
-      UniquePtr<txMozillaXMLOutput> handler(
-          new txMozillaXMLOutput(mSourceDocument, aFormat, mObserver));
+      auto handler = std::make_unique<txMozillaXMLOutput>(mSourceDocument,
+                                                          aFormat, mObserver);
 
       nsresult rv = handler->createResultDocument(aName, aNsID, mSourceDocument,
                                                   mDocumentIsData);
@@ -133,8 +135,8 @@ nsresult txToDocHandlerFactory::createHandlerWith(
     }
 
     case eTextOutput: {
-      UniquePtr<txMozillaTextOutput> handler(
-          new txMozillaTextOutput(mSourceDocument, mObserver));
+      auto handler =
+          std::make_unique<txMozillaTextOutput>(mSourceDocument, mObserver);
 
       nsresult rv = handler->createResultDocument(mDocumentIsData);
       if (NS_SUCCEEDED(rv)) {
@@ -448,8 +450,7 @@ txMozillaXSLTProcessor::AddXSLTParam(const nsString& aName,
     return error.StealNSResult();
   }
 
-  UniquePtr<OwningXSLTParameterValue> varValue =
-      MakeUnique<OwningXSLTParameterValue>();
+  auto varValue = std::make_unique<OwningXSLTParameterValue>();
   varValue->SetAsXPathResult() = xpathResult.forget();
 
   txExpandedName varName(nsId, name);
@@ -468,15 +469,15 @@ txMozillaXSLTProcessor::AddXSLTParam(const nsString& aName,
 class nsTransformBlockerEvent : public mozilla::Runnable {
  public:
   RefPtr<txMozillaXSLTProcessor> mProcessor;
+  RefPtr<Document> mBlockedDocument;
 
-  explicit nsTransformBlockerEvent(txMozillaXSLTProcessor* processor)
-      : mozilla::Runnable("nsTransformBlockerEvent"), mProcessor(processor) {}
+  explicit nsTransformBlockerEvent(txMozillaXSLTProcessor* processor,
+                                   Document* aBlockedDocument)
+      : mozilla::Runnable("nsTransformBlockerEvent"),
+        mProcessor(processor),
+        mBlockedDocument(aBlockedDocument) {}
 
-  ~nsTransformBlockerEvent() {
-    nsCOMPtr<Document> document =
-        mProcessor->GetSourceContentModel()->OwnerDoc();
-    document->UnblockOnload(true);
-  }
+  ~nsTransformBlockerEvent() { mBlockedDocument->UnblockOnload(true); }
 
   NS_IMETHOD Run() override {
     MOZ_RELEASE_ASSERT(mProcessor->mState ==
@@ -492,7 +493,8 @@ nsresult txMozillaXSLTProcessor::DoTransform() {
   NS_ASSERTION(mObserver, "no observer");
   NS_ASSERTION(NS_IsMainThread(), "should only be on main thread");
 
-  nsCOMPtr<nsIRunnable> event = new nsTransformBlockerEvent(this);
+  nsCOMPtr<nsIRunnable> event =
+      new nsTransformBlockerEvent(this, mSource->OwnerDoc());
   mSource->OwnerDoc()->BlockOnload();
   nsresult rv = NS_DispatchToCurrentThread(event);
   if (NS_FAILED(rv)) {
@@ -879,7 +881,7 @@ void txMozillaXSLTProcessor::SetParameter(const nsAString& aNamespaceURI,
     return;
   }
 
-  UniquePtr<txVariable> newVar = MakeUnique<txVariable>(std::move(value));
+  auto newVar = std::make_unique<txVariable>(std::move(value));
   mVariables.add(varName, newVar.release());
 }
 
@@ -1085,28 +1087,20 @@ void txMozillaXSLTProcessor::reportError(nsresult aResult,
       nsAutoCString errorText;
       auto statusId = StatusCodeToL10nId(aResult);
       if (statusId) {
-        l10n->FormatValueSync(*statusId, {}, errorText, IgnoreErrors());
+        l10n->FormatValueSync(*statusId, errorText, IgnoreErrors());
       } else {
-        dom::Optional<intl::L10nArgs> l10nArgs;
-        l10nArgs.Construct();
-        auto errorArg = l10nArgs.Value().Entries().AppendElement();
-        errorArg->mKey = "errorCode";
-        errorArg->mValue.SetValue().SetAsUTF8String().AppendInt(
-            static_cast<uint32_t>(aResult), 16);
-        l10n->FormatValueSync("xslt-unknown-error"_ns, l10nArgs, errorText,
+        nsAutoCString errorCode;
+        errorCode.AppendInt(static_cast<uint32_t>(aResult), 16);
+        l10n->FormatValueSync("xslt-unknown-error"_ns,
+                              {{"errorCode"_ns, errorCode}}, errorText,
                               IgnoreErrors());
       }
-
-      dom::Optional<intl::L10nArgs> l10nArgs;
-      l10nArgs.Construct();
-      auto errorArg = l10nArgs.Value().Entries().AppendElement();
-      errorArg->mKey = "error";
-      errorArg->mValue.SetValue().SetAsUTF8String().Assign(errorText);
 
       nsLiteralCString messageId =
           mStylesheet ? "xslt-transform-error"_ns : "xslt-loading-error"_ns;
       nsAutoCString errorMessage;
-      l10n->FormatValueSync(messageId, l10nArgs, errorMessage, IgnoreErrors());
+      l10n->FormatValueSync(messageId, {{"error"_ns, errorText}}, errorMessage,
+                            IgnoreErrors());
       mErrorText = NS_ConvertUTF8toUTF16(errorMessage);
     }
   }
@@ -1286,8 +1280,7 @@ void txMozillaXSLTProcessor::Shutdown() { txXSLTProcessor::shutdown(); }
 /* static */
 UniquePtr<txVariable::OwningXSLTParameterValue> txVariable::convertToOwning(
     const XSLTParameterValue& aValue, ErrorResult& aError) {
-  UniquePtr<OwningXSLTParameterValue> value =
-      MakeUnique<OwningXSLTParameterValue>();
+  auto value = std::make_unique<OwningXSLTParameterValue>();
   if (aValue.IsUnrestrictedDouble()) {
     value->SetAsUnrestrictedDouble() = aValue.GetAsUnrestrictedDouble();
   } else if (aValue.IsBoolean()) {

@@ -334,7 +334,7 @@ nsresult CacheFileMetadata::WriteMetadata(
   UniquePtr<char[]> scratch;
   char* content;
   if (encrypted) {
-    scratch = MakeUnique<char[]>(contentLen);
+    scratch = std::make_unique<char[]>(contentLen);
     content = scratch.get();
   } else {
     content = mWriteBuf;
@@ -829,6 +829,18 @@ nsresult CacheFileMetadata::OnDataRead(CacheFileHandle* aHandle, char* aBuf,
 
   int64_t size = mHandle->FileSize();
   MOZ_ASSERT(size != -1);
+
+  if (size < int64_t(mBufSize)) {
+    LOG(
+        ("CacheFileMetadata::OnDataRead() - File shrank during metadata read, "
+         "creating empty metadata. [this=%p, bufSize=%u, size=%" PRId64 "]",
+         this, mBufSize, size));
+
+    InitEmptyMetadata();
+
+    mListener.swap(listener);
+    return NS_OK;
+  }
 
   if (realOffset >= size) {
     LOG(

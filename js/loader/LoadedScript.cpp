@@ -9,7 +9,7 @@
 #include "mozilla/RefPtr.h"     // RefPtr, mozilla::MakeRefPtr
 #include "mozilla/Span.h"       // mozilla::Span
 #include "mozilla/Sprintf.h"    // SprintfLiteral
-#include "mozilla/UniquePtr.h"  // mozilla::UniquePtr, mozilla::MakeUnique
+#include "mozilla/UniquePtr.h"  // mozilla::UniquePtr, std::make_unique
 
 #include "jsfriendapi.h"
 #include "LoadContextBase.h"  // LoadContextBase
@@ -38,6 +38,14 @@ size_t ScriptFetchInfo::SizeOfIncludingThis(
     mozilla::MallocSizeOf aMallocSizeOf) const {
   return aMallocSizeOf(this) +
          mFetchOptions->SizeOfIncludingThis(aMallocSizeOf);
+}
+
+ResolvedModuleSet* ScriptFetchInfo::GetPreloadedResolvedSet() {
+  if (!mPreloadedResolvedSet) {
+    mPreloadedResolvedSet = std::make_unique<ResolvedModuleSet>();
+  }
+
+  return mPreloadedResolvedSet.get();
 }
 
 static bool IsInternalURIScheme(nsIURI* uri) {
@@ -212,7 +220,7 @@ void LoadedScript::SetSRIMetadata(
     return;
   }
 
-  mSRIMetadata = mozilla::MakeUnique<mozilla::dom::SRIMetadata>(aSRIMetadata);
+  mSRIMetadata = std::make_unique<mozilla::dom::SRIMetadata>(aSRIMetadata);
 }
 
 bool LoadedScript::IsSRIMetadataReusableBy(
@@ -263,7 +271,13 @@ bool LoadedScript::ReadFromEncodingHeader(const EncodingHeader* aHeader) {
   mDependsOnClassicScriptHintEncoding =
       aHeader->mDependsOnClassicScriptHintEncoding;
 
-  size_t encodingStringLen = strlen(aHeader->mClassicScriptEncoding);
+  size_t encodingStringLen =
+      strnlen(aHeader->mClassicScriptEncoding,
+              EncodingHeader::ClassicScriptEncodingMaxLength);
+  if (encodingStringLen == EncodingHeader::ClassicScriptEncodingMaxLength) {
+    return false;
+  }
+
   if (encodingStringLen == 0) {
     mClassicScriptEncoding = nullptr;
     return true;
@@ -306,7 +320,7 @@ NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN(ModuleScript)
 NS_IMPL_CYCLE_COLLECTION_TRACE_END
 
 ModuleScript::ModuleScript(ScriptFetchInfo* aFetchInfo)
-    : mFetchInfoForAccessingPreloadFlag(aFetchInfo) {
+    : mFetchInfo(aFetchInfo) {
   MOZ_ASSERT(!ModuleRecord());
   MOZ_ASSERT(!HasParseError());
   MOZ_ASSERT(!HasErrorToRethrow());
@@ -336,8 +350,7 @@ void ModuleScript::SetModuleRecord(Handle<JSObject*> aModuleRecord) {
 #ifdef DEBUG
   // Sync the [[PreloadSlot]] in ModuleObject.
   if (mModuleRecord) {
-    SetModulePreload(mModuleRecord,
-                     mFetchInfoForAccessingPreloadFlag->IsForModulePreload());
+    SetModulePreload(mModuleRecord, mFetchInfo->IsForModulePreload());
   }
 #endif
 
@@ -364,29 +377,10 @@ void ModuleScript::SetErrorToRethrow(const Value& aError) {
   mErrorToRethrow = aError;
 }
 
-void ModuleScript::SetForPreload(bool aValue) {
-  mFetchInfoForAccessingPreloadFlag->SetForModulePreload(aValue);
-#ifdef DEBUG
-  if (ModuleRecord()) {
-    SetModulePreload(ModuleRecord(), aValue);
-  }
-#endif
-}
 void ModuleScript::SetHadImportMap(bool aValue) { mHadImportMap = aValue; }
 
-ResolvedModuleSet* ModuleScript::GetPreloadedResolvedSet() {
-  if (!mPreloadedResolvedSet) {
-    mPreloadedResolvedSet = mozilla::MakeUnique<ResolvedModuleSet>();
-  }
-
-  return mPreloadedResolvedSet.get();
-}
-
-void ModuleScript::ResetPreload() {
-  MOZ_ASSERT(mFetchInfoForAccessingPreloadFlag->IsForModulePreload());
-  if (mModuleRecord) {
-    ResetPreloadedModule(mModuleRecord);
-  }
+void ModuleScript::ResetPreloadErrors() {
+  MOZ_ASSERT(mFetchInfo->IsForModulePreload());
 
   if (HasParseError()) {
     mParseError = UndefinedValue();

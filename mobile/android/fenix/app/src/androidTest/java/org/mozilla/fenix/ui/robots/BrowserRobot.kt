@@ -13,7 +13,6 @@ import android.util.Log
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.ComposeTimeoutException
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -61,6 +60,7 @@ import mozilla.components.feature.summarize.R as summarizeR
 import mozilla.components.lib.crash.store.CrashReportOption
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.mozilla.fenix.Config
 import org.mozilla.fenix.R
 import org.mozilla.fenix.ext.components
 import org.mozilla.fenix.helpers.AppAndSystemHelper.registerAndCleanupIdlingResources
@@ -92,6 +92,7 @@ import org.mozilla.fenix.helpers.TestHelper.waitForObjects
 import org.mozilla.fenix.helpers.click
 import org.mozilla.fenix.helpers.ext.waitNotNull
 import org.mozilla.fenix.home.ui.HomepageTestTag.HOMEPAGE
+import org.mozilla.fenix.pdf.PdfToolsTestTag
 import org.mozilla.fenix.settings.SupportUtils
 import org.mozilla.fenix.tabstray.TabsTrayTestTag
 import org.mozilla.fenix.webcompat.BrokenSiteReporterTestTags
@@ -102,7 +103,6 @@ import org.mozilla.fenix.webcompat.BrokenSiteReporterTestTags.BROKEN_SITE_REPORT
 class BrowserRobot(private val composeTestRule: ComposeTestRule) {
     private lateinit var sessionLoadedIdlingResource: SessionLoadedIdlingResource
 
-    @OptIn(ExperimentalTestApi::class)
     fun waitForPageToLoad(pageLoadWaitingTime: Long = waitingTime) {
         Log.i(TAG, "waitForPageToLoad: Waiting for page load to complete.")
         try {
@@ -275,6 +275,22 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
                 }
             }
         }
+    }
+
+    fun verifyTheTranslationBannerIsDisplayed(translatedFrom: String, translatedTo: String) {
+        Log.i(TAG, "verifyTheTranslationBannerIsDisplayed: Trying to verify the Translations banner is displayed.")
+        composeTestRule
+            .onNodeWithContentDescription(getStringResource(R.string.translation_toolbar_expand_action))
+            .assertIsDisplayed()
+        composeTestRule
+            .onNodeWithContentDescription(getStringResource(R.string.translation_toolbar_close_action))
+            .assertIsDisplayed()
+        composeTestRule
+            .onNodeWithText(
+                getStringResource(R.string.translation_toolbar_translated_from_and_to, translatedFrom, translatedTo)
+            )
+            .assertIsDisplayed()
+        Log.i(TAG, "verifyTheTranslationBannerIsDisplayed: Trying to verified the Translations banner is displayed.")
     }
 
     fun verifyDRMControlledContentPageContent(expectedText: String) {
@@ -547,7 +563,27 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
     fun longClickPDFImage() =
         longClickPageObject(this@BrowserRobot.composeTestRule, itemWithResId("pdfjs_internal_id_13R"))
 
-    fun verifyPDFReaderToolbarItems() = assertUIObjectExists(itemWithResIdContainingText("download", "Download"))
+    fun verifyPDFReaderToolbarItems() {
+        // Bug 2081247 to switch to new toolbar for testing
+        if (!Config.channel.isNightlyOrDebug) {
+            assertUIObjectExists(itemWithResIdContainingText("download", "Download"))
+            return
+        }
+
+        Log.i(TAG, "verifyPDFReaderToolbarItems: Waiting for $waitingTime until the PDF tools bar exists")
+        composeTestRule.waitUntilAtLeastOneExists(hasTestTag(PdfToolsTestTag.BAR), waitingTime)
+        Log.i(TAG, "verifyPDFReaderToolbarItems: Waited for $waitingTime until the PDF tools bar exists")
+        listOf(
+                PdfToolsTestTag.DOWNLOAD_BUTTON,
+                PdfToolsTestTag.PRINT_BUTTON,
+                PdfToolsTestTag.SHARE_BUTTON,
+            )
+            .forEach { testTag ->
+                Log.i(TAG, "verifyPDFReaderToolbarItems: Trying to verify that $testTag is displayed")
+                composeTestRule.onNodeWithTag(testTag).assertIsDisplayed()
+                Log.i(TAG, "verifyPDFReaderToolbarItems: Verified that $testTag is displayed")
+            }
+    }
 
     fun clickSubmitLoginButton() {
         clickPageObject(this@BrowserRobot.composeTestRule, itemWithResId("submit"))
@@ -647,7 +683,6 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
         }
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun clickSuggestedLogin(userName: String) {
         Log.i(TAG, "clickSuggestedLogin: Waiting for the suggested user name: $userName to exist")
         this@BrowserRobot.composeTestRule.waitUntilAtLeastOneExists(hasText(userName))
@@ -809,7 +844,6 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
         }
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifySuggestedUserName(userName: String) {
         Log.i(TAG, "verifySuggestedUserName: Waiting for the suggested user name: $userName to exist")
         this@BrowserRobot.composeTestRule.waitUntilAtLeastOneExists(hasText(userName))
@@ -1409,15 +1443,6 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "clickSiteDoesNotLoadReason: Clicked the \"Site doesn’t load\" reason option")
     }
 
-    fun clickBrokenSiteFormCancelButton(composeTestRule: ComposeTestRule) {
-        Log.i(TAG, "clickBrokenSiteFormCancelButton: Trying to click the \"Cancel\" button")
-        composeTestRule
-            .onNodeWithText(getStringResource(R.string.webcompat_reporter_cancel))
-            .performScrollTo()
-            .performClick()
-        Log.i(TAG, "clickBrokenSiteFormCancelButton: Clicked the \"Cancel\" button")
-    }
-
     fun clickBrokenSiteFormSendButton(composeTestRule: ComposeTestRule) {
         Log.i(TAG, "clickBrokenSiteFormSendButton: Trying to close the keyboard.")
         closeSoftKeyboard()
@@ -1544,7 +1569,7 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
                 TAG,
                 "verifyTheSummarizeCFR: Trying to verify the \"Shake your device to summarize this page in seconds\" CFR dismiss button is displayed.",
             )
-            composeTestRule.summarizeCFRButton().assertIsDisplayed()
+            composeTestRule.summarizeCFDismissButton().assertIsDisplayed()
             Log.i(
                 TAG,
                 "verifyTheSummarizeCFR: Verified the \"Shake your device to summarize this page in seconds\" CFR dismiss button is displayed.",
@@ -1562,13 +1587,12 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
         }
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun clickTheDismissButtonOnSummarizeCFR() {
         Log.i(TAG, "clickTheDismissButtonOnSummarizeCFR: Waiting for the summarize CFR dismiss button to exist")
         composeTestRule.waitUntilAtLeastOneExists(hasTestTag("cfr.dismiss"), waitingTime)
         Log.i(TAG, "clickTheDismissButtonOnSummarizeCFR: Waited for the summarize CFR dismiss button to exist")
         Log.i(TAG, "clickTheDismissButtonOnSummarizeCFR: Trying to click the \"X\" button on the summarize CFR")
-        composeTestRule.summarizeCFRButton().performClick()
+        composeTestRule.summarizeCFDismissButton().performClick()
         Log.i(TAG, "clickTheDismissButtonOnSummarizeCFR: Clicked the \"X\" button on the summarize CFR")
     }
 
@@ -1639,7 +1663,6 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
             return ThreeDotMenuMainRobot.Transition(composeTestRule)
         }
 
-        @OptIn(ExperimentalTestApi::class)
         fun openSearch(interact: SearchRobot.() -> Unit): SearchRobot.Transition {
             Log.i(TAG, "openSearch: Waiting for $waitingTime until the URL bar exists")
             composeTestRule.waitUntilAtLeastOneExists(hasTestTag(ADDRESSBAR_URL_BOX), waitingTime)
@@ -1652,7 +1675,6 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
             return SearchRobot.Transition(composeTestRule)
         }
 
-        @OptIn(ExperimentalTestApi::class)
         fun openNavigationToolbar(interact: NavigationToolbarRobot.() -> Unit): NavigationToolbarRobot.Transition {
             composeTestRule.waitUntilAtLeastOneExists(hasTestTag(ADDRESSBAR_URL_BOX), waitingTime)
             Log.i(TAG, "openNavigationToolbar: Trying to click navigation toolbar")
@@ -1693,7 +1715,6 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
             return NotificationRobot.Transition()
         }
 
-        @OptIn(ExperimentalTestApi::class)
         fun goToHomescreen(
             isPrivateModeEnabled: Boolean = false,
             interact: HomeScreenRobot.() -> Unit,
@@ -1931,20 +1952,36 @@ class BrowserRobot(private val composeTestRule: ComposeTestRule) {
             return SettingsRobot.Transition()
         }
 
-        fun clickDownloadPDFButton(interact: DownloadRobot.() -> Unit): DownloadRobot.Transition {
-            Log.i(TAG, "clickDownloadPDFButton: Trying to click the download PDF button")
-            itemWithResIdContainingText(
-                    "download",
-                    "Download",
-                )
-                .click()
-            Log.i(TAG, "clickDownloadPDFButton: Clicked the download PDF button")
+        fun clickDownloadPDFButton(
+            confirmDownloadPrompt: Boolean = true,
+            interact: DownloadRobot.() -> Unit,
+        ): DownloadRobot.Transition {
+            // Bug 2081247 to switch to new toolbar for testing
+            if (Config.channel.isNightlyOrDebug) {
+                Log.i(TAG, "clickDownloadPDFButton: Waiting for $waitingTime until the download PDF button exists")
+                composeTestRule.waitUntilAtLeastOneExists(hasTestTag(PdfToolsTestTag.DOWNLOAD_BUTTON), waitingTime)
+                Log.i(TAG, "clickDownloadPDFButton: Waited for $waitingTime until the download PDF button exists")
+                Log.i(TAG, "clickDownloadPDFButton: Trying to click the download PDF button")
+                composeTestRule.onNodeWithTag(PdfToolsTestTag.DOWNLOAD_BUTTON).performClick()
+                Log.i(TAG, "clickDownloadPDFButton: Clicked the download PDF button")
+                if (confirmDownloadPrompt) {
+                    DownloadRobot(composeTestRule).verifyDownloadPrompt(composeTestRule)
+                    DownloadRobot.Transition(composeTestRule).clickDownload(composeTestRule) {}
+                }
+            } else {
+                Log.i(TAG, "clickDownloadPDFButton: Trying to click the download PDF button")
+                itemWithResIdContainingText(
+                        "download",
+                        "Download",
+                    )
+                    .click()
+                Log.i(TAG, "clickDownloadPDFButton: Clicked the download PDF button")
+            }
 
             DownloadRobot(composeTestRule).interact()
             return DownloadRobot.Transition(composeTestRule)
         }
 
-        @OptIn(ExperimentalTestApi::class)
         fun closeWebCompatReporter(interact: BrowserRobot.() -> Unit): BrowserRobot.Transition {
             val backDescription = "Navigate back"
             Log.i(TAG, "closeWebCompatReporter: Waiting for $waitingTime until the \"Navigate back\" button exists")
@@ -2121,7 +2158,7 @@ private fun contextMenuOpenInExternalApp() =
 private fun ComposeTestRule.summarizeCFRMessage() =
     onNodeWithText(getStringResource(R.string.browser_toolbar_summarize_cfr_description))
 
-private fun ComposeTestRule.summarizeCFRButton() = onNodeWithTag("cfr.dismiss")
+private fun ComposeTestRule.summarizeCFDismissButton() = onNodeWithTag("cfr.dismiss")
 
 private fun ComposeTestRule.summarizedBottomSheet() = onNodeWithText("Summary by Firefox")
 

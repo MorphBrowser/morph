@@ -16,9 +16,10 @@ ChromeUtils.defineESModuleGetters(this, {
 
 const BASE_URL = "https://example.com/";
 
-const gPinStub = sinon
-  .stub(TaskbarTabsPin, "pinTaskbarTab")
-  .callsFake(() => "shortcut relative path");
+const gPinStub = sinon.stub(TaskbarTabsPin, "pinTaskbarTab").callsFake(() => ({
+  shortcut: "shortcut relative path",
+  rejected: false,
+}));
 const gUnpinStub = sinon.stub(TaskbarTabsPin, "unpinTaskbarTab");
 
 add_task(async function test_moveTabIntoTaskbarTabParentWindow() {
@@ -29,7 +30,7 @@ add_task(async function test_moveTabIntoTaskbarTabParentWindow() {
     const move = await TaskbarTabs.moveTabIntoTaskbarTab(tab);
     is(gPinStub.callCount, 1, "Exactly one pin was attempted");
     is(
-      gPinStub.firstCall.args[2],
+      gPinStub.firstCall.args[2]?.window,
       move.window,
       "The newly-created window was passed as part of the pinning"
     );
@@ -136,4 +137,40 @@ add_task(async function test_shortcutRelativePathIsUpdated() {
   });
 
   sandbox.restore();
+});
+
+add_task(async function test_findOrCreateTaskbarTabPinResult() {
+  let uri = Services.io.newURI(BASE_URL);
+  let result = await TaskbarTabs.findOrCreateTaskbarTab(uri, 0);
+  Assert.deepEqual(
+    await result.pin,
+    { shortcut: "shortcut relative path", rejected: false },
+    "The pin outcome is returned for an accepted pin"
+  );
+
+  let existing = await TaskbarTabs.findOrCreateTaskbarTab(uri, 0);
+  Assert.strictEqual(
+    existing.pin,
+    null,
+    "No pin is attempted for an existing Taskbar Tab without ensurePinned"
+  );
+  await TaskbarTabs.removeTaskbarTab(result.taskbarTab.id);
+
+  gPinStub.callsFake(() => ({
+    shortcut: "shortcut relative path",
+    rejected: true,
+  }));
+  result = await TaskbarTabs.findOrCreateTaskbarTab(uri, 0);
+  Assert.strictEqual(
+    (await result.pin).rejected,
+    true,
+    "A declined pin is reported as rejected"
+  );
+  Assert.ok(result.created, "The Taskbar Tab is still created");
+  await TaskbarTabs.removeTaskbarTab(result.taskbarTab.id);
+
+  gPinStub.callsFake(() => ({
+    shortcut: "shortcut relative path",
+    rejected: false,
+  }));
 });

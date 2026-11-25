@@ -423,6 +423,14 @@ void StyleSheet::GetHref(nsAString& aHref, ErrorResult& aRv) {
   }
 }
 
+already_AddRefed<nsINode> StyleSheet::GetOwnerNodeForBindings() const {
+  return do_AddRef(GetOwnerNode());
+}
+
+already_AddRefed<StyleSheet> StyleSheet::GetParentStyleSheet() const {
+  return do_AddRef(GetParentSheet());
+}
+
 void StyleSheet::GetTitle(nsAString& aTitle) {
   // From https://drafts.csswg.org/cssom/#dom-stylesheet-title:
   //
@@ -1083,7 +1091,14 @@ dom::MediaList* StyleSheet::Media() {
 
 JSObject* StyleSheet::WrapObject(JSContext* aCx,
                                  JS::Handle<JSObject*> aGivenProto) {
-  return dom::CSSStyleSheet_Binding::Wrap(aCx, this, aGivenProto);
+  // An imported sheet may be kept alive only by an import rule awaiting
+  // deletion by the cycle collector, and Wrap() might GC.
+  JS::Rooted<JSObject*> result(aCx);
+  {
+    RefPtr kungFuDeathGrip{this};
+    result = dom::CSSStyleSheet_Binding::Wrap(aCx, this, aGivenProto);
+  }
+  return result;
 }
 
 void StyleSheet::FixUpRuleListAfterContentsChangeIfNeeded(bool aFromClone) {

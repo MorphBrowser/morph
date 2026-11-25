@@ -5,8 +5,9 @@
 use api::ColorF;
 use api::{ImageRendering, LineOrientation, PrimitiveFlags};
 use api::units::*;
+use crate::path_tiler::PathPrimitive;
 use crate::clip::ClipNodeId;
-use crate::render_backend::DataStores;
+use crate::render_backend::{DataStores, DlStores};
 use crate::space::SnapRounding;
 use crate::quad::QuadTileClassifier;
 use crate::renderer::GpuBufferHandle;
@@ -21,7 +22,7 @@ use crate::render_task_graph::RenderTaskId;
 use crate::resource_cache::ImageProperties;
 use crate::util::Recycler;
 use crate::internal_types::{FastHashSet, LayoutPrimitiveInfo};
-use crate::visibility::{PrimitiveDrawHeader, PrimitiveDrawIndex};
+use crate::visibility::{BackdropCaptures, PrimitiveDrawHeader, PrimitiveDrawIndex};
 use std::ops;
 
 pub mod backdrop;
@@ -37,14 +38,16 @@ pub mod interned;
 pub mod storage;
 
 use backdrop::{BackdropCaptureDataHandle, BackdropRenderDataHandle};
-use borders::{ImageBorderDataHandle, NormalBorderDataHandle};
-use gradient::{LinearGradientDataHandle, RadialGradientDataHandle, ConicGradientDataHandle};
-use image::{ImageDataHandle, YuvImageDataHandle};
-use line_dec::LineDecorationDataHandle;
+use borders::{ImageBorderKey, NormalBorderKey};
+use gradient::{ConicGradientKey, LinearGradientKey, RadialGradientKey};
+use image::{ImagePrimKey, YuvImagePrimKey};
+use line_dec::LineDecorationKey;
 use picture::PictureDataHandle;
-use rectangle::RectangleDataHandle;
-use text_run::{TextRunDataHandle, TextRunScratch};
-use crate::box_shadow::BoxShadowDataHandle;
+use rectangle::RectangleKey;
+use crate::dl_interner::DlHandle;
+use text_run::TextRunScratch;
+use api::interned_prims::TextRunKey;
+use crate::box_shadow::BoxShadowKey;
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -142,7 +145,7 @@ pub use api::interned_prims::PrimKey;
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[derive(MallocSizeOf)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PrimTemplateCommonData {
     pub flags: PrimitiveFlags,
     pub aligned_aa_edges: EdgeMask,
@@ -167,9 +170,44 @@ impl PrimTemplateCommonData {
     }
 }
 
+/// What scene building reads of an interned primitive: where its instance goes.
+/// The display item carries only the spatial id, the clip chain and the handle,
+/// so this is resolved from the key's common data for every primitive type.
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-#[derive(MallocSizeOf)]
+#[derive(Debug, MallocSizeOf)]
+pub struct PrimPlacement {
+    pub rect: LayoutRect,
+    pub clip_rect: LayoutRect,
+    pub flags: PrimitiveFlags,
+}
+
+/// A primitive key, which whatever its shape starts from the common data
+/// every primitive carries.
+pub trait PrimKeyCommon {
+    fn key_common(&self) -> &PrimKeyCommonData;
+}
+
+impl<T: malloc_size_of::MallocSizeOf> PrimKeyCommon for PrimKey<T> {
+    fn key_common(&self) -> &PrimKeyCommonData {
+        &self.common
+    }
+}
+
+impl<K: PrimKeyCommon> crate::dl_interner::DlResolve<K> for PrimPlacement {
+    fn resolve(key: &K, _ctx: &crate::dl_interner::DlResolveContext) -> Self {
+        let common = key.key_common();
+        PrimPlacement {
+            rect: common.prim_rect.into(),
+            clip_rect: common.local_clip_rect.into(),
+            flags: common.flags,
+        }
+    }
+}
+
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+#[derive(MallocSizeOf, Clone)]
 pub struct PrimTemplate<T> {
     pub common: PrimTemplateCommonData,
     pub kind: T,
@@ -211,46 +249,56 @@ pub enum PrimitiveKind {
     },
     /// A run of glyphs, with associated font parameters.
     TextRun {
-        /// Handle to the common interned data for this primitive.
-        data_handle: TextRunDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<TextRunKey>,
     },
     /// A line decoration. cache_handle refers to a cached render
     /// task handle, if this line decoration is not a simple solid.
     LineDecoration {
-        /// Handle to the common interned data for this primitive.
-        data_handle: LineDecorationDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<LineDecorationKey>,
     },
     NormalBorder {
-        /// Handle to the common interned data for this primitive.
-        data_handle: NormalBorderDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<NormalBorderKey>,
     },
     ImageBorder {
-        /// Handle to the common interned data for this primitive.
-        data_handle: ImageBorderDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<ImageBorderKey>,
     },
     Rectangle {
-        /// Handle to the common interned data for this primitive.
-        data_handle: RectangleDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<RectangleKey>,
     },
     YuvImage {
-        /// Handle to the common interned data for this primitive.
-        data_handle: YuvImageDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<YuvImagePrimKey>,
     },
     Image {
-        /// Handle to the common interned data for this primitive.
-        data_handle: ImageDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<ImagePrimKey>,
     },
     LinearGradient {
-        /// Handle to the common interned data for this primitive.
-        data_handle: LinearGradientDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<LinearGradientKey>,
     },
     RadialGradient {
-        /// Handle to the common interned data for this primitive.
-        data_handle: RadialGradientDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<RadialGradientKey>,
     },
     ConicGradient {
-        /// Handle to the common interned data for this primitive.
-        data_handle: ConicGradientDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<ConicGradientKey>,
     },
     /// Render a portion of a specified backdrop.
     BackdropCapture {
@@ -261,7 +309,9 @@ pub enum PrimitiveKind {
         pic_index: PictureIndex,
     },
     BoxShadow {
-        data_handle: BoxShadowDataHandle,
+        /// Handle into the follower store fed by the content display list
+        /// builder.
+        handle: DlHandle<BoxShadowKey>,
     },
 }
 
@@ -380,60 +430,60 @@ impl PrimitiveInstance {
     /// rounds out (a conservative, grid-aligned footprint for surface / cluster
     /// allocation) while its clips stay exact, at the sub-pixel position
     /// matching its contents (bug 2050692).
-    pub fn snap_policy(&self, data_stores: &DataStores) -> SnapPolicy {
-        if data_stores.prim_has_anti_aliasing(self) {
+    pub fn snap_policy(&self, data_stores: &DataStores, dl_stores: &DlStores) -> SnapPolicy {
+        if data_stores.prim_has_anti_aliasing(self, dl_stores) {
             return SnapPolicy { rect: SnapRounding::Exact, clip: ClipSnap::Nearest };
         }
         if !self.kind.snaps() {
             return SnapPolicy { rect: SnapRounding::RoundOut, clip: ClipSnap::Exact };
         }
         let rect = match self.kind {
-            PrimitiveKind::LineDecoration { data_handle, .. } => SnapRounding::Line {
-                horizontal: data_stores.line_decoration[data_handle].kind.orientation
+            PrimitiveKind::LineDecoration { handle } => SnapRounding::Line {
+                horizontal: dl_stores.line_decorations[handle].kind.orientation
                     == LineOrientation::Horizontal,
             },
-            PrimitiveKind::NormalBorder { data_handle, .. } => SnapRounding::BorderInner {
-                widths: data_stores.normal_border[data_handle].kind.widths,
+            PrimitiveKind::NormalBorder { handle } => SnapRounding::BorderInner {
+                widths: dl_stores.normal_borders[handle].kind.widths,
             },
             _ => SnapRounding::Nearest,
         };
         SnapPolicy { rect, clip: ClipSnap::Nearest }
     }
 
-    pub fn uid(&self) -> intern::ItemUid {
+    pub fn uid(&self, dl_stores: &DlStores) -> intern::ItemUid {
         match &self.kind {
-            PrimitiveKind::Rectangle { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::Rectangle { handle } => {
+                dl_stores.rectangles.uid(*handle)
             }
-            PrimitiveKind::Image { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::Image { handle } => {
+                dl_stores.images.uid(*handle)
             }
-            PrimitiveKind::ImageBorder { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::ImageBorder { handle } => {
+                dl_stores.image_borders.uid(*handle)
             }
-            PrimitiveKind::LineDecoration { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::LineDecoration { handle } => {
+                dl_stores.line_decorations.uid(*handle)
             }
-            PrimitiveKind::LinearGradient { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::LinearGradient { handle } => {
+                dl_stores.linear_gradients.uid(*handle)
             }
-            PrimitiveKind::NormalBorder { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::NormalBorder { handle } => {
+                dl_stores.normal_borders.uid(*handle)
             }
             PrimitiveKind::Picture { data_handle, .. } => {
                 data_handle.uid()
             }
-            PrimitiveKind::RadialGradient { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::RadialGradient { handle } => {
+                dl_stores.radial_gradients.uid(*handle)
             }
-            PrimitiveKind::ConicGradient { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::ConicGradient { handle } => {
+                dl_stores.conic_gradients.uid(*handle)
             }
-            PrimitiveKind::TextRun { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::TextRun { handle } => {
+                dl_stores.text_runs.uid(*handle)
             }
-            PrimitiveKind::YuvImage { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::YuvImage { handle } => {
+                dl_stores.yuv_images.uid(*handle)
             }
             PrimitiveKind::BackdropCapture { data_handle, .. } => {
                 data_handle.uid()
@@ -441,8 +491,8 @@ impl PrimitiveInstance {
             PrimitiveKind::BackdropRender { data_handle, .. } => {
                 data_handle.uid()
             }
-            PrimitiveKind::BoxShadow { data_handle, .. } => {
-                data_handle.uid()
+            PrimitiveKind::BoxShadow { handle } => {
+                dl_stores.box_shadows.uid(*handle)
             }
 
         }
@@ -482,6 +532,9 @@ pub struct PrimitiveFrameScratch {
     /// visit ends.
     pending_picture_draws: Vec<PrimitiveDrawIndex>,
 
+    /// The backdrop-filter captures reachable this frame.
+    pub backdrop_captures: BackdropCaptures,
+
     /// Per-frame scratch for Picture primitives. Holds the picture's
     /// primary/secondary render task ids and any per-composite-mode
     /// extra GPU buffer addresses. Indexed by `scratch_handle` on
@@ -509,12 +562,17 @@ pub struct PrimitiveFrameScratch {
     /// into it for on-screen display).
     pub debug_items: Vec<DebugItem>,
 
-    /// Set of sub-graphs that are required, determined during visibility pass
-    pub required_sub_graphs: FastHashSet<PictureIndex>,
+    /// The backdrop-filter chains whose `BackdropRender` is drawn this frame,
+    /// determined during the visibility pass
+    pub required_backdrop_chains: FastHashSet<PictureIndex>,
 
     /// Temporary buffers for building segments in to during prepare pass
     pub quad_direct_segments: Vec<QuadSegment>,
     pub quad_indirect_segments: Vec<QuadSegment>,
+
+    /// Paths drawn with `QuadRenderStrategy::Path`, indexed by
+    /// `PrimitiveCommand::Path`.
+    pub path_prims: Vec<PathPrimitive>,
 }
 
 impl Default for PrimitiveFrameScratch {
@@ -524,14 +582,16 @@ impl Default for PrimitiveFrameScratch {
             picture_draws: Vec::new(),
             picture_draw_ranges: Vec::new(),
             pending_picture_draws: Vec::new(),
+            backdrop_captures: BackdropCaptures::default(),
             pictures: storage::Storage::new(0),
             text_runs: storage::Storage::new(0),
             glyph_keys: GlyphKeyStorage::new(0),
             clip_mask_instances: Vec::new(),
             debug_items: Vec::new(),
-            required_sub_graphs: FastHashSet::default(),
+            required_backdrop_chains: FastHashSet::default(),
             quad_direct_segments: Vec::new(),
             quad_indirect_segments: Vec::new(),
+            path_prims: Vec::new(),
         }
     }
 }
@@ -623,6 +683,7 @@ impl PrimitiveFrameScratch {
         recycler.recycle_vec(&mut self.draws);
         recycler.recycle_vec(&mut self.picture_draws);
         recycler.recycle_vec(&mut self.picture_draw_ranges);
+        self.backdrop_captures.recycle(recycler);
         self.pictures.recycle(recycler);
         self.text_runs.recycle(recycler);
         self.glyph_keys.recycle(recycler);
@@ -630,6 +691,7 @@ impl PrimitiveFrameScratch {
         recycler.recycle_vec(&mut self.debug_items);
         recycler.recycle_vec(&mut self.quad_direct_segments);
         recycler.recycle_vec(&mut self.quad_indirect_segments);
+        recycler.recycle_vec(&mut self.path_prims);
     }
 
     pub fn begin_frame(&mut self) {
@@ -644,8 +706,9 @@ impl PrimitiveFrameScratch {
         self.clip_mask_instances.push(ClipMaskKind::None);
         self.quad_direct_segments.clear();
         self.quad_indirect_segments.clear();
+        self.path_prims.clear();
 
-        self.required_sub_graphs.clear();
+        self.required_backdrop_chains.clear();
 
         self.debug_items.clear();
     }
@@ -915,14 +978,18 @@ fn device_text_runs_do_not_snap_their_clips() {
     use crate::intern::Handle;
 
     assert!(
-        !PrimitiveKind::TextRun { data_handle: Handle::INVALID }.snaps(),
+        !PrimitiveKind::TextRun {
+            handle: DlHandle::new(crate::dl_interner::DlNamespace(0), 0, 0),
+        }.snaps(),
         "device-space text must not snap its clips (bug 2050692)",
     );
 
     // Everything else snaps, including pictures - an image-mask clip has to
     // stay aligned with the mask it rasterizes to.
     assert!(
-        PrimitiveKind::Rectangle { data_handle: Handle::INVALID }.snaps(),
+        PrimitiveKind::Rectangle {
+            handle: DlHandle::new(crate::dl_interner::DlNamespace(0), 0, 0),
+        }.snaps(),
         "a snapping primitive must snap its clips",
     );
     assert!(

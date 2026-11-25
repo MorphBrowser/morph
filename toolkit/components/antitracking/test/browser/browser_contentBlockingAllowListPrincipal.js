@@ -5,7 +5,7 @@
 
 ChromeUtils.defineESModuleGetters(this, {
   ContentBlockingAllowList:
-    "resource://gre/modules/ContentBlockingAllowList.sys.mjs",
+    "moz-src:///toolkit/components/antitracking/ContentBlockingAllowList.sys.mjs",
 });
 
 const TEST_SANDBOX_URL =
@@ -110,7 +110,6 @@ add_task(async () => {
       ["privacy.restrict3rdpartystorage.heuristic.redirect", false],
       ["privacy.restrict3rdpartystorage.heuristic.recently_visited", false],
       ["privacy.restrict3rdpartystorage.heuristic.window_open", false],
-      ["dom.security.https_first_pbm", false],
     ],
   });
 });

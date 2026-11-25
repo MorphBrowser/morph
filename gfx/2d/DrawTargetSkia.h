@@ -143,10 +143,8 @@ class DrawTargetSkia : public DrawTarget {
   bool Init(unsigned char* aData, const IntSize& aSize, int32_t aStride,
             SurfaceFormat aFormat, bool aUninitialized = false,
             bool aIsClear = false);
-  bool Init(SkCanvas* aCanvas);
+  bool Init(SkCanvas* aCanvas, bool aSupportsGlyphSourceText = false);
   bool Init(RefPtr<DataSourceSurface>&& aSurface);
-
-  static void UpdateSurfaceProps();
 
   // Skia assumes that texture sizes fit in 16-bit integers.
   static size_t GetMaxSurfaceSize() { return 65535; }
@@ -174,6 +172,10 @@ class DrawTargetSkia : public DrawTarget {
 
   void AccessibleId(uint64_t aInnerWindowId, uint64_t aAccId) final;
 
+  bool SupportsGlyphSourceText() const final {
+    return mSupportsGlyphSourceText;
+  }
+
  private:
   friend class SourceSurfaceSkia;
 
@@ -192,6 +194,7 @@ class DrawTargetSkia : public DrawTarget {
     Matrix mMaskToDevice;
     CompositionOp mCompositionOp = CompositionOp::OP_OVER;
     bool mOldPermitSubpixelAA = false;
+    int mSaveCount = 0;
   };
   std::vector<PushedLayer> mPushedLayers;
 
@@ -202,6 +205,7 @@ class DrawTargetSkia : public DrawTarget {
   RefPtr<SourceSurfaceSkia> mSnapshot;
   Mutex mSnapshotLock MOZ_UNANNOTATED;
   bool mIsClear = false;
+  bool mSupportsGlyphSourceText = false;
 
 #ifdef XP_DARWIN
   friend class BorrowedCGContext;

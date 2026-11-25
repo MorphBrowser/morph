@@ -17,8 +17,6 @@ import {
   Progress,
 } from "chrome://global/content/ml/Utils.sys.mjs";
 
-import { OPFS } from "chrome://global/content/ml/OPFS.sys.mjs";
-
 /**
  * Log level set by the pipeline.
  *
@@ -36,7 +34,7 @@ const lazy = {};
 ChromeUtils.defineLazyGetter(lazy, "console", () => {
   return console.createInstance({
     maxLogLevel: _logLevel, // we can't use maxLogLevelPref in workers.
-    prefix: "ML:LlamaCppPipeline",
+    logModule: "GeckoMLLlamaCppPipeline",
   });
 });
 
@@ -51,9 +49,7 @@ ChromeUtils.defineLazyGetter(lazy, "console", () => {
  * @param {string} [options.modelId] - Identifier of the model to be loaded.
  * @param {string} [options.modelRevision] - Specific revision of the model to be used.
  * @param {string} [options.modelFile] - Name of the model file to load.
- * @param {number} [options.numContext=700] - Number of context tokens to use for inference.
  * @param {number} [options.numBatch=700] - Number of tokens to process in a batch.
- * @param {number} [options.numUbatch=700] - Number of micro-batches to split inference into.
  * @param {number} [options.numThreads=0] - Number of CPU threads to use (default: auto).
  * @param {boolean} [options.flashAttn=false] - Whether to enable Flash Attention for optimization.
  * @param {boolean} [options.useMmap=false] - Whether to use memory-mapped file loading.
@@ -102,9 +98,7 @@ export class LlamaCppPipeline {
       modelId,
       modelRevision,
       modelFile,
-      numContext = 700,
       numBatch = 700,
-      numUbatch = 700,
       numThreads = 0,
       flashAttn = false,
       useMmap = false,
@@ -116,7 +110,7 @@ export class LlamaCppPipeline {
   ) {
     let startInitTime = ChromeUtils.now();
 
-    const modelFilePath = (
+    const modelBlob = (
       await mlEngineWorker.getModelFile({
         url: createFileUrl({
           model: modelId,
@@ -127,8 +121,6 @@ export class LlamaCppPipeline {
         }),
       })
     ).ok[2];
-
-    lazy.console.debug("Model local path is", { modelFilePath });
 
     let options = {};
 
@@ -155,28 +147,18 @@ export class LlamaCppPipeline {
     }
 
     options = {
-      n_ctx: numContext,
       useCache: false,
       n_gpu_layers: 0,
       offload_kqv: false,
       n_batch: numBatch,
-      n_ubatch: numUbatch,
+      n_ubatch: numBatch,
       use_mmap: useMmap,
       use_mlock: useMlock,
       flash_attn: flashAttn,
       cache_type_k: cacheType,
       cache_type_v: cacheType,
       ...options,
-      modelFilePath,
     };
-
-    let opfsStart = ChromeUtils.now();
-    const modelBlob = await (await OPFS.getFileHandle(modelFilePath)).getFile();
-    ChromeUtils.addProfilerMarker(
-      "MLEngine:llama.cpp",
-      { startTime: opfsStart },
-      `Retrieve model file from OPFS`
-    );
 
     const generator = new LlamaRunner();
 
@@ -187,7 +169,6 @@ export class LlamaCppPipeline {
         context: {
           nThreads: options.n_threads,
           nThreadsBatch: options.n_threads_decoding,
-          nCtx: numContext,
         },
       },
       modelBlob
@@ -198,7 +179,7 @@ export class LlamaCppPipeline {
     ChromeUtils.addProfilerMarker(
       "MLEngine:llama.cpp",
       { startTime: startInitTime },
-      `Initialize: ${modelId}, ctx=${numContext}, threads=${options.n_threads}/${options.n_threads_decoding}`
+      `Initialize: ${modelId}, threads=${options.n_threads}/${options.n_threads_decoding}`
     );
 
     const pipeline = new LlamaCppPipeline(generator, options, errorFactory);

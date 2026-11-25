@@ -44,9 +44,54 @@ Integration.downloads.defineESModuleGetter(
  * @return true if we can use the directory, false otherwise.
  */
 function isUsableDirectory(aDirectory) {
-  return (
-    aDirectory.exists() && aDirectory.isDirectory() && aDirectory.isWritable()
-  );
+  try {
+    return (
+      aDirectory.exists() && aDirectory.isDirectory() && aDirectory.isWritable()
+    );
+  } catch (ex) {
+    // These checks can throw instead of returning false, e.g. if the volume
+    // is read-only or disappears in the meantime.
+    return false;
+  }
+}
+
+let gDownloadSavePickerQueues = new WeakMap();
+
+// Run download save pickers one at a time per macOS window, including the
+// directory lookup and update. Race the task against window closure and signal
+// cancellation so the task can ignore late directory lookups and picker callbacks.
+async function runDownloadSavePicker(parentWindow, task) {
+  let controller = new AbortController();
+  if (AppConstants.platform != "macosx") {
+    return task(controller.signal);
+  }
+
+  let previous = gDownloadSavePickerQueues.get(parentWindow);
+  let { promise, resolve } = Promise.withResolvers();
+  gDownloadSavePickerQueues.set(parentWindow, promise);
+  try {
+    await previous;
+    if (parentWindow.closed) {
+      return null;
+    }
+
+    let { promise: closed, resolve: cancel } = Promise.withResolvers();
+    let onWindowClosed = () => {
+      controller.abort();
+      cancel(null);
+    };
+    parentWindow.addEventListener("unload", onWindowClosed, { once: true });
+    try {
+      return await Promise.race([task(controller.signal), closed]);
+    } finally {
+      parentWindow.removeEventListener("unload", onWindowClosed);
+    }
+  } finally {
+    resolve();
+    if (gDownloadSavePickerQueues.get(parentWindow) == promise) {
+      gDownloadSavePickerQueues.delete(parentWindow);
+    }
+  }
 }
 
 // Web progress listener so we can detect errors while mLauncher is
@@ -181,15 +226,19 @@ export class nsUnknownContentTypeDialog {
         null
       );
       /*
-       * There were some concerns that this load might be triggered by an
-       * inital about:blank in the window. This seems unlikely because:
+       * There were some concerns that this event might be triggered by an
+       * initial about:blank in the window. This seems unlikely because:
        * 1. Loading about:blank takes a tick and would therefore be canceled by
        *    a consecutive chrome URI load.
-       * 2. With recent about:blank changes, the load event is fired when we
+       * 2. With recent about:blank changes, the load events are fired when we
        *    determine about:blank to be the navigation target, which isn't the
        *    case here.
        */
-      this.mDialog.addEventListener("load", () => this.initDialog());
+      this.mDialog.addEventListener(
+        "DOMContentLoaded",
+        () => this.initDialog(),
+        { once: true }
+      );
     } catch (ex) {
       // The containing window may have gone away.  Break reference
       // cycles and stop doing the download.
@@ -212,7 +261,7 @@ export class nsUnknownContentTypeDialog {
     if (!this.#log) {
       this.#log = console.createInstance({
         maxLogLevelPref: "toolkit.download.loglevel",
-        prefix: "HelperAppService",
+        logModule: "HelperAppService",
       });
       let info = this.mLauncher.MIMEInfo;
       // primaryExtension can throw if there are no extensions on this mimetype.
@@ -353,76 +402,78 @@ export class nsUnknownContentTypeDialog {
 
       picker.appendFilters(nsIFilePicker.filterAll);
 
-      // Default to lastDir if it is valid, otherwise use the user's default
-      // downloads directory.  getPreferredDownloadsDirectory should always
-      // return a valid directory path, so we can safely default to it.
-      let preferredDir = await Downloads.getPreferredDownloadsDirectory();
-      picker.displayDirectory = new FileUtils.File(preferredDir);
-
-      gDownloadLastDir.getFileAsync(aLauncher.source).then(lastDir => {
+      result = await runDownloadSavePicker(parent, async signal => {
+        let [preferredDir, lastDir] = await Promise.all([
+          Downloads.getPreferredDownloadsDirectory(),
+          gDownloadLastDir.getFileAsync(aLauncher.source),
+        ]);
+        // The parent may have closed while the directory lookup was pending.
+        if (signal.aborted) {
+          return null;
+        }
+        picker.displayDirectory = new FileUtils.File(preferredDir);
         if (lastDir && isUsableDirectory(lastDir)) {
           picker.displayDirectory = lastDir;
         }
 
-        picker.open(returnValue => {
-          if (returnValue == nsIFilePicker.returnCancel) {
-            // null result means user cancelled.
-            aLauncher.saveDestinationAvailable(null);
-            return;
-          }
+        let returnValue = await new Promise(resolve => picker.open(resolve));
+        if (signal.aborted || returnValue === nsIFilePicker.returnCancel) {
+          return null;
+        }
 
-          // Be sure to save the directory the user chose through the Save As...
-          // dialog  as the new browser.download.dir since the old one
-          // didn't exist.
-          result = picker.file;
-
-          if (result) {
-            let allowOverwrite = false;
-            try {
-              // If we're overwriting, avoid renaming our file, and assume
-              // overwriting it does the right thing.
-              if (
-                result.exists() &&
-                this.getFinalLeafName(result.leafName, "", true) ==
-                  result.leafName
-              ) {
-                allowOverwrite = true;
-              }
-            } catch (ex) {
-              // As it turns out, the failure to remove the file, for example due to
-              // permission error, will be handled below eventually somehow.
-            }
-
-            var newDir = result.parent.QueryInterface(Ci.nsIFile);
-
-            // Do not store the last save directory as a pref inside the private browsing mode
-            gDownloadLastDir.setFile(aLauncher.source, newDir);
-
-            try {
-              result = this.validateLeafName(
-                newDir,
-                result.leafName,
-                null,
-                allowOverwrite,
-                true
-              );
-            } catch (ex) {
-              // When the chosen download directory is write-protected,
-              // display an informative error message.
-              // In all cases, download will be stopped.
-
-              if (ex.result == Cr.NS_ERROR_FILE_ACCESS_DENIED) {
-                this.displayBadPermissionAlert();
-                aLauncher.saveDestinationAvailable(null);
-                return;
-              }
-            }
-          }
-          // Don't pop up the downloads panel redundantly.
-          aLauncher.saveDestinationAvailable(result, true);
-        });
+        let file = picker.file;
+        if (file && isUsableDirectory(file.parent)) {
+          // Do not store the last save directory as a pref inside the private browsing mode
+          gDownloadLastDir.setFile(aLauncher.source, file.parent);
+        }
+        return file;
       });
-    })().catch(console.error);
+
+      if (result) {
+        let allowOverwrite = false;
+        try {
+          // If we're overwriting, avoid renaming our file, and assume
+          // overwriting it does the right thing.
+          if (
+            result.exists() &&
+            this.getFinalLeafName(result.leafName, "", true) == result.leafName
+          ) {
+            allowOverwrite = true;
+          }
+        } catch (ex) {
+          // As it turns out, the failure to remove the file, for example due to
+          // permission error, will be handled below eventually somehow.
+        }
+
+        let newDir = result.parent.QueryInterface(Ci.nsIFile);
+        try {
+          result = this.validateLeafName(
+            newDir,
+            result.leafName,
+            null,
+            allowOverwrite,
+            true
+          );
+        } catch (ex) {
+          // When the chosen download directory is write-protected,
+          // display an informative error message.
+          // In all cases, download will be stopped.
+
+          if (ex.result == Cr.NS_ERROR_FILE_ACCESS_DENIED) {
+            this.displayBadPermissionAlert();
+            result = null;
+          }
+        }
+      }
+      // Don't pop up the downloads panel redundantly.
+      aLauncher.saveDestinationAvailable(result, !!result);
+    })().catch(ex => {
+      console.error(ex);
+      // A null destination cancels the download. Without a call to
+      // saveDestinationAvailable() the transfer would keep running in the
+      // background, with no target file and no entry in the downloads panel.
+      aLauncher.saveDestinationAvailable(null);
+    });
   }
 
   getFinalLeafName(aLeafName, aFileExt, aAfterFilePicker) {
@@ -589,16 +640,14 @@ export class nsUnknownContentTypeDialog {
       this.dialogElement("normalBox").collapsed = true;
       // show basic choice
       this.dialogElement("basicBox").collapsed = false;
-      // change button labels and icons; use "save" icon for the accept
-      // button since it's the only action possible
+      // change the accept button label and icon, since saving is the only
+      // action possible
       let acceptButton = dialog.getButton("accept");
-      acceptButton.label = this.dialogElement("strings").getString(
-        "unknownAccept.label"
+      this.mDialog.document.l10n.setAttributes(
+        acceptButton,
+        "unknowncontenttype-accept-save-file"
       );
       acceptButton.setAttribute("icon", "save");
-      dialog.getButton("cancel").label = this.dialogElement(
-        "strings"
-      ).getString("unknownCancel.label");
       // hide other handler
       this.dialogElement("openHandler").collapsed = true;
       // set save as the selected option

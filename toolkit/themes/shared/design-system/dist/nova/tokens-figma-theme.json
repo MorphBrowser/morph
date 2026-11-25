@@ -334,20 +334,10 @@
     "dark": "{Theme$button/text/color/muted/active}",
     "forcedColors": "{Theme$button/text/color/ghost/active}"
   },
-  "button/text/color/menu/disabled": {
-    "light": "{Theme$button/text/color/ghost/disabled}",
-    "dark": "{Theme$button/text/color/disabled}",
-    "forcedColors": "{Theme$button/text/color/disabled}"
-  },
-  "button/text/color/menu/hover": {
-    "light": "{Theme$button/text/color/ghost/hover}",
-    "dark": "{Theme$button/text/color/hover}",
-    "forcedColors": "-moz-menuhovertext"
-  },
-  "button/text/color/menu/selected": {
-    "light": "{Theme$button/text/color/ghost/selected}",
-    "dark": "{Theme$button/text/color/selected}",
-    "forcedColors": "{Theme$button/text/color/primary/selected}"
+  "button/text/color/menu": {
+    "light": "{Theme$button/text/color/ghost}",
+    "dark": "{Theme$button/text/color/ghost}",
+    "forcedColors": "MenuText"
   },
   "button/text/color/primary": {
     "light": "{Colors$color/white}",
@@ -411,8 +401,23 @@
   },
   "button/text/color/menu/active": {
     "light": "{Theme$button/text/color/ghost/active}",
-    "dark": "{Theme$button/text/color/active}",
-    "forcedColors": "transparent"
+    "dark": "{Theme$button/text/color/ghost/active}",
+    "forcedColors": "{Theme$button/text/color/menu/hover}"
+  },
+  "button/text/color/menu/disabled": {
+    "light": "{Theme$button/text/color/ghost/disabled}",
+    "dark": "{Theme$button/text/color/ghost/disabled}",
+    "forcedColors": "{Theme$button/text/color/disabled}"
+  },
+  "button/text/color/menu/hover": {
+    "light": "{Theme$button/text/color/ghost/hover}",
+    "dark": "{Theme$button/text/color/ghost/hover}",
+    "forcedColors": "-moz-menuhovertext"
+  },
+  "button/text/color/menu/selected": {
+    "light": "{Theme$button/text/color/ghost/selected}",
+    "dark": "{Theme$button/text/color/ghost/selected}",
+    "forcedColors": "{Theme$button/text/color/primary/selected}"
   },
   "card/header/background/color": {
     "light": "{Theme$button/background/color}",
@@ -474,11 +479,6 @@
     "dark": "{Theme$popup/background/color}",
     "forcedColors": "{Theme$popup/background/color}"
   },
-  "panel/border/color": {
-    "light": "{Theme$popup/border/color}",
-    "dark": "{Theme$popup/border/color}",
-    "forcedColors": "{Theme$popup/border/color}"
-  },
   "panel/text/color": {
     "light": "{Theme$text/color}",
     "dark": "{Theme$text/color}",
@@ -504,11 +504,6 @@
     "dark": "{Colors$color/gray/60}",
     "forcedColors": "{HCM Theme$ButtonText}"
   },
-  "toolbar/field/background/color": {
-    "light": "{Theme$toolbar/background/color}",
-    "dark": "{Theme$toolbar/background/color}",
-    "forcedColors": "{Theme$toolbar/background/color}"
-  },
   "toolbar/field/background/color/focus": {
     "light": "{Theme$background/color/box}",
     "dark": "{Theme$background/color/box}",
@@ -528,6 +523,11 @@
     "light": "{Theme$focus/outline/color}",
     "dark": "{Theme$focus/outline/color}",
     "forcedColors": "{Theme$focus/outline/color}"
+  },
+  "toolbar/field/background/color": {
+    "light": "{Colors$color/white/alpha/40}",
+    "dark": "{Colors$color/black/alpha/20}",
+    "forcedColors": "{HCM Theme$Field}"
   },
   "toolbar/background/color": {
     "light": "rgba(255, 255, 255, 0.4)",
@@ -564,6 +564,11 @@
     "dark": "{Theme$toolbarbutton/outline/color/active}",
     "forcedColors": "{Theme$toolbarbutton/outline/color/active}"
   },
+  "toolbarbutton/outline/color/disabled": {
+    "light": "transparent",
+    "dark": "transparent",
+    "forcedColors": "{Theme$button/border/color/disabled}"
+  },
   "toolbarbutton/outline/color/hover": {
     "light": "transparent",
     "dark": "transparent",
@@ -578,16 +583,6 @@
     "light": "transparent",
     "dark": "transparent",
     "forcedColors": "transparent"
-  },
-  "toolbox/background/color/gradient-leading": {
-    "light": "{Colors$color/violet/10}",
-    "dark": "{Colors$color/violet-desaturated/70}",
-    "forcedColors": "{HCM Theme$Canvas}"
-  },
-  "toolbox/background/color/gradient-trailing": {
-    "light": "{Colors$color/orange/10}",
-    "dark": "{Colors$color/orange/70}",
-    "forcedColors": "{HCM Theme$Canvas}"
   },
   "toolbox/text/color": {
     "light": "{Theme$text/color}",
@@ -605,9 +600,19 @@
     "forcedColors": "transparent"
   },
   "toolbox/background/gradient": {
-    "light": "linear-gradient(96deg, color-mix({Primitives$toolbox/background/color/gradient-leading} 50%, transparent) 39.84%, color-mix({Primitives$toolbox/background/color/gradient-trailing} 50%, transparent) 101.72%)",
-    "dark": "linear-gradient(96deg, color-mix({Primitives$toolbox/background/color/gradient-leading} 50%, transparent) 39.84%, color-mix({Primitives$toolbox/background/color/gradient-trailing} 50%, transparent) 101.72%)",
+    "light": "linear-gradient(96deg, color-mix({Theme$toolbox/background/gradient/leading} 50%, transparent) 39.84%, color-mix({Theme$toolbox/background/gradient/trailing} 50%, transparent) 101.72%)",
+    "dark": "linear-gradient(96deg, color-mix({Theme$toolbox/background/gradient/leading} 50%, transparent) 39.84%, color-mix({Theme$toolbox/background/gradient/trailing} 50%, transparent) 101.72%)",
     "forcedColors": "image(transparent)"
+  },
+  "toolbox/background/gradient/leading": {
+    "light": "{Colors$color/violet/10}",
+    "dark": "{Colors$color/violet-desaturated/70}",
+    "forcedColors": "{HCM Theme$Canvas}"
+  },
+  "toolbox/background/gradient/trailing": {
+    "light": "{Colors$color/orange/10}",
+    "dark": "{Colors$color/orange/70}",
+    "forcedColors": "{HCM Theme$Canvas}"
   },
   "badge/background/color/filled": {
     "light": "{Colors$color/green/50}",
@@ -828,126 +833,6 @@
     "light": "{Theme$toolbox/text/color}",
     "dark": "{Theme$toolbox/text/color}",
     "forcedColors": "{Theme$toolbox/text/color}"
-  },
-  "tab/group/blue": {
-    "light": "{Colors$color/blue/50}",
-    "dark": "{Colors$color/blue/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/blue/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/blue/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/blue/hover": {
-    "light": "{Colors$color/blue/60}",
-    "dark": "{Colors$color/blue/40}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/purple": {
-    "light": "{Colors$color/purple/50}",
-    "dark": "{Colors$color/purple/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/purple/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/purple/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/purple/hover": {
-    "light": "{Colors$color/purple/60}",
-    "dark": "{Colors$color/purple/40}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/cyan": {
-    "light": "{Colors$color/cyan/50}",
-    "dark": "{Colors$color/cyan/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/cyan/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/cyan/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/cyan/hover": {
-    "light": "{Colors$color/cyan/60}",
-    "dark": "{Colors$color/cyan/40}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/orange": {
-    "light": "{Colors$color/orange/50}",
-    "dark": "{Colors$color/orange/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/orange/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/orange/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/orange/hover": {
-    "light": "{Colors$color/orange/60}",
-    "dark": "{Colors$color/orange/40}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/yellow": {
-    "light": "{Colors$color/yellow/50}",
-    "dark": "{Colors$color/yellow/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/yellow/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/yellow/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/yellow/hover": {
-    "light": "{Colors$color/yellow/60}",
-    "dark": "{Colors$color/yellow/40}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/pink": {
-    "light": "{Colors$color/pink/50}",
-    "dark": "{Colors$color/pink/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/pink/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/pink/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/pink/hover": {
-    "light": "{Colors$color/pink/60}",
-    "dark": "{Colors$color/pink/40}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/green": {
-    "light": "{Colors$color/green/50}",
-    "dark": "{Colors$color/green/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/green/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/green/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/green/hover": {
-    "light": "{Colors$color/green/60}",
-    "dark": "{Colors$color/green/40}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/red": {
-    "light": "{Colors$color/red/50}",
-    "dark": "{Colors$color/red/30}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/red/text": {
-    "light": "{Colors$color/white}",
-    "dark": "{Colors$color/red/90}",
-    "forcedColors": "transparent"
-  },
-  "tab/group/red/hover": {
-    "light": "{Colors$color/red/60}",
-    "dark": "{Colors$color/red/40}",
-    "forcedColors": "transparent"
   },
   "tab/background/color/hover": {
     "light": "{Theme$toolbarbutton/background/color/hover}",

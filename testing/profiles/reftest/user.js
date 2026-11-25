@@ -1,7 +1,5 @@
 // Preference file for the reftest harness.
 /* globals user_pref */
-// Make sure Shield doesn't hit the network.
-user_pref("app.normandy.api_url", "https://localhost/selfsupport-dummy/");
 user_pref("app.update.staging.enabled", false);
 user_pref("browser.safebrowsing.blockedURIs.enabled", false);
 user_pref("browser.safebrowsing.downloads.enabled", false);
@@ -27,6 +25,8 @@ user_pref("browser.viewport.desktopWidth", 800);
 user_pref("datareporting.healthreport.uploadEnabled", false);
 // Don't forcibly kill content processes after a timeout
 user_pref("dom.ipc.tabs.shutdownTimeoutSecs", 0);
+// Allow loading chrome://reftest/* documents in content processes.
+user_pref("dom.ipc.validatePrincipal.testing.allowContentSystemDocuments", true);
 // For mochitests, we're more interested in testing the behavior of in-
 // content XBL bindings, so we set this pref to true. In reftests, we're
 // more interested in testing the behavior of XBL as it works in chrome,

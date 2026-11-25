@@ -158,7 +158,8 @@ const PROP_JSON_FIELDS = [
   "rootURI",
 ];
 
-const SIGNED_TYPES = new Set(["extension", "locale", "theme"]);
+// Keep in sync with ALL_XPI_TYPES in XPIProvider.sys.mjs.
+const SIGNED_TYPES = new Set(["extension", "locale", "theme", "dictionary"]);
 
 // Time to wait before async save of XPI JSON database, in milliseconds
 const ASYNC_SAVE_DELAY_MS = 20;
@@ -442,7 +443,7 @@ export class AddonInternal {
   get isCorrectlySigned() {
     switch (this.location.name) {
       case KEY_APP_SYSTEM_PROFILE:
-        // Add-ons installed via Normandy must be signed by the system
+        // System add-ons in the profile must be signed by the system
         // key or the "Mozilla Extensions" key.
         return [
           lazy.AddonManager.SIGNEDSTATE_SYSTEM,

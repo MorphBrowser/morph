@@ -8,6 +8,7 @@
 #include <array>
 #include <bitset>
 #include <cctype>
+#include <memory>
 
 #include "AccessCheck.h"
 #include "CompositableHost.h"
@@ -67,7 +68,6 @@
 #include "WebGLBuffer.h"
 #include "WebGLChild.h"
 #include "WebGLContextLossHandler.h"
-#include "WebGLContextUtils.h"
 #include "WebGLExtensions.h"
 #include "WebGLFormats.h"
 #include "WebGLFramebuffer.h"
@@ -143,6 +143,7 @@ WebGLContext::WebGLContext(HostWebGLContext* host,
       mPrincipalKey(desc.principalKey),
       mContextLossHandler(this),
       mRequestedSize(desc.size) {
+  mColorWriteMasks.fill(0xf);
   if (host) {
     host->mContext = this;
   }
@@ -351,14 +352,14 @@ bool WebGLContext::CreateAndInitGL(
     tryNativeGL = false;
   }
 
-  if (StaticPrefs::webgl_disable_angle() ||
+  if (StaticPrefs::webgl_disable_angle_AtStartup() ||
       PR_GetEnv("MOZ_WEBGL_FORCE_OPENGL") || useEGL) {
     tryNativeGL = true;
     tryANGLE = false;
   }
 #elif defined(XP_MACOSX)
   if (gfx::gfxVars::AllowMetalAngleWebGL() &&
-      !StaticPrefs::webgl_disable_angle() &&
+      !StaticPrefs::webgl_disable_angle_AtStartup() &&
       // Metal does not expose a software renderer. Fall back to native (CGL) if
       // a hardware context is forbidden.
       !(flags & gl::CreateContextFlags::FORBID_HARDWARE)) {
@@ -434,7 +435,7 @@ bool WebGLContext::CreateAndInitGL(
 
   const auto val = StaticPrefs::webgl_debug_incomplete_tex_color();
   if (val) {
-    mIncompleteTexOverride.reset(new gl::Texture(*gl));
+    mIncompleteTexOverride = std::make_unique<gl::Texture>(*gl);
     const gl::ScopedBindTexture autoBind(gl, mIncompleteTexOverride->name);
     const auto heapVal = std::make_unique<uint32_t>(val);
     gl->fTexImage2D(LOCAL_GL_TEXTURE_2D, 0, LOCAL_GL_RGBA, 1, 1, 0,
@@ -661,6 +662,11 @@ RefPtr<WebGLContext> WebGLContext::Create(HostWebGLContext* host,
   out->limits = *webgl->mLimits;
   out->uploadableSdTypes = webgl->mUploadableSdTypes;
   out->vendor = webgl->gl->Vendor();
+#if defined(MOZ_AARCH64) && defined(XP_MACOSX)
+  // Blit uploads can cause application freezes on the native GL driver on apple
+  // silicon. See bug 1800573.
+  out->supportsDomBlitUploads = webgl->gl->IsMetalANGLE();
+#endif
   out->optionalRenderableFormatBits = webgl->mOptionalRenderableFormatBits;
 
   return webgl;
@@ -905,7 +911,7 @@ ScopedPrepForResourceClear::ScopedPrepForResourceClear(
 
   // "The clear operation always uses the front stencil write mask
   //  when clearing the stencil buffer."
-  webgl.DoColorMask(Some(0), 0b1111);
+  webgl.DoColorMask(Nothing(), 0b1111);
   gl->fDepthMask(true);
   gl->fStencilMaskSeparate(LOCAL_GL_FRONT, 0xffffffff);
 
@@ -924,7 +930,13 @@ ScopedPrepForResourceClear::~ScopedPrepForResourceClear() {
     gl->fEnable(LOCAL_GL_RASTERIZER_DISCARD);
   }
 
-  webgl.DoColorMask(Some(0), webgl.mColorWriteMask0);
+  if (webgl.IsExtensionEnabled(WebGLExtensionID::OES_draw_buffers_indexed)) {
+    for (const auto i : IntegerRange(webgl.MaxValidDrawBuffers())) {
+      webgl.DoColorMask(Some(i), webgl.mColorWriteMasks[i]);
+    }
+  } else {
+    webgl.DoColorMask(Nothing(), webgl.mColorWriteMasks[0]);
+  }
   gl->fDepthMask(webgl.mDepthWriteMask);
   gl->fStencilMaskSeparate(LOCAL_GL_FRONT, webgl.mStencilWriteMaskFront);
 
@@ -1210,7 +1222,7 @@ void InitSwapChain(gl::GLContext& gl, gl::SwapChain& swapChain,
   }
   if (!swapChain.mFactory) {
     NS_WARNING("Failed to make an ideal SurfaceFactory.");
-    swapChain.mFactory = MakeUnique<gl::SurfaceFactory_Basic>(gl);
+    swapChain.mFactory = std::make_unique<gl::SurfaceFactory_Basic>(gl);
   }
   MOZ_ASSERT(swapChain.mFactory);
   if (useAsync) {
@@ -1350,8 +1362,9 @@ bool WebGLContext::PushRemoteTexture(
       if (!mHost) {
         return onFailure();
       }
-      auto pid = mHost->mOwner->OtherPid();
-      mRemoteTextureOwner = MakeRefPtr<layers::RemoteTextureOwnerClient>(pid);
+      auto childID = mHost->mOwner->OtherChildID();
+      mRemoteTextureOwner =
+          MakeRefPtr<layers::RemoteTextureOwnerClient>(childID);
     }
     ownerClient = mRemoteTextureOwner;
   }
@@ -1476,8 +1489,8 @@ void WebGLContext::EnsureContextLostRemoteTextureOwner(
     if (!mHost) {
       return;
     }
-    auto pid = mHost->mOwner->OtherPid();
-    mRemoteTextureOwner = MakeRefPtr<layers::RemoteTextureOwnerClient>(pid);
+    auto childID = mHost->mOwner->OtherChildID();
+    mRemoteTextureOwner = MakeRefPtr<layers::RemoteTextureOwnerClient>(childID);
   }
 
   layers::RemoteTextureOwnerId ownerId = options.remoteTextureOwnerId;
@@ -2012,7 +2025,7 @@ void WebGLContext::DoColorMask(Maybe<GLuint> i, const uint8_t bitmask) const {
 
 ScopedDrawCallWrapper::ScopedDrawCallWrapper(WebGLContext& webgl)
     : mWebGL(webgl) {
-  uint8_t driverColorMask0 = mWebGL.mColorWriteMask0;
+  uint8_t driverColorMask0 = mWebGL.mColorWriteMasks[0];
   bool driverDepthTest = mWebGL.mDepthTestEnabled;
   bool driverStencilTest = mWebGL.mStencilTestEnabled;
   const auto& fb = mWebGL.mBoundDrawFramebuffer;

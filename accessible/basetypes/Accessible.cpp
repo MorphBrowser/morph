@@ -437,6 +437,22 @@ void Accessible::GetPositionAndSetSize(int32_t* aPosInSet, int32_t* aSetSize) {
   }
 }
 
+bool Accessible::IsGeneric() const {
+  role accRole = Role();
+  if (accRole == roles::TEXT || accRole == roles::TEXT_CONTAINER) {
+    return true;
+  }
+
+  if (accRole == roles::SECTION) {
+    const nsRoleMapEntry* roleMapEntry = ARIARoleMap();
+    if ((!roleMapEntry || !roleMapEntry->IsOfType(eDPub))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool Accessible::IsLinkValid() {
   MOZ_ASSERT(IsLink(), "IsLinkValid is called on not hyper link!");
 
@@ -892,6 +908,12 @@ role Accessible::ARIATransformRole(role aRole) const {
       // first). Otherwise, fall back to the element's native role.
       return FindNextValidARIARole({nsGkAtoms::region, nsGkAtoms::form});
     }
+
+    if (aRole == roles::FORM) {
+      // A form with a name is a form landmark.
+      return roles::FORM_LANDMARK;
+    }
+
     return aRole;
   }
 

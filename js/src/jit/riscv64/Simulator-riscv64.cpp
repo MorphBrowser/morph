@@ -441,7 +441,7 @@ void RiscvDebugger::Debug() {
       SimInstruction instr(sim_->get_pc_as<Instruction*>());
       if (!(instr.IsTrap()) || instr.InstructionBits() == rtCallRedirInstr) {
         sim_->icount_++;
-        sim_->InstructionDecode(instr);
+        sim_->ExecuteInstructionWithChecks(instr);
       } else {
         // Allow si to jump over generated breakpoints.
         printf("/!\\ Jumping over generated breakpoint.\n");
@@ -729,6 +729,8 @@ void RiscvDebugger::Debug() {
       printf("Unknown command: %s\n", cmd);
     }
   }
+  // The commands may have set a watch or tracing.
+  sim_->UpdateInstructionChecks();
 
 #undef COMMAND_SIZE
 #undef ARG_SIZE
@@ -1163,6 +1165,11 @@ void Simulator::setCallResultFloat(float result) {
 
 void Simulator::setCallResult(int64_t res) { setRegister(a0, res); }
 
+#ifdef XP_DARWIN
+// add a dedicated setCallResult for intptr_t on Darwin
+void Simulator::setCallResult(intptr_t res) { setRegister(a0, I64(res)); }
+#endif
+
 void Simulator::setCallResult(__int128_t res) {
   setRegister(a0, I64(res));
   setRegister(a1, I64(res >> 64));
@@ -1506,7 +1513,11 @@ bool Simulator::overRecursed(uintptr_t newsp) const {
 }
 
 bool Simulator::overRecursedWithExtra(uint32_t extra) const {
-  uintptr_t newsp = getRegister(sp) - extra;
+  uintptr_t cursp = getRegister(sp);
+  if (extra >= cursp) {
+    return true;
+  }
+  uintptr_t newsp = cursp - extra;
   return newsp <= stackLimit();
 }
 
@@ -1702,6 +1713,7 @@ void Simulator::SoftwareInterrupt() {
         default:
           UNREACHABLE();
       }
+      UpdateInstructionChecks();
     } else {
       increaseStopCounter(code);
       handleStop(code);
@@ -1831,25 +1843,10 @@ void Simulator::DieOrDebug() {
   }
 }
 
-// Executes the current instruction.
-void Simulator::InstructionDecode(const SimInstruction& instr) {
-  if (!SimulatorProcess::ICacheCheckingDisableCount) {
-    AutoLockSimulatorCache als;
-    SimulatorProcess::checkICacheLocked(instr);
-  }
+MOZ_ALWAYS_INLINE void Simulator::ExecuteInstruction(Instruction* instr) {
   pc_modified_ = false;
 
-  EmbeddedVector<char, 256> buffer;
-
-  if (FLAG_trace_sim || FLAG_debug_sim) {
-    SNPrintF(trace_buf_, " ");
-    disasm::NameConverter converter;
-    disasm::Disassembler dasm(converter);
-    // Use a reasonably large buffer.
-    dasm.InstructionDecode(buffer, instr.instr());
-  }
-
-  instr_ = instr.instr();
+  instr_ = instr;
   switch (instr_.InstructionType()) {
     case Instruction::kRType:
       DecodeRVRType();
@@ -1908,15 +1905,33 @@ void Simulator::InstructionDecode(const SimInstruction& instr) {
       UNSUPPORTED();
   }
 
+  if (!pc_modified_) {
+    setRegister(pc, reinterpret_cast<sreg_t>(instr) + instr->InstructionSize());
+  }
+}
+
+void Simulator::ExecuteInstructionWithChecks(const SimInstruction& instr) {
+  if (!SimulatorProcess::ICacheCheckingDisableCount) {
+    AutoLockSimulatorCache als;
+    SimulatorProcess::checkICacheLocked(instr);
+  }
+
+  EmbeddedVector<char, 256> buffer;
+
+  if (FLAG_trace_sim || FLAG_debug_sim) {
+    SNPrintF(trace_buf_, " ");
+    disasm::NameConverter converter;
+    disasm::Disassembler dasm(converter);
+    // Use a reasonably large buffer.
+    dasm.InstructionDecode(buffer, instr.instr());
+  }
+
+  ExecuteInstruction(instr.instr());
+
   if (FLAG_trace_sim) {
     printf("  0x%012" PRIxPTR "      %-44s\t%s\n",
            reinterpret_cast<intptr_t>(instr.instr()), buffer.start(),
            trace_buf_.start());
-  }
-
-  if (!pc_modified_) {
-    setRegister(
-        pc, reinterpret_cast<sreg_t>(instr.instr()) + instr.InstructionSize());
   }
 
   if (watch_address_ != nullptr) {
@@ -1936,6 +1951,7 @@ void Simulator::enable_single_stepping(SingleStepCallback cb, void* arg) {
   single_stepping_ = true;
   single_step_callback_ = cb;
   single_step_callback_arg_ = arg;
+  UpdateInstructionChecks();
   single_step_callback_(single_step_callback_arg_, this, (void*)get_pc());
 }
 
@@ -1947,10 +1963,31 @@ void Simulator::disable_single_stepping() {
   single_stepping_ = false;
   single_step_callback_ = nullptr;
   single_step_callback_arg_ = nullptr;
+  UpdateInstructionChecks();
 }
 
-template <bool enableStopSimAt>
+void Simulator::UpdateInstructionChecks() {
+  instruction_checks_ = StopSimAt != -1 || single_stepping_ || FLAG_trace_sim ||
+                        FLAG_debug_sim ||
+                        !SimulatorProcess::ICacheCheckingDisableCount ||
+                        watch_address_ != nullptr;
+}
+
+MOZ_NEVER_INLINE void Simulator::ExecuteSlowPath(int64_t program_counter) {
+  if (icount_ == Simulator::StopSimAt) {
+    RiscvDebugger dbg(this);
+    dbg.Debug();
+  }
+  if (single_stepping_) {
+    single_step_callback_(single_step_callback_arg_, this,
+                          (void*)program_counter);
+  }
+  SimInstruction instr(reinterpret_cast<Instruction*>(program_counter));
+  ExecuteInstructionWithChecks(instr);
+}
+
 void Simulator::execute() {
+  UpdateInstructionChecks();
   if (single_stepping_) {
     single_step_callback_(single_step_callback_arg_, this, nullptr);
   }
@@ -1960,16 +1997,11 @@ void Simulator::execute() {
   int64_t program_counter = get_pc();
 
   while (program_counter != end_sim_pc) {
-    if (enableStopSimAt && (icount_ == Simulator::StopSimAt)) {
-      RiscvDebugger dbg(this);
-      dbg.Debug();
+    if (MOZ_UNLIKELY(instruction_checks_)) {
+      ExecuteSlowPath(program_counter);
+    } else {
+      ExecuteInstruction(reinterpret_cast<Instruction*>(program_counter));
     }
-    if (single_stepping_) {
-      single_step_callback_(single_step_callback_arg_, this,
-                            (void*)program_counter);
-    }
-    SimInstruction instr(reinterpret_cast<Instruction*>(program_counter));
-    InstructionDecode(instr);
     icount_++;
     program_counter = get_pc();
   }
@@ -3727,9 +3759,9 @@ bool Simulator::DecodeRvvVS() {
 void Simulator::DecodeRVIType() {
   switch (instr_.InstructionBits() & kITypeMask) {
     case RO_JALR: {
-      set_rd(get_pc() + kInstrSize);
       // Note: No need to shift 2 for JALR's imm12, but set lowest bit to 0.
       sreg_t next_pc = (rs1() + imm12()) & ~sreg_t(1);
+      set_rd(get_pc() + kInstrSize);
       set_pc(next_pc);
       break;
     }
@@ -4013,7 +4045,17 @@ void Simulator::DecodeRVIType() {
       break;
     }
     case RO_FENCE: {
-      // DO nothing in sumulator
+      if (instr_.InstructionBits() == kPauseInstr) {
+        AtomicOperations::pause();
+      } else {
+        // Simulated loads and stores are host accesses, so a fence needs a
+        // host barrier to order them. The host barrier only approximates a
+        // weaker fence.
+        MOZ_ASSERT(instr_.MemoryOrder(true) == PSIORW &&
+                       instr_.MemoryOrder(false) == PSIORW,
+                   "Only fence iorw, iorw is supported");
+        AtomicOperations::fenceSeqCst();
+      }
       break;
     }
     case RO_ECALL: {                   // RO_EBREAK
@@ -4251,8 +4293,9 @@ void Simulator::DecodeCRType() {
         DieOrDebug();
       } else if (instr_.RvcRdValue() != 0 &&
                  instr_.RvcRs2Value() == 0) {  // c.jalr
+        sreg_t next_pc = rvc_rs1();
         setRegister(ra, get_pc() + kShortInstrSize);
-        set_pc(rvc_rs1());
+        set_pc(next_pc);
       } else if (instr_.RvcRdValue() != 0 &&
                  instr_.RvcRs2Value() != 0) {  // c.add
         set_rvc_rd(sext_xlen(rvc_rs1() + rvc_rs2()));
@@ -4514,11 +4557,7 @@ void Simulator::callInternal(uint8_t* entry) {
   setRegister(Simulator::Register::gp, callee_saved_value);
 
   // Start the simulation.
-  if (Simulator::StopSimAt != -1) {
-    execute<true>();
-  } else {
-    execute<false>();
-  }
+  execute();
 
   // Check that the callee-saved registers have been preserved.
   MOZ_ASSERT(callee_saved_value == getRegister(Simulator::Register::fp));

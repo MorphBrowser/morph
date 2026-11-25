@@ -132,7 +132,7 @@ dictionary RTCOutboundRtpStreamStats : RTCSentRtpStreamStats {
   unsigned long long retransmittedPacketsSent;
   unsigned long long retransmittedBytesSent;
   unsigned long rtxSsrc;
-  unsigned long long totalEncodedBytesTarget;
+  double targetBitrate;
   unsigned long frameWidth;
   unsigned long frameHeight;
   double framesPerSecond;
@@ -155,6 +155,15 @@ dictionary RTCRemoteOutboundRtpStreamStats : RTCSentRtpStreamStats {
 dictionary RTCMediaSourceStats : RTCStats {
   required DOMString trackIdentifier;
   required DOMString kind;
+};
+
+dictionary RTCAudioSourceStats : RTCMediaSourceStats {
+  double audioLevel;
+  double totalAudioEnergy;
+  double totalSamplesDuration;
+  // TODO BUG 2087679
+  // double echoReturnLoss;
+  // double echoReturnLossEnhancement;
 };
 
 dictionary RTCVideoSourceStats : RTCMediaSourceStats {
@@ -318,6 +327,7 @@ dictionary RTCStatsCollection {
   sequence<RTCRemoteInboundRtpStreamStats>  remoteInboundRtpStreamStats = [];
   sequence<RTCRemoteOutboundRtpStreamStats> remoteOutboundRtpStreamStats = [];
   sequence<RTCMediaSourceStats>             mediaSourceStats = [];
+  sequence<RTCAudioSourceStats>             audioSourceStats = [];
   sequence<RTCVideoSourceStats>             videoSourceStats = [];
   sequence<RTCPeerConnectionStats>          peerConnectionStats = [];
   sequence<RTCRTPContributingSourceStats>   rtpContributingSourceStats = [];
@@ -348,6 +358,7 @@ dictionary RTCIceServerInternal {
 dictionary RTCConfigurationInternal {
   RTCBundlePolicy                bundlePolicy;
   required boolean               certificatesProvided;
+  octet                          iceCandidatePoolSize;
   sequence<RTCIceServerInternal> iceServers = [];
   RTCIceTransportPolicy          iceTransportPolicy;
   required boolean               peerIdentityProvided;

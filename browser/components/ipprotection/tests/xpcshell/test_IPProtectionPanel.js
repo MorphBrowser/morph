@@ -9,6 +9,11 @@ const { IPProtectionPanel } = ChromeUtils.importESModule(
 const { IPProtectionServerlist } = ChromeUtils.importESModule(
   "moz-src:///toolkit/components/ipprotection/IPProtectionServerlist.sys.mjs"
 );
+const { ShellService } = ChromeUtils.importESModule(
+  "moz-src:///browser/components/shell/ShellService.sys.mjs"
+);
+
+const EGRESS_LOCATION_PREF = "browser.ipProtection.egressLocation";
 
 /**
  * A class that mocks the IP Protection panel.
@@ -468,7 +473,7 @@ add_task(async function test_showing_refreshes_usage_when_paused() {
   let refreshUsageStub = sinon.stub(IPPProxyManager, "refreshUsage").resolves();
 
   ipProtectionPanel.state.paused = false;
-  ipProtectionPanel.showing(ipProtectionPanel.panel);
+  await ipProtectionPanel.showing(ipProtectionPanel.panel);
 
   Assert.ok(
     refreshUsageStub.notCalled,
@@ -476,7 +481,7 @@ add_task(async function test_showing_refreshes_usage_when_paused() {
   );
 
   ipProtectionPanel.state.paused = true;
-  ipProtectionPanel.showing(ipProtectionPanel.panel);
+  await ipProtectionPanel.showing(ipProtectionPanel.panel);
   Assert.ok(
     refreshUsageStub.calledOnce,
     "refreshUsage should be called when opening the panel while paused"
@@ -488,7 +493,7 @@ add_task(async function test_showing_refreshes_usage_when_paused() {
 });
 
 /**
- * Tests that opening the panel reads the isPremium getter on panel open.
+ * Tests that opening the panel calls isPremium on panel open.
  */
 add_task(async function test_showing_checks_is_premium_once() {
   let ipProtectionPanel = new IPProtectionPanel();
@@ -496,37 +501,37 @@ add_task(async function test_showing_checks_is_premium_once() {
 
   // Check that the state is set on panel open
   let premiumValue = true;
-  let isPremiumSpy = sinon.spy(() => premiumValue);
+  let isPremiumSpy = sinon.spy(async () => premiumValue);
   let isPremiumStub = sinon
     .stub(IPProtectionPanel.prototype, "isPremium")
-    .get(isPremiumSpy);
+    .callsFake(isPremiumSpy);
 
-  ipProtectionPanel.showing(ipProtectionPanel.panel);
+  await ipProtectionPanel.showing(ipProtectionPanel.panel);
 
   Assert.equal(
     isPremiumSpy.callCount,
     1,
-    "isPremium should be read when the panel opens"
+    "isPremium should be called when the panel opens"
   );
   Assert.equal(
     ipProtectionPanel.state.isPremium,
     true,
-    "isPremium state should be set from the getter"
+    "isPremium state should be set from the method's result"
   );
 
   // Checks that the state is re-set on panel open if it was previously true
   premiumValue = false;
-  ipProtectionPanel.showing(ipProtectionPanel.panel);
+  await ipProtectionPanel.showing(ipProtectionPanel.panel);
 
   Assert.equal(
     isPremiumSpy.callCount,
     2,
-    "isPremium should be read once more on the second panel open"
+    "isPremium should be called once more on the second panel open"
   );
   Assert.equal(
     ipProtectionPanel.state.isPremium,
     false,
-    "isPremium state should follow the getter when it changes between opens"
+    "isPremium state should follow the method's result when it changes between opens"
   );
 
   isPremiumStub.restore();
@@ -534,46 +539,125 @@ add_task(async function test_showing_checks_is_premium_once() {
   Services.prefs.clearUserPref("browser.ipProtection.everOpenedPanel");
 });
 
+const LOCATIONS = {
+  REC: { country: { code: "REC", locked: false } },
+  CA: { country: { code: "CA", locked: true } },
+};
+
 /**
- * Tests that showLocationButtonBadge is true when the dismissed pref is not set.
+ * Opens the panel with an active connection on `current`, the locked CA as
+ * the picked location, and premium coming from the default browser check.
+ *
+ * @param {object} options
+ * @param {string} options.current
+ *   Key in LOCATIONS of the location the connection routes through.
+ * @param {boolean} options.isDefaultBrowser
+ *   Whether Firefox is the default browser.
+ * @returns {Promise<sinon.SinonStub>} The IPPProxyManager.switch stub.
  */
-add_task(async function test_location_badge_initial_state_pref_unset() {
-  Services.prefs.clearUserPref(
-    "browser.ipProtection.locationButtonBadgeDismissed"
-  );
-
+async function showPanelWithLocation({ current, isDefaultBrowser }) {
   let ipProtectionPanel = new IPProtectionPanel();
+  ipProtectionPanel.panel = new FakeIPProtectionPanelView();
+  let sandbox = sinon.createSandbox();
+  Services.prefs.setStringPref(EGRESS_LOCATION_PREF, "CA");
+  sandbox
+    .stub(IPProtectionService, "authProvider")
+    .get(() => ({ hasUpgraded: false }));
+  sandbox
+    .stub(ShellService, "isDefaultBrowserAsync")
+    .resolves(isDefaultBrowser);
+  sandbox
+    .stub(IPProtectionServerlist, "getLocation")
+    .callsFake(code => LOCATIONS[code] ?? null);
+  sandbox
+    .stub(IPProtectionServerlist, "getRecommendedLocation")
+    .returns(LOCATIONS.REC);
+  sandbox.stub(IPPProxyManager, "location").get(() => LOCATIONS[current]);
+  let switchStub = sandbox.stub(IPPProxyManager, "switch");
 
-  Assert.equal(
-    ipProtectionPanel.state.showLocationButtonBadge,
-    true,
-    "showLocationButtonBadge should be true when pref is not set"
-  );
+  await ipProtectionPanel.showing(ipProtectionPanel.panel);
 
+  sandbox.restore();
   ipProtectionPanel.uninit();
+  Services.prefs.clearUserPref(EGRESS_LOCATION_PREF);
+  Services.prefs.clearUserPref("browser.ipProtection.everOpenedPanel");
+  return switchStub;
+}
+
+/**
+ * Tests that opening the panel after losing default browser status moves a
+ * connection off a locked location.
+ */
+add_task(async function test_showing_leaves_locked_location() {
+  let switchStub = await showPanelWithLocation({
+    current: "CA",
+    isDefaultBrowser: false,
+  });
+
+  Assert.ok(switchStub.calledOnce, "The connection should be switched");
+  Assert.strictEqual(
+    switchStub.firstCall.args[0],
+    undefined,
+    "The connection should be switched to the recommended location"
+  );
 });
 
 /**
- * Tests that showLocationButtonBadge is false when the dismissed pref is set to true.
+ * Tests that opening the panel after becoming the default browser again moves
+ * the connection back to the picked locked location.
  */
-add_task(async function test_location_badge_initial_state_pref_set() {
-  Services.prefs.setBoolPref(
-    "browser.ipProtection.locationButtonBadgeDismissed",
-    true
-  );
+add_task(async function test_showing_returns_to_locked_location() {
+  let switchStub = await showPanelWithLocation({
+    current: "REC",
+    isDefaultBrowser: true,
+  });
 
+  Assert.ok(
+    switchStub.calledOnceWithExactly("CA"),
+    "The connection should be switched back to the picked location"
+  );
+});
+
+/**
+ * Tests that opening the panel keeps a connection already on the location the
+ * panel shows.
+ */
+add_task(async function test_showing_keeps_matching_location() {
+  let switchStub = await showPanelWithLocation({
+    current: "CA",
+    isDefaultBrowser: true,
+  });
+
+  Assert.ok(switchStub.notCalled, "The connection should not be switched");
+});
+
+/**
+ * Tests that opening the panel doesn't update premium status if hidden while
+ * the premium check is pending.
+ */
+add_task(async function test_showing_aborts_when_hidden() {
   let ipProtectionPanel = new IPProtectionPanel();
+  ipProtectionPanel.panel = new FakeIPProtectionPanelView();
+
+  let premiumCheck = Promise.withResolvers();
+  let isPremiumStub = sinon
+    .stub(ipProtectionPanel, "isPremium")
+    .returns(premiumCheck.promise);
+
+  let showingPromise = ipProtectionPanel.showing(ipProtectionPanel.panel);
+  ipProtectionPanel.hiding();
+  premiumCheck.resolve(true);
+  await showingPromise;
 
   Assert.equal(
-    ipProtectionPanel.state.showLocationButtonBadge,
+    ipProtectionPanel.state.isPremium,
     false,
-    "showLocationButtonBadge should be false when pref is set to true"
+    "isPremium state should not be updated when opening the panel is cancelled"
   );
 
+  isPremiumStub.restore();
   ipProtectionPanel.uninit();
-  Services.prefs.clearUserPref(
-    "browser.ipProtection.locationButtonBadgeDismissed"
-  );
+  Services.prefs.clearUserPref("browser.ipProtection.everOpenedPanel");
 });
 
 function dispatchUsageEvent(max, remaining) {

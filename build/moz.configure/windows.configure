@@ -94,7 +94,7 @@ def valid_ucrt_sdk_dir(
 
 @depends(vc_path, valid_windows_sdk_dir, valid_ucrt_sdk_dir)
 @imports("os")
-def include_path(vc_path, windows_sdk_dir, ucrt_sdk_dir):
+def msvc_include_dirs(vc_path, windows_sdk_dir, ucrt_sdk_dir):
     if not vc_path:
         return
     atlmfc_dir = os.path.join(vc_path, "atlmfc", "include")
@@ -118,49 +118,18 @@ def include_path(vc_path, windows_sdk_dir, ucrt_sdk_dir):
             "Please install them." % windows_sdk_dir.path
         )
 
-    configured_includes = [
-        normalize_path_list_entry(p)
-        for p in (
-            os.path.join(vc_path, "include"),
-            atlmfc_dir,
-            os.path.join(windows_sdk_dir.include, "shared"),
-            os.path.join(windows_sdk_dir.include, "um"),
-            winrt_dir,
-            cppwinrt_dir,
-            os.path.join(ucrt_sdk_dir.include, "ucrt"),
-        )
+    return [
+        os.path.join(vc_path, "include"),
+        atlmfc_dir,
+        os.path.join(windows_sdk_dir.include, "shared"),
+        os.path.join(windows_sdk_dir.include, "um"),
+        winrt_dir,
+        cppwinrt_dir,
+        os.path.join(ucrt_sdk_dir.include, "ucrt"),
     ]
-    # Bug 2040992: INCLUDE gets exported by make to subprocesses, so
-    # reentrant configure invocations (e.g. Gradle's :machConfigure) can
-    # see a different INCLUDE than the original ./mach configure. Since
-    # INCLUDE flows into autoconf.mk, capturing those differences would
-    # churn it between invocations from different entry points, which
-    # causes rebuilds through PP_TARGETS like .cargo/config.toml. So we
-    # skip entries already in the configured set, while preserving any
-    # extra entries the user added.
-    configured_set = set(configured_includes)
-    seen_extra_includes = set()
-    extra_includes = []
-    # INCLUDE is an MSVC/clang-cl variable and is always ";"-separated,
-    # regardless of the host OS. Do not use os.pathsep here: on a POSIX
-    # host (e.g. the Linux worker used for win64 cross-compiles) os.pathsep
-    # is ":", which would mis-parse and mis-serialize INCLUDE and prevent
-    # the compiler from finding the Windows SDK / CRT headers.
-    for p in os.environ.get("INCLUDE", "").split(";"):
-        normalized = normalize_path_list_entry(p)
-        if normalized and normalized not in configured_set:
-            if normalized in seen_extra_includes:
-                continue
-            seen_extra_includes.add(normalized)
-            extra_includes.append(normalized)
-    includes = extra_includes + configured_includes
-    # Set in the environment for old-configure
-    includes = ";".join(includes)
-    os.environ["INCLUDE"] = includes
-    return includes
 
 
-set_config("INCLUDE", include_path)
+set_config("MSVC_INCLUDE_DIRS", msvc_include_dirs)
 
 # cppwinrt requires this on clang because of no coroutine support, which is okay
 set_define("_SILENCE_CLANG_COROUTINE_MESSAGE", "")
@@ -373,21 +342,6 @@ def check_w32API_version():
     )
 
 
-@depends(target)
-def cpu_arch_macro_definition(target):
-    if target.cpu == "x86":
-        return "_X86_"
-    elif target.cpu == "x86_64":
-        return "_AMD64_"
-    elif target.cpu == "aarch64":
-        return "_ARM64_"
-    else:
-        return "_CPU_ARCH_NOT_DEFINED"
-
-
-set_define(cpu_arch_macro_definition, True)
-
-
 check_w32API_version()
 
 
@@ -491,6 +445,13 @@ with only_when(depends(c_compiler)(lambda c: c.type == "clang-cl")):
         add_linker_flag("-LARGEADDRESSAWARE")
         add_linker_flag("-SAFESEH")
 
+    # The MSVC STL marks every function in <atomic> as target("cx16") when
+    # compiling with clang for x64, and clang 23 no longer inlines them into
+    # callers built without that feature. Without this, every std::atomic
+    # operation is an out-of-line call. All x64 CPUs supported by Windows 10+
+    # have cmpxchg16b.
+    add_flag("-mcx16", when=depends(target.cpu)(lambda cpu: cpu == "x86_64"))
+
 
 set_define("WIN32_LEAN_AND_MEAN", True)
 
@@ -499,9 +460,6 @@ set_define("NOMINMAX", True)
 
 
 with only_when(target_is_windows & depends(c_compiler)(lambda c: c.type != "clang-cl")):
-    # strsafe.h on mingw uses macros for function deprecation that pollutes namespace
-    # causing problems with local implementations with the same name.
-    set_define("STRSAFE_NO_DEPRECATE", True)
     # abseil defaults to the pthread_setspecific thread identity mode on mingw.
     set_define("ABSL_FORCE_THREAD_IDENTITY_MODE", "ABSL_THREAD_IDENTITY_MODE_USE_CPP11")
 
@@ -510,9 +468,11 @@ with only_when(target_is_windows & depends(c_compiler)(lambda c: c.type != "clan
 
     set_config("WIN32_EXE_DEFAULT_LDFLAGS", win32_exe_default_ldflags_mingw)
 
-    # Silence problematic clang warnings
-    add_flag("-Wno-incompatible-ms-struct", compiler=cxx_compiler)
     add_linker_flag("-Wl,--no-insert-timestamp")
+
+    set_define(
+        "HAVE_SEH_EXCEPTIONS", True, when=depends(target.cpu)(lambda cpu: cpu != "x86")
+    )
 
     with only_when(depends(target.cpu)(lambda cpu: cpu == "x86")):
         add_flag("-mstackrealign")

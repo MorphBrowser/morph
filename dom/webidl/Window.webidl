@@ -298,7 +298,7 @@ partial interface Window {
   //[Throws, NewObject, NeedsCallerType] MediaQueryList matchMedia(DOMString query);
   [Throws, NewObject, NeedsCallerType] MediaQueryList? matchMedia(UTF8String query);
 
-  [SameObject, Replaceable] readonly attribute Screen screen;
+  [Replaceable] readonly attribute Screen screen;
 
   // browsing context
   //[Throws] undefined moveTo(double x, double y);
@@ -400,6 +400,9 @@ dictionary SynthesizeMouseEventData : SynthesizeEventData {
   // reports while the native pointer is locked. Must be specified together.
   long movementX;
   long movementY;
+  // Command (for WidgetCommandEvent) to execute as the default action for the click.
+  // Can only be specified from the parent process.
+  DOMString command = "";
 };
 
 // Mozilla-specific stuff

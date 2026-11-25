@@ -253,6 +253,8 @@ class CustomTabsTest {
     fun verifyPDFViewerInACustomTabTest() {
         val customTabPage = mockWebServer.getGenericAsset(3)
         val pdfFormResource = mockWebServer.pdfFormAsset
+        val pdfTitle = "Untitled document - pdfForm.pdf"
+        val downloadFile = "pdfForm.pdf"
 
         intentReceiverActivityTestRule.launchActivity(createCustomTabIntent(customTabPage.url.toString()))
 
@@ -263,9 +265,16 @@ class CustomTabsTest {
             verifyPDFReaderToolbarItems()
             verifyCustomTabCloseButton()
             verifyCustomTabsSiteInfoButton()
-            verifyCustomTabToolbarTitle("Untitled document - pdfForm.pdf")
+            verifyCustomTabToolbarTitle(pdfTitle)
             verifyCustomTabUrl(pdfFormResource.url.toString())
             verifyMainMenuButton()
+        }
+        browserScreen(composeTestRule) {}
+            .clickDownloadPDFButton {
+                verifyDownloadCompleteSnackbar(fileName = downloadFile)
+                waitUntilDownloadSnackbarGone()
+            }
+        customTabScreen(composeTestRule) {
             clickCustomTabCloseButton()
         }
         homeScreen(composeTestRule) {

@@ -28,7 +28,6 @@ const RESULT_MENU_COMMAND = {
   HELP: "help",
   INACCURATE_LOCATION: "inaccurate_location",
   MANAGE: "manage",
-  NOT_INTERESTED: "not_interested",
   SHOW_LESS_FREQUENTLY: "show_less_frequently",
 };
 
@@ -247,7 +246,7 @@ export class YelpSuggestions extends SuggestProvider {
       {
         name: RESULT_MENU_COMMAND.INACCURATE_LOCATION,
         l10n: {
-          id: "urlbar-result-menu-report-inaccurate-location2",
+          id: "urlbar-result-menu-report-inaccurate-location3",
         },
       },
     ];
@@ -256,7 +255,7 @@ export class YelpSuggestions extends SuggestProvider {
       commands.push({
         name: RESULT_MENU_COMMAND.SHOW_LESS_FREQUENTLY,
         l10n: {
-          id: "urlbar-result-menu-show-less-frequently2",
+          id: "urlbar-result-menu-show-less-frequently3",
         },
       });
     }
@@ -310,19 +309,7 @@ export class YelpSuggestions extends SuggestProvider {
       // selType == "dismiss" when the user presses the dismiss key shortcut.
       case RESULT_MENU_COMMAND.DISMISS:
         lazy.QuickSuggest.dismissResult(result);
-        controller.removeResult(result, {
-          acknowledgeDismissalL10n: {
-            id: "firefox-suggest-dismissal-acknowledgment-one-yelp",
-          },
-        });
-        break;
-      case RESULT_MENU_COMMAND.NOT_INTERESTED:
-        lazy.UrlbarPrefs.set("suggest.yelp", false);
-        controller.removeResult(result, {
-          acknowledgeDismissalL10n: {
-            id: "firefox-suggest-dismissal-acknowledgment-all-yelp",
-          },
-        });
+        controller.removeResult(result);
         break;
       case RESULT_MENU_COMMAND.SHOW_LESS_FREQUENTLY:
         this.handleShowLessFrequently(controller, result);

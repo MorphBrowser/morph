@@ -101,14 +101,6 @@ struct _GdkEventTouchpadPinch;
 typedef struct _GdkEventTouchpadPinch GdkEventTouchpadPinch;
 #endif
 
-// 'Stable' Wayland subsurface rounding algorithm is used by all compositors
-// except KDE.
-// See
-// https://gitlab.freedesktop.org/wayland/wayland-protocols/-/merge_requests/143#note_1343171
-// for details.
-// We want to replace it by wp-fractional-scale-v2 when it's available.
-extern bool gUseStableRounding;
-
 #if !GTK_CHECK_VERSION(3, 22, 0)
 typedef enum {
   GDK_ANCHOR_FLIP_X = 1 << 0,
@@ -139,10 +131,18 @@ namespace mozilla {
 enum class NativeKeyBindingsType : uint8_t;
 
 class TimeStamp;
-class WaylandVsyncSource;
 #ifdef MOZ_X11
 class CurrentX11TimeGetter;
 #endif
+
+namespace layers {
+class NativeLayerRootRemoteWaylandParent;
+class NativeLayerRootWayland;
+}  // namespace layers
+
+namespace gfx {
+class DataSourceSurface;
+}  // namespace gfx
 
 namespace widget {
 class DBusMenuBar;
@@ -151,10 +151,10 @@ class WaylandSurface;
 class WaylandSurfaceLock;
 class nsWindowX11;
 class nsWindowWayland;
+class nsWindowWaylandToplevel;
+class nsWindowWaylandPopup;
 }  // namespace widget
 }  // namespace mozilla
-
-class gfxImageSurface;
 
 class nsWindow : public nsIWidget {
  public:
@@ -171,6 +171,12 @@ class nsWindow : public nsIWidget {
   NS_INLINE_DECL_REFCOUNTING_INHERITED(nsWindow, nsIWidget)
 
   virtual mozilla::widget::nsWindowWayland* AsWayland() { return nullptr; }
+  virtual mozilla::widget::nsWindowWaylandPopup* AsWaylandPopup() {
+    return nullptr;
+  }
+  virtual mozilla::widget::nsWindowWaylandToplevel* AsWaylandToplevel() {
+    return nullptr;
+  }
   virtual mozilla::widget::nsWindowX11* AsX11() { return nullptr; }
 
   // called when we are destroyed
@@ -206,6 +212,7 @@ class nsWindow : public nsIWidget {
   void SetFocus(Raise, mozilla::dom::CallerType aCallerType) override;
   LayoutDeviceIntRect GetBounds() override;
   LayoutDeviceIntRect GetScreenBounds() override;
+  DesktopIntRect GetClientArea() const { return mClientArea; }
   DesktopIntRect GetScreenBoundsUnscaled();
   LayoutDeviceIntRect GetClientBounds() override;
   LayoutDeviceIntSize GetClientSize() override;
@@ -214,6 +221,10 @@ class nsWindow : public nsIWidget {
   nsresult GetRestoredBounds(LayoutDeviceIntRect&) override;
   bool PersistClientBounds() const override { return true; }
   LayoutDeviceIntMargin NormalSizeModeClientToWindowMargin() override;
+
+  // Get rounded client size based on actual window position and rounding
+  // method, see nsWindowWayland::sUseStableRounding.
+  virtual LayoutDeviceIntSize GetRoundedClientSize();
 
   bool WorkspaceManagementDisabled();
   bool ConstrainSizeWithScale(int* aWidth, int* aHeight, double aScale);
@@ -260,6 +271,7 @@ class nsWindow : public nsIWidget {
   void SetIcon(const nsAString& aIconSpec) override;
   void SetWindowClass(const nsAString& xulWinType, const nsAString& xulWinClass,
                       const nsAString& xulWinName) override;
+  void UpdateWindowClass(const nsAString& aXulWinClass) override;
   LayoutDeviceIntPoint WidgetToScreenOffset() override;
   DesktopIntPoint WidgetToScreenOffsetUnscaled();
   void CaptureRollupEvents(bool aDoCapture) override;
@@ -346,7 +358,7 @@ class nsWindow : public nsIWidget {
       mozilla::gfx::DrawTarget* aDrawTarget,
       const LayoutDeviceIntRegion& aInvalidRegion) override;
 
-  virtual void SetProgress(unsigned long progressPercent) {};
+  virtual void SetProgress(unsigned long progressPercent) {}
 
   bool SynchronouslyRepaintOnResize() override;
 
@@ -368,7 +380,6 @@ class nsWindow : public nsIWidget {
 
   static guint32 sLastButtonPressTime;
 
-  MozContainer* GetMozContainer() { return mContainer; }
   GdkWindow* GetGdkWindow() const { return mGdkWindow; }
   void SetGdkWindow(GdkWindow* aGdkWindow);
   GdkWindow* GetToplevelGdkWindow() const;
@@ -435,7 +446,7 @@ class nsWindow : public nsIWidget {
       uint32_t aPointerOrientation,
       nsISynthesizedEventCallback* aCallback) override;
 
-  nsresult SynthesizeNativeTouchPadPinch(TouchpadGesturePhase aEventPhase,
+  nsresult SynthesizeNativeTouchpadPinch(TouchpadGesturePhase aEventPhase,
                                          float aScale,
                                          LayoutDeviceIntPoint aPoint,
                                          int32_t aModifierFlags) override;
@@ -505,8 +516,6 @@ class nsWindow : public nsIWidget {
 
   mozilla::UniquePtr<mozilla::widget::WaylandSurfaceLock> LockSurface();
 
-  bool ApplyEnterLeaveMutterWorkaround();
-
   void NotifyOcclusionState(mozilla::widget::OcclusionState aState) override;
 
   static nsWindow* GetWindow(GdkWindow* window);
@@ -519,8 +528,9 @@ class nsWindow : public nsIWidget {
 
   void GtkWidgetDestroyHandler(GtkWidget* aWidget);
 
-  void SetDragPopupSurface(RefPtr<gfxImageSurface> aDragPopupSurface,
-                           const LayoutDeviceIntRegion& aInvalidRegion);
+  void SetDragPopupSurface(
+      RefPtr<mozilla::gfx::DataSourceSurface> aDragPopupSurface,
+      const LayoutDeviceIntRegion& aInvalidRegion);
 
   static nsWindow* FromGtkWidget(GtkWidget* widget);
   static nsWindow* FromGdkWindow(GdkWindow* window);
@@ -543,17 +553,27 @@ class nsWindow : public nsIWidget {
  protected:
   virtual ~nsWindow();
 
-  virtual void CreateNative() = 0;
-  virtual void DestroyNative() = 0;
+  virtual void CreateNative() {}
+  virtual void DestroyNative() {}
 
   void ConfigureToplevelWindow();
-  virtual void ConfigureToplevelWindowNative() {};
+  virtual void ConfigureToplevelWindowNative() {}
 
   // Native implementation of OnMap() event for X11/Wayland.
-  virtual void OnMapNative() {};
+  virtual void OnMapNative() {}
+  virtual void OnUnmapNative() {}
 
-  virtual void EnableVSyncSource() {};
-  virtual void DisableVSyncSource() {};
+  virtual void CreateVSyncSource() {}
+  virtual void DeleteVSyncSource() {}
+
+  virtual void EnableVSyncSource() {}
+  virtual void DisableVSyncSource() {}
+  virtual void WatchHiddenVSyncSource() {}
+
+  virtual bool IsFullscreenSupported() { return true; };
+
+  virtual void StartWindowDrag(int aX, int aY, int aTime);
+  virtual void ResizeWindowDrag(GdkWindowEdge aEdge, GdkEventButton* aEvent);
 
   // event handling code
   void DispatchActivateEvent(void);
@@ -628,8 +648,14 @@ class nsWindow : public nsIWidget {
   void* mEGLWindow = nullptr;
 #ifdef MOZ_WAYLAND
   RefPtr<mozilla::widget::WaylandSurface> mSurface;
+  RefPtr<mozilla::layers::NativeLayerRootRemoteWaylandParent>
+      mNativeLayerRootRemoteWaylandParent;
+  // The "real" NativeLayerRoot that receives surfaces from the layers
+  // managed by mNativeLayerRootRemoteWaylandParent.
+  RefPtr<mozilla::layers::NativeLayerRootWayland>
+      mNativeLayerRootForRemoteWaylandParent;
 #endif
-  RefPtr<gfxImageSurface> mDragPopupSurface;
+  RefPtr<mozilla::gfx::DataSourceSurface> mDragPopupSurface;
   LayoutDeviceIntRegion mDragPopupSurfaceRegion;
 
   PlatformCompositorWidgetDelegate* mCompositorWidgetDelegate = nullptr;
@@ -776,6 +802,11 @@ class nsWindow : public nsIWidget {
   // size/focus etc.
   bool mWaitingToSessionRestore : 1;
 
+  // Set together with mWaitingToSessionRestore and kept until session restore
+  // finishes, so that a window shown while it runs, which is a restored one,
+  // neither uses the launch activation token nor requests activation.
+  bool mWaitingToFocusRestore : 1;
+
   // all of our DND stuff
   void InitDragEvent(mozilla::WidgetDragEvent& aEvent);
 
@@ -794,6 +825,11 @@ class nsWindow : public nsIWidget {
   WindowRenderer* GetWindowRenderer() override;
   void DidGetNonBlankPaint() override;
 
+  void CreateCompositor(int aWidth, int aHeight) override;
+  void DestroyCompositor() override;
+#ifdef MOZ_WAYLAND
+  void CloseNativeLayerRootRemoteWaylandParent();
+#endif
   void SetCompositorWidgetDelegate(CompositorWidgetDelegate* delegate) override;
 
   void UpdateMozWindowActive();

@@ -6,6 +6,7 @@ import {
   actionCreators as ac,
   actionTypes as at,
 } from "../../common/Actions.mjs";
+import { nextDwellId } from "./dwell-id.mjs";
 
 const _OpenInPrivateWindow = site => ({
   id: "newtab-menu-open-new-private-window",
@@ -105,6 +106,8 @@ export const LinkMenuOptions = {
         recommended_at: site.recommended_at,
         format: site.format,
         ...(site.flight_id ? { flight_id: site.flight_id } : {}),
+        // Opts the window this opens into newtab.opened_page_dwell_time.
+        ...(site.dwell_label ? { dwell_label: site.dwell_label } : {}),
         is_pocket_card: site.type === "CardGrid",
         ...(site.section
           ? {
@@ -470,6 +473,7 @@ export const LinkMenuOptions = {
   ReportAd: site => {
     return {
       id: "newtab-menu-report-this-ad",
+      ariaHasPopup: "dialog",
       action: ac.AlsoToMain({
         type: at.REPORT_AD_OPEN,
         data: {
@@ -573,6 +577,14 @@ export function getLinkMenuOptions(props) {
               action.data
             );
           }
+          // A fresh id per open, shared with the user event below, so the
+          // dwell time on a story can find the click it belongs to.
+          const dwellId = action.data?.dwell_label?.startsWith("story_")
+            ? nextDwellId()
+            : undefined;
+          if (dwellId) {
+            action.data = { ...action.data, dwell_id: dwellId };
+          }
           dispatch(action);
           if (toast) {
             dispatch(toast);
@@ -614,6 +626,7 @@ export function getLinkMenuOptions(props) {
                 selected_topics: selected_topics ? selected_topics : "",
                 tile_id,
                 topic,
+                ...(dwellId ? { dwell_id: dwellId } : {}),
               };
             } else {
               value = { card_type: site.flight_id ? "spoc" : "organic" };

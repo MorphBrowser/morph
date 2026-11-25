@@ -2,45 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-import importPlugin from "eslint-plugin-import";
-import jsxA11y from "eslint-plugin-jsx-a11y";
-import react from "eslint-plugin-react";
+import { importX } from "eslint-plugin-import-x";
 import globals from "globals";
 
 export default [
   {
-    ...jsxA11y.flatConfigs.recommended,
     // When adding items to this file please check for effects on sub-directories.
-    plugins: { import: importPlugin, react, "jsx-a11y": jsxA11y },
+    plugins: { "import-x": importX },
     settings: {
       react: {
         version: "19.2.0",
       },
     },
     rules: {
-      "react/jsx-boolean-value": ["error", "always"],
-      "react/jsx-key": "error",
-      "react/jsx-no-bind": [
-        "error",
-        { allowArrowFunctions: true, allowFunctions: true },
-      ],
-      "react/jsx-no-comment-textnodes": "error",
-      "react/jsx-no-duplicate-props": "error",
-      "react/jsx-no-target-blank": "error",
-      "react/jsx-no-undef": "error",
-      "react/jsx-pascal-case": "error",
-      "react/jsx-uses-react": "error",
-      "react/jsx-uses-vars": "error",
-      "react/no-access-state-in-setstate": "error",
-      "react/no-danger": "error",
-      "react/no-deprecated": "error",
-      "react/no-did-mount-set-state": "error",
-      "react/no-did-update-set-state": "error",
-      "react/no-direct-mutation-state": "error",
-      "react/no-is-mounted": "error",
-      "react/no-unknown-property": "error",
-      "react/require-render-return": "error",
-
       "accessor-pairs": [
         "error",
         { setWithoutGet: true, getWithoutSet: false },
@@ -131,10 +105,9 @@ export default [
       "content-src/components/WallpaperCategories/WallpaperCategories.jsx",
     ],
     rules: {
-      "jsx-a11y/anchor-has-content": "off",
-      "jsx-a11y/heading-has-content": "off",
-      "jsx-a11y/label-has-associated-control": "off",
-      "jsx-a11y/no-onchange": "off",
+      "jsx-a11y-x/anchor-has-content": "off",
+      "jsx-a11y-x/heading-has-content": "off",
+      "jsx-a11y-x/label-has-associated-control": "off",
     },
   },
   {
@@ -159,7 +132,7 @@ export default [
     files: ["content-src/**", "test/jest/**"],
     rules: {
       // Disallow commonjs in these directories.
-      "import/no-commonjs": 2,
+      "import-x/no-commonjs": 2,
     },
   },
   {
@@ -167,7 +140,7 @@ export default [
     // their npm imports are resolved by webpack/Jest, not Node's module resolver.
     files: ["content-src/vendor.mjs", "test/jest/jest-setup.mjs"],
     rules: {
-      "import/no-unresolved": "off",
+      "import-x/no-unresolved": "off",
     },
   },
   {

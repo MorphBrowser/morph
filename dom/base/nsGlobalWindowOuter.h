@@ -68,6 +68,7 @@ class nsHistory;
 class nsGlobalWindowObserver;
 class nsGlobalWindowInner;
 class nsDOMWindowUtils;
+class LazyFocusActionId;
 struct nsRect;
 class nsWindowRoot;
 class nsWindowSizes;
@@ -82,7 +83,6 @@ class ThrottledEventQueue;
 class ScrollContainerFrame;
 namespace dom {
 class BarProp;
-struct ChannelPixelLayout;
 class Console;
 class Crypto;
 class CustomElementRegistry;
@@ -91,7 +91,6 @@ class Document;
 class External;
 class Function;
 class Gamepad;
-enum class ImageBitmapFormat : uint8_t;
 class IntlUtils;
 class Location;
 class MediaQueryList;
@@ -332,11 +331,11 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
                                                     bool aIsFullscreen) final;
   MOZ_CAN_RUN_SCRIPT void FullscreenWillChange(bool aIsFullscreen) final;
   MOZ_CAN_RUN_SCRIPT void FinishFullscreenChange(bool aIsFullscreen) final;
-  void ForceFullScreenInWidget() final;
   void MacFullscreenMenubarOverlapChanged(
       mozilla::DesktopCoord aOverlapAmount) final;
-  bool SetWidgetFullscreen(FullscreenReason aReason, bool aIsFullscreen,
-                           nsIWidget* aWidget);
+  MOZ_CAN_RUN_SCRIPT bool TryMakeWidgetFullscreen(FullscreenReason aReason,
+                                                  bool aIsFullscreen,
+                                                  nsIWidget* aWidget);
   bool Fullscreen() const;
 
   // nsIInterfaceRequestor
@@ -512,7 +511,7 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
   // kungFuDeathGrip in it.
   MOZ_CAN_RUN_SCRIPT_BOUNDARY void FocusOuter(
       mozilla::dom::CallerType aCallerType, bool aFromOtherProcess,
-      uint64_t aActionId);
+      LazyFocusActionId& aActionId);
   nsresult Focus(mozilla::dom::CallerType aCallerType) override;
   // TODO: Convert BlurOuter() to MOZ_CAN_RUN_SCRIPT and get rid of the
   // kungFuDeathGrip in it.
@@ -947,6 +946,10 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
 
   void SetDocShell(nsDocShell* aDocShell);
 
+  // Sends the command updates which were coalesced by UpdateCommands() in a
+  // content process to the parent process.
+  void SendPendingCommandUpdatesToParentProcess();
+
   // nsPIDOMWindow{Inner,Outer} should be able to see these helper methods.
   friend class nsPIDOMWindowInner;
   friend class nsPIDOMWindowOuter;
@@ -954,8 +957,6 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
   void SetIsBackgroundInternal(bool aIsBackground);
 
   nsresult GetInterfaceInternal(const nsIID& aIID, void** aSink);
-
-  void MaybeAllowStorageForOpenedWindow(nsIURI* aURI);
 
   void MaybeResetWindowName(Document* aNewDocument);
 
@@ -1003,7 +1004,6 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
   // in-process request.
   mozilla::Maybe<FullscreenRequest> mInProcessFullscreenRequest;
 
-  bool mForceFullScreenInWidget : 1;
   bool mIsClosed : 1;
   bool mInClose : 1;
   // mHavePendingClose means we've got a termination function set to
@@ -1094,6 +1094,11 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
   // flag is updated from FullscreenTransitionTask.
   bool mIsInFullScreenTransition = false;
 
+  // In a content process, the actions passed to UpdateCommands() which have
+  // not been sent to the parent process yet. A runnable which sends them is
+  // pending iff this is non-empty.
+  AutoTArray<nsString, 1> mPendingCommandUpdateActions;
+
   friend class nsDOMWindowUtils;
   friend class mozilla::dom::BrowsingContext;
   friend class mozilla::dom::PostMessageEvent;
@@ -1131,6 +1136,11 @@ inline void nsGlobalWindowOuter::MaybeClearInnerWindow(
     nsPIDOMWindowInner* aExpectedInner) {
   if (mInnerWindow == aExpectedInner) {
     mInnerWindow = nullptr;
+
+    if (mBrowsingContext && mBrowsingContext->GetUnbarrieredWindowProxy() ==
+                                GetWrapperMaybeDead()) {
+      mBrowsingContext->ClearWindowProxy();
+    }
   }
 }
 

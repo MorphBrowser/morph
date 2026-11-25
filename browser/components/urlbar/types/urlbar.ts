@@ -18,6 +18,28 @@ type UrlbarQueryContext =
 type UrlbarResult = import("../content/UrlbarResult.mjs").UrlbarResult;
 
 /**
+ * The search access point name of a UrlbarInput.
+ * It is used to check for capabilities, for logging and for telemetry.
+ *
+ * In search telemetry, it is related to the `source` extra key whose possible
+ * values are a superset of UrlbarSapName, see `KNOWN_SEARCH_SOURCES`.
+ *
+ * In urlbar telemetry, it is related to the `sap` extra key whose possible
+ * values are a different superset of UrlbarSapName, @see UrlbarTelemetrySapName.
+ */
+type UrlbarSapName = "newtab_searchbar" | "searchbar" | "smartbar" | "urlbar";
+
+/**
+ * Extension of UrlbarSapName to be used for urlbar.* telemetry.
+ * For search telemetry, see BrowserSearchTelemetry.KNOWN_SEARCH_SOURCES.
+ */
+type UrlbarTelemetrySapName =
+  | UrlbarSapName
+  | "handoff"
+  | "urlbar_newtab"
+  | "urlbar_addonpage";
+
+/**
  * A structure that holds the details of commands for results.
  */
 type UrlbarResultCommand = {
@@ -52,4 +74,11 @@ type UrlbarResultCommand = {
    * to be shown.
    */
   submenu?: boolean;
+};
+
+/**
+ * Convert every method of an object to return void.
+ */
+type VoidMethods<T extends Record<keyof T, (...args: any) => any>> = {
+  [F in keyof T]: (...args: Parameters<T[F]>) => void;
 };

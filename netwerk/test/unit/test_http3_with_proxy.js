@@ -2,7 +2,7 @@
 
 /* import-globals-from http3_common.js */
 
-const { Http3ProxyFilter, NodeHTTP2ProxyServer } = ChromeUtils.importESModule(
+const { Http3ProxyFilter } = ChromeUtils.importESModule(
   "resource://testing-common/NodeServer.sys.mjs"
 );
 
@@ -22,16 +22,14 @@ let proxyPort;
 let proxyFilter;
 
 add_setup(async function () {
-  let h2Port = Services.env.get("MOZHTTP2_PORT");
-  Assert.notEqual(h2Port, null);
-  Assert.notEqual(h2Port, "");
+  do_get_profile();
+  let h2Port = await create_h3_fallback_origin();
   h3Port = await create_h3_server();
   Assert.notEqual(h3Port, null);
   Assert.notEqual(h3Port, "");
   h3AltSvc = ":" + h3Port;
   h3ServerDomain = "foo.example.com";
   h3Route = `${h3ServerDomain}:${h3Port}`;
-  do_get_profile();
   prefs = Services.prefs;
 
   prefs.setBoolPref("network.http.http3.enable", true);
@@ -151,13 +149,5 @@ add_task(async function test_slow_receiver() {
 // connection.
 // TODO: Bug 1582667 should try to fix issue with connection being closed.
 add_task(async function test_version_fallback() {
-  let proxy = new NodeHTTP2ProxyServer();
-  await proxy.startWithoutProxyFilter(proxyPort);
-  registerCleanupFunction(async () => {
-    await proxy.stop();
-  });
-  Assert.equal(proxyPort, proxy.port());
-  info(`proxy port=${proxy.port()}\n`);
-
   await do_test_version_fallback(httpsOrigin);
 });

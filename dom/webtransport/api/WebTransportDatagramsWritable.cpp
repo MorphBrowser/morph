@@ -43,12 +43,16 @@ WebTransportDatagramsWritable::~WebTransportDatagramsWritable() {
 already_AddRefed<WebTransportDatagramsWritable>
 WebTransportDatagramsWritable::Create(
     JSContext* aCx, nsIGlobalObject* aGlobal, WebTransport* aTransport,
-    WebTransportDatagramDuplexStream* aDatagrams, double aHighWaterMark,
+    WebTransportDatagramDuplexStream* aDatagrams,
     WebTransportSendGroup* aSendGroup, int64_t aSendOrder, ErrorResult& aRv) {
   // https://w3c.github.io/webtransport/#webtransportdatagramswritable-create
-  // Step 1: Let stream be a new WebTransportDatagramsWritable with
-  // [[OutgoingDatagramsQueue]] as an empty queue, [[Transport]] as transport,
-  // [[SendGroup]] as sendGroup, and [[SendOrder]] as sendOrder.
+  // Step 1: Let stream be a new WebTransportDatagramsWritable, with:
+  // [[OutgoingDatagramsQueue]]: an empty queue
+  // [[BackpressurePromise]]: a promise resolved with undefined
+  // [[Transport]]: transport
+  // [[SendGroup]]: sendGroup
+  // [[SendOrder]]: sendOrder
+  // The first two live in the algorithms instance below.
   auto datagramsWritable = MakeRefPtr<WebTransportDatagramsWritable>(
       aGlobal, aTransport, aSendGroup, aSendOrder);
 
@@ -68,15 +72,17 @@ WebTransportDatagramsWritable::Create(
   }
 
   datagramsWritable->mAlgorithms = algorithms;
+  algorithms->SetOwnerWritable(datagramsWritable.get());
 
   // Set up the WritableStream with our custom algorithms
-  datagramsWritable->SetUpNative(aCx, *algorithms, Some(aHighWaterMark),
-                                 nullptr, aRv);
+  datagramsWritable->SetUpNative(aCx, *algorithms, Nothing(), nullptr, aRv);
   if (aRv.Failed()) {
     return nullptr;
   }
 
-  // Step 4: Return stream.
+  // Step 4: Append stream to transport.[[Datagrams]].[[Writables]].
+  // Done by WebTransportDatagramDuplexStream::CreateWritable().
+  // Step 5: Return stream.
   return datagramsWritable.forget();
 }
 
@@ -109,6 +115,34 @@ void WebTransportDatagramsWritable::SetSendOrder(int64_t aSendOrder) {
   if (mAlgorithms) {
     mAlgorithms->SetSendOrder(aSendOrder);
   }
+}
+
+bool WebTransportDatagramsWritable::IsConnected() const {
+  return mAlgorithms && mAlgorithms->GetChild();
+}
+
+void WebTransportDatagramsWritable::SetChild(WebTransportChild* aChild) {
+  if (mAlgorithms) {
+    mAlgorithms->SetChild(aChild);
+  }
+}
+
+void WebTransportDatagramsWritable::Cleanup() {
+  if (mAlgorithms) {
+    mAlgorithms->Cleanup();
+  }
+}
+
+void WebTransportDatagramsWritable::RetireInFlight(uint64_t aCount) {
+  if (mAlgorithms) {
+    mAlgorithms->RetireInFlight(aCount);
+  }
+}
+
+bool WebTransportDatagramsWritable::TryResolveBackpressureFromCredit(
+    uint64_t aAvailableBytes, size_t* aResolvedBytes) {
+  return mAlgorithms && mAlgorithms->TryResolveBackpressureFromCredit(
+                            aAvailableBytes, aResolvedBytes);
 }
 
 }  // namespace mozilla::dom

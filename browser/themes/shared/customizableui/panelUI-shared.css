@@ -8,12 +8,41 @@
 :root {
   --panelui-subview-transition-duration: 150ms;
 
+  /* How far the subview travels in from the end side, and how far the view
+   * being drilled out of recedes towards the start side: nothing on the way
+   * in, where it holds still, and a short distance on the way back out.
+   * Transforms have no logical form, so these are flipped by hand; the chrome
+   * has one direction throughout, which is why doing it here is enough. The
+   * durations and easings of the drill come from the design system:
+   * --panel-subview-motion-duration-*, --panel-subview-motion-easing for the
+   * transforms and --panel-subview-motion-easing-fade for the opacities. */
+  --panel-subview-drill-parent-translate-x: 0px;
+  --panel-subview-drill-parent-exit-translate-x: -8px;
+  --panel-subview-drill-translate-x: 12px;
+
+  &:dir(rtl) {
+    --panel-subview-drill-parent-exit-translate-x: 8px;
+    --panel-subview-drill-translate-x: -12px;
+  }
+
+  /* Nothing travels without motion, which leaves the cross-fade as the whole
+   * of the drill. Zeroing the distances rather than dropping the transforms
+   * is what lets the rules below be written once for both motion modes, and
+   * it costs no transition either: a view whose start and end are both the
+   * rest position never gets one. */
+  @media (prefers-reduced-motion) {
+    &,
+    &:dir(rtl) {
+      --panel-subview-drill-parent-exit-translate-x: 0px;
+      --panel-subview-drill-translate-x: 0px;
+    }
+  }
+
   --panel-banner-item-color: var(--button-text-color);
   --panel-banner-item-background-color: var(--button-background-color);
   --panel-banner-item-hover-bgcolor: var(--button-background-color-hover);
   --panel-banner-item-active-bgcolor: var(--button-background-color-active);
   --panel-banner-item-update-supported-bgcolor: var(--color-accent-attention);
-  --panel-banner-item-info-icon-bgcolor: light-dark(#0090ed, #80ebff);
 
   --menu-panel-width: 22.35em;
   --menu-panel-width-wide: 29em;
@@ -217,6 +246,107 @@ panelview {
 .panel-viewstack {
   overflow: visible;
   transition: height var(--panelui-subview-transition-duration);
+  /* The subview stacked on top during the drill below positions itself
+   * against this. Set unconditionally so that the containing block is the
+   * same whether a drill is running or not: toggling it would move any
+   * absolutely positioned descendant as the drill starts and ends. */
+  position: relative;
+}
+
+/* Drill-down animation between a view and its subview. */
+panelmultiview[drilling] > .panel-viewcontainer > .panel-viewstack {
+  /* The views' opacities sum to 1 at every frame and `plus-lighter` adds
+   * them, so together they cover exactly what one view does. Isolating the
+   * stack keeps that addition off what the panel paints behind them. */
+  isolation: isolate;
+}
+
+panelmultiview[drilling] > .panel-viewcontainer[panelopen] {
+  transition-timing-function: var(--panel-subview-motion-easing);
+}
+
+panelview[drill-role] {
+  mix-blend-mode: plus-lighter;
+  will-change: transform, opacity;
+  transform: translateX(0);
+}
+
+panelview[drill-role="sub"] {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+}
+
+/* Each direction below sets its durations in transform then opacity order;
+ * the opacities share an easing and a duration so they keep summing to 1. */
+panelmultiview[drill-active] panelview[drill-role] {
+  transition-property: transform, opacity;
+  transition-timing-function: var(--panel-subview-motion-easing), var(--panel-subview-motion-easing-fade);
+}
+
+panelmultiview[drilling="forward"] {
+  > .panel-viewcontainer[panelopen] {
+    transition-duration: var(--panel-subview-motion-duration-enter);
+  }
+
+  panelview[drill-role="sub"] {
+    opacity: 0;
+    transform: translateX(var(--panel-subview-drill-translate-x));
+  }
+
+  &[drill-active] {
+    panelview[drill-role] {
+      /* Drilling in hands the panel over in a single frame rather than fading. */
+      transition-duration: var(--panel-subview-motion-duration-enter), 0ms;
+    }
+
+    panelview[drill-role="root"] {
+      opacity: 0;
+      transform: translateX(var(--panel-subview-drill-parent-translate-x));
+    }
+
+    panelview[drill-role="sub"] {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+}
+
+panelmultiview[drilling="back"] {
+  > .panel-viewcontainer[panelopen] {
+    transition-duration: var(--panel-subview-motion-duration-parent-exit);
+  }
+
+  panelview[drill-role="root"] {
+    opacity: 0;
+    transform: translateX(var(--panel-subview-drill-parent-exit-translate-x));
+  }
+
+  &[drill-active] {
+    /* The view coming back takes longer to travel than the one leaving does,
+     * but both of them fade over the shorter of the two. */
+    panelview[drill-role="root"] {
+      transition-duration: var(--panel-subview-motion-duration-parent-exit), var(--panel-subview-motion-duration-exit);
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    panelview[drill-role="sub"] {
+      transition-duration: var(--panel-subview-motion-duration-exit);
+      opacity: 0;
+      transform: translateX(var(--panel-subview-drill-translate-x));
+    }
+  }
+}
+
+/* The cross-fade left without motion runs shorter. macOS only: elsewhere
+ * prefers-reduced-motion drops the panel's own fade too (see popup.css), so
+ * the drill doesn't run at all, which PanelMultiView also knows about. */
+@media (prefers-reduced-motion) and (-moz-platform: macos) {
+  /* Nothing travels, so this duration only ever applies to the fade. */
+  panelmultiview[drilling][drill-active] panelview[drill-role] {
+    transition-duration: var(--panel-subview-motion-duration-fade-reduced);
+  }
 }
 
 .panel-subview-body {
@@ -898,6 +1028,7 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
   & .fxa-menu-sign-in-promo-message {
     margin: 0;
     font-size: var(--font-size-small);
+    color: var(--text-color-deemphasized);
 
     :root[uidensity="compact"] & {
       display: none;
@@ -948,6 +1079,7 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
    the account menu. */
 #PanelUI-fxa-menu-signed-out-card,
 #appMenu-fxa-signed-out-row {
+  min-width: 0;
   gap: var(--space-medium);
   padding: var(--panel-menuitem-padding);
   margin: var(--panel-menuitem-margin);
@@ -966,7 +1098,16 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
   }
 
   & .fxa-menu-signed-out-email {
+    margin-block: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-weight: var(--font-weight-semibold);
+  }
+
+  /* The fallback title is localized copy, which wraps; only an email truncates. */
+  & #appMenu-fxa-signed-out-title[data-l10n-id] {
+    white-space: normal;
   }
 
   & .fxa-menu-signed-out-message {
@@ -1062,20 +1203,6 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
   }
 }
 
-#PanelUI-fxa-menu-secure-sync-subpanel,
-#PanelUI-fxa-device-recent-tabs {
-  height: fit-content;
-  /* FIXME: Why is !important needed here? */
-  min-height: 0 !important;
-}
-
-/* FIXME(bug 2061145): We should track visible panel without using :has() */
-/* stylelint-disable-next-line stylelint-plugin-mozilla/no-has-selector */
-.panel-viewcontainer:has(#PanelUI-fxa-menu-secure-sync-subpanel[visible], #PanelUI-fxa-device-recent-tabs[visible], #PanelUI-profiles[visible]) {
-  /* FIXME: Why is !important needed here? */
-  min-height: 0 !important;
-}
-
 #PanelUI-fxa-cta-menu .fxa-cta-button label {
   margin: 0;
 }
@@ -1090,8 +1217,7 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
   &[fxastatus="unverified"] #appMenu-fxa-label2::after {
     content: url("chrome://global/skin/icons/info-filled.svg");
     -moz-context-properties: fill;
-    /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
-    fill: var(--panel-banner-item-info-icon-bgcolor);
+    fill: var(--icon-color-information);
   }
 }
 
@@ -1131,7 +1257,6 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
 }
 
 .fxa-menu-sync-status-title {
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   margin: 0;
 }
 
@@ -1242,11 +1367,9 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
     .avatar-container::after {
       content: "";
       position: absolute;
-      /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
       top: calc(var(--icon-size) - 6px);
       /* Avatar icon size minus its circle width minus half of the little circle icon size */
-      /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
-      left: calc(var(--icon-size) - 1px - 6px / 2);
+      inset-inline-start: calc(var(--icon-size) - 1px - 6px / 2);
       /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
       height: 6px;
       /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
@@ -1326,12 +1449,6 @@ toolbarbutton[constrain-size="true"][cui-areatype="panel"] > .toolbarbutton-badg
 
 #PanelUI-fxa-menu-relay-button {
   list-style-image: url(chrome://browser/content/logos/relay-monochrome.svg);
-}
-
-.PanelUI-fxa-menu-share-firefox-button {
-  list-style-image: url(chrome://browser/content/logos/share-firefox.svg);
-  -moz-context-properties: fill;
-  fill: currentColor;
 }
 
 #PanelUI-fxa-menu-vpn-button {
@@ -1474,7 +1591,6 @@ panelmultiview[mainViewId="PanelUI-fxa"] #PanelUI-remotetabs-syncnow {
   margin: 0;
   text-align: center;
   text-shadow: none;
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   max-width: 15em;
   margin-top: var(--space-medium);
 }
@@ -1525,7 +1641,6 @@ panelmultiview[mainViewId="PanelUI-fxa"] #PanelUI-remotetabs-syncnow {
 
 #PanelUI-remotetabs[mainview] {
   /* panel anchored to toolbar button might be too skinny */
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   min-width: 19em;
 
   .PanelUI-remotetabs-notabsforclient-label {
@@ -2009,13 +2124,6 @@ toolbarbutton[itemtype="showinactivebutton"] {
   &[cui-areatype="panel"] > .toolbarbutton-combined-buttons-dropmarker,
   &[overflowedItem] > .toolbarbutton-combined-buttons-dropmarker {
     display: none;
-  }
-
-  &:is(:not([cui-areatype="toolbar"]), [overflowedItem="true"]) > toolbarbutton:not(.toolbarbutton-1)[disabled] {
-    /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
-    opacity: var(--button-opacity-disabled);
-    /* Override toolbarbutton.css which sets the color to GrayText */
-    color: inherit;
   }
 
   &:is(:not([cui-areatype="toolbar"]), [overflowedItem="true"]) > separator {
@@ -2572,28 +2680,44 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
   position: relative;
 }
 
-/* Reset/Restart Private Browsing Panel */
+/* Reset/Restart Private Browsing Panel, and the fire button panel */
 
-#reset-pbm-panel {
+#reset-pbm-panel,
+#fire-button-panel {
   max-width: var(--menu-panel-width-wide);
 }
 
-#reset-pbm-panel-container {
+#reset-pbm-panel-container,
+#fire-button-panel-container {
   padding: var(--space-large) var(--space-large) 0;
   gap: var(--space-small);
 }
 
-#reset-pbm-panel-header > description {
+#reset-pbm-panel-header > description,
+#fire-button-panel-header > description {
   margin-bottom: 0;
 }
 
 #reset-pbm-panel-header > description,
 #reset-pbm-panel-description,
-#reset-pbm-panel-footer {
+#reset-pbm-panel-footer,
+#fire-button-panel-header > description,
+#fire-button-panel-description,
+#fire-button-panel-choose-description,
+#fire-button-panel-footer-row {
   margin-inline: 0;
 }
 
-#reset-pbm-panel-header > description {
+/* The "Choose…" link sits on the same row as the buttons, pushed to the
+   opposite end. moz-button-group right-aligns its own contents. */
+#fire-button-panel-footer-row {
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-small);
+}
+
+#reset-pbm-panel-header > description,
+#fire-button-panel-header > description {
   font-weight: var(--font-weight-heading);
 }
 
@@ -2664,7 +2788,7 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
 
 #remote-control-panel-toggle-button {
   margin: 0;
-  justify-content: center;
+  width: 100%;
 }
 
 /* Report Broken Site panels */
@@ -2744,31 +2868,22 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
     object-position: left top;
   }
 
-  button.arrow-button {
-    font-weight: normal;
-    padding: var(--space-large) var(--space-medium);
+  moz-button.arrow-button {
+    --button-content-alignment: space-between;
+    --button-padding: var(--space-large) var(--space-medium);
+    --button-font-weight: normal;
+    --button-icon-fill: currentColor;
+
+    width: 100%;
     margin: 0 0 var(--space-large);
-    border: 0;
 
-    > hbox > label {
+    &::part(moz-button-label) {
       text-align: start;
-
-      /* allow for multi-line localizations */
-      display: block !important;
       text-wrap: balance;
-      width: 100%;
     }
 
-    background: url("chrome://global/skin/icons/arrow-right.svg") no-repeat calc(100% - var(--panel-menuitem-padding-inline)) center;
-    &:dir(rtl) {
-      background: url("chrome://global/skin/icons/arrow-left.svg") no-repeat var(--panel-menuitem-padding-inline) center;
-    }
-    background-color: var(--background-color-box);
-    -moz-context-properties: fill;
-    fill: currentColor;
-
-    &:not(:hover, :active) {
-      background-color: inherit;
+    &:dir(rtl):not(.external-link-button) {
+      --button-icon-content: url("chrome://global/skin/icons/arrow-left.svg");
     }
   }
 
@@ -2986,7 +3101,6 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
   fill: var(--appmenu-profiles-theme-bg);
   /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   stroke: var(--appmenu-profiles-theme-fg);
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   border: 4px solid var(--panel-background-color);
   border-radius: var(--border-radius-circle);
 }
@@ -3020,11 +3134,6 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
   overflow: hidden auto;
 }
 
-#PanelUI-profiles {
-  height: fit-content;
-  min-height: 0 !important;
-}
-
 /* ----- Profiles FxA panel ----- */
 
 /* Special case: hide the profiles menuitem and its separator if the FxA/Sync
@@ -3048,11 +3157,6 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
   padding-top: 0;
   width: 28em;
 
-  @media not -moz-pref("browser.nova.enabled") {
-    /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
-    width: 400px;
-  }
-
   > .panel-header {
     margin: 0;
   }
@@ -3066,12 +3170,6 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
   }
 }
 
-@media not -moz-pref("browser.nova.enabled") {
-  #ipprotection-header-content {
-    color: var(--text-color);
-  }
-}
-
 #ipprotection-header-content,
 #ipprotection-experiment-badge {
   font-size: var(--font-size-large);
@@ -3080,10 +3178,6 @@ radiogroup:focus-visible > .subviewradio[focused="true"] {
 #ipprotection-experiment-badge {
   display: inline-block;
   color: var(--text-color-deemphasized);
-
-  @media not -moz-pref("browser.nova.enabled") {
-    margin-inline-start: var(--space-xsmall);
-  }
 }
 
 #PanelUI-ipprotection-locations {

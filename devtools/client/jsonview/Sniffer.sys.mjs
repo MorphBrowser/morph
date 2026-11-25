@@ -16,6 +16,17 @@ XPCOMUtils.defineLazyPreferenceGetter(
 const JSON_VIEW_MIME_TYPE = "application/vnd.mozilla.json.view";
 const JSONLINES_VIEW_MIME_TYPE = "application/vnd.mozilla.jsonlines.view";
 
+// Content types that say nothing about the actual format, either because the
+// server doesn't know the .jsonl extension or sent no Content-Type at all.
+// The extension is only trusted for these, so an explicit type such as
+// text/html served at a .jsonl URL is honored (bug 2088590).
+const GENERIC_CONTENT_TYPES = new Set([
+  "",
+  "text/plain",
+  "application/octet-stream",
+  "application/x-unknown-content-type",
+]);
+
 function getContentDisposition(channel) {
   try {
     return channel.contentDisposition;
@@ -37,6 +48,15 @@ function getContentDisposition(channel) {
 export class Sniffer {
   getMIMETypeFromContent(request) {
     if (request instanceof Ci.nsIChannel) {
+      let contentType;
+      try {
+        contentType = request.contentType;
+      } catch (e) {
+        // There is no content type when no response was received, e.g. when
+        // the load failed.
+        return "";
+      }
+
       // JSON View is enabled only for top level loads only.
       if (
         gPrefs.gEnabled &&
@@ -47,13 +67,13 @@ export class Sniffer {
         // Check the response content type and if it's a valid type
         // such as application/json or application/manifest+json
         // change it to new internal type consumed by JSON View.
-        if (/^application\/(?:.+\+)?json$/.test(request.contentType)) {
+        if (/^application\/(?:.+\+)?json$/.test(contentType)) {
           return JSON_VIEW_MIME_TYPE;
         }
 
         // Check if this is a JSON Lines content-type (one JSON value per line).
-        let isJsonlines = isJsonlMimeType(request.contentType);
-        if (!isJsonlines) {
+        let isJsonlines = isJsonlMimeType(contentType);
+        if (!isJsonlines && GENERIC_CONTENT_TYPES.has(contentType)) {
           try {
             isJsonlines =
               request.URI.QueryInterface(
@@ -66,9 +86,9 @@ export class Sniffer {
         if (isJsonlines) {
           return JSONLINES_VIEW_MIME_TYPE;
         }
-      } else if (request.contentType === JSON_VIEW_MIME_TYPE) {
+      } else if (contentType === JSON_VIEW_MIME_TYPE) {
         return "application/json";
-      } else if (request.contentType === JSONLINES_VIEW_MIME_TYPE) {
+      } else if (contentType === JSONLINES_VIEW_MIME_TYPE) {
         return "application/jsonl";
       }
     }

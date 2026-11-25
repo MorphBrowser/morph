@@ -3,6 +3,10 @@
 
 "use strict";
 
+const { MockEngineManager } = ChromeUtils.importESModule(
+  "resource://testing-common/AIWindowTestUtils.sys.mjs"
+);
+
 /**
  * Helper function to safely get the aichat browser element
  * Waits for ai-window, then shadowRoot, then #aichat-browser
@@ -96,9 +100,7 @@ async function setupConversationWithToolUI(aichatBrowser, toolUIData) {
  */
 add_task(async function test_website_confirmation_renders() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Please confirm which tabs to close."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -161,7 +163,8 @@ add_task(async function test_website_confirmation_renders() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -170,9 +173,7 @@ add_task(async function test_website_confirmation_renders() {
  */
 add_task(async function test_action_result_renders_for_closed_tabs() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["I've closed those tabs for you."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -237,7 +238,8 @@ add_task(async function test_action_result_renders_for_closed_tabs() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -246,9 +248,7 @@ add_task(async function test_action_result_renders_for_closed_tabs() {
  */
 add_task(async function test_action_result_renders_for_restored_tabs() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["I've restored the tabs."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -312,7 +312,8 @@ add_task(async function test_action_result_renders_for_restored_tabs() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -321,9 +322,7 @@ add_task(async function test_action_result_renders_for_restored_tabs() {
  */
 add_task(async function test_tab_group_confirmation_renders() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Please confirm which tabs to group."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -397,7 +396,8 @@ add_task(async function test_tab_group_confirmation_renders() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -408,9 +408,7 @@ add_task(async function test_tab_group_confirmation_renders() {
  */
 add_task(async function test_retry_hidden_for_resume_activity_response() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Here's where you left off."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -457,7 +455,8 @@ add_task(async function test_retry_hidden_for_resume_activity_response() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -466,9 +465,7 @@ add_task(async function test_retry_hidden_for_resume_activity_response() {
  */
 add_task(async function test_action_result_renders_for_grouped_tabs() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["I've grouped those tabs for you."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -528,7 +525,8 @@ add_task(async function test_action_result_renders_for_grouped_tabs() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -537,9 +535,7 @@ add_task(async function test_action_result_renders_for_grouped_tabs() {
  */
 add_task(async function test_action_result_renders_for_ungrouped_tabs() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["I've ungrouped those tabs."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -593,7 +589,8 @@ add_task(async function test_action_result_renders_for_ungrouped_tabs() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -602,9 +599,7 @@ add_task(async function test_action_result_renders_for_ungrouped_tabs() {
  */
 add_task(async function test_confirmation_events_bubble_correctly() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Please confirm the tabs to close."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -739,7 +734,8 @@ add_task(async function test_confirmation_events_bubble_correctly() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -748,9 +744,7 @@ add_task(async function test_confirmation_events_bubble_correctly() {
  */
 add_task(async function test_tab_group_confirmation_event_detail() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Please confirm tabs to group."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -850,6 +844,104 @@ add_task(async function test_tab_group_confirmation_event_detail() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+  }
+});
+
+/**
+ * Test that "Select all" / "Deselect all" on either confirmation card is
+ * forwarded as a tool UI update, so the parent can record it
+ */
+add_task(async function test_confirmation_toggle_all_dispatches_update() {
+  const restoreSignIn = skipSignIn();
+  const mockEngineManager = new MockEngineManager();
+  const win = await openAIWindow();
+
+  try {
+    const browser = win.gBrowser.selectedBrowser;
+    const aichatBrowser = await getAichatBrowser(browser);
+
+    for (const [uiType, properties] of [
+      ["website-confirmation", {}],
+      ["tab-group-confirmation", { actionType: "open_tabs" }],
+    ]) {
+      const toolCallId = `tool-toggle-${uiType}`;
+      await setupConversationWithToolUI(aichatBrowser, {
+        userMessage: "Act on tabs",
+        assistantMessage: "Please confirm the tabs.",
+        messageId: `msg-toggle-${uiType}`,
+        toolUIData: {
+          toolCallId,
+          uiType,
+          properties: {
+            ...properties,
+            tabs: [
+              {
+                linkedPanel: "panel-1",
+                url: "https://example.com",
+                title: "Example",
+                checked: false,
+              },
+            ],
+          },
+        },
+      });
+
+      await SpecialPowers.spawn(
+        aichatBrowser,
+        [uiType, toolCallId],
+        async (type, expectedToolCallId) => {
+          const chatContent = content.document.querySelector("ai-chat-content");
+          const confirmation = await ContentTaskUtils.waitForCondition(
+            () =>
+              chatContent.shadowRoot.querySelector("ai-website-confirmation"),
+            "Wait for confirmation component"
+          );
+          await confirmation.updateComplete;
+
+          const updates = [];
+          const listener = event => updates.push(event.detail);
+          chatContent.addEventListener("AIChatContent:ToolUIUpdate", listener);
+
+          const toggleButton =
+            confirmation.shadowRoot.querySelectorAll("moz-button")[1];
+          toggleButton.click();
+          await confirmation.updateComplete;
+          toggleButton.click();
+
+          chatContent.removeEventListener(
+            "AIChatContent:ToolUIUpdate",
+            listener
+          );
+
+          Assert.deepEqual(
+            updates.map(update => ({
+              toolCallId: update.toolCallId,
+              updateType: update.updateType,
+              allSelected: update.updateData.allSelected,
+            })),
+            [
+              {
+                toolCallId: expectedToolCallId,
+                updateType: "toggle-all-tab-selection",
+                allSelected: true,
+              },
+              {
+                toolCallId: expectedToolCallId,
+                updateType: "toggle-all-tab-selection",
+                allSelected: false,
+              },
+            ],
+            `${type}: select all then deselect all are forwarded`
+          );
+        }
+      );
+    }
+  } finally {
+    await BrowserTestUtils.closeWindow(win);
+    restoreSignIn();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });

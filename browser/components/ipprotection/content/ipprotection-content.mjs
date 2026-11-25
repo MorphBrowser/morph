@@ -5,27 +5,43 @@
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
 import { html, ifDefined } from "chrome://global/content/vendor/lit.all.mjs";
 import {
+  ADDITIONAL_LOCATIONS_AVAILABLE,
   BANDWIDTH,
   LINKS,
 } from "chrome://browser/content/ipprotection/ipprotection-constants.mjs";
-import { formatRemainingBandwidth } from "chrome://browser/content/ipprotection/ipprotection-utils.mjs";
+import {
+  countryName,
+  formatRemainingBandwidth,
+} from "chrome://browser/content/ipprotection/ipprotection-utils.mjs";
+
+const lazy = {};
+
+ChromeUtils.defineESModuleGetters(lazy, {
+  IPProtectionServerlist:
+    "moz-src:///toolkit/components/ipprotection/IPProtectionServerlist.sys.mjs",
+});
 
 const { ERRORS } = ChromeUtils.importESModule(
   "moz-src:///toolkit/components/ipprotection/IPPProxyManager.sys.mjs"
 );
 
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/ipprotection/ipprotection-message-bar.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/ipprotection/ipprotection-unauthenticated.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/ipprotection/ipprotection-status-card.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/ipprotection/ipprotection-status-box.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
+import "chrome://browser/content/ipprotection/bandwidth-usage.mjs";
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-toggle.mjs";
+// eslint-disable-next-line import-x/no-unassigned-import
+import "chrome://global/content/elements/moz-promo.mjs";
 
 const SITE_RULES_SETTINGS_PANE = "privacy-vpnsiterules";
+const PROMO_END_DATE = new Date(2027, 0, 31);
 
 /**
  * Custom element that implements a message bar and status card for IP protection.
@@ -35,20 +51,26 @@ export default class IPProtectionContentElement extends MozLitElement {
     unauthenticatedEl: "ipprotection-unauthenticated",
     messagebarEl: "ipprotection-message-bar",
     statusCardEl: "ipprotection-status-card",
+    locationButtonEl: "#vpn-location-button",
+    bandwidthUsageEl: "bandwidth-usage",
     upgradeEl: "#upgrade-vpn-content",
     activeSubscriptionEl: "#active-subscription-vpn-content",
     supportLinkEl: "#vpn-support-link",
     statusBoxEl: "ipprotection-status-box",
+    tryAgainButtonEl: "#try-again-button",
+    continueWithoutVpnButtonEl: "#continue-without-vpn-button",
     siteExclusionControlEl: "#site-exclusion-control",
     siteExclusionToggleEl: "#site-exclusion-toggle",
     siteExclusionDescriptionEl: '#site-exclusion-toggle > [slot="description"]',
     siteRulesEl: "#site-rules-control",
+    siteRuleHeadingEl: "#site-rule-heading",
+    siteRuleDescriptionEl: "#site-rule-description",
+    siteInclusionPromptEl: "#site-inclusion-prompt",
     settingsButtonEl: "#vpn-settings-button",
   };
 
   static properties = {
     state: { type: Object, attribute: false },
-    _showMessageBar: { type: Boolean, state: true },
     _messageDismissed: { type: Boolean, state: true },
   };
 
@@ -61,7 +83,6 @@ export default class IPProtectionContentElement extends MozLitElement {
 
     this.messageBarListener = this.#messageBarListener.bind(this);
     this.statusCardListener = this.#statusCardListener.bind(this);
-    this._showMessageBar = false;
     this._messageDismissed = false;
   }
 
@@ -142,6 +163,18 @@ export default class IPProtectionContentElement extends MozLitElement {
     Glean.ipprotection.clickUpgradeButton.record();
   }
 
+  handleTryAgain() {
+    this.dispatchEvent(
+      new CustomEvent("IPProtection:UserRetry", { bubbles: true })
+    );
+  }
+
+  handleToggleOff() {
+    this.dispatchEvent(
+      new CustomEvent("IPProtection:UserDisable", { bubbles: true })
+    );
+  }
+
   focus() {
     if (this.state.unauthenticated) {
       this.unauthenticatedEl?.focus();
@@ -156,15 +189,12 @@ export default class IPProtectionContentElement extends MozLitElement {
         new CustomEvent("IPProtection:UserEnable", { bubbles: true })
       );
     } else if (event.type === "ipprotection-status-card:user-toggled-off") {
-      this.dispatchEvent(
-        new CustomEvent("IPProtection:UserDisable", { bubbles: true })
-      );
+      this.handleToggleOff();
     }
   }
 
   #messageBarListener(event) {
     if (event.type === "ipprotection-message-bar:user-dismissed") {
-      this._showMessageBar = false;
       this._messageDismissed = true;
       this.state.error = "";
 
@@ -206,10 +236,30 @@ export default class IPProtectionContentElement extends MozLitElement {
   handleClickSiteRulesLink(event) {
     event.preventDefault();
     const win = event.target.documentGlobal;
+    Glean.ipprotection.rulesPageOpened.record({ entrypoint: "panel" });
     win.openPreferences(SITE_RULES_SETTINGS_PANE);
     this.dispatchEvent(
       new CustomEvent("IPProtection:Close", { bubbles: true, composed: true })
     );
+  }
+
+  handleDismissSiteInclusionPrompt() {
+    this.dispatchEvent(
+      new CustomEvent("IPProtection:DismissSiteInclusionPrompt", {
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  handleDismissLocationMessageBar(event) {
+    this.dispatchEvent(
+      new CustomEvent("IPProtection:DismissLocationMessageBar", {
+        bubbles: true,
+        composed: true,
+      })
+    );
+    event.stopPropagation();
   }
 
   handleClickSettingsButton(event) {
@@ -238,6 +288,73 @@ export default class IPProtectionContentElement extends MozLitElement {
       this._messageDismissed = false;
     }
     this.#prevBandwidthWarning = !!this.state.bandwidthWarning;
+
+    this.#updateSiteRulesDescription();
+  }
+
+  async #updateSiteRulesDescription() {
+    let siteRulesEl = this.siteRulesEl;
+    if (!siteRulesEl) {
+      return;
+    }
+    await siteRulesEl.updateComplete;
+    let headingEl = this.siteRuleHeadingEl;
+    let descriptionEl = this.siteRuleDescriptionEl;
+    siteRulesEl.buttonEl.ariaDescribedByElements =
+      headingEl && descriptionEl ? [headingEl, descriptionEl] : null;
+  }
+
+  handleLocationButtonClick(e) {
+    this.dispatchEvent(
+      new CustomEvent("IPProtection:UserShowLocations", {
+        bubbles: true,
+        composed: true,
+        detail: {
+          keyboardActivated: e.detail === 0,
+          locationButton: this.locationButtonEl,
+        },
+      })
+    );
+  }
+
+  locationSelectionButtonTemplate() {
+    let locationCode = this.state.location;
+    if (
+      locationCode &&
+      !this.state.isPremium &&
+      lazy.IPProtectionServerlist.getLocation(locationCode)?.country.locked
+    ) {
+      locationCode = "REC";
+    }
+
+    const country =
+      locationCode && locationCode !== "REC" ? countryName(locationCode) : null;
+
+    return html`
+      <moz-button
+        id="vpn-location-button"
+        class="toolbarbutton"
+        ?disabled=${this.state.isActivating}
+        closemenu="none"
+        @click=${this.handleLocationButtonClick}
+      >
+        <span class="location-btn-content">
+          ${country
+            ? html`<span
+                data-l10n-id="ipprotection-location-country-button"
+                data-l10n-args=${JSON.stringify({ country })}
+              ></span>`
+            : html`<span
+                data-l10n-id="ipprotection-recommended-location-button"
+              ></span>`}
+          <img
+            class="arrow-icon"
+            src="chrome://global/skin/icons/arrow-right.svg"
+            role="presentation"
+          />
+        </span>
+      </moz-button>
+    `;
   }
 
   messageBarTemplate() {
@@ -264,7 +381,7 @@ export default class IPProtectionContentElement extends MozLitElement {
       });
     } else if (this.state.onboardingMessage) {
       messageId = this.state.onboardingMessage;
-      messageType = "info";
+      messageType = "infoLink";
 
       switch (this.state.onboardingMessage) {
         case "ipprotection-message-continuous-onboarding-intro":
@@ -293,21 +410,84 @@ export default class IPProtectionContentElement extends MozLitElement {
     `;
   }
 
+  additionalLocationMessageBarTemplate() {
+    const messageId = "ipprotection-message-default-browser-confirmation";
+    return html`
+      <ipprotection-message-bar
+        class="vpn-top-content"
+        type="success"
+        .messageId=${messageId}
+        .messageLinkL10nArgs=${JSON.stringify({
+          additionalLocationsCount: ADDITIONAL_LOCATIONS_AVAILABLE,
+        })}
+        @ipprotection-message-bar:user-dismissed=${this
+          .handleDismissLocationMessageBar}
+      ></ipprotection-message-bar>
+    `;
+  }
+
+  #showTopMessageBar() {
+    return (
+      (this.state.onboardingMessage || this.state.bandwidthWarning) &&
+      !this._messageDismissed &&
+      !this.state.unauthenticated &&
+      !this.state.paused &&
+      !this.state.error
+    );
+  }
+
+  #showSiteInclusionPrompt() {
+    return (
+      this.state.isSiteInclusionsEnabled &&
+      this.state.showSiteInclusionPrompt &&
+      this.state.siteData &&
+      !this.hasSiteInclusion &&
+      !this.hasSiteExclusion &&
+      this.canEnableConnection
+    );
+  }
+
   statusCardTemplate() {
-    let hasExclusion = this.hasSiteExclusion;
+    let hasExclusion =
+      !this.state.isSiteInclusionsEnabled && this.hasSiteExclusion;
 
     return html`
       <ipprotection-status-card
         .protectionEnabled=${this.canEnableConnection}
-        .location=${this.state.location}
-        .bandwidthUsage=${ifDefined(this.state.bandwidthUsage)}
         .hasExclusion=${hasExclusion}
         .isActivating=${this.state.isActivating}
-        .showLocationButtonBadge=${this.state.showLocationButtonBadge}
-        .isPremium=${ifDefined(this.state.isPremium)}
         .hasUpgraded=${this.state.hasUpgraded}
       ></ipprotection-status-card>
     `;
+  }
+
+  bandwidthUsageTemplate() {
+    if (this.state.bandwidthUsage) {
+      return html`<bandwidth-usage
+        remaining=${this.state.bandwidthUsage.remaining}
+        max=${this.state.bandwidthUsage.max}
+        numeric
+      ></bandwidth-usage>`;
+    }
+
+    if (!this.state.bandwidthUnlimited) {
+      return null;
+    }
+
+    if (this.state.hasUpgraded) {
+      return html`<span
+        class="unlimited-bandwidth"
+        data-l10n-id="ipprotection-unlimited-bandwidth-upgraded"
+      ></span>`;
+    }
+
+    return html`<span
+      class="unlimited-bandwidth"
+      data-l10n-id="ipprotection-unlimited-bandwidth-promo"
+      data-l10n-args=${JSON.stringify({
+        endDate: PROMO_END_DATE.getTime(),
+      })}
+    ></span>`;
   }
 
   upgradeTemplate() {
@@ -344,36 +524,38 @@ export default class IPProtectionContentElement extends MozLitElement {
 
   errorTemplate() {
     const isNetworkError = this.state.error === ERRORS.NETWORK;
-    const isCatastrophicError = this.state.error === ERRORS.CATASTROPHIC;
     const isRestrictedGeoError = this.state.error === ERRORS.VPN_UNAVAILABLE;
 
-    let headerL10nId = "ipprotection-connection-status-generic-error-title-1";
-    let descriptionL10nId =
-      "ipprotection-connection-status-generic-error-description";
+    let headerL10nId = "ipprotection-connection-status-blocked-error-title-1";
+    let descriptionL10nId = null;
     let errorType = ERRORS.GENERIC;
-    let imageSrc = null;
+    let imageSrc =
+      "chrome://browser/content/ipprotection/assets/states/ipprotection-error.svg";
     let supportSlug = null;
+    let showButtons = true;
+    const isRetrying = !!this.state.isRetrying;
 
     if (isNetworkError) {
       headerL10nId = "ipprotection-connection-status-network-error-title-1";
       descriptionL10nId =
         "ipprotection-connection-status-network-error-description";
       errorType = ERRORS.NETWORK;
+      showButtons = false;
       imageSrc =
         "chrome://browser/content/ipprotection/assets/states/ipprotection-info.svg";
-    } else if (isCatastrophicError) {
-      headerL10nId = "ipprotection-connection-status-blocked-error-title-1";
-      descriptionL10nId =
-        "ipprotection-connection-status-generic-error-try-again";
-      errorType = ERRORS.CATASTROPHIC;
-      imageSrc =
-        "chrome://browser/content/ipprotection/assets/states/ipprotection-error.svg";
     } else if (isRestrictedGeoError) {
       headerL10nId = "ipprotection-connection-status-blocked-error-title-1";
       descriptionL10nId =
         "ipprotection-connection-status-blocked-error-description-1";
       errorType = ERRORS.VPN_UNAVAILABLE;
+      showButtons = false;
+      imageSrc = null;
       supportSlug = LINKS.NO_ACCESS_SUPPORT_SLUG;
+    }
+
+    if (isRetrying) {
+      headerL10nId = "ipprotection-connection-status-trying-again-title";
+      descriptionL10nId = null;
     }
 
     return html`
@@ -391,6 +573,33 @@ export default class IPProtectionContentElement extends MozLitElement {
                 class="icon"
                 src=${imageSrc}
               />
+            `
+          : null}
+        ${showButtons
+          ? html`
+              <moz-button
+                id="try-again-button"
+                slot="action"
+                type="primary"
+                data-l10n-id="ipprotection-connection-status-try-again-button"
+                ?disabled=${isRetrying}
+                @click=${this.handleTryAgain}
+                closemenu="none"
+              ></moz-button>
+            `
+          : null}
+        ${showButtons && this.state.isDefaultMode
+          ? html`
+              <moz-button
+                id="continue-without-vpn-button"
+                slot="action"
+                type="secondary"
+                class="toolbarbutton"
+                data-l10n-id="ipprotection-connection-error-continue-without-vpn"
+                ?disabled=${isRetrying}
+                @click=${this.handleToggleOff}
+                closemenu="none"
+              ></moz-button>
             `
           : null}
       </ipprotection-status-box>
@@ -421,6 +630,7 @@ export default class IPProtectionContentElement extends MozLitElement {
   siteRulesStatusTemplate() {
     if (
       !this.state.isSiteInclusionsEnabled ||
+      !this.state.isActive ||
       !this.state.siteData ||
       this.#hasErrors ||
       !this.hasSiteRule
@@ -438,6 +648,7 @@ export default class IPProtectionContentElement extends MozLitElement {
 
     let dataL10nId;
     let imgSrc;
+    let imgId;
 
     // hasSiteRule can be set without a rule that classifies this site, so the
     // rule type has to be resolved before we commit to rendering anything.
@@ -445,10 +656,12 @@ export default class IPProtectionContentElement extends MozLitElement {
       dataL10nId = "site-rules-description-inclusion";
       imgSrc =
         "chrome://browser/content/ipprotection/assets/states/ipprotection-on.svg";
+      imgId = "ipprotection-on";
     } else if (this.hasSiteExclusion) {
       dataL10nId = "site-rules-description-exclusion";
       imgSrc =
-        "chrome://browser/content/ipprotection/assets/states/ipprotection-off.svg";
+        "chrome://browser/content/ipprotection/assets/states/ipprotection-excluded.svg";
+      imgId = "ipprotection-excluded";
     } else {
       return null;
     }
@@ -462,8 +675,25 @@ export default class IPProtectionContentElement extends MozLitElement {
         ></span>
         <span id="site-rule-description" data-l10n-id=${dataL10nId}></span>
       </div>
-      <img src=${imgSrc} alt="" />
+      <img src=${imgSrc} alt="" id=${imgId} />
     </div>`;
+  }
+
+  siteInclusionPromptTemplate() {
+    if (!this.#showSiteInclusionPrompt()) {
+      return null;
+    }
+
+    return html`<moz-promo
+      id="site-inclusion-prompt"
+      type="vibrant"
+      data-l10n-id="site-rules-inclusion-prompt"
+      data-l10n-args=${JSON.stringify({
+        website: this.state.siteData.host,
+      })}
+      dismissable
+      @promo:user-dismissed=${this.handleDismissSiteInclusionPrompt}
+    ></moz-promo>`;
   }
 
   siteRulesSettingsLinkTemplate() {
@@ -479,7 +709,7 @@ export default class IPProtectionContentElement extends MozLitElement {
       id="site-rules-control"
       type="ghost"
       data-l10n-id="site-rules-manage-rules-link-text"
-      iconsrc="chrome://browser/skin/permissions.svg"
+      iconsrc="chrome://browser/content/ipprotection/assets/vpn-website-rules-icon.svg"
       @click=${this.handleClickSiteRulesLink}
     >
     </moz-button>`;
@@ -536,16 +766,20 @@ export default class IPProtectionContentElement extends MozLitElement {
 
   enrollingTemplate() {
     return html`
-      <div id="enrolling-container" aria-busy="true">
-        <span id="enrolling-header">
-          <span>
-            <div class="skeleton skeleton-title"></div>
-            <div class="skeleton skeleton-line"></div>
+      <div id="outer-enrolling-container" aria-busy="true">
+        <div id="enrolling-container">
+          <span id="enrolling-header">
+            <span>
+              <div class="skeleton skeleton-title"></div>
+            </span>
+            <div class="skeleton skeleton-image"></div>
           </span>
-          <div class="skeleton skeleton-image"></div>
-        </span>
-        <div class="skeleton skeleton-line-thick"></div>
-        <div class="skeleton skeleton-line-thick"></div>
+          <div class="skeleton skeleton-line-thick"></div>
+        </div>
+        <div class="skeleton skeleton-line-thick skeleton-line-outer"></div>
+        ${this.state.bandwidthUsage
+          ? html` <div class="skeleton skeleton-line"></div>`
+          : null}
       </div>
     `;
   }
@@ -571,50 +805,42 @@ export default class IPProtectionContentElement extends MozLitElement {
         <div class="vpn-bottom-content">${this.footerTemplate()}</div>`;
     }
 
+    const bottomMessageBar = this.state.showAdditionalLocationConfirmation
+      ? this.additionalLocationMessageBarTemplate()
+      : null;
+
+    const topMessageBar = this.#showTopMessageBar()
+      ? this.messageBarTemplate()
+      : null;
+
     if (this.state.isSiteInclusionsEnabled) {
       return html`
-        ${this.statusCardTemplate()}
+        ${topMessageBar} ${this.statusCardTemplate()}
+        ${this.locationSelectionButtonTemplate()}
         <div class="vpn-bottom-content">
-          ${this.siteRulesStatusTemplate()}
+          ${bottomMessageBar} ${this.siteRulesStatusTemplate()}
+          ${this.bandwidthUsageTemplate()} ${this.siteInclusionPromptTemplate()}
           ${this.siteRulesSettingsLinkTemplate()} ${this.footerTemplate()}
         </div>
       `;
     }
 
     return html`
-      ${this.statusCardTemplate()} ${this.exclusionToggleTemplate()}
+      ${topMessageBar} ${this.statusCardTemplate()}
+      ${this.locationSelectionButtonTemplate()} ${bottomMessageBar}
+      ${this.bandwidthUsageTemplate()} ${this.exclusionToggleTemplate()}
       <div class="vpn-bottom-content">${this.footerTemplate()}</div>
     `;
   }
 
   render() {
-    if (
-      (this.state.onboardingMessage || this.state.bandwidthWarning) &&
-      !this._messageDismissed &&
-      !this.state.unauthenticated &&
-      !this.state.paused
-    ) {
-      this._showMessageBar = true;
-    } else if (
-      (!this.state.onboardingMessage && !this.state.bandwidthWarning) ||
-      this.state.paused
-    ) {
-      // Remove the message bar if we can no longer render messages before they were dismissed
-      // or when in the paused state.
-      this._showMessageBar = false;
-    }
-
-    const messageBar = this._showMessageBar ? this.messageBarTemplate() : null;
-
-    let content = html`${messageBar}${this.mainContentTemplate()}`;
-
     // TODO: Conditionally render post-upgrade subview within #ipprotection-content-wrapper - Bug 1973813
     return html`
       <link
         rel="stylesheet"
         href="chrome://browser/content/ipprotection/ipprotection-content.css"
       />
-      <div id="ipprotection-content-wrapper">${content}</div>
+      <div id="ipprotection-content-wrapper">${this.mainContentTemplate()}</div>
     `;
   }
 }

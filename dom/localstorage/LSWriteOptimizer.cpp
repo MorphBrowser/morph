@@ -4,7 +4,6 @@
 
 #include "LSWriteOptimizer.h"
 
-#include <new>
 #include <utility>
 
 #include "nsBaseHashtable.h"
@@ -48,7 +47,7 @@ void LSWriteOptimizerBase::DeleteItem(const nsAString& aKey, int64_t aDelta) {
       entry.Remove();
     } else {
       entry.InsertOrUpdate(
-          MakeUnique<DeleteItemInfo>(NextSerialNumber(), aKey));
+          std::make_unique<DeleteItemInfo>(NextSerialNumber(), aKey));
     }
   });
 
@@ -61,7 +60,7 @@ void LSWriteOptimizerBase::Truncate(int64_t aDelta) {
   mWriteInfos.Clear();
 
   if (!mTruncateInfo) {
-    mTruncateInfo = MakeUnique<TruncateInfo>(NextSerialNumber());
+    mTruncateInfo = std::make_unique<TruncateInfo>(NextSerialNumber());
   }
 
   mTotalDelta += aDelta;
@@ -89,7 +88,7 @@ void LSWriteOptimizerBase::GetSortedWriteInfos(
   }
 
   for (const auto& entry : mWriteInfos) {
-    aWriteInfos.AppendElement(WrapNotNull(entry.GetWeak()));
+    aWriteInfos.AppendElement(WrapNotNull(entry.GetRawPtr()));
   }
 
   // Serial numbers are unique, so this is a total order and the result is

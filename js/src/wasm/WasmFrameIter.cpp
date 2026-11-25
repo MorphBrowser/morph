@@ -33,7 +33,6 @@
 #include "wasm/WasmStubs.h"
 
 #include "jit/MacroAssembler-inl.h"
-#include "vm/JSContext-inl.h"
 #include "wasm/WasmInstance-inl.h"
 
 #ifdef XP_WIN
@@ -80,13 +79,18 @@ static uint32_t FuncIndexForBytecodeOffset(const Code& code,
 /*****************************************************************************/
 // WasmFrameIter implementation
 
-WasmFrameIter::WasmFrameIter(JitActivation* activation, wasm::Frame* fp)
+WasmFrameIter::WasmFrameIter(JitActivation* activation, wasm::Frame* fp,
+                             uintptr_t* shadowStackPointer)
     : cx_(activation->cx()),
       activation_(activation),
       fp_(fp ? fp : activation->wasmExitFP())
 #ifdef ENABLE_WASM_JSPI
       ,
       contStack_(nullptr)
+#endif
+#ifdef JS_HW_SHADOW_STACK
+      ,
+      shadowStackPointer_(shadowStackPointer)
 #endif
 {
   MOZ_ASSERT(fp_);
@@ -99,6 +103,17 @@ WasmFrameIter::WasmFrameIter(JitActivation* activation, wasm::Frame* fp)
   // Exit frames dynamically switch to the main stack. We need to mark this as
   // a stack switch.
   bool dynamicSwitchToMainStack = contStack_ && fp_ == activation->wasmExitFP();
+#  ifdef JS_HW_SHADOW_STACK
+  if (shadowStackPointer_ && dynamicSwitchToMainStack) {
+    // Since VM exits always switch to the main stack, the shadowStackPointer
+    // passed to this constructor does not correspond to the stack where the
+    // exception/trap actually occurred. We begin unwinding from the exit shadow
+    // stack pointer saved in wasm::GenerateExitPrologueMainStackSwitch.
+    shadowStackPointer_ = contStack_->exitShadowStackPointer();
+    MOZ_RELEASE_ASSERT(shadowStackPointer_);
+    shadowStackSwitchPointer_ = shadowStackPointer_;
+  }
+#  endif
 #endif
 
   // When the stack is captured during a trap (viz., to create the .stack
@@ -115,6 +130,13 @@ WasmFrameIter::WasmFrameIter(JitActivation* activation, wasm::Frame* fp)
     const wasm::Code* unwoundCode = LookupCode(unwoundPC, &unwoundCodeRange);
     MOZ_RELEASE_ASSERT(unwoundCode);
     MOZ_RELEASE_ASSERT(unwoundCodeRange);
+
+#ifdef JS_HW_SHADOW_STACK
+    if (trapData.unwoundFrame) {
+      // wasm::StartUnwinding() unwound the frame where the trap occurred.
+      unwindShadowStackEntry(unwoundPC);
+    }
+#endif
 
 #ifdef ENABLE_WASM_JSPI
     MOZ_RELEASE_ASSERT(unwoundCodeRange->isFunction() ||
@@ -152,9 +174,21 @@ WasmFrameIter::WasmFrameIter(JitActivation* activation, wasm::Frame* fp)
     currentFrameStackSwitched_ = dynamicSwitchToMainStack;
 #endif
 
-    // The debugEnabled() relies on valid value of resumePCinCurrentFrame_
-    // to identify DebugFrame. Normally this field is updated at popFrame().
-    resumePCinCurrentFrame_ = (uint8_t*)trapData.resumePC;
+    // If wasm::StartUnwinding unwound the trapping frame (which only happens
+    // for IndirectCallBadSig), the current frame is the caller's, so its
+    // resume PC is the call site in the caller, not the trap's resume PC in
+    // the callee.  Stackmap lookup relies on this.  The caller may have made a
+    // return call as a regular call.
+    if (trapData.unwoundFrame) {
+      MOZ_ASSERT(trapData.trap == Trap::IndirectCallBadSig);
+      resumePCinCurrentFrame_ = (uint8_t*)unwoundPC;
+      CallSite site;
+      currentFrameIsReturnCallFallback_ =
+          code_->lookupCallSite(unwoundPC, &site) &&
+          site.isReturnCallFallback();
+    } else {
+      resumePCinCurrentFrame_ = (uint8_t*)trapData.resumePC;
+    }
 
     MOZ_ASSERT(!done());
     return;
@@ -171,6 +205,10 @@ WasmFrameIter::WasmFrameIter(JitActivation* activation, wasm::Frame* fp)
   // keep its code alive.
   exitInstance_ = instance_;
 
+#ifdef ENABLE_WASM_JSPI
+  ContStack* exitContStack = contStack_;
+#endif
+
   // Skip the exit frame.
   popFrame(/*isLeavingFrame=*/false);
   MOZ_ASSERT(!done() || unwoundCallerFP_);
@@ -180,6 +218,12 @@ WasmFrameIter::WasmFrameIter(JitActivation* activation, wasm::Frame* fp)
   // frame as being a stack switch.
   if (!done()) {
     currentFrameStackSwitched_ = dynamicSwitchToMainStack;
+
+    // The exit frame was the only frame on its stack, see unwoundContStack_.
+    if (contStack_ != exitContStack) {
+      MOZ_ASSERT(dynamicSwitchToMainStack);
+      unwoundContStack_ = exitContStack;
+    }
   }
 #endif
 }
@@ -214,6 +258,7 @@ WasmFrameIter::WasmFrameIter(Instance* instance, Frame* fp, void* returnAddress)
     CallSite site;
     MOZ_ALWAYS_TRUE(code_->lookupCallSite(returnAddress, &site));
     MOZ_RELEASE_ASSERT(site.mightBeCrossInstance());
+    currentFrameIsReturnCallFallback_ = site.isReturnCallFallback();
 
 #ifdef ENABLE_WASM_JSPI
     currentFrameStackSwitched_ = site.isStackSwitch();
@@ -279,6 +324,19 @@ void WasmFrameIter::popContBaseFrame() {
   const Handlers* handlers = stack->handlers();
   fp_ = (wasm::Frame*)handlers->returnTarget.framePointer;
   uint8_t* returnAddress = (uint8_t*)handlers->returnTarget.resumePC;
+#  ifdef JS_HW_SHADOW_STACK
+  if (shadowStackPointer_) {
+    MOZ_RELEASE_ASSERT(handlers->returnTarget.shadowStackPointer);
+    // Continue unwinding on our handler's shadow stack, from where the switch
+    // to the stack the previous frame was on took place. Additionally, if this
+    // is not the main stack's shadow stack, we save the switch point in case we
+    // find a catch handler on this stack and need to switch to it on the
+    // exception resume path.
+    shadowStackPointer_ = handlers->returnTarget.shadowStackPointer;
+    shadowStackSwitchPointer_ =
+        handlers->returnTarget.stack->stack ? shadowStackPointer_ : nullptr;
+  }
+#  endif
   instance_ = handlers->returnTarget.instance;
   const CodeRange* codeRange;
   code_ = LookupCode(returnAddress, &codeRange);
@@ -306,7 +364,7 @@ void WasmFrameIter::popFrame(bool isLeavingFrame) {
   // Clearing unwound continuation stack here.
   unwoundContStack_ = nullptr;
 #endif
-  skippedReturnCallTrampoline_ = false;
+  currentFrameIsReturnCallFallback_ = false;
 
   // If we're visiting inlined frames, see if this frame was inlined.
   if (enableInlinedFrames_ && inlinedCallerOffsets_.size() > 0) {
@@ -345,6 +403,15 @@ void WasmFrameIter::popFrame(bool isLeavingFrame) {
   currentFrameStackSwitched_ = false;
 #endif
 
+#ifdef JS_HW_SHADOW_STACK
+  // Unwind the shadow stack entry pushed by the call that created the current
+  // frame, except when the caller is the interpreter entry stub, which the
+  // WasmInterpEntry exception resume returns into.
+  if (!code_ || !codeRange->isInterpEntry()) {
+    unwindShadowStackEntry(returnAddress);
+  }
+#endif
+
   if (isLeavingFrame) {
     MOZ_ASSERT(activation_->hasWasmExitFP());
 
@@ -352,26 +419,6 @@ void WasmFrameIter::popFrame(bool isLeavingFrame) {
     if (activation_->isWasmTrapping()) {
       activation_->finishWasmTrap();
     }
-  }
-
-  // A return address into the return_call trampoline denotes a hidden frame
-  // that only restores the caller instance and returns to the real caller. Skip
-  // it by following the hidden frame's stored return address to the real
-  // caller.
-  if (!code_ && wasm::IsReturnCallTrampolineReturnAddress(returnAddress)) {
-    // The hidden frame restores the caller instance and realm. Recover them
-    // here so the interp-entry, jit-entry and cont-base branches below (which
-    // return before the Function-branch recovery) still see the caller.
-    instance_ = ExtractCallerInstanceFromFrameWithInstances(fp_);
-    if (isLeavingFrame) {
-      cx()->setRealmForJitExceptionHandler(instance_->realm());
-    }
-    fp_ = fp_->wasmCaller();
-    returnAddress = fp_->returnAddress();
-    code_ = LookupCode(returnAddress, &codeRange);
-    skippedReturnCallTrampoline_ = true;
-    MOZ_RELEASE_ASSERT(
-        !wasm::IsReturnCallTrampolineReturnAddress(returnAddress));
   }
 
   if (!code_) {
@@ -490,11 +537,10 @@ void WasmFrameIter::popFrame(bool isLeavingFrame) {
   CallSite site;
   MOZ_ALWAYS_TRUE(code_->lookupCallSite(returnAddress, &site));
 
-  // instance_ was recovered above when the hidden return_call trampoline frame
-  // was skipped.
-  if (!skippedReturnCallTrampoline_ && site.mightBeCrossInstance()) {
+  if (site.mightBeCrossInstance()) {
     instance_ = ExtractCallerInstanceFromFrameWithInstances(prevFP);
   }
+  currentFrameIsReturnCallFallback_ = site.isReturnCallFallback();
 
 #ifdef ENABLE_WASM_JSPI
   // A stack switch should always go through the cont base frame case above.
@@ -590,13 +636,29 @@ bool WasmFrameIter::debugEnabled() const {
     return false;
   }
 
-  return true;
+  // A frame that made a return call as a regular call has semantically
+  // returned: the debugger was notified at the CollapseFrame breakpoint before
+  // the call. Report no debug frame for it, so that nothing uses its
+  // DebugFrame.
+  return !currentFrameIsReturnCallFallback();
 }
 
 DebugFrame* WasmFrameIter::debugFrame() const {
   MOZ_ASSERT(!done());
   return DebugFrame::from(fp_);
 }
+
+#ifdef JS_HW_SHADOW_STACK
+void WasmFrameIter::unwindShadowStackEntry(const void* returnAddress) {
+  if (!shadowStackPointer_) {
+    return;
+  }
+
+  MOZ_RELEASE_ASSERT(*shadowStackPointer_ ==
+                     reinterpret_cast<uintptr_t>(returnAddress));
+  shadowStackPointer_++;
+}
+#endif
 
 /*****************************************************************************/
 // Prologue/epilogue code generation
@@ -605,9 +667,10 @@ DebugFrame* WasmFrameIter::debugFrame() const {
 // prologue/epilogue. The offsets are dynamically asserted during code
 // generation.
 #if defined(JS_CODEGEN_X64)
-static const unsigned PushedRetAddr = 0;
-static const unsigned PushedFP = 1;
-static const unsigned SetFP = 4;
+static const unsigned PushedRetAddr =
+    IndirectTargetLandingPadSize(TargetKind::Call);
+static const unsigned PushedFP = PushedRetAddr + 1;
+static const unsigned SetFP = PushedRetAddr + 4;
 static const unsigned PoppedFP = 0;
 static const unsigned PoppedFPJitEntry = 0;
 #elif defined(JS_CODEGEN_X86)
@@ -629,9 +692,10 @@ static const unsigned PoppedFPJitEntry = 0;
 // PushedRetAddr and PushedFP are used in some restricted contexts
 // and must be superficially meaningful.
 static const unsigned BeforePushRetAddr = 0;
-static const unsigned PushedRetAddr = 4;
-static const unsigned PushedFP = 4;
-static const unsigned SetFP = 8;
+static const unsigned PushedRetAddr =
+    IndirectTargetLandingPadSize(TargetKind::Call) + 4;
+static const unsigned PushedFP = PushedRetAddr;
+static const unsigned SetFP = PushedRetAddr + 4;
 static const unsigned PoppedFP = 4;
 static const unsigned PoppedFPJitEntry = 4;
 static_assert(BeforePushRetAddr == 0, "Required by StartUnwinding");
@@ -748,7 +812,7 @@ void wasm::GenerateEnterWasmFPEnvironment(MacroAssembler& masm,
 #ifndef JS_CODEGEN_ARM64
 static void GenerateCommonPrologue(MacroAssembler& masm, uint32_t* entry) {
 #  if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
-  *entry = masm.currentOffset();
+  *entry = masm.indirectTarget(TargetKind::Call).offset();
 
   // The x86/x64 call instruction pushes the return address.
   MOZ_ASSERT_IF(!masm.oom(), PushedRetAddr == masm.currentOffset() - *entry);
@@ -836,9 +900,9 @@ static void GenerateCallablePrologue(MacroAssembler& masm, uint32_t* entry) {
     masm.SetStackPointer64(vixl::sp);
 
     AutoForbidPoolsAndNops afp(&masm,
-                               /* number of instructions in scope = */ 2);
+                               /* number of instructions in scope = */ 3);
 
-    *entry = masm.currentOffset();
+    *entry = masm.indirectTarget(TargetKind::Call).offset();
 
     static_assert(Frame::callerFPOffset() == 0 &&
                   Frame::returnAddressOffset() == 8);
@@ -970,7 +1034,8 @@ void wasm::GenerateMinimalEpilogue(MacroAssembler& masm, uint32_t* ret) {
 void wasm::GenerateFunctionPrologue(MacroAssembler& masm,
                                     const CallIndirectId& callIndirectId,
                                     const Maybe<uint32_t>& tier1FuncIndex,
-                                    FuncOffsets* offsets) {
+                                    FuncOffsets* offsets,
+                                    FaultingCodeRange* badSigTrap) {
   AutoCreatedBy acb(masm, "wasm::GenerateFunctionPrologue");
 
   // We are going to generate this code layout:
@@ -1015,10 +1080,10 @@ void wasm::GenerateFunctionPrologue(MacroAssembler& masm,
     // Generate checked call entry. The BytecodeOffset of the trap is fixed up
     // to be the bytecode offset of the callsite by
     // JitActivation::startWasmTrap.
-    MOZ_ASSERT_IF(!masm.oom(), masm.currentOffset() - offsets->begin ==
+    uint32_t checkedCallEntry;
+    GenerateCallablePrologue(masm, &checkedCallEntry);
+    MOZ_ASSERT_IF(!masm.oom(), checkedCallEntry - offsets->begin ==
                                    WasmCheckedCallEntryOffset);
-    uint32_t dummy;
-    GenerateCallablePrologue(masm, &dummy);
 
     switch (callIndirectId.kind()) {
       case CallIndirectIdKind::Global: {
@@ -1078,7 +1143,11 @@ void wasm::GenerateFunctionPrologue(MacroAssembler& masm,
         // up wasm::StartUnwinding, which uses the PC to determine if the frame
         // has been constructed or not.
         masm.bind(&fail);
-        masm.wasmTrap(Trap::IndirectCallBadSig, TrapSiteDesc());
+        FaultingCodeRange fcr =
+            masm.wasmTrap(Trap::IndirectCallBadSig, TrapSiteDesc());
+        if (badSigTrap) {
+          *badSigTrap = fcr;
+        }
         break;
       }
       case CallIndirectIdKind::Immediate: {
@@ -1092,7 +1161,11 @@ void wasm::GenerateFunctionPrologue(MacroAssembler& masm,
         // up wasm::StartUnwinding, which uses the PC to determine if the frame
         // has been constructed or not.
         masm.bind(&fail);
-        masm.wasmTrap(Trap::IndirectCallBadSig, TrapSiteDesc());
+        FaultingCodeRange fcr =
+            masm.wasmTrap(Trap::IndirectCallBadSig, TrapSiteDesc());
+        if (badSigTrap) {
+          *badSigTrap = fcr;
+        }
         break;
       }
       case CallIndirectIdKind::None:
@@ -1140,7 +1213,7 @@ void wasm::GenerateFunctionPrologue(MacroAssembler& masm,
     masm.jump(Address(scratch, *tier1FuncIndex * sizeof(uintptr_t)));
   }
 
-  offsets->tierEntry = masm.currentOffset();
+  offsets->tierEntry = masm.indirectTarget(TargetKind::Jump).offset();
 
   MOZ_ASSERT(masm.framePushed() == 0);
 }
@@ -1229,6 +1302,28 @@ void wasm::GenerateExitPrologueMainStackSwitch(
   masm.moveToStackPtr(scratch3);
   masm.assertStackAlignment(WasmStackAlignment);
 
+#  ifdef JS_HW_SHADOW_STACK
+  masm.moveShadowStackPtrTo(scratch3);
+
+  Label noHardwareShadowStack;
+  masm.branchTestPtr(Assembler::Zero, scratch3, scratch3,
+                     &noHardwareShadowStack);
+
+  masm.storePtr(
+      scratch3,
+      Address(scratch2, wasm::ContStack::offsetOfExitShadowStackPointer()));
+
+  // SP points at the base handlers, which has a SwitchTarget where we can grab
+  // the shadow stack pointer for the main stack.
+  masm.loadPtr(Address(masm.getStackPointer(),
+                       offsetof(wasm::Handlers, returnTarget) +
+                           offsetof(wasm::SwitchTarget, shadowStackPointer)),
+               scratch3);
+  masm.switchToShadowStackPtr(scratch3);
+
+  masm.bind(&noHardwareShadowStack);
+#  endif
+
   // Reset the stack limit on wasm::Context to the main stack limit. This
   // clobbers scratch2.
   masm.loadPtr(Address(scratch1, JSContext::offsetOfWasm() +
@@ -1304,6 +1399,16 @@ void wasm::GenerateExitEpilogueMainStackReturn(MacroAssembler& masm,
   Label originallyOnSystemStack;
   masm.branchTestPtr(Assembler::Zero, scratch2, scratch2,
                      &originallyOnSystemStack);
+
+#  ifdef JS_HW_SHADOW_STACK
+  masm.loadPtr(
+      Address(scratch2, wasm::ContStack::offsetOfExitShadowStackPointer()),
+      scratch1);
+  masm.storePtr(
+      ImmWord(0),
+      Address(scratch2, wasm::ContStack::offsetOfExitShadowStackPointer()));
+  masm.switchToShadowStackPtr(scratch1);
+#  endif
 
   // Load the JSContext.
   masm.loadPtr(Address(InstanceReg, wasm::Instance::offsetOfCx()), scratch1);
@@ -1531,9 +1636,9 @@ void wasm::GenerateJitExitPrologue(MacroAssembler& masm,
   {
 #  if defined(JS_CODEGEN_ARM64)
     AutoForbidPoolsAndNops afp(&masm,
-                               /* number of instructions in scope = */ 3);
+                               /* number of instructions in scope = */ 4);
 #  endif
-    offsets->begin = masm.currentOffset();
+    offsets->begin = masm.indirectTarget(TargetKind::Call).offset();
     Label fallback;
     masm.bind(&fallback, BufferOffset(fallbackOffset));
 
@@ -1585,7 +1690,7 @@ void wasm::GenerateJitEntryPrologue(MacroAssembler& masm,
     // Push the return address.
     AutoForbidPoolsAndNops afp(&masm,
                                /* number of instructions in scope = */ 3);
-    offsets->begin = masm.currentOffset();
+    offsets->begin = masm.indirectTarget(TargetKind::Call).offset();
 
     static_assert(BeforePushRetAddr == 0);
     static_assert(JitFrameLayout::offsetOfCallerFramePtr() == 0);
@@ -1692,11 +1797,7 @@ static inline void AssertMatchesCallSite(void* callerPC, uint8_t* callerFP) {
   const Code* code = LookupCode(callerPC, &callerCodeRange);
 
   if (!code) {
-    // No code means this is either a direct JIT call, or the return_call
-    // trampoline, which has no exit frame.
-    if (!wasm::IsReturnCallTrampolineReturnAddress(callerPC)) {
-      AssertDirectJitCall(callerFP);
-    }
+    AssertDirectJitCall(callerFP);
     return;
   }
 
@@ -1796,7 +1897,6 @@ void ProfilingFrameIterator::initFromExitFP(const Frame* fp) {
     case CodeRange::DebugStub:
     case CodeRange::RequestTierUpStub:
     case CodeRange::UpdateCallRefMetricsStub:
-    case CodeRange::ReturnCallTrampoline:
     case CodeRange::Throw:
     case CodeRange::FarJumpIsland:
       MOZ_CRASH("Unexpected CodeRange kind");
@@ -1850,18 +1950,8 @@ const Instance* js::wasm::GetNearestEffectiveInstance(const Frame* fp) {
     const Code* code = LookupCode(returnAddress, &codeRange);
 
     if (!code) {
-      // No code means this is either a direct JIT call, or the return_call
-      // trampoline. Assert this is the case.
-      //
-      // A return_call trampoline return address means this frame was reached
-      // via a cross-instance return_call. Its effective instance is the callee
-      // instance.
-      //
-      // A direct JIT call also stores the effective instance in a callee
-      // instance slot.
-      if (!wasm::IsReturnCallTrampolineReturnAddress(returnAddress)) {
-        AssertDirectJitCall(fp->jitEntryCaller());
-      }
+      // It is a direct call from JIT.
+      AssertDirectJitCall(fp->jitEntryCaller());
       return ExtractCalleeInstanceFromFrameWithInstances(fp);
     }
 
@@ -2054,9 +2144,9 @@ bool js::wasm::StartUnwinding(const RegisterState& registers,
         AssertMatchesCallSite(fixedPC, fixedFP);
       } else
 #endif
-          if (offsetFromEntry == PushedRetAddr || codeRange->isThunk()) {
+          if (offsetFromEntry <= PushedRetAddr || codeRange->isThunk()) {
         // The return address has been pushed on the stack but fp still
-        // points to the caller's fp.
+        // points to the caller's fp. This includes the entry's landing pad.
         fixedPC = sp[0];
         fixedFP = fp;
         AssertMatchesCallSite(fixedPC, fixedFP);
@@ -2190,27 +2280,6 @@ bool js::wasm::StartUnwinding(const RegisterState& registers,
       }
       fixedPC = nullptr;
       break;
-    case CodeRange::ReturnCallTrampoline:
-      // The trampoline runs on the hidden frame of a cross-instance
-      // return_call; see GenerateReturnCallTrampoline. Until FP is restored,
-      // the hidden frame holds the caller's return address and FP. After that,
-      // fp is the caller's FP and the return address is in the link register
-      // or on top of the stack.
-      if (offsetInCode < codeRange->ret()) {
-        const auto* frame = Frame::fromUntaggedWasmExitFP(fp);
-        fixedPC = frame->returnAddress();
-        fixedFP = frame->rawCaller();
-      } else {
-        fixedFP = fp;
-#if defined(JS_CODEGEN_ARM64) || defined(JS_CODEGEN_MIPS64) || \
-    defined(JS_CODEGEN_LOONG64) || defined(JS_CODEGEN_RISCV64)
-        fixedPC = (uint8_t*)registers.lr;
-#else
-        fixedPC = sp[0];
-#endif
-      }
-      AssertMatchesCallSite(fixedPC, fixedFP);
-      break;
     case CodeRange::Throw:
       // The throw stub executes a small number of instructions before popping
       // the entire activation. To simplify testing, we simply pretend throw
@@ -2313,19 +2382,6 @@ void ProfilingFrameIterator::operator++() {
   const CodeBlock* codeBlock = LookupCodeBlock(callerPC_, &codeRange_);
   code_ = codeBlock ? codeBlock->code : nullptr;
 
-  // Skip the hidden return_call trampoline frame: callerPC_ points into the
-  // trampoline, whose frame just returns to the real caller; follow it there.
-  if (!code_ && wasm::IsReturnCallTrampolineReturnAddress(callerPC_)) {
-    const auto* hidden = Frame::fromUntaggedWasmExitFP(callerFP_);
-    callerPC_ = hidden->returnAddress();
-    callerFP_ = hidden->rawCaller();
-    stackAddress_ = callerFP_;
-    codeBlock = LookupCodeBlock(callerPC_, &codeRange_);
-    code_ = codeBlock ? codeBlock->code : nullptr;
-    // At most one trampoline frame; see popFrame.
-    MOZ_RELEASE_ASSERT(!wasm::IsReturnCallTrampolineReturnAddress(callerPC_));
-  }
-
   if (!code_) {
     category_ = Category::Other;
     // The parent frame is an inlined wasm call, callerFP_ points to the fake
@@ -2407,7 +2463,6 @@ void ProfilingFrameIterator::operator++() {
 #endif
     case CodeRange::InterpEntry:
     case CodeRange::JitEntry:
-    case CodeRange::ReturnCallTrampoline:
       MOZ_CRASH("should have been guarded above");
     case CodeRange::Throw:
       MOZ_CRASH("code range doesn't have frame");
@@ -2596,7 +2651,6 @@ const char* wasm::ThunkedNativeToDescription(SymbolicAddress func) {
       return "call to native cont.unwind function";
 #endif
     case SymbolicAddress::SlotsToAllocKindBytesTable:
-    case SymbolicAddress::ReturnCallTrampoline:
       MOZ_CRASH(
           "symbolic address was not code and should not have appeared here");
 #define VISIT_BUILTIN_FUNC(op, export, sa_name, ...) \
@@ -2633,8 +2687,6 @@ const char* ProfilingFrameIterator::label() const {
   static const char requestTierUpDescription[] = "tier-up request (in wasm)";
   static const char updateCallRefMetricsDescription[] =
       "update call_ref metrics (in wasm)";
-  static const char returnCallTrampolineDescription[] =
-      "return_call trampoline (in wasm)";
 
   if (!exitReason_.isFixed()) {
     return ThunkedNativeToDescription(exitReason_.symbolic());
@@ -2678,8 +2730,6 @@ const char* ProfilingFrameIterator::label() const {
       return requestTierUpDescription;
     case CodeRange::UpdateCallRefMetricsStub:
       return updateCallRefMetricsDescription;
-    case CodeRange::ReturnCallTrampoline:
-      return returnCallTrampolineDescription;
 #ifdef ENABLE_WASM_JSPI
     case CodeRange::ContBaseFrame:
       return "cont base frame";

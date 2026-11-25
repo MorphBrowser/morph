@@ -19,7 +19,6 @@
 #include "TelemetryProbesReporter.h"
 #include "VideoFrameContainer.h"
 #include "VideoUtils.h"
-#include "WindowRenderer.h"
 #include "mozilla/AbstractThread.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/StaticPrefs_media.h"
@@ -123,8 +122,6 @@ void MediaDecoder::NotifyOwnerActivityChanged(bool aIsOwnerInvisible,
   MOZ_DIAGNOSTIC_ASSERT(!IsShutdown());
   SetElementVisibility(aIsOwnerInvisible, aIsOwnerConnected,
                        aIsOwnerInBackground, aHasOwnerPendingCallbacks);
-
-  NotifyCompositor();
 }
 
 void MediaDecoder::Pause() {
@@ -184,7 +181,12 @@ void MediaDecoder::SetOutputTracksPrincipal(
     const RefPtr<nsIPrincipal>& aPrincipal) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(mDecoderStateMachine, "Must be called after Load().");
-  mOutputPrincipal = MakePrincipalHandle(aPrincipal);
+  if (GetPrincipalFromHandle(mOutputPrincipal) == aPrincipal) {
+    // Every new handle has a new generation id, which downstream sees as a
+    // principal change. Keep the current handle if nothing really changed.
+    return;
+  }
+  mOutputPrincipal = PrincipalHandle(aPrincipal);
 }
 
 double MediaDecoder::GetDuration() {
@@ -583,7 +585,7 @@ void MediaDecoder::SetStateMachineParameters() {
   mTimedMetadataListener = mDecoderStateMachine->TimedMetadataEvent().Connect(
       mAbstractMainThread, this, &MediaDecoder::OnMetadataUpdate);
   mMetadataLoadedListener = mDecoderStateMachine->MetadataLoadedEvent().Connect(
-      mAbstractMainThread, this, &MediaDecoder::MetadataLoaded);
+      mAbstractMainThread, this, &MediaDecoder::OnMetadataLoaded);
   mFirstFrameLoadedListener =
       mDecoderStateMachine->FirstFrameLoadedEvent().Connect(
           mAbstractMainThread, this, &MediaDecoder::FirstFrameLoaded);
@@ -718,11 +720,23 @@ double MediaDecoder::GetCurrentTime() {
   return mLogicalPosition;
 }
 
+void MediaDecoder::OnMetadataLoaded(
+    UniquePtr<MediaInfo> aInfo, UniquePtr<MetadataTags> aTags,
+    MediaDecoderEventVisibility aEventVisibility) {
+  MOZ_ASSERT(NS_IsMainThread());
+  RefPtr<MediaDecoder> kungFuDeathGrip = this;
+  MetadataLoaded(std::move(aInfo), std::move(aTags), aEventVisibility);
+}
+
 void MediaDecoder::OnMetadataUpdate(TimedMetadata&& aMetadata) {
   MOZ_ASSERT(NS_IsMainThread());
-  MetadataLoaded(MakeUnique<MediaInfo>(*aMetadata.mInfo),
+  RefPtr<MediaDecoder> kungFuDeathGrip = this;
+  MetadataLoaded(std::make_unique<MediaInfo>(*aMetadata.mInfo),
                  UniquePtr<MetadataTags>(std::move(aMetadata.mTags)),
                  MediaDecoderEventVisibility::Observable);
+  if (IsShutdown()) {
+    return;
+  }
   FirstFrameLoaded(std::move(aMetadata.mInfo),
                    MediaDecoderEventVisibility::Observable);
 }
@@ -750,6 +764,9 @@ void MediaDecoder::MetadataLoaded(
   if (aEventVisibility != MediaDecoderEventVisibility::Suppressed) {
     mFiredMetadataLoaded = true;
     GetOwner()->MetadataLoaded(mInfo.get(), std::move(aTags));
+    if (IsShutdown()) {
+      return;
+    }
   }
   // Invalidate() will end up calling GetOwner()->UpdateMediaSize with the last
   // dimensions retrieved from the video frame container. The video frame
@@ -840,7 +857,7 @@ void MediaDecoder::FirstFrameLoaded(
 
   // We only care about video first frame.
   if (mInfo->HasVideo() && mMDSMCreationTime) {
-    auto info = MakeUnique<dom::MediaDecoderDebugInfo>();
+    auto info = std::make_unique<dom::MediaDecoderDebugInfo>();
     RequestDebugInfo(*info)->Then(
         GetMainThreadSerialEventTarget(), __func__,
         [self = RefPtr<MediaDecoder>{this}, this, now = TimeStamp::Now(),
@@ -1131,27 +1148,6 @@ void MediaDecoder::DurationChanged() {
 
   if (CurrentPosition().ToSeconds() > mDuration.match(DurationToDouble())) {
     Seek(mDuration.match(DurationToDouble()), SeekTarget::Accurate);
-  }
-}
-
-already_AddRefed<KnowsCompositor> MediaDecoder::GetCompositor() {
-  MediaDecoderOwner* owner = GetOwner();
-  Document* ownerDoc = owner ? owner->GetDocument() : nullptr;
-  WindowRenderer* renderer =
-      ownerDoc ? nsContentUtils::WindowRendererForDocument(ownerDoc) : nullptr;
-  RefPtr<KnowsCompositor> knows =
-      renderer ? renderer->AsKnowsCompositor() : nullptr;
-  return knows ? knows->GetForMedia().forget() : nullptr;
-}
-
-void MediaDecoder::NotifyCompositor() {
-  RefPtr<KnowsCompositor> knowsCompositor = GetCompositor();
-  if (knowsCompositor) {
-    nsCOMPtr<nsIRunnable> r =
-        NewRunnableMethod<already_AddRefed<KnowsCompositor>&&>(
-            "MediaFormatReader::UpdateCompositor", mReader,
-            &MediaFormatReader::UpdateCompositor, knowsCompositor.forget());
-    (void)mReader->OwnerThread()->Dispatch(r.forget());
   }
 }
 

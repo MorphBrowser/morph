@@ -13,6 +13,7 @@
 #include "mozilla/StaticPrefs_layers.h"
 #include "mozilla/gfx/2D.h"  // for DataSourceSurface, Factory
 #include "mozilla/gfx/CanvasManagerParent.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/ipc/Shmem.h"  // for Shmem
 #include "mozilla/layers/AsyncImagePipelineManager.h"
 #include "mozilla/layers/BufferTexture.h"
@@ -46,6 +47,12 @@
 #  ifdef MOZ_WMF_MEDIA_ENGINE
 #    include "mozilla/layers/DcompSurfaceImage.h"
 #  endif
+#endif
+
+#ifdef MOZ_WAYLAND
+#  include "mozilla/WidgetUtilsGtk.h"
+#  include "mozilla/webrender/RenderLinuxTextureHost.h"
+#  include "mozilla/widget/SHMBufSurface.h"
 #endif
 
 #if 0
@@ -492,6 +499,14 @@ BufferTextureHost::BufferTextureHost(const BufferDescriptor& aDesc,
                          << (int)mDescriptor.type();
       MOZ_CRASH("GFX: Bad descriptor");
   }
+
+  mUseExternalTextures = false;
+#ifdef MOZ_WAYLAND
+  if (widget::GdkIsWaylandDisplay() && gfx::gfxVars::UseWebRenderCompositor()) {
+    RefPtr<SHMBufSurface> surface = SHMBufSurface::Create(nullptr, aDesc);
+    mUseExternalTextures = surface->SupportsDirectComposition();
+  }
+#endif
 }
 
 BufferTextureHost::~BufferTextureHost() = default;
@@ -506,9 +521,17 @@ void BufferTextureHost::CreateRenderTexture(
     const wr::ExternalImageId& aExternalImageId) {
   MOZ_ASSERT(mExternalImageId.isSome());
 
-  RefPtr<wr::RenderTextureHost> texture =
-      MakeRefPtr<wr::RenderBufferTextureHost>(GetBuffer(),
-                                              GetBufferDescriptor());
+  RefPtr<wr::RenderTextureHost> texture;
+#ifdef MOZ_WAYLAND
+  if (UseExternalTextures()) {
+    texture = MakeRefPtr<wr::RenderLinuxTextureHost>(GetBuffer(),
+                                                     GetBufferDescriptor());
+  } else
+#endif
+  {
+    texture = MakeRefPtr<wr::RenderBufferTextureHost>(GetBuffer(),
+                                                      GetBufferDescriptor());
+  }
 
   if (auto* shmemTextureHost = AsShmemTextureHost()) {
     shmemTextureHost->OnRenderTextureCreated(texture);
@@ -533,13 +556,18 @@ void BufferTextureHost::PushResourceUpdates(
                     ? &wr::TransactionBuilder::AddExternalImage
                     : &wr::TransactionBuilder::UpdateExternalImage;
 
-  // Use native textures only if our backend requires it.
+  // Use native textures if our backend requires it, or if our backend doesn't
+  // forbid it and we want to use them.
   NativeTexturePolicy policy = BackendNativeTexturePolicy(
       aResources.GetCapabilities().mBackendType, GetSize());
-  auto imageType = policy == REQUIRE ? wr::ExternalImageType::TextureHandle(
-                                           wr::ImageBufferKind::TextureRect)
-                                     : wr::ExternalImageType::Buffer();
-
+  bool useNativeTexture =
+      (policy == REQUIRE) || (policy != FORBID && UseExternalTextures());
+  // External textures are used on Wayland where texture 2D is used.
+  auto textureType = UseExternalTextures() ? wr::ImageBufferKind::Texture2D
+                                           : wr::ImageBufferKind::TextureRect;
+  auto imageType = useNativeTexture
+                       ? wr::ExternalImageType::TextureHandle(textureType)
+                       : wr::ExternalImageType::Buffer();
   if (!IsYCbCr()) {
     if (aImageKeys.length() != 1) {
       MOZ_ASSERT_UNREACHABLE("unexpected keys lenght");
@@ -826,7 +854,7 @@ ShmemTextureHost::ShmemTextureHost(const ipc::Shmem& aShmem,
   MOZ_ASSERT(!(mFlags & TextureFlags::DEALLOCATE_CLIENT));
 
   if (aShmem.IsReadable()) {
-    UniquePtr<mozilla::ipc::Shmem> shmem = MakeUnique<ipc::Shmem>(aShmem);
+    auto shmem = std::make_unique<ipc::Shmem>(aShmem);
     mShmemDeallocRunnable =
         MakeRefPtr<ShmemDeallocRunnable>(mDeallocator, std::move(shmem));
   } else {

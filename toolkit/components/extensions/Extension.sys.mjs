@@ -61,7 +61,8 @@ const lazy = XPCOMUtils.declareLazy({
   getSitePermsPermissionsPromptStringIds:
     "resource://gre/modules/addons/siteperms-addon-utils.sys.mjs",
   Schemas: "resource://gre/modules/Schemas.sys.mjs",
-  ServiceWorkerCleanUp: "resource://gre/modules/ServiceWorkerCleanUp.sys.mjs",
+  ServiceWorkerCleanUp:
+    "moz-src:///toolkit/components/cleardata/ServiceWorkerCleanUp.sys.mjs",
   extensionStorageSync: "resource://gre/modules/ExtensionStorageSync.sys.mjs",
   PERMISSION_L10N: "resource://gre/modules/ExtensionPermissionMessages.sys.mjs",
   permissionToL10nId:
@@ -1561,6 +1562,12 @@ export class ExtensionData {
     });
   }
 
+  // GeneratedWidgetExtension overrides this to allow the `generated_widget`
+  // manifest key, which is reserved for generated widgets.
+  canUseGeneratedWidgets() {
+    return false;
+  }
+
   canUseAPIExperiment() {
     return (
       this.type == "extension" &&
@@ -2118,7 +2125,7 @@ export class ExtensionData {
       }
 
       let moduleData = data => ({
-        url: this.rootURI.resolve(data.script),
+        url: this.getURL(data.script),
         events: data.events,
         paths: data.paths,
         scopes: data.scopes,
@@ -2155,6 +2162,33 @@ export class ExtensionData {
           cssPaths: options.css || [],
           cssOrigin: options.css_origin,
         });
+      }
+
+      if (manifest.builtin_widget && !isPrivileged) {
+        if (this.temporarilyInstalled) {
+          this.manifestError(
+            `Using 'builtin_widget' requires a privileged add-on. ` +
+              PRIVILEGED_ADDONS_DEVDOCS_MESSAGE
+          );
+        } else {
+          this.manifestWarning(
+            `Ignoring 'builtin_widget': requires a privileged add-on.`
+          );
+        }
+        manifest.builtin_widget = null;
+      }
+
+      if (manifest.generated_widget && !this.canUseGeneratedWidgets()) {
+        if (this.temporarilyInstalled) {
+          this.manifestError(
+            `Using 'generated_widget' is reserved for generated widgets.`
+          );
+        } else {
+          this.manifestWarning(
+            `Ignoring 'generated_widget': reserved for generated widgets.`
+          );
+        }
+        manifest.generated_widget = null;
       }
 
       if (manifest.experiment_apis) {
@@ -2394,7 +2428,7 @@ export class ExtensionData {
   }
 
   getAPIManager() {
-    /** @type {(InstanceType<typeof ExtensionCommon.LazyAPIManager>)[]} */
+    /** @type {InstanceType<typeof ExtensionCommon.SchemaAPIManager>[]} */
     let apiManagers = [Management];
 
     for (let id of this.dependencies) {
@@ -2459,7 +2493,7 @@ export class ExtensionData {
   }
 
   // Returns true if an addon is builtin to Firefox or
-  // distributed via Normandy into a system location.
+  // distributed into a system location.
   get isAppProvided() {
     return this.addonData.builtIn || this.addonData.isSystem;
   }
@@ -4289,6 +4323,7 @@ export class Extension extends ExtensionData {
       if (this.policy) {
         this.policy.active = false;
       }
+      this.experimentAPIManager?.disableNewScripts();
 
       this.cleanupGeneratedFile();
 
@@ -4551,6 +4586,7 @@ export class Extension extends ExtensionData {
 
     Management.emit("shutdown", this);
     this.emit("shutdown", isAppShutdown);
+    this.experimentAPIManager?.disableNewScripts();
 
     const TIMED_OUT = Symbol();
 

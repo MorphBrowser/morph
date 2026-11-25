@@ -314,6 +314,9 @@ export var Bookmarks = Object.freeze({
       if (!parent) {
         throw new Error("parentGuid must be valid");
       }
+      if (parent.type != this.TYPE_FOLDER) {
+        throw new Error("parentGuid must be a folder");
+      }
 
       // Set index in the appending case.
       if (
@@ -364,6 +367,7 @@ export var Bookmarks = Object.freeze({
       if (isTagging) {
         for (let entry of await fetchBookmarksByURL(item, {
           concurrent: true,
+          includeTags: true,
         })) {
           notifications.push(
             new PlacesBookmarkTags({
@@ -614,6 +618,10 @@ export var Bookmarks = Object.freeze({
         throw new Error("Can't use insertTree to insert tags.");
       }
 
+      if (treeParent.type != Bookmarks.TYPE_FOLDER) {
+        throw new Error("The parent you specified must be a folder.");
+      }
+
       await insertBookmarkTree(
         insertInfos,
         source,
@@ -832,6 +840,9 @@ export var Bookmarks = Object.freeze({
             if (!parent) {
               throw new Error("No bookmarks found for the provided parentGuid");
             }
+            if (parent.type != this.TYPE_FOLDER) {
+              throw new Error("parentGuid must be a folder");
+            }
           }
 
           if (updateInfo.hasOwnProperty("index")) {
@@ -945,7 +956,7 @@ export var Bookmarks = Object.freeze({
             if (isTagging) {
               for (let entry of await fetchBookmarksByTags(
                 { tags: [updatedItem.title] },
-                { concurrent: true }
+                { concurrent: true, includeTags: true }
               )) {
                 notifications.push(
                   new PlacesBookmarkTags({
@@ -1146,6 +1157,13 @@ export var Bookmarks = Object.freeze({
             { guid: targetParentGuid },
             { db }
           );
+
+          if (!newParent) {
+            throw new Error("No bookmarks found for the provided parentGuid");
+          }
+          if (newParent.type != this.TYPE_FOLDER) {
+            throw new Error("parentGuid must be a folder");
+          }
 
           if (newParent._grandParentId == lazy.PlacesUtils.tagsFolderId) {
             throw new Error("Can't move to a tags folder");
@@ -2469,7 +2487,9 @@ async function fetchBookmark(info, options = {}) {
     );
 
     return rows.length
-      ? rowsToItemsArray(rows, !!options.ignoreInvalidURLs)[0]
+      ? rowsToItemsArray(rows, {
+          ignoreInvalidURLs: !!options.ignoreInvalidURLs,
+        })[0]
       : null;
   };
   if (options.concurrent) {
@@ -2517,42 +2537,78 @@ async function fetchBookmarkByPosition(info, options = {}) {
   );
 }
 
+/**
+ * A `tags(fk, tags)` CTE with the comma separated, sorted tags of each page in
+ * a `filtered_places(id)` CTE that must be defined before it. Computing tags
+ * once per page, rather than once per bookmark through a correlated subquery,
+ * avoids quadratic cost when a page is bookmarked many times. CROSS JOIN forces
+ * `filtered_places` to be the outer loop, otherwise SQLite may walk all the tag
+ * entries.
+ */
+const TAGS_BY_PLACE_CTE = `tags(fk, tags) AS MATERIALIZED (
+  SELECT bb.fk, group_concat(pp.title ORDER BY pp.title)
+  FROM filtered_places
+  CROSS JOIN moz_bookmarks bb ON bb.fk = filtered_places.id
+  JOIN moz_bookmarks pp ON pp.id = bb.parent
+  JOIN moz_bookmarks gg ON gg.id = pp.parent
+  WHERE gg.guid = '${Bookmarks.tagsGuid}'
+  GROUP BY bb.fk
+)`;
+
+/**
+ * Returns the SQL fragments adding a `_tags` column to a query that selects
+ * bookmarks of pages `h`, whose ids are in a `filtered_places(id)` CTE.
+ *
+ * @param {boolean} [includeTags]
+ *        whether to add the column; if falsy, all the fragments are empty.
+ * @returns {{cte: string, column: string, join: string}}
+ */
+function tagsSQLFragments(includeTags) {
+  if (!includeTags) {
+    return { cte: "", column: "", join: "" };
+  }
+  return {
+    cte: `, ${TAGS_BY_PLACE_CTE}`,
+    column: ", t.tags AS _tags",
+    join: "LEFT JOIN tags t ON t.fk = h.id",
+  };
+}
+
 async function fetchBookmarksByTags(info, options = {}) {
+  let tagsSQL = tagsSQLFragments(options.includeTags);
   let query = async function (db) {
     let rows = await db.executeCached(
-      `SELECT b.guid, IFNULL(p.guid, '') AS parentGuid, b.position AS 'index',
+      `WITH filtered_places(id) AS MATERIALIZED (
+         SELECT b2.fk FROM moz_bookmarks b2
+         JOIN moz_bookmarks p2 ON p2.id = b2.parent
+         JOIN moz_bookmarks g2 ON g2.id = p2.parent
+         WHERE g2.guid = '${Bookmarks.tagsGuid}'
+         AND lower(p2.title) IN (
+           ${new Array(info.tags.length).fill("?").join(",")}
+         )
+         GROUP BY b2.fk HAVING count(*) = ${info.tags.length}
+       )${tagsSQL.cte}
+       SELECT b.guid, IFNULL(p.guid, '') AS parentGuid, b.position AS 'index',
               b.dateAdded, b.lastModified, b.type, IFNULL(b.title, '') AS title,
               h.url AS url, b.id AS _id, b.parent AS _parentId,
               NULL AS _childCount,
-              p.parent AS _grandParentId, b.syncStatus AS _syncStatus,
-              (SELECT group_concat(pp.title ORDER BY pp.title)
-               FROM moz_bookmarks bb
-               JOIN moz_bookmarks pp ON pp.id = bb.parent
-               JOIN moz_bookmarks gg ON gg.id = pp.parent
-               WHERE bb.fk = h.id
-               AND gg.guid = '${Bookmarks.tagsGuid}'
-              ) AS _tags
-       FROM moz_bookmarks b
+              p.parent AS _grandParentId, b.syncStatus AS _syncStatus
+              ${tagsSQL.column}
+       FROM filtered_places
+       JOIN moz_places h ON h.id = filtered_places.id
+       JOIN moz_bookmarks b ON b.fk = h.id
        JOIN moz_bookmarks p ON p.id = b.parent
        JOIN moz_bookmarks g ON g.id = p.parent
-       JOIN moz_places h ON h.id = b.fk
+       ${tagsSQL.join}
        WHERE g.guid <> '${Bookmarks.tagsGuid}'
-       AND b.fk IN (
-          SELECT b2.fk FROM moz_bookmarks b2
-          JOIN moz_bookmarks p2 ON p2.id = b2.parent
-          JOIN moz_bookmarks g2 ON g2.id = p2.parent
-          WHERE g2.guid = '${Bookmarks.tagsGuid}'
-          AND lower(p2.title) IN (
-            ${new Array(info.tags.length).fill("?").join(",")}
-          )
-          GROUP BY b2.fk HAVING count(*) = ${info.tags.length}
-       )
        ORDER BY b.lastModified DESC
       `,
       info.tags.map(t => t.toLowerCase())
     );
 
-    return rows.length ? rowsToItemsArray(rows) : null;
+    return rows.length
+      ? rowsToItemsArray(rows, { includesTags: options.includeTags })
+      : null;
   };
 
   if (options.concurrent) {
@@ -2576,10 +2632,10 @@ async function fetchBookmarksByGUIDPrefix(info, options = {}) {
        FROM moz_bookmarks b
        LEFT JOIN moz_bookmarks p ON p.id = b.parent
        LEFT JOIN moz_places h ON h.id = b.fk
-       WHERE b.guid LIKE :guidPrefix
+       WHERE b.guid GLOB :guidPrefix
        ORDER BY b.lastModified DESC
       `,
-      { guidPrefix: info.guidPrefix + "%" }
+      { guidPrefix: info.guidPrefix + "*" }
     );
 
     return rows.length ? rowsToItemsArray(rows) : null;
@@ -2608,30 +2664,30 @@ async function fetchBookmarksByURLs(urls, options = {}) {
       `/* do not warn (bug no): not worth to add an index */
       WITH urls(url, url_hash) AS (
         SELECT value, hash(value) FROM carray(:urls)
-      )
+      ),
+      filtered_places(id) AS MATERIALIZED (
+        SELECT DISTINCT h.id FROM urls
+        JOIN moz_places h ON h.url_hash = urls.url_hash AND h.url = urls.url
+      ),
+      ${TAGS_BY_PLACE_CTE}
       SELECT b.guid, IFNULL(p.guid, '') AS parentGuid, b.position AS 'index',
               b.dateAdded, b.lastModified, b.type, IFNULL(b.title, '') AS title,
               h.url AS url, b.id AS _id, b.parent AS _parentId,
               NULL AS _childCount,
               p.parent AS _grandParentId, b.syncStatus AS _syncStatus,
-              (SELECT group_concat(pp.title ORDER BY pp.title)
-               FROM moz_bookmarks bb
-               JOIN moz_bookmarks pp ON bb.parent = pp.id
-               JOIN moz_bookmarks gg ON pp.parent = gg.id
-               WHERE bb.fk = h.id
-               AND gg.guid = '${Bookmarks.tagsGuid}'
-              ) AS _tags
-      FROM moz_bookmarks b
+              t.tags AS _tags
+      FROM filtered_places
+      JOIN moz_places h ON h.id = filtered_places.id
+      JOIN moz_bookmarks b ON b.fk = h.id
       JOIN moz_bookmarks p ON p.id = b.parent
-      JOIN moz_places h ON h.id = b.fk
-      JOIN urls ON urls.url = h.url AND urls.url_hash = h.url_hash
+      LEFT JOIN tags t ON t.fk = h.id
       WHERE _grandParentId <> :tagsFolderId
       ORDER BY h.url, b.lastModified DESC`,
       params
     );
 
     let map = new Map();
-    for (let item of rowsToItemsArray(rows)) {
+    for (let item of rowsToItemsArray(rows, { includesTags: true })) {
       let href = item.url.href;
       let arr = map.get(href);
       if (!arr) {
@@ -2653,26 +2709,25 @@ async function fetchBookmarksByURLs(urls, options = {}) {
 }
 
 async function fetchBookmarksByURL(info, options = {}) {
+  let tagsSQL = tagsSQLFragments(options.includeTags);
   let query = async function (db) {
     let rows = await db.executeCached(
       `/* do not warn (bug no): not worth to add an index */
+      WITH filtered_places(id) AS MATERIALIZED (
+        SELECT id FROM moz_places WHERE url_hash = hash(:url) AND url = :url
+      )${tagsSQL.cte}
       SELECT b.guid, IFNULL(p.guid, '') AS parentGuid, b.position AS 'index',
               b.dateAdded, b.lastModified, b.type, IFNULL(b.title, '') AS title,
               h.url AS url, b.id AS _id, b.parent AS _parentId,
               NULL AS _childCount, /* Unused for now */
-              p.parent AS _grandParentId, b.syncStatus AS _syncStatus,
-              (SELECT group_concat(pp.title ORDER BY pp.title)
-               FROM moz_bookmarks bb
-               JOIN moz_bookmarks pp ON bb.parent = pp.id
-               JOIN moz_bookmarks gg ON pp.parent = gg.id
-               WHERE bb.fk = h.id
-               AND gg.guid = '${Bookmarks.tagsGuid}'
-              ) AS _tags
-      FROM moz_bookmarks b
+              p.parent AS _grandParentId, b.syncStatus AS _syncStatus
+              ${tagsSQL.column}
+      FROM filtered_places
+      JOIN moz_places h ON h.id = filtered_places.id
+      JOIN moz_bookmarks b ON b.fk = h.id
       JOIN moz_bookmarks p ON p.id = b.parent
-      JOIN moz_places h ON h.id = b.fk
-      WHERE h.url_hash = hash(:url) AND h.url = :url
-      AND _grandParentId <> :tagsFolderId
+      ${tagsSQL.join}
+      WHERE _grandParentId <> :tagsFolderId
       ORDER BY b.lastModified DESC
       `,
       {
@@ -2681,7 +2736,9 @@ async function fetchBookmarksByURL(info, options = {}) {
       }
     );
 
-    return rows.length ? rowsToItemsArray(rows) : null;
+    return rows.length
+      ? rowsToItemsArray(rows, { includesTags: options.includeTags })
+      : null;
   };
 
   if (options.concurrent) {
@@ -3040,12 +3097,18 @@ function removeSameValueProperties(dest, src) {
  *
  * @param {Array} rows
  *        the array of mozIStorageRow objects.
- * @param {boolean} ignoreInvalidURLs
+ * @param {object} [options]
+ * @param {boolean} [options.ignoreInvalidURLs]
  *        whether to ignore invalid urls (leaving the url property undefined)
  *        or throw.
+ * @param {boolean} [options.includesTags]
+ *        whether the rows include the `_tags` column.
  * @returns {object[]} An array of bookmark objects.
  */
-function rowsToItemsArray(rows, ignoreInvalidURLs = false) {
+function rowsToItemsArray(
+  rows,
+  { ignoreInvalidURLs = false, includesTags = false } = {}
+) {
   return rows.map(row => {
     let item = {};
     for (let prop of ["guid", "index", "type", "title"]) {
@@ -3094,7 +3157,7 @@ function rowsToItemsArray(rows, ignoreInvalidURLs = false) {
       }
     }
 
-    try {
+    if (includesTags) {
       let tags = row.getResultByName("_tags");
       Object.defineProperty(item, "_tags", {
         value: tags
@@ -3105,8 +3168,6 @@ function rowsToItemsArray(rows, ignoreInvalidURLs = false) {
         enumerable: false,
         configurable: true,
       });
-    } catch (ex) {
-      // `tags` not fetched, don't add it.
     }
 
     return item;
@@ -3218,7 +3279,9 @@ var removeFoldersContents = async function (db, folderGuids, options) {
        LEFT JOIN moz_places h ON b.fk = h.id`,
       { folderGuid }
     );
-    itemsRemoved = itemsRemoved.concat(rowsToItemsArray(rows, true));
+    itemsRemoved = itemsRemoved.concat(
+      rowsToItemsArray(rows, { ignoreInvalidURLs: true })
+    );
   }
 
   if (itemsRemoved.length) {

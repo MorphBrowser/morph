@@ -14,11 +14,16 @@ const { XPCOMUtils } = ChromeUtils.importESModule(
   "resource://gre/modules/XPCOMUtils.sys.mjs"
 );
 
+/**
+ * @import { PopupAndRedirectBlocker } from "moz-src:///toolkit/actors/PopupAndRedirectBlockingParent.sys.mjs";
+ */
+
 let lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
-  ContentAnalysisUtils: "resource://gre/modules/ContentAnalysisUtils.sys.mjs",
+  ContentAnalysisUtils:
+    "moz-src:///toolkit/components/contentanalysis/ContentAnalysisUtils.sys.mjs",
   Finder: "resource://gre/modules/Finder.sys.mjs",
   FinderParent: "resource://gre/modules/FinderParent.sys.mjs",
   PopupAndRedirectBlocker:
@@ -139,7 +144,13 @@ export class MozBrowser extends MozElements.MozElementMixin(XULFrameElement) {
     this.droppedLinkHandler = null;
     this.mIconURL = null;
     this.lastURI = null;
+    /** @type {number} */
+    this.lastLocationChange;
 
+    /**
+     * @type {PopupAndRedirectBlocker}
+     */
+    this.popupAndRedirectBlocker;
     ChromeUtils.defineLazyGetter(this, "popupAndRedirectBlocker", () => {
       return new lazy.PopupAndRedirectBlocker(this);
     });
@@ -164,7 +175,7 @@ export class MozBrowser extends MozElements.MozElementMixin(XULFrameElement) {
           event.preventDefault();
         }
 
-        // No need to handle "dragover" in e10s, since nsDocShellTreeOwner.cpp in the child process
+        // No need to handle "dragover" in e10s, since nsWebBrowser.cpp in the child process
         // handles that case using "@mozilla.org/content/dropped-link-handler;1" service.
         if (this.isRemoteBrowser) {
           return;
@@ -250,7 +261,7 @@ export class MozBrowser extends MozElements.MozElementMixin(XULFrameElement) {
           }
         }
 
-        // No need to handle "drop" in e10s, since nsDocShellTreeOwner.cpp in the child process
+        // No need to handle "drop" in e10s, since nsWebBrowser.cpp in the child process
         // handles that case using "@mozilla.org/content/dropped-link-handler;1" service.
         if (
           !this.droppedLinkHandler ||
@@ -1853,7 +1864,7 @@ export class MozBrowser extends MozElements.MozElementMixin(XULFrameElement) {
   async drawSnapshot(x, y, w, h, scale, backgroundColor, fullViewport = false) {
     let rect = fullViewport ? null : new DOMRect(x, y, w, h);
     try {
-      return this.browsingContext.currentWindowGlobal.drawSnapshot(
+      return await this.browsingContext.currentWindowGlobal.drawSnapshot(
         rect,
         scale,
         backgroundColor

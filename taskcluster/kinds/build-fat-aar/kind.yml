@@ -19,19 +19,17 @@ transforms:
     - gecko_taskgraph.transforms.task:transforms
 
 task-defaults:
-    run-on-repo-type: [hg]
     attributes:
         artifact_map: taskcluster/gecko_taskgraph/manifests/fennec_geckoview.yml
     index:
         product: mobile
     worker-type: b-linux-docker-amd
     use-python: default
+    use-gradle: offline
     worker:
         docker-image: {in-tree: android-build}
         max-run-time: 7200
         env:
-            # Online in order to download the per-architecture AARs.
-            GRADLE_USER_HOME: "/builds/worker/checkouts/build/gecko/mobile/android/gradle/dotgradle-online"
             TOOLTOOL_MANIFEST: "mobile/android/config/tooltool-manifests/android/releng.manifest"
             MOZ_ANDROID_FAT_AAR_ARCHITECTURES: "armeabi-v7a,arm64-v8a,x86_64"
             MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE: system
@@ -78,7 +76,6 @@ task-defaults:
                 default: nightly-fat-aar
         platform: android-arm
     run:
-        clone-with: hg
         using: mozharness
         script: "mozharness/scripts/fx_desktop_build.py"
         secrets: true
@@ -118,17 +115,9 @@ task-defaults:
             - sysroot-x86_64-linux-gnu
             - sysroot-wasm32-wasi
             - terser
-        armeabi-v7a:
-            - artifact: target.maven.zip
-              dest: armeabi-v7a
-              extract: false
         arm64-v8a:
             - artifact: target.maven.zip
               dest: arm64-v8a
-              extract: false
-        x86_64:
-            - artifact: target.maven.zip
-              dest: x86_64
               extract: false
 
 tasks:
@@ -141,7 +130,7 @@ tasks:
             maven_packages:
                 - geckoview
         shipping-phase: build
-        shipping-product: fennec
+        shipping-product: firefox-android
         index:
             job-name: android-geckoview-fat-aar-opt
             type: shippable-with-multi-l10n
@@ -166,6 +155,15 @@ tasks:
         fetches:
             toolchain:
                 - android-gradle-dependencies
+            <<: &armv7-x86_64-fetches
+                armeabi-v7a:
+                    - artifact: target.maven.zip
+                      dest: armeabi-v7a
+                      extract: false
+                x86_64:
+                    - artifact: target.maven.zip
+                      dest: x86_64
+                      extract: false
         optimization:
             skip-unless-backstop: null
 
@@ -178,7 +176,7 @@ tasks:
             maven_packages:
                 - geckoview
         shipping-phase: build
-        shipping-product: fennec
+        shipping-product: firefox-android
         index:
             job-name: android-geckoview-fat-aar-opt-lite
             type: shippable-with-multi-l10n
@@ -205,11 +203,12 @@ tasks:
         fetches:
             toolchain:
                 - android-gradle-dependencies
+            <<: *armv7-x86_64-fetches
         optimization:
             skip-unless-backstop: null
 
     android-geckoview-fat-aar-nightlyasrelease/opt:
-        description: "Android GeckoView multi-architecture fat AAR Nightly-As-Release"
+        description: "Android GeckoView arm64-v8a fat AAR Nightly-As-Release"
         # shippable:true makes build-apk set MOZ_UPDATE_CHANNEL to
         # nightly-{project}. This matches the geckoview-nightly-{project}-omni
         # maven artifact that this task makes. Without it, the Fenix build
@@ -229,29 +228,29 @@ tasks:
             symbol: Bnar
         run-on-projects: []
         dependencies:
-            x86_64: build-android-x86_64-nightlyasrelease/opt
-            armeabi-v7a: build-android-arm-nightlyasrelease/opt
             arm64-v8a: build-android-aarch64-nightlyasrelease/opt
         worker-type: b-linux-docker-xlarge-amd
         worker:
             env:
                 PERFHERDER_EXTRA_OPTIONS: android-geckoview-fat-aar-nightlyasrelease
-                MOZ_ARTIFACT_TASK: {task-reference: '<armeabi-v7a>'}
+                MOZ_ARTIFACT_TASK: {task-reference: '<arm64-v8a>'}
+                MOZ_ANDROID_FAT_AAR_ARCHITECTURES: "arm64-v8a"
         mozconfig:
-            platform: android-arm
+            platform: android-aarch64
             variant: nightly-fat-aar-as-release
         run:
             actions: [get-secrets, build]
             config:
                 - builds/releng_base_android_64_builds.py
                 - taskcluster_nightly.py
-            custom-build-variant-cfg: arm
+            custom-build-variant-cfg: aarch64
         fetches:
             toolchain:
                 - android-gradle-dependencies
 
     android-geckoview-fat-aar/opt:
         description: "Android GeckoView multi-architecture fat AAR Opt"
+        use-gradle-cache: true
         attributes:
             maven_packages:
                 - geckoview
@@ -277,9 +276,11 @@ tasks:
             toolchain:
                 - linux64-sccache
                 - android-gradle-dependencies
+            <<: *armv7-x86_64-fetches
 
     android-geckoview-fat-aar-appservices/opt:
         description: "Android GeckoView multi-architecture fat AAR Opt with an in-tree app-services"
+        use-gradle-cache: true
         attributes:
             maven_packages:
                 - geckoview
@@ -315,6 +316,7 @@ tasks:
             toolchain:
                 - linux64-sccache
                 - android-gradle-dependencies-appservices
+            <<: *armv7-x86_64-fetches
             linux-x86-64:
                 - artifact: target.libmegazord_so_artifacts.zip
                   dest: linux-x86-64

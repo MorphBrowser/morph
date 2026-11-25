@@ -255,6 +255,7 @@ class WebrtcVideoConduit : public VideoSessionConduit,
   void RequestKeyFrame(FrameTransformerProxy* aProxy) override;
   void GenerateKeyFrame(const Maybe<std::string>& aRid,
                         FrameTransformerProxy* aProxy) override;
+  void GenerateKeyFrames(std::vector<std::string> aRids) override;
 
  private:
   // Utility function to dump recv codec database
@@ -274,6 +275,9 @@ class WebrtcVideoConduit : public VideoSessionConduit,
   // Call thread only.
   // Should only be called from Shutdown()
   void SetIsShutdown();
+
+  // Call thread only. Tells the call whether our transport can carry media.
+  void UpdateNetworkState(bool aReady);
 
   void DeliverPacket(webrtc::CopyOnWriteBuffer packet,
                      PacketType type) override;
@@ -546,6 +550,10 @@ class WebrtcVideoConduit : public VideoSessionConduit,
   // Whether the conduit is shutdown or not.
   // Call thread only.
   bool mIsShutdown = false;
+
+  // Whether we have told the call that our transport can carry media.
+  // Call thread only.
+  bool mNetworkReady = false;
 };
 }  // namespace mozilla
 

@@ -39,7 +39,6 @@ component and set of conventions that provides:
 - Programmable message targeting language to show the right message to the
   right user at the right time
 - A template library of reusable Message and Notification UIs
-- Full compatibility with Normandy pref-flip experiments
 - Generalized and privacy conscious event telemetry
 - Flexible Frequency Capping to mitigate user message fatigue
 - Localized off train Messages
@@ -133,6 +132,6 @@ telemetry
 skylight
 ```
 
-[messaging system schemas]: https://firefox-source-docs.mozilla.org/toolkit/components/messaging-system/docs/index.html#messaging-system-schemas
-[triggers]: https://firefox-source-docs.mozilla.org/toolkit/components/messaging-system/docs/TriggerActionSchemas/index.html
-[user actions]: https://firefox-source-docs.mozilla.org/toolkit/components/messaging-system/docs/SpecialMessageActionSchemas/index.html
+[messaging system schemas]: /toolkit/components/messaging-system/docs/index.md#messaging-system-schemas
+[triggers]: /toolkit/components/messaging-system/docs/TriggerActionSchemas/index.md
+[user actions]: /toolkit/components/messaging-system/docs/SpecialMessageActionSchemas/index.md

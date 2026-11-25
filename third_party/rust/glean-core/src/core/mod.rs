@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{DateTime, FixedOffset, SecondsFormat};
+use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use malloc_size_of_derive::MallocSizeOf;
 use once_cell::sync::OnceCell;
 use uuid::Uuid;
@@ -525,6 +525,8 @@ impl Glean {
                 .set_sync(&glean, experimentation_id.to_string());
         }
 
+        glean.set_early_metrics();
+
         // The upload enabled flag may have changed since the last run, for
         // example by the changing of a config file.
         if cfg.upload_enabled {
@@ -722,21 +724,6 @@ impl Glean {
             let new_clientid = self.core_metrics.client_id.generate_and_set_sync(self);
             self.store_client_id_with_reporting(new_clientid, "New client in database only.");
         }
-
-        if self
-            .core_metrics
-            .first_run_date
-            .get_value(self, "glean_client_info")
-            .is_none()
-        {
-            self.core_metrics.first_run_date.set_sync(self, None);
-            // The `first_run_date` field is generated on the very first run
-            // and persisted across upload toggling. We can assume that, the only
-            // time it is set, that's indeed our "first run".
-            self.is_first_run = true;
-        }
-
-        self.set_application_lifetime_core_metrics();
     }
 
     /// Initializes the database metrics managed by Glean's Rust core.
@@ -864,6 +851,10 @@ impl Glean {
                 _ = data.clear_lifetime_storage(Lifetime::User, ping.name());
                 _ = data.clear_lifetime_storage(Lifetime::Application, ping.name());
             }
+            if let Err(err) = self.event_storage().clear_for_ping(ping.name()) {
+                log::warn!("Error clearing event storage for ping: {}", err);
+            }
+
             let ping_maker = PingMaker::new();
             let disabled_pings = &[ping.name()][..];
             if let Err(err) = ping_maker.clear_pending_pings(self.get_data_path(), disabled_pings) {
@@ -1008,6 +999,16 @@ impl Glean {
         if let Err(err) = self.event_data_store.clear_all() {
             log::warn!("Error clearing pending events: {}", err);
         }
+
+        // The persisted `session#*` keys were cleared with internal storage above.
+        // Reset the in-memory session state to match, so a later opt-in can't
+        // continue the pre-opt-out session. No `session_end` is recorded, since
+        // upload is being disabled.
+        self.session_manager = SessionManager::new(
+            self.session_manager.mode,
+            self.session_manager.configured_sample_rate,
+            self.session_manager.inactivity_timeout,
+        );
 
         // This does not clear the experiments store (which isn't managed by the
         // StorageEngineManager), since doing so would mean we would have to have the
@@ -1328,6 +1329,26 @@ impl Glean {
         Ok(())
     }
 
+    /// Set early metrics unconditionally.
+    ///
+    /// This covers e.g. the `first_run_date` and application lifetime metrics known at build time.
+    fn set_early_metrics(&mut self) {
+        // We set the first_run_date unconditionally nowadays
+        if self
+            .core_metrics
+            .first_run_date
+            .get_value(self, "glean_client_info")
+            .is_none()
+        {
+            self.core_metrics.first_run_date.set_sync(self, None);
+            // The `first_run_date` field is generated on the very first run
+            // and persisted across upload toggling. We can assume that, the only
+            // time it is set, that's indeed our "first run".
+            self.is_first_run = true;
+        }
+        self.set_application_lifetime_core_metrics();
+    }
+
     /// Sets internally-handled application lifetime metrics.
     fn set_application_lifetime_core_metrics(&self) {
         self.core_metrics.os.set_sync(self, system::OS);
@@ -1546,15 +1567,12 @@ impl Glean {
 
     /// Injects a `glean_timestamp` key into `extra` when event timestamps are enabled.
     ///
-    /// Takes the already-computed `timestamp_ms` so the glean_timestamp extra and
-    /// the event's main timestamp are both derived from the same clock sample.
-    fn maybe_inject_glean_timestamp(
-        &self,
-        extra: &mut std::collections::HashMap<String, String>,
-        timestamp_ms: u64,
-    ) {
+    /// Uses the wall clock, matching `EventMetric::record`. The event's main
+    /// `timestamp` stays on the monotonic clock.
+    fn maybe_inject_glean_timestamp(&self, extra: &mut std::collections::HashMap<String, String>) {
         if self.with_timestamps {
-            extra.insert("glean_timestamp".to_string(), timestamp_ms.to_string());
+            let precise_timestamp = Utc::now().timestamp_millis() as u64;
+            extra.insert("glean_timestamp".to_string(), precise_timestamp.to_string());
         }
     }
 
@@ -1582,7 +1600,7 @@ impl Glean {
             start_time.to_rfc3339_opts(SecondsFormat::Millis, true),
         );
         extra.insert("sampled_in".to_string(), sampled_in.to_string());
-        self.maybe_inject_glean_timestamp(&mut extra, timestamp);
+        self.maybe_inject_glean_timestamp(&mut extra);
         self.event_data_store.record(
             self,
             &meta.into(),
@@ -1608,7 +1626,7 @@ impl Glean {
         if let Some(r) = reason {
             extra.insert("reason".to_string(), r.to_string());
         }
-        self.maybe_inject_glean_timestamp(&mut extra, timestamp);
+        self.maybe_inject_glean_timestamp(&mut extra);
         self.event_data_store.record(
             self,
             &meta.into(),
@@ -1954,24 +1972,34 @@ impl Glean {
     /// Updates attribution fields with new values.
     /// AttributionMetrics fields with `None` values will not overwrite older values.
     pub fn update_attribution(&self, attribution: AttributionMetrics) {
+        const MAX_ATTRIBUTION_LENGTH: usize = 512;
+
         if let Some(source) = attribution.source {
-            self.core_metrics.attribution_source.set_sync(self, source);
+            self.core_metrics
+                .attribution_source
+                .set_sync_with_max_length(self, source, MAX_ATTRIBUTION_LENGTH);
         }
         if let Some(medium) = attribution.medium {
-            self.core_metrics.attribution_medium.set_sync(self, medium);
+            self.core_metrics
+                .attribution_medium
+                .set_sync_with_max_length(self, medium, MAX_ATTRIBUTION_LENGTH);
         }
         if let Some(campaign) = attribution.campaign {
             self.core_metrics
                 .attribution_campaign
-                .set_sync(self, campaign);
+                .set_sync_with_max_length(self, campaign, MAX_ATTRIBUTION_LENGTH);
         }
         if let Some(term) = attribution.term {
-            self.core_metrics.attribution_term.set_sync(self, term);
+            self.core_metrics.attribution_term.set_sync_with_max_length(
+                self,
+                term,
+                MAX_ATTRIBUTION_LENGTH,
+            );
         }
         if let Some(content) = attribution.content {
             self.core_metrics
                 .attribution_content
-                .set_sync(self, content);
+                .set_sync_with_max_length(self, content, MAX_ATTRIBUTION_LENGTH);
         }
     }
 

@@ -72,6 +72,10 @@ class GitRepository(Repository):
     def head_rev(self):
         return self._run("rev-parse", "HEAD").strip()
 
+    @property
+    def is_shallow(self):
+        return self._run("rev-parse", "--is-shallow-repository").strip() == "true"
+
     def is_cinnabar_repo(self) -> bool:
         """Return `True` if the repo is a git-cinnabar clone."""
 
@@ -279,6 +283,12 @@ class GitRepository(Repository):
         files = [p for p in self._run("ls-files", "-z").split("\0") if p]
         return FileListFinder(files)
 
+    def _get_tracked_files(self, patterns):
+        pathspecs = [f":(glob){pattern}" for pattern in patterns]
+        files = self._run("ls-files", "-z", "--", *pathspecs).split("\0")
+        deleted = self._run("ls-files", "-z", "--deleted", "--", *pathspecs)
+        return sorted(set(files) - set(deleted.split("\0")) - {""})
+
     def get_ignored_files_finder(self):
         files = [
             p
@@ -451,6 +461,12 @@ class GitRepository(Repository):
         if follow is not None:
             cmd += ["--", *follow]
         return self._run(*cmd).splitlines()
+
+    def get_ancestors(self, head: str = "HEAD", limit: int = 20) -> list[str]:
+        """Return the SHAs of `head` and its ancestors, newest first."""
+        return self._run(
+            "rev-list", "--topo-order", f"--max-count={limit}", head
+        ).splitlines()
 
     def get_commit_patches(self, nodes: list[str]) -> list[bytes]:
         """Return the contents of the patch `node` in the VCS' standard format."""

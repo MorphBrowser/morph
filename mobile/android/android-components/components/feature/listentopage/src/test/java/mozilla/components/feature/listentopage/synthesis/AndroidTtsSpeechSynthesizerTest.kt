@@ -17,8 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.test.runTest
-import mozilla.components.feature.listentopage.Voice
 import mozilla.components.feature.listentopage.playback.DirectoryAudioFileCache
+import mozilla.components.feature.listentopage.voices.Voice
 import mozilla.components.support.test.robolectric.testContext
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -213,6 +213,34 @@ class AndroidTtsSpeechSynthesizerTest {
             listOf(Voice("en-gb-alpha", Locale.UK), Voice("en-us-zeta", Locale.US)),
             startedSynthesizer().loadAvailableVoices("en-US"),
         )
+    }
+
+    @Test
+    fun `test that voices named in three-letter codes are offered under their two-letter locale`() = runTest {
+        installVoice("eng-usa", alpha3Locale("eng", "USA", "default"))
+        installVoice("eng-gbr", alpha3Locale("eng", "GBR", "default"))
+        installVoice("spa-mex", alpha3Locale("spa", "MEX", "default"))
+
+        assertEquals(
+            listOf(Voice("eng-gbr", Locale.UK), Voice("eng-usa", Locale.US)),
+            startedSynthesizer().loadAvailableVoices("en-US"),
+        )
+    }
+
+    @Test
+    fun `test that voices in three-letter codes that differ only by variant are offered as one region`() = runTest {
+        installVoice("por-bra-f00", alpha3Locale("por", "BRA", "f00"), quality = TtsVoice.QUALITY_HIGH)
+        installVoice("por-bra-default", alpha3Locale("por", "BRA", "default"))
+
+        assertEquals(
+            listOf(Voice("por-bra-f00", Locale.forLanguageTag("pt-BR"))),
+            startedSynthesizer().loadAvailableVoices("pt-PT"),
+        )
+    }
+
+    @Test
+    fun `test that a locale already in two-letter codes is left as it is`() {
+        assertEquals(Locale.US, Locale.US.normalized())
     }
 
     // The lookup finds nothing rather than failing, so without this the engine would go on reading in the voice it
@@ -460,6 +488,10 @@ class AndroidTtsSpeechSynthesizerTest {
         assertIs<SpeechSynthesisException>(failure)
         return failure
     }
+
+    // The deprecated constructor is the only way to build this, as Locale.Builder rejects three-letter regions.
+    @Suppress("DEPRECATION")
+    private fun alpha3Locale(language: String, region: String, variant: String) = Locale(language, region, variant)
 
     private fun installVoice(
         name: String,

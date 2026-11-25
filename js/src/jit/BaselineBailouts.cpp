@@ -334,6 +334,12 @@ class MOZ_STACK_CLASS BaselineStackBuilder {
   size_t framePushed() const { return framePushed_; }
 
   [[nodiscard]] bool subtract(size_t size, const char* info = nullptr) {
+    // Don't underflow the stack pointer.
+    if (MOZ_UNLIKELY(size >= uintptr_t(frame_) - bufferUsed_)) {
+      ReportOverRecursed(cx_);
+      return false;
+    }
+
     // enlarge the buffer if need be.
     while (size > bufferAvail_) {
       if (!enlarge()) {
@@ -1590,11 +1596,6 @@ bool jit::BailoutIonToBaseline(JSContext* cx, JitActivation* activation,
         activation->removeRematerializedFramesFromDebugger(cx, iter.fp());
       });
 
-  // Always remove the RInstructionResults from the JitActivation, even in
-  // case of failures as the stack frame is going away after the bailout.
-  auto removeIonFrameRecovery = mozilla::MakeScopeExit(
-      [&] { activation->removeIonFrameRecovery(iter.jsFrame()); });
-
   // The caller of the top frame must be one of the following:
   //      IonJS - Ion calling into Ion.
   //      BaselineStub - Baseline calling into Ion.
@@ -1665,7 +1666,9 @@ bool jit::BailoutIonToBaseline(JSContext* cx, JitActivation* activation,
   // Ensure that all value locations are readable from the SnapshotIterator.
   // Get the RInstructionResults from the JitActivation if the frame got
   // recovered ahead of the bailout.
-  SnapshotIterator snapIter(iter, activation->bailoutData()->machineState());
+  Rooted<SnapshotIterator> rootedSnapIter(
+      cx, iter, activation->bailoutData()->machineState());
+  SnapshotIterator& snapIter = rootedSnapIter.get();
   if (!snapIter.initInstructionResults(recoverBailout)) {
     return false;
   }
@@ -1719,26 +1722,21 @@ bool jit::BailoutIonToBaseline(JSContext* cx, JitActivation* activation,
 
   BailoutKind bailoutKind = builder.bailoutKind();
 
-  if (!builder.outermostFrameFormals().empty()) {
-    // Set the first frame's formals, see the comment in InitFromBailout.
-    Value* argv = builder.startFrame()->actualArgs();
-    mozilla::PodCopy(argv, builder.outermostFrameFormals().begin(),
-                     builder.outermostFrameFormals().length());
-  }
-
   // Do stack check.
   bool overRecursed = false;
   BaselineBailoutInfo* info = builder.info();
   size_t numBytesToPush = info->copyStackTop - info->copyStackBottom;
   MOZ_ASSERT((numBytesToPush % sizeof(uintptr_t)) == 0);
-  uint8_t* newsp = info->incomingStack - numBytesToPush;
+  MOZ_RELEASE_ASSERT(numBytesToPush < uintptr_t(info->incomingStack));
 #ifdef JS_SIMULATOR
+  uint8_t* newsp = info->incomingStack - numBytesToPush;
   if (Simulator::Current()->overRecursed(uintptr_t(newsp))) {
     overRecursed = true;
   }
 #else
   AutoCheckRecursionLimit recursion(cx);
-  if (!recursion.checkWithStackPointerDontReport(cx, newsp)) {
+  if (!recursion.checkWithStackPointerAndExtraDontReport(
+          cx, info->incomingStack, numBytesToPush)) {
     overRecursed = true;
   }
 #endif
@@ -1746,6 +1744,15 @@ bool jit::BailoutIonToBaseline(JSContext* cx, JitActivation* activation,
     JitSpew(JitSpew_BaselineBailouts, "  Overrecursion check failed!");
     ReportOverRecursed(cx);
     return false;
+  }
+
+  // Set the first frame's formals after all fallible operations, because a
+  // failed bailout must leave the Ion frame intact.
+  // See BaselineStackBuilder::buildArguments.
+  if (!builder.outermostFrameFormals().empty()) {
+    Value* argv = builder.startFrame()->actualArgs();
+    mozilla::PodCopy(argv, builder.outermostFrameFormals().begin(),
+                     builder.outermostFrameFormals().length());
   }
 
   // Take the reconstructed baseline stack so it doesn't get freed when builder

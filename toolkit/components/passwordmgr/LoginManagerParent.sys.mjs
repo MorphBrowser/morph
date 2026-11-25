@@ -416,9 +416,8 @@ export class LoginManagerParent extends JSWindowActorParent {
 
   #onFormSubmit() {
     Services.obs.notifyObservers(
-      null,
-      "passwordmgr-form-submission-detected",
-      this.origin
+      this.manager.documentPrincipal,
+      "passwordmgr-form-submission-detected"
     );
   }
 
@@ -1641,7 +1640,7 @@ export class LoginManagerParent extends JSWindowActorParent {
       : null;
   }
 
-  async #confirmLoginRemoval(loginGuid) {
+  async #confirmLoginRemoval(loginGuid, flowId) {
     const browser = this.getRootBrowser();
     const chromeWindow = this.browsingContext.topChromeWindow;
 
@@ -1651,19 +1650,24 @@ export class LoginManagerParent extends JSWindowActorParent {
     const osAuth = await lazy.AutocompleteRemoveRecord.passwordOSAuthStrings();
     const { isAuthorized } = await lazy.LoginHelper.requestReauth(
       browser,
-      null,
+      lazy.AutocompleteRemoveRecord.authExpirationTime("password", browser),
       osAuth.message,
       osAuth.caption,
       "delete_autocomplete"
     );
 
-    if (!isAuthorized || !chromeWindow) {
+    if (!isAuthorized) {
+      return;
+    }
+    lazy.AutocompleteRemoveRecord.noteAuthorized("password", browser);
+    if (!chromeWindow) {
       return;
     }
 
     const confirmed = await lazy.AutocompleteRemoveRecord.confirmRemoval(
       chromeWindow,
-      "password"
+      "password",
+      flowId
     );
     if (!confirmed) {
       return;
@@ -1677,7 +1681,7 @@ export class LoginManagerParent extends JSWindowActorParent {
     }
   }
 
-  async onAutoCompleteEntrySelected(message, data) {
+  async onAutoCompleteEntrySelected(message, data, { flowId } = {}) {
     switch (message) {
       // Called when clicking the open preference entry in the autocomplete
       case "PasswordManager:OpenPreferences": {
@@ -1686,8 +1690,10 @@ export class LoginManagerParent extends JSWindowActorParent {
       }
 
       case "PasswordManager:DeleteLogin": {
+        // Prompts return focus to the field; only the reopen below may show it.
+        this.sendAsyncMessage("PasswordManager:removalPending");
         try {
-          await this.#confirmLoginRemoval(data?.loginGuid);
+          await this.#confirmLoginRemoval(data?.loginGuid, flowId);
         } catch (ex) {
           lazy.log("Password removal flow failed:", ex);
         } finally {

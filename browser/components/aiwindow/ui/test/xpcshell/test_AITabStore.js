@@ -6,6 +6,10 @@ do_get_profile();
 const { AITabStore } = ChromeUtils.importESModule(
   "moz-src:///browser/components/aiwindow/ui/modules/AITabStore.sys.mjs"
 );
+const { AITAB_PAGE_TYPES, DEFAULT_AITAB_PAGE_TYPE } =
+  ChromeUtils.importESModule(
+    "moz-src:///browser/components/aiwindow/ui/modules/AITabPageTypes.sys.mjs"
+  );
 
 const EXPECTED_COLUMNS = {
   uuid: "TEXT",
@@ -19,6 +23,7 @@ const EXPECTED_COLUMNS = {
   context_jsonb: "BLOB",
   components_jsonb: "BLOB",
   localstate_jsonb: "BLOB",
+  page_type: "INTEGER",
 };
 
 async function getTableColumns(conn, table) {
@@ -50,11 +55,7 @@ add_task(async function test_schema_version() {
     AITabStore.CURRENT_SCHEMA_VERSION,
     "Schema version matches the store's current version"
   );
-  Assert.equal(
-    version,
-    3,
-    "Schema version is 3 after the tool_conv_id migration"
-  );
+  Assert.equal(version, 4, "Schema version is 4 after the page_type migration");
 });
 
 add_task(async function test_aitab_pages_columns() {
@@ -74,6 +75,7 @@ add_task(async function test_aitab_pages_columns() {
   Assert.ok(columns.conv_id.notNull, "conv_id is NOT NULL");
   Assert.ok(columns.slug.notNull, "slug is NOT NULL");
   Assert.ok(columns.title.notNull, "title is NOT NULL");
+  Assert.ok(columns.page_type.notNull, "page_type is NOT NULL");
 
   // The chat a page belongs to is not optional; the conversation it was
   // composed in is unknown for every row written before the column existed.
@@ -116,10 +118,17 @@ add_task(async function test_slug_version_index_is_unique() {
   );
 });
 
+function todaySlugDate() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
 add_task(async function test_a_slug_cannot_be_reused_by_another_tab() {
   const first = await AITabStore.create({
     convId: "conv-slug-owner",
-    slug: "hotels_in_lisbon",
+    slug: "hotels-in-lisbon",
     title: "Hotels in Lisbon",
   });
 
@@ -128,29 +137,37 @@ add_task(async function test_a_slug_cannot_be_reused_by_another_tab() {
   // failing, and the slug still points at exactly one tab.
   const second = await AITabStore.create({
     convId: "conv-slug-squatter",
-    slug: "hotels_in_lisbon",
+    slug: "hotels-in-lisbon",
     title: "Hotels in Lisbon",
   });
 
-  Assert.equal(first.slug, "hotels_in_lisbon", "The first claim keeps it");
-  Assert.equal(second.slug, "hotels_in_lisbon_2", "The second is moved off it");
+  const dated = `hotels-in-lisbon_${todaySlugDate()}`;
+  Assert.equal(first.slug, "hotels-in-lisbon", "The first claim keeps it");
+  Assert.equal(second.slug, dated, "The second gets today's date appended");
   Assert.equal(
-    (await AITabStore.getBySlug("hotels_in_lisbon")).uuid,
+    (await AITabStore.getBySlug("hotels-in-lisbon")).uuid,
     first.uuid,
     "The contested slug still resolves to the tab that claimed it"
   );
   Assert.equal(
-    (await AITabStore.getBySlug("hotels_in_lisbon_2")).uuid,
+    (await AITabStore.getBySlug(dated)).uuid,
     second.uuid,
     "And the second tab is reachable under the slug it was given"
   );
 });
 
 add_task(async function test_minted_slugs_keep_counting() {
-  for (const slug of ["weekend_in_porto", "weekend_in_porto_2"]) {
+  const dated = `weekend-in-porto_${todaySlugDate()}`;
+  for (const slug of [
+    "weekend-in-porto",
+    dated,
+    `${dated}_1`,
+    `${dated}_2`,
+    `${dated}_3`,
+  ]) {
     const page = await AITabStore.create({
       convId: `conv-${slug}`,
-      slug: "weekend_in_porto",
+      slug: "weekend-in-porto",
       title: "Weekend in Porto",
     });
     Assert.equal(page.slug, slug, `The next free slug is ${slug}`);
@@ -312,6 +329,115 @@ add_task(async function test_one_conversation_can_hold_several_tabs() {
     "First",
     "The first tab is untouched"
   );
+});
+
+add_task(async function test_page_type_defaults_to_chat() {
+  const created = await AITabStore.create({
+    convId: "conv-default-type",
+    slug: "slug-default-type",
+    title: "No page type given",
+  });
+
+  Assert.equal(
+    created.pageType,
+    AITAB_PAGE_TYPES.CHAT,
+    "A page created without a type is a chat page"
+  );
+  Assert.equal(
+    (await AITabStore.getBySlug("slug-default-type")).pageType,
+    AITAB_PAGE_TYPES.CHAT,
+    "And reads back as one"
+  );
+});
+
+add_task(async function test_create_stores_the_page_type() {
+  const created = await AITabStore.create({
+    convId: "conv-digest",
+    slug: "slug-digest",
+    title: "Digest",
+    pageType: AITAB_PAGE_TYPES.DIGEST,
+  });
+
+  Assert.equal(created.pageType, AITAB_PAGE_TYPES.DIGEST, "It is returned");
+  Assert.equal(
+    (await AITabStore.getBySlug("slug-digest")).pageType,
+    AITAB_PAGE_TYPES.DIGEST,
+    "And persisted"
+  );
+});
+
+add_task(async function test_create_rejects_unknown_page_type() {
+  await Assert.rejects(
+    AITabStore.create({
+      convId: "conv-bad-type",
+      slug: "slug-bad-type",
+      title: "Unknown type",
+      pageType: 999,
+    }),
+    /unknown page type/,
+    "create() with a page type that is not registered is rejected"
+  );
+  Assert.equal(
+    await AITabStore.getBySlug("slug-bad-type"),
+    null,
+    "And nothing is stored"
+  );
+});
+
+add_task(async function test_edit_keeps_the_page_type() {
+  await AITabStore.create({
+    convId: "conv-keep-type",
+    slug: "slug-keep-type",
+    title: "Chat page",
+  });
+
+  const edited = await AITabStore.edit({
+    convId: "conv-keep-type",
+    slug: "slug-keep-type",
+    title: "Chat page, revised",
+    pageType: AITAB_PAGE_TYPES.DIGEST,
+  });
+
+  Assert.equal(
+    edited.pageType,
+    AITAB_PAGE_TYPES.CHAT,
+    "An edit keeps the stored type rather than the one it was given"
+  );
+  Assert.equal(
+    (await AITabStore.getBySlug("slug-keep-type")).pageType,
+    AITAB_PAGE_TYPES.CHAT,
+    "And so does the version it wrote"
+  );
+});
+
+add_task(async function test_edit_rejects_page_types_that_cannot_be_edited() {
+  for (const [name, pageType] of [
+    ["research", AITAB_PAGE_TYPES.RESEARCH],
+    ["digest", AITAB_PAGE_TYPES.DIGEST],
+  ]) {
+    const slug = `slug-locked-${name}`;
+    await AITabStore.create({
+      convId: `conv-locked-${name}`,
+      slug,
+      title: "Locked",
+      pageType,
+    });
+
+    await Assert.rejects(
+      AITabStore.edit({
+        convId: `conv-locked-${name}`,
+        slug,
+        title: "Rewritten",
+      }),
+      /cannot be edited/,
+      `edit() on a ${name} page is rejected`
+    );
+    Assert.deepEqual(
+      await AITabStore.getVersionsBySlug(slug),
+      [1],
+      `And no new version of the ${name} page is written`
+    );
+  }
 });
 
 add_task(async function test_edit_rejects_unknown_tab() {
@@ -503,6 +629,28 @@ add_task(async function test_delete_versions_before_spares_other_slugs() {
  * connection instead of shipping a fixture database, which is why it goes
  * last: dropping the column discards the values the tests above stored in it.
  */
+add_task(async function test_page_type_is_added_to_a_v3_database() {
+  await AITabStore.connection.execute(
+    "ALTER TABLE aitab_pages DROP COLUMN page_type"
+  );
+  await AITabStore.connection.execute(
+    `INSERT INTO aitab_pages (uuid, conv_id, slug, version, title, created_at, updated_at)
+     VALUES ('uuid-v3', 'conv-v3', 'slug-v3', 1, 'Stored under v3', 0, 0)`
+  );
+
+  await AITabStore.applyMigrations(3);
+
+  const columns = await getTableColumns(AITabStore.connection, "aitab_pages");
+  Assert.ok(columns.page_type, "The column is added to a v3 database");
+  Assert.equal(columns.page_type.type, "INTEGER", "It is added as INTEGER");
+  Assert.ok(columns.page_type.notNull, "It is NOT NULL");
+  Assert.equal(
+    (await AITabStore.getBySlug("slug-v3")).pageType,
+    DEFAULT_AITAB_PAGE_TYPE,
+    "A page stored before the column existed reads back as the default type"
+  );
+});
+
 add_task(async function test_tool_conv_id_is_added_to_a_v2_database() {
   await AITabStore.connection.execute(
     "ALTER TABLE aitab_pages DROP COLUMN tool_conv_id"

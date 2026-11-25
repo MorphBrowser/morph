@@ -5,6 +5,7 @@
 import json
 import os
 
+import mozpack.path as mozpath
 from mozunit import main
 
 from mozbuild.backend.clangd import ClangdBackend
@@ -19,7 +20,7 @@ class TestCompileDBBackends(BackendTester):
         compile_db = json.loads(open(compile_commands_path).read())
 
         # Verify that we have the same number of items
-        self.assertEqual(len(compile_db), 4)
+        self.assertEqual(len(compile_db), 5)
 
         expected_db = [
             {
@@ -70,6 +71,19 @@ class TestCompileDBBackends(BackendTester):
                 ],
                 "file": f"{topsrcdir}/qux.cpp",
             },
+            {
+                "directory": topobjdir,
+                "arguments": [
+                    "clang++",
+                    "-o",
+                    "/dev/null",
+                    "-c",
+                    "-xc++",
+                    "-ferror-limit=0",
+                    f"{topsrcdir}/foo.h",
+                ],
+                "file": f"{topsrcdir}/foo.h",
+            },
         ]
 
         # Verify item consistency against `expected_db`
@@ -98,6 +112,81 @@ class TestCompileDBBackends(BackendTester):
         self.assertEqual(
             defines,
             ['-DMOZ_APP_NAME="firefox"', '-DMOZ_APP_DISPLAYNAME="Mozilla Firefox"'],
+        )
+
+    def test_database_objc(self):
+        env = self._consume("database-objc", CompileDBBackend)
+        with open(os.path.join(env.topobjdir, "compile_commands.json")) as fh:
+            compile_db = json.load(fh)
+
+        flags = [
+            f"-I{env.topsrcdir}",
+            f"-I{env.topobjdir}",
+            f"-I{env.topobjdir}/dist/include",
+            "-fno-strict-aliasing",
+            "-ffp-contract=off",
+        ]
+        self.assertCountEqual(
+            compile_db,
+            [
+                {
+                    "directory": env.topobjdir,
+                    "arguments": [
+                        "clang",
+                        "-o",
+                        "/dev/null",
+                        "-c",
+                        *flags,
+                        "-fobjc-exceptions",
+                        "-fobjc-arc",
+                        "-ferror-limit=0",
+                        f"{env.topsrcdir}/baz.m",
+                    ],
+                    "file": f"{env.topsrcdir}/baz.m",
+                },
+                {
+                    "directory": env.topobjdir,
+                    "arguments": [
+                        "clang++",
+                        "-o",
+                        "/dev/null",
+                        "-c",
+                        *flags,
+                        "-fobjc-call-cxx-cdtors",
+                        "-fobjc-weak",
+                        "-ferror-limit=0",
+                        f"{env.topsrcdir}/qux.mm",
+                    ],
+                    "file": f"{env.topsrcdir}/qux.mm",
+                },
+                {
+                    "directory": env.topobjdir,
+                    "arguments": [
+                        "clang++",
+                        "-o",
+                        "/dev/null",
+                        "-c",
+                        *flags,
+                        "-fobjc-call-cxx-cdtors",
+                        "-fobjc-weak",
+                        "-xobjective-c++",
+                        "-ferror-limit=0",
+                        f"{env.topsrcdir}/qux.h",
+                    ],
+                    "file": f"{env.topsrcdir}/qux.h",
+                },
+            ],
+        )
+
+    def test_database_c_header(self):
+        env = self._consume("database-c", CompileDBBackend)
+        with open(os.path.join(env.topobjdir, "compile_commands.json")) as fh:
+            compile_db = {mozpath.basename(e["file"]): e for e in json.load(fh)}
+
+        self.assertEqual(
+            compile_db["foo.h"]["arguments"],
+            compile_db["foo.c"]["arguments"][:-2]
+            + ["-xc", "-ferror-limit=0", f"{env.topsrcdir}/foo.h"],
         )
 
     def test_clangd(self):

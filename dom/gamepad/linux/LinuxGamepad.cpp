@@ -33,7 +33,6 @@
 namespace {
 
 using namespace mozilla::dom;
-using mozilla::MakeUnique;
 using mozilla::udev_device;
 using mozilla::udev_enumerate;
 using mozilla::udev_lib;
@@ -140,7 +139,7 @@ void LinuxGamepadService::AddDevice(struct udev_device* dev) {
     }
   }
 
-  auto gamepad = MakeUnique<Gamepad>();
+  auto gamepad = std::make_unique<Gamepad>();
   snprintf(gamepad->devpath, sizeof(gamepad->devpath), "%s", devpath);
   GIOChannel* channel = g_io_channel_new_file(devpath, "r", nullptr);
   if (!channel) {
@@ -298,7 +297,7 @@ void LinuxGamepadService::AddDevice(struct udev_device* dev) {
   if (gamepad->isStandardGamepad) {
     gamepad->handle =
         service->AddGamepad(gamepad->idstring, GamepadMappingType::Standard,
-                            GamepadHand::_empty, numButtons, numAxes, 0, 0, 0);
+                            numButtons, numAxes, 0, 0, 0);
   } else {
     bool defaultRemapper = false;
     RefPtr<GamepadRemapper> remapper =
@@ -308,7 +307,7 @@ void LinuxGamepadService::AddDevice(struct udev_device* dev) {
     remapper->SetButtonCount(numButtons);
 
     gamepad->handle = service->AddGamepad(
-        gamepad->idstring, remapper->GetMappingType(), GamepadHand::_empty,
+        gamepad->idstring, remapper->GetMappingType(),
         remapper->GetButtonCount(), remapper->GetAxisCount(), 0,
         remapper->GetLightIndicatorCount(), remapper->GetTouchEventCount());
     gamepad->remapper = remapper.forget();

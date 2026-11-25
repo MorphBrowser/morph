@@ -23,8 +23,6 @@ prefs = [
   "media.seamless-looping-video=false",
   # Bug 2021606
   "privacy.baselineFingerprintingProtection=false",
-  # Bug 2077709
-  "dom.navigation.navigationRateLimit.count=0",
 ]
 
 ["generated/test_..__always-fail.html"]
@@ -169,12 +167,6 @@ fail-if = [
 # Complicated
 
 
-["generated/test_2_conformance2__glsl3__switch-case.html"]
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1725442
-fail-if = [
-  "os == 'win' && os_version == '11.26200'",
-]
-
 ["generated/test_2_conformance2__glsl3__texture-bias.html"]
 # should be: 3,3,3,3
 # should be: 13,13,13,13
@@ -291,13 +283,6 @@ skip-if = [
 # -
 # Platform-specific
 
-["generated/test_2_conformance2__rendering__framebuffer-mismatched-attachment-targets.html"]
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1725283
-# E.g. framebuffer layer 0 should be drawn green
-fail-if = [
-  "os == 'win' && os_version == '11.26200'",
-]
-
 ["generated/test_2_conformance2__rendering__framebuffer-render-to-layer-angle-issue.html"]
 # framebuffer layer 0 should be green
 # framebuffer layer 1 should be green
@@ -307,9 +292,12 @@ fail-if = [
 
 ["generated/test_2_conformance2__rendering__framebuffer-render-to-layer.html"]
 # pixel 0,0 channel 2 was 51 expected 63 +/- 9
+# Windows: D3D11 rejects mixing 3D and non-3D attachments since ANGLE
+# b64f67868464 (FRAMEBUFFER_UNSUPPORTED for TEXTURE_3D with depth renderbuffer).
 fail-if = [
   "os == 'android' && os_version == '14' && arch == 'aarch64'",
   "os == 'mac' && os_version == '10.15' && arch == 'x86_64'",
+  "os == 'win' && os_version == '11.26200'",
 ]
 
 ########################################################################
@@ -1259,6 +1247,10 @@ fail-if = [
 fail-if = [
   "os == 'linux' && os_version == '22.04' && arch == 'x86_64' && display == 'wayland'",
 ]
+# GPU hang in readPixels on multisampled contexts after a stencil clear. Bug 2097155
+skip-if = [
+  "os == 'mac' && os_version == '10.15' && arch == 'x86_64'",
+]
 
 ["generated/test_2_conformance__extensions__webgl-compressed-texture-astc.html"]
 skip-if = [
@@ -1345,12 +1337,6 @@ fail-if = [
   "os == 'linux' && os_version == '22.04' && arch == 'x86_64' && display == 'wayland'",
 ]
 # Found 0 lines, looking in the vertical direction, expected 2
-
-["generated/test_2_conformance__rendering__many-draw-calls.html"]
-# Appears to just take too long on debug, most of the time.
-skip-if = [
-  "debug",
-]
 
 ["generated/test_2_conformance__rendering__rendering-stencil-large-viewport.html"]
 # same as webgl1 test
@@ -1843,9 +1829,7 @@ skip-if = [
 
 ["generated/test_conformance__rendering__many-draw-calls.html"]
 # Crashes on Android
-# Times-out on DEBUG builds
 skip-if = [
-  "debug",
   "os == 'android' && os_version == '14' && arch == 'aarch64'",
 ]
 

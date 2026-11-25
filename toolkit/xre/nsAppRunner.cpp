@@ -26,6 +26,7 @@
 #include "mozilla/ProcessType.h"
 #include "mozilla/ResultExtensions.h"
 #include "mozilla/RuntimeExceptionModule.h"
+#include "mozilla/SHA1.h"
 #include "mozilla/FileUtils.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/StaticPrefs_browser.h"
@@ -113,6 +114,7 @@
 #ifdef XP_WIN
 #  include "nsIWinAppHelper.h"
 #  include <windows.h>
+#  include <userenv.h>
 #  include <intrin.h>
 #  include <math.h>
 #  include "cairo/cairo-features.h"
@@ -174,6 +176,11 @@
 
 #include "nsINIParser.h"
 #include "mozilla/Omnijar.h"
+#include "nsZipArchive.h"
+#include "nsContentUtils.h"
+#include "mozilla/JSONStringWriteFuncs.h"
+#include "mozilla/ChromeScriptPath.h"
+#include "mozilla/ErrorNames.h"
 #include "mozilla/StartupTimeline.h"
 #include "mozilla/LateWriteChecks.h"
 
@@ -213,6 +220,12 @@
 
 #if defined(XP_MACOSX)
 #  include <Carbon/Carbon.h>
+#  include <IOKit/IOKitLib.h>
+#endif
+
+#if defined(XP_LINUX)
+#  include <fstream>
+#  include <string>
 #endif
 
 #ifdef DEBUG
@@ -224,6 +237,9 @@
 #include "nsICrashReporter.h"
 #include "nsIPrefService.h"
 #include "nsIMemoryInfoDumper.h"
+#include "js/ErrorReport.h"
+#include "js/Exception.h"
+#include "js/Wrapper.h"
 #include "js/String.h"
 #if defined(XP_LINUX) && !defined(ANDROID)
 #  include "mozilla/widget/LSBUtils.h"
@@ -282,6 +298,10 @@ static const char kPrefHealthReportUploadEnabled[] =
     "datareporting.healthreport.uploadEnabled";
 #endif  // defined(MOZ_BLOCK_PROFILE_DOWNGRADE) || defined(MOZ_LAUNCHER_PROCESS)
         // || defined(MOZ_DEFAULT_BROWSER_AGENT)
+#ifdef MOZ_BLOCK_PROFILE_DOWNGRADE
+// Holds a hash of the machine ID. Never send this in telemetry.
+static const char kPrefMachineId[] = "toolkit.profiles.machineID";
+#endif
 #if defined(MOZ_DEFAULT_BROWSER_AGENT)
 static const char kPrefDefaultAgentEnabled[] = "default-browser-agent.enabled";
 
@@ -478,7 +498,8 @@ bool IsWaylandEnabled() { return false; }
  * @param fmt
  *        printf-style format string followed by arguments.
  */
-static MOZ_FORMAT_PRINTF(2, 3) void Output(bool isError, const char* fmt, ...) {
+static MOZ_FORMAT_PRINTF(2, 3) void Output([[maybe_unused]] bool isError,
+                                           const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
 
@@ -541,7 +562,6 @@ static ArgResult CheckArgExists(const char* aArg) {
 }
 
 bool gSafeMode = false;
-bool gFxREmbedded = false;
 
 enum E10sStatus {
   kE10sEnabledByDefault,
@@ -1645,6 +1665,16 @@ nsXULAppInfo::GetDesktopEnvironment(nsACString& aDesktopEnvironment) {
 }
 
 NS_IMETHODIMP
+nsXULAppInfo::GetIsGnomeDesktopEnvironment(bool* aResult) {
+#ifdef MOZ_WIDGET_GTK
+  *aResult = IsGnomeDesktopEnvironment();
+#else
+  *aResult = false;
+#endif
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 nsXULAppInfo::GetIsWayland(bool* aResult) {
 #ifdef MOZ_WIDGET_GTK
   *aResult = GdkIsWaylandDisplay();
@@ -1655,7 +1685,7 @@ nsXULAppInfo::GetIsWayland(bool* aResult) {
 }
 
 NS_IMETHODIMP
-nsXULAppInfo::GetProcessStartupShortcut(nsAString& aShortcut) {
+nsXULAppInfo::GetProcessStartupShortcut([[maybe_unused]] nsAString& aShortcut) {
 #if defined(XP_WIN)
   if (XRE_IsParentProcess()) {
     aShortcut.Assign(gProcessStartupShortcut);
@@ -1673,7 +1703,7 @@ static Maybe<LauncherRegistryInfo::EnabledState> gLauncherProcessState;
 #endif  // defined(XP_WIN) && defined(MOZ_LAUNCHER_PROCESS)
 
 NS_IMETHODIMP
-nsXULAppInfo::GetLauncherProcessState(uint32_t* aResult) {
+nsXULAppInfo::GetLauncherProcessState([[maybe_unused]] uint32_t* aResult) {
 #if defined(XP_WIN) && defined(MOZ_LAUNCHER_PROCESS)
   SetupLauncherProcessPref();
 
@@ -1927,12 +1957,7 @@ nsXULAppInfo::AppendAppNotesToCrashReport(const nsACString& data) {
 }
 
 NS_IMETHODIMP
-nsXULAppInfo::RegisterAppMemory(uint64_t pointer, uint64_t len) {
-  return CrashReporter::RegisterAppMemory((void*)pointer, len);
-}
-
-NS_IMETHODIMP
-nsXULAppInfo::WriteMinidumpForException(void* aExceptionInfo) {
+nsXULAppInfo::WriteMinidumpForException([[maybe_unused]] void* aExceptionInfo) {
 #ifdef XP_WIN
   return CrashReporter::WriteMinidumpForException(
       static_cast<EXCEPTION_POINTERS*>(aExceptionInfo));
@@ -1942,7 +1967,8 @@ nsXULAppInfo::WriteMinidumpForException(void* aExceptionInfo) {
 }
 
 NS_IMETHODIMP
-nsXULAppInfo::AppendObjCExceptionInfoToAppNotes(void* aException) {
+nsXULAppInfo::AppendObjCExceptionInfoToAppNotes(
+    [[maybe_unused]] void* aException) {
 #ifdef XP_MACOSX
   return CrashReporter::AppendObjCExceptionInfoToAppNotes(aException);
 #else
@@ -2915,11 +2941,10 @@ static nsresult ProfileEncryptionMismatchDialog(const char* aMsgKey,
 #endif  // MOZ_WIDGET_ANDROID
 }
 
-static ReturnAbortOnError ProfileLockedDialog(nsIFile* aProfileDir,
-                                              nsIFile* aProfileLocalDir,
-                                              nsIProfileUnlocker* aUnlocker,
-                                              nsINativeAppSupport* aNative,
-                                              nsIProfileLock** aResult) {
+static ReturnAbortOnError ProfileLockedDialog(
+    nsIFile* aProfileDir, nsIFile* aProfileLocalDir,
+    nsIProfileUnlocker* aUnlocker, nsINativeAppSupport* aNative,
+    [[maybe_unused]] nsIProfileLock** aResult) {
   nsresult rv;
 
   // We aren't going to start this instance so we can unblock other instances
@@ -3038,8 +3063,9 @@ static ReturnAbortOnError ProfileLockedDialog(nsIFile* aProfileDir,
 
 MOZ_CAN_RUN_SCRIPT
 static ReturnAbortOnError ShowProfileDialog(
-    nsIToolkitProfileService* aProfileSvc, nsINativeAppSupport* aNative,
-    const char* aDialogURL, const char* aTelemetryEnvVar) {
+    [[maybe_unused]] nsIToolkitProfileService* aProfileSvc,
+    nsINativeAppSupport* aNative, const char* aDialogURL,
+    const char* aTelemetryEnvVar) {
   nsresult rv;
 
   nsCOMPtr<nsIFile> profD, profLD;
@@ -3376,7 +3402,7 @@ static mozilla::Maybe<uint64_t> ReadInstallTimestamp(nsIFile* aJsonFile,
   }
   rewind(f.get());
 
-  auto buf = MakeUnique<uint8_t[]>(len);
+  auto buf = std::make_unique<uint8_t[]>(len);
   if (fread(buf.get(), 1, len, f.get()) != (size_t)len) {
     return mozilla::Nothing();
   }
@@ -3401,6 +3427,101 @@ static mozilla::Maybe<uint64_t> ReadInstallTimestamp(nsIFile* aJsonFile,
   return ParseInstallTimestamp(utf8View);
 }
 #  endif  // !XP_MACOSX
+
+#  if defined(XP_LINUX)
+static nsresult ReadLinuxMachineId(const char* aPath, nsACString& aMachineId) {
+  std::ifstream input(aPath);
+  if (!input.is_open()) {
+    return NS_ERROR_FAILURE;
+  }
+  std::string line;
+  if (!std::getline(input, line) || line.empty()) {
+    return NS_ERROR_FAILURE;
+  }
+  aMachineId.Assign(line.c_str(), line.length());
+  return NS_OK;
+}
+#  endif
+
+static nsresult GetRawMachineId(nsACString& aMachineId) {
+#  if defined(XP_WIN)
+  wchar_t guid[64];
+  DWORD size = sizeof(guid);
+  if (::RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography",
+                     L"MachineGuid", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                     nullptr, guid, &size) != ERROR_SUCCESS) {
+    return NS_ERROR_FAILURE;
+  }
+  CopyUTF16toUTF8(nsDependentString(guid), aMachineId);
+  return NS_OK;
+#  elif defined(XP_MACOSX)
+  io_service_t platformExpert = IOServiceGetMatchingService(
+      MACH_PORT_NULL, IOServiceMatching("IOPlatformExpertDevice"));
+  if (!platformExpert) {
+    return NS_ERROR_FAILURE;
+  }
+
+  CFTypeRef uuid = IORegistryEntryCreateCFProperty(
+      platformExpert, CFSTR(kIOPlatformUUIDKey), kCFAllocatorDefault, 0);
+  IOObjectRelease(platformExpert);
+  if (!uuid) {
+    return NS_ERROR_FAILURE;
+  }
+  auto releaseUuid = MakeScopeExit([&] { CFRelease(uuid); });
+
+  char buffer[128];
+  if (CFGetTypeID(uuid) != CFStringGetTypeID() ||
+      !CFStringGetCString(static_cast<CFStringRef>(uuid), buffer,
+                          sizeof(buffer), kCFStringEncodingUTF8) ||
+      !buffer[0]) {
+    return NS_ERROR_FAILURE;
+  }
+  aMachineId.Assign(buffer);
+  return NS_OK;
+#  elif defined(XP_LINUX)
+  if (NS_SUCCEEDED(ReadLinuxMachineId("/etc/machine-id", aMachineId))) {
+    return NS_OK;
+  }
+  return ReadLinuxMachineId("/var/lib/dbus/machine-id", aMachineId);
+#  else
+  return NS_ERROR_NOT_AVAILABLE;
+#  endif
+}
+
+/**
+ * Returns the hash of a unique identifier for the current device. As a unique
+ * identifier this must not be included in telemetry data without passing a
+ * sensitive data review.
+ *
+ * We use SHA1 as the hashing function as it is available without starting NSS
+ * and we only need to use it for comparison purposes.
+ */
+nsresult GetMachineId(nsACString& aMachineId) {
+  nsAutoCString rawId;
+  nsresult rv = GetRawMachineId(rawId);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  SHA1Sum sha1;
+  sha1.update(kPrefMachineId, sizeof(kPrefMachineId) - 1);
+  sha1.update(rawId.BeginReading(), rawId.Length());
+  SHA1Sum::Hash hash;
+  sha1.finish(hash);
+
+  aMachineId.Truncate();
+  for (uint8_t byte : hash) {
+    aMachineId.AppendPrintf("%02x", byte);
+  }
+  return NS_OK;
+}
+
+static void StoreMachineId() {
+  nsAutoCString machineId;
+  if (NS_SUCCEEDED(GetMachineId(machineId))) {
+    Preferences::SetCString(kPrefMachineId, machineId);
+  } else {
+    Preferences::ClearUser(kPrefMachineId);
+  }
+}
 
 Maybe<mozilla::PathString> GenerateDowngradeTelemetry(
     const nsACString& aPingId, const nsCString& aLastVersion, bool aHasSync,
@@ -3437,7 +3558,30 @@ Maybe<mozilla::PathString> GenerateDowngradeTelemetry(
     // Don't early return.
     NS_ERROR("Failed to get property: hasWinPackageId");
   }
+
+  const char* profileType = nullptr;
+  DWORD profileFlags = 0;
+  if (::GetProfileType(&profileFlags)) {
+    if (profileFlags & PT_TEMPORARY) {
+      profileType = "temporary";
+    } else if (profileFlags & PT_MANDATORY) {
+      profileType = "mandatory";
+    } else if (profileFlags & (PT_ROAMING | PT_ROAMING_PREEXISTING)) {
+      profileType = "roaming";
+    } else {
+      profileType = "normal";
+    }
+  }
 #  endif
+
+  mozilla::Maybe<bool> maybeIsDifferentMachine;
+  nsCString lastMachineId;
+  if (NS_SUCCEEDED(prefBranch->GetCharPref(kPrefMachineId, lastMachineId))) {
+    nsAutoCString machineId;
+    if (NS_SUCCEEDED(GetMachineId(machineId))) {
+      maybeIsDifferentMachine = mozilla::Some(lastMachineId != machineId);
+    }
+  }
 
   mozilla::Maybe<PRTime> maybeInstallTime;
   mozilla::Maybe<PRTime> maybeUpdateTime;
@@ -3541,7 +3685,7 @@ Maybe<mozilla::PathString> GenerateDowngradeTelemetry(
   rv = pingFile->OpenANSIFileDesc("w", &file);
   NS_ENSURE_SUCCESS(rv, Nothing());
 
-  JSONWriter w(MakeUnique<FileWriteFunc>(file));
+  JSONWriter w(std::make_unique<FileWriteFunc>(file));
   w.Start();
   {
     w.StringProperty("type",
@@ -3586,6 +3730,16 @@ Maybe<mozilla::PathString> GenerateDowngradeTelemetry(
                        PromiseFlatCString(aProfileSelectionReason));
 
       w.BoolProperty("isDifferentInstall", aIsDifferentInstall);
+
+      if (maybeIsDifferentMachine) {
+        w.BoolProperty("isDifferentMachine", *maybeIsDifferentMachine);
+      }
+
+#  ifdef XP_WIN
+      if (profileType) {
+        w.StringProperty("profileType", MakeStringSpan(profileType));
+      }
+#  endif
 
       if (aReplacedLockTime) {
         // aReplacedLockTime is in milliseconds.
@@ -4397,16 +4551,12 @@ static bool CheckForUserMismatch() { return false; }
 
 void mozilla::startup::IncreaseDescriptorLimits() {
 #ifdef XP_UNIX
-  // Increase the fd limit to accomodate IPC resources like shared memory.
-#  ifdef XP_DARWIN
-  // We use Mach IPC for shared memory, so a lower limit suffices.
-  // See also the Darwin case in config/external/nspr/pr/moz.build
-  static constexpr rlim_t kFDs = 4096;
-#  else   // Unix but not Darwin
+  // Increase the fd limit to accommodate IPC resources like shared memory.
   // This can be increased if needed, but also be aware that Linux
-  // distributions may impose hard limits less than this.
+  // distributions may impose hard limits less than this. macOS accepts any
+  // value and caps the effective limit at kern.maxfilesperproc, and it must
+  // not exceed the FD_SETSIZE in config/external/nspr/pr/moz.build.
   static constexpr rlim_t kFDs = 65536;
-#  endif  // Darwin or not
   struct rlimit rlim;
 
   if (getrlimit(RLIMIT_NOFILE, &rlim) != 0) {
@@ -4554,7 +4704,7 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
 #ifdef XP_MACOSX
   mozilla::MacAutoreleasePool pool;
 
-  DisableAppNap();
+  RegisterEarlyUserDefaults();
 #endif
 
 #ifdef MOZ_BACKGROUNDTASKS
@@ -4597,10 +4747,6 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
     ChaosMode::SetChaosFeature(feature);
     ChaosMode::enterChaosMode();
     MOZ_ASSERT(ChaosMode::isActive(ChaosFeature::Any));
-  }
-
-  if (CheckArgExists("fxr")) {
-    gFxREmbedded = true;
   }
 
   if (ChaosMode::isActive(ChaosFeature::Any)) {
@@ -4905,11 +5051,9 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
   if (CheckArg("foreground")) {
     // The original process communicates that it was in the foreground by
     // adding this argument.  This new process, which is taking over for
-    // the old one, should make itself the active application.
-    ProcessSerialNumber psn;
-    if (::GetCurrentProcess(&psn) == noErr) {
-      ::SetFrontProcess(&psn);
-    }
+    // the old one, should make itself the active application once AppKit has
+    // finished launching.
+    ActivateMacAppAfterLaunch();
   }
 #endif
 
@@ -4920,6 +5064,14 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
   if (CheckArg("os-restarted", nullptr, CheckArgFlag::RemoveArg) == ARG_FOUND) {
     gRestartedByOS = true;
   }
+
+#ifdef MOZ_X11
+  // An XSMP session manager restarting us passes --sm-client-id. The argument
+  // is consumed by nsNativeAppSupportUnix::Start later on.
+  if (CheckArgExists("sm-client-id") == ARG_FOUND) {
+    gRestartedByOS = true;
+  }
+#endif
 
   gRestartArgc = gArgc;
   gRestartArgv =
@@ -5015,8 +5167,7 @@ int XREMain::XRE_mainInit(bool* aExitFlag) {
     return 1;
   }
   if (ar == ARG_FOUND) {
-    UniquePtr<DBusService> dbusService =
-        MakeUnique<DBusService>(dbusServiceLauncher);
+    auto dbusService = std::make_unique<DBusService>(dbusServiceLauncher);
     if (dbusService->Init()) {
       dbusService->Run();
     }
@@ -5104,7 +5255,8 @@ enum struct ShouldNotProcessUpdatesReason {
   NotAnUpdatingTask,
   OtherInstanceRunning,
   FirstStartup,
-  DisabledByEnvironment
+  DisabledByEnvironment,
+  LaunchedByAIAgent
 };
 
 const char* ShouldNotProcessUpdatesReasonAsString(
@@ -5118,9 +5270,28 @@ const char* ShouldNotProcessUpdatesReasonAsString(
       return "OtherInstanceRunning";
     case ShouldNotProcessUpdatesReason::DisabledByEnvironment:
       return "DisabledByEnvironment";
+    case ShouldNotProcessUpdatesReason::LaunchedByAIAgent:
+      return "LaunchedByAIAgent";
     default:
       MOZ_CRASH("impossible value for ShouldNotProcessUpdatesReason");
   }
+}
+
+// Returns the name of the first environment variable found that indicates a
+// launch by an AI agent, or nullptr if there is none.
+static const char* GetAIAgentEnvVar() {
+  static const char* const kAIAgentEnvVars[] = {
+      "CLAUDECODE",     "CLINE_ACTIVE", "CODEX_SANDBOX",     "CODEX_THREAD_ID",
+      "COPILOT_AGENT",  "COPILOT_CLI",  "CURSOR_AGENT",      "DSH_SHELL",
+      "GEMINI_CLI",     "HERMES_AGENT", "HERMES_SESSION_ID", "MUSE_SESSION_ID",
+      "OPENCLAW_SHELL", "OPENCODE",     "PI_CODING_AGENT",   "PI_TOOL_CALL_ID",
+  };
+  for (const char* envVar : kAIAgentEnvVars) {
+    if (EnvHasValue(envVar)) {
+      return envVar;
+    }
+  }
+  return nullptr;
 }
 
 Maybe<ShouldNotProcessUpdatesReason> ShouldNotProcessUpdates(
@@ -5134,7 +5305,7 @@ Maybe<ShouldNotProcessUpdatesReason> ShouldNotProcessUpdates(
   }
 
   // Bug 2055849: Don't process updates if MOZ_DISABLE_UPDATE_PROCESSING is set.
-  // Set by default when using https://github.com/mozilla/firefox-devtools-mcp.
+  // Set by default when using https://github.com/mozilla/firefox-mcp.
   if (EnvHasValue("MOZ_DISABLE_UPDATE_PROCESSING")) {
     NS_WARNING("ShouldNotProcessUpdates(): DisabledByEnvironment");
     return Some(ShouldNotProcessUpdatesReason::DisabledByEnvironment);
@@ -5204,6 +5375,25 @@ Maybe<ShouldNotProcessUpdatesReason> ShouldNotProcessUpdates(
     }
   }
 #  endif
+
+  // Applying a pending update forces other running instances of the same
+  // installation to restart (bug 1480452), which an AI agent launching its own
+  // instance should not do to the user.
+  if (ARG_FOUND != CheckArgExists("test-process-updates") &&
+      !EnvHasValue("MOZ_TEST_PROCESS_UPDATES") &&
+      !EnvHasValue("MOZ_AGENT_ALLOW_UPDATE_PROCESSING")) {
+    if (const char* agentEnvVar = GetAIAgentEnvVar()) {
+      printf(
+          "Pending updates will not be applied because %s is set in the "
+          "environment, which indicates a launch by an AI agent. Set "
+          "MOZ_AGENT_ALLOW_UPDATE_PROCESSING=1 to apply pending updates at "
+          "startup.\n",
+          agentEnvVar);
+      fflush(stdout);
+      NS_WARNING("ShouldNotProcessUpdates(): LaunchedByAIAgent");
+      return Some(ShouldNotProcessUpdatesReason::LaunchedByAIAgent);
+    }
+  }
 
   return Nothing();
 }
@@ -5327,11 +5517,9 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
     if (const char* currentDesktop = PR_GetEnv("XDG_CURRENT_DESKTOP")) {
       useXI2 |= (nsDependentCString(currentDesktop) == "gamescope"_ns);
     }
-#    ifdef EARLY_BETA_OR_EARLIER
     // We tried 3.24.0+ but had problems, let's retry with newer versions. See
     // bug 1660212.
     useXI2 |= !gtk_check_version(3, 24, 49);
-#    endif
   }
   if (!useXI2) {
     gdk_disable_multidevice();
@@ -5590,22 +5778,8 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
 
 #if defined(MOZ_HAS_REMOTE)
   if (gRemoteService) {
-    // Use the full profile path to identify the profile.
-    nsCString profilePath;
-
-#  ifdef XP_WIN
-    nsString path;
-    rv = mProfD->GetPath(path);
+    rv = gRemoteService->SetProfile(mProfD, profile);
     if (NS_SUCCEEDED(rv)) {
-      CopyUTF16toUTF8(path, profilePath);
-    }
-#  else
-    rv = mProfD->GetNativePath(profilePath);
-#  endif
-
-    if (NS_SUCCEEDED(rv)) {
-      gRemoteService->SetProfile(profilePath);
-
       if (!mDisableRemoteClient) {
         // Try to remote the entire command line. If this fails, start up
         // normally.
@@ -5620,19 +5794,6 @@ int XREMain::XRE_mainStartup(bool* aExitFlag) {
         gRemoteService->SetStartupToken(startupToken);
 #  endif
         rv = gRemoteService->StartClient();
-
-        if (rv == NS_ERROR_NOT_AVAILABLE && profile) {
-          // Older versions would use the profile name in preference to the
-          // path.
-          nsCString profileName;
-          profile->GetName(profileName);
-          gRemoteService->SetProfile(profileName);
-
-          rv = gRemoteService->StartClient();
-
-          // Reset back to the path.
-          gRemoteService->SetProfile(profilePath);
-        }
 
         if (NS_SUCCEEDED(rv)) {
           *aExitFlag = true;
@@ -6047,6 +6208,70 @@ void AddSandboxAnnotations() MOZ_CAN_RUN_SCRIPT_BOUNDARY {
 }
 #endif /* MOZ_SANDBOX */
 
+static bool IsSystemPrincipalException(JS::Handle<JS::Value> aExn) {
+  if (!aExn.isObject()) {
+    return false;
+  }
+  JSObject* obj = js::UncheckedUnwrap(&aExn.toObject());
+  return nsContentUtils::ObjectPrincipal(obj)->IsSystemPrincipal();
+}
+
+static void AnnotateOmnijarCanaryFailure(JSContext* aCx, nsresult aRv,
+                                         mozilla::Omnijar::Type aOmnijar,
+                                         const nsACString& aEntry) {
+  mozilla::JSONStringWriteFunc<nsAutoCString> json;
+  mozilla::JSONWriter w(json, mozilla::JSONWriter::SingleLineStyle);
+  w.Start();
+  nsAutoCString rvName;
+  mozilla::GetErrorName(aRv, rvName);
+  w.StringProperty("rv", rvName);
+
+  JS::ExceptionStack exnStack(aCx);
+  bool hasException = JS_IsExceptionPending(aCx) &&
+                      JS::StealPendingExceptionStack(aCx, &exnStack);
+  w.BoolProperty("exn", hasException);
+  if (hasException) {
+    bool isChrome = IsSystemPrincipalException(exnStack.exception());
+    w.BoolProperty("exnChrome", isChrome);
+    JS::ErrorReportBuilder builder(aCx);
+    if (builder.init(aCx, exnStack, JS::ErrorReportBuilder::NoSideEffects)) {
+      if (JSErrorReport* report = builder.report()) {
+        w.IntProperty("exnNumber", report->errorNumber);
+        if (isChrome && report->filename) {
+          w.StringProperty(
+              "exnFile",
+              mozilla::MakeStringSpan(mozilla::GetReportableChromeScriptPath(
+                  report->filename.c_str())));
+          w.IntProperty("exnLine", report->lineno);
+        }
+      }
+    }
+  }
+
+  nsCOMPtr<nsIFile> omnijar = mozilla::Omnijar::GetPath(aOmnijar);
+  w.BoolProperty("omnijar", !!omnijar);
+  int64_t omnijarSize = 0;
+  if (omnijar && NS_SUCCEEDED(omnijar->GetFileSize(&omnijarSize))) {
+    w.IntProperty("omnijarSize", omnijarSize);
+  }
+
+  RefPtr<nsZipArchive> zip = mozilla::Omnijar::GetReader(aOmnijar);
+  w.BoolProperty("reader", !!zip);
+  if (zip) {
+    nsZipItem* item = zip->GetItem(aEntry);
+    w.BoolProperty("entry", !!item);
+    if (item) {
+      nsZipItemPtr<char> data(zip, aEntry, /* doCRC */ true);
+      w.IntProperty("entrySize", item->RealSize());
+      w.BoolProperty("entryRead", !!data.Buffer());
+    }
+  }
+  w.End();
+
+  CrashReporter::RecordAnnotationNSCString(
+      CrashReporter::Annotation::OmnijarCanaryFailure, json.StringCRef());
+}
+
 /*
  * XRE_mainRun - Command line startup, profile migration, and
  * the calling of appStartup->Run().
@@ -6173,6 +6398,13 @@ nsresult XREMain::XRE_mainRun() {
       }
     }
 
+#if defined(MOZ_SANDBOX) && defined(XP_WIN)
+    // Now that the profile has been set, we can cache the directories needed
+    // for sandbox policy rules. Doing this before profile migration means that
+    // any sandboxed processes it launches also get these rules.
+    mozilla::SandboxBroker::CacheGeckoDirs();
+#endif
+
     // We'd like to initialize the JSContext *after* reading the user prefs.
     // Unfortunately that's not possible if we have to do profile migration
     // because that requires us to execute JS before reading user prefs.
@@ -6283,22 +6515,15 @@ nsresult XREMain::XRE_mainRun() {
       JS::Rooted<JSObject*> mod(jsapi.cx());
       // AppConstants.sys.mjs is small, widely used and most likely will
       // never go away.
+      constexpr auto canaryEntry = "modules/AppConstants.sys.mjs"_ns;
       rv = mozJSModuleLoader::Get()->ImportESModule(
-          jsapi.cx(), "resource://gre/modules/AppConstants.sys.mjs"_ns, &mod);
+          jsapi.cx(), nsAutoCString("resource://gre/"_ns + canaryEntry), &mod);
       if (NS_FAILED(rv)) {
+        AnnotateOmnijarCanaryFailure(jsapi.cx(), rv, mozilla::Omnijar::GRE,
+                                     canaryEntry);
         return NS_ERROR_OMNIJAR_OR_DIR_MISSING;
       }
     }
-
-#if defined(MOZ_SANDBOX) && defined(XP_WIN)
-    // Now that we have preferences and the directory provider, we can
-    // finish initializing SandboxBroker. This must happen before the GFX
-    // platform is initialized (which will launch the GPU process), which
-    // occurs when the "app-startup" category is started up below
-    //
-    // After this completes, we are ready to launch sandboxed processes
-    mozilla::SandboxBroker::GeckoDependentInitialize();
-#endif
 
     nsCOMPtr<nsIFile> workingDir;
     rv = NS_GetSpecialDirectory(NS_OS_CURRENT_WORKING_DIR,
@@ -6322,6 +6547,10 @@ nsresult XREMain::XRE_mainRun() {
     NS_ENSURE_TRUE(appStartup, NS_ERROR_FAILURE);
 
     mDirProvider.DoStartup();
+
+#ifdef MOZ_BLOCK_PROFILE_DOWNGRADE
+    StoreMachineId();
+#endif
 
 #ifdef XP_WIN
     // It needs to be called on the main thread because it has to use
@@ -6421,6 +6650,9 @@ nsresult XREMain::XRE_mainRun() {
 #endif
 
 #if defined(MOZ_WIDGET_GTK)
+      nsAppShell::InitLaunchActivationToken(mXDGActivationToken.IsEmpty()
+                                                ? mDesktopStartupID
+                                                : mXDGActivationToken);
       // Clear the environment variables so they won't be inherited by child
       // processes and confuse things.
       for (const auto& name : kStartupTokenNames) {
@@ -6631,7 +6863,7 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
   nsresult rv = NS_OK;
 
   if (aConfig.appData) {
-    mAppData = MakeUnique<XREAppData>(*aConfig.appData);
+    mAppData = std::make_unique<XREAppData>(*aConfig.appData);
   } else {
     MOZ_RELEASE_ASSERT(aConfig.appDataPath);
     nsCOMPtr<nsIFile> appini;
@@ -6641,7 +6873,7 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
       return 1;
     }
 
-    mAppData = MakeUnique<XREAppData>();
+    mAppData = std::make_unique<XREAppData>();
     rv = XRE_ParseAppData(appini, *mAppData);
     if (NS_FAILED(rv)) {
       Output(true, "Couldn't read application.ini");
@@ -6789,7 +7021,7 @@ int XREMain::XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
   // Start the real application. We use |aInitJSContext = false| because
   // XRE_mainRun wants to initialize the JSContext after reading user prefs.
 
-  mScopedXPCOM = MakeUnique<ScopedXPCOMStartup>();
+  mScopedXPCOM = std::make_unique<ScopedXPCOMStartup>();
 
   rv = mScopedXPCOM->Initialize(/* aInitJSContext = */ false);
   if (rv == NS_ERROR_OMNIJAR_CORRUPT) {
@@ -6987,7 +7219,6 @@ bool XRE_UseNativeEventProcessing() {
   switch (XRE_GetProcessType()) {
 #if defined(XP_DARWIN) || defined(XP_WIN)
     case GeckoProcessType_RDD:
-    case GeckoProcessType_Socket:
       return false;
     case GeckoProcessType_Utility: {
 #  if defined(XP_WIN)
@@ -7020,16 +7251,8 @@ bool XRE_UseNativeEventProcessing() {
 namespace mozilla {
 
 uint32_t GetMaxWebProcessCount() {
-  // multiOptOut is in int to allow us to run multiple experiments without
-  // introducing multiple prefs a la the autostart.N prefs.
-  if (Preferences::GetInt("dom.ipc.multiOptOut", 0) >=
-      nsIXULRuntime::E10S_MULTI_EXPERIMENT) {
-    return 1;
-  }
-
-  const char* optInPref = "dom.ipc.processCount";
-  uint32_t optInPrefValue = Preferences::GetInt(optInPref, 1);
-  return std::max(1u, optInPrefValue);
+  int32_t processCount = Preferences::GetInt("dom.ipc.processCount", 1);
+  return static_cast<uint32_t>(std::max(1, processCount));
 }
 
 const char* PlatformBuildID() { return gToolkitBuildID; }

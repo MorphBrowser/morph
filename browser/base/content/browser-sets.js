@@ -13,6 +13,7 @@ document.addEventListener(
       ContainerCreationPanel:
         "chrome://browser/content/usercontext/ContainerCreationPanel.mjs",
       Referrals: "moz-src:///browser/components/referrals/Referrals.sys.mjs",
+      WindowLock: "moz-src:///browser/modules/WindowLock.sys.mjs",
     });
 
     // <commandset id="mainCommandSet"> defined in browser-sets.inc.xhtml
@@ -97,9 +98,21 @@ document.addEventListener(
           case "cmd_toggleMute":
             gBrowser.toggleMuteAudioOnMultiSelectedTabs(gBrowser.selectedTab);
             break;
-          case "cmd_CustomizeToolbars":
-            gCustomizeMode.enter();
+          case "cmd_CustomizeToolbars": {
+            let source = event.sourceEvent?.target;
+            let entryPoint = "other";
+            if (source?.id == "appmenu-moreTools-button") {
+              entryPoint = "app_menu";
+            } else if (source?.id == "overflowMenu-customize-button") {
+              entryPoint = "overflow_menu";
+            } else if (source?.id == "menu_customizeToolbars") {
+              entryPoint = "menu_bar";
+            } else if (source?.closest("#customizationPanelItemContextMenu")) {
+              entryPoint = "toolbar_context_menu";
+            }
+            gCustomizeMode.enter(entryPoint);
             break;
+          }
           case "cmd_toggleOfflineStatus":
             BrowserOffline.toggleOfflineStatus();
             break;
@@ -198,6 +211,14 @@ document.addEventListener(
           case "Browser:DuplicateTab":
             BrowserCommands.duplicateTab();
             break;
+          case "Browser:CopyTabURL":
+            BrowserUtils.copyLink(
+              BrowserUtils.getExposableURI(gBrowser.currentURI, {
+                stripTracking: true,
+              }).displaySpec,
+              gBrowser.selectedBrowser.contentTitle
+            );
+            break;
           case "Browser:NextTab":
             gBrowser.tabContainer.advanceSelectedTab(
               1,
@@ -294,11 +315,28 @@ document.addEventListener(
           case "Tools:ChatsHistory":
             FirefoxViewHandler.openTab("chats");
             break;
-          case "Tools:Sanitize":
-            Sanitizer.showUI(window);
+          case "Tools:Sanitize": {
+            let { DIALOG_ENTRY_POINTS } = Sanitizer;
+            let source = event.sourceEvent?.target;
+            let entryPoint = DIALOG_ENTRY_POINTS.OTHER;
+            if (source?.localName == "key") {
+              entryPoint = DIALOG_ENTRY_POINTS.SHORTCUT;
+            } else if (source?.id == "sanitizeItem") {
+              entryPoint = DIALOG_ENTRY_POINTS.MENU_BAR;
+            } else if (source?.id == "appMenuClearRecentHistory") {
+              entryPoint = DIALOG_ENTRY_POINTS.APP_MENU;
+            }
+            Sanitizer.showUI(window, undefined, {
+              entryPoint,
+              triggeringEvent: event,
+            });
             break;
+          }
           case "Tools:PrivateBrowsing":
             OpenBrowserWindow({ private: true });
+            break;
+          case "cmd_lockWindows":
+            lazy.WindowLock.lockFromShortcut();
             break;
           case "Browser:Screenshot":
             ScreenshotsUtils.notify(window, "Shortcut");
@@ -374,10 +412,11 @@ document.addEventListener(
         }
         case "toggleSidebarKb":
           if (SIDEBAR_REVAMP_ENABLED) {
-            SidebarController.handleToolbarButtonClick();
-            Glean.sidebar.keyboardShortcut.record({
-              panel: SidebarController.currentID,
-              opened: SidebarController._state.launcherExpanded,
+            SidebarController.handleToolbarButtonClick().then(() => {
+              Glean.sidebar.keyboardShortcut.record({
+                panel: SidebarController.currentID,
+                opened: SidebarController._state.launcherExpanded,
+              });
             });
           }
           break;

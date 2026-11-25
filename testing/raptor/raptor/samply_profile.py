@@ -58,8 +58,10 @@ class SamplyProfile(RaptorProfiling):
             )
             return None
 
-    def __init__(self, upload_dir, raptor_config, test_config):
-        super().__init__(upload_dir, raptor_config, test_config)
+    def __init__(
+        self, upload_dir, raptor_config, test_config, source_path_mappings=None
+    ):
+        super().__init__(upload_dir, raptor_config, test_config, source_path_mappings)
 
         if self.raptor_config.get("app", "") not in SAMPLY_PROFILE_APPS:
             raise RuntimeError(f"Samply profiling only supports: {SAMPLY_PROFILE_APPS}")
@@ -144,7 +146,7 @@ class SamplyProfile(RaptorProfiling):
                 # Disabling the content sandbox allows JIT dumps
                 # and marker files to be emitted
                 "MOZ_DISABLE_CONTENT_SANDBOX": "1",
-                "JIT_OPTION_enableICFramePointers": "true",
+                "JIT_OPTION_enableStubFramePointers": "true",
                 "JIT_OPTION_onlyInlineSelfHosted": "true",
                 "JIT_OPTION_emitInterpreterEntryTrampoline": "true",
                 "PERF_SPEW_DIR": f"{self.temp_dir}",

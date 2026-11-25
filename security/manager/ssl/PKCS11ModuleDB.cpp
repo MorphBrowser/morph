@@ -42,9 +42,8 @@ NS_IMPL_ISUPPORTS(PKCS11ModuleDB, nsIPKCS11ModuleDB)
 PKCS11ModuleDB::PKCS11ModuleDB() {
   MOZ_ASSERT(NS_IsMainThread());
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
-  if (StaticPrefs::security_utility_pkcs11_module_process_enabled() &&
-      !GetInSafeMode()) {
+#if !defined(MOZ_NO_SMART_CARDS)
+  if (UtilityProcessEnabled() && !GetInSafeMode()) {
     auto manager = ipc::UtilityProcessManager::GetSingleton();
     MOZ_ASSERT(manager);
     if (manager) {
@@ -65,7 +64,7 @@ PKCS11ModuleDB::PKCS11ModuleDB() {
           });
     }
   }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 }
 
 StaticRefPtr<PKCS11ModuleDB> sPKCS11ModuleDB;
@@ -83,6 +82,18 @@ already_AddRefed<PKCS11ModuleDB> PKCS11ModuleDB::GetSingleton() {
   }
 
   return do_AddRef(sPKCS11ModuleDB);
+}
+
+static StaticDataMutex<Maybe<bool>> sUtilityProcessEnabled(
+    "sUtilityProcessEnabled");
+
+bool PKCS11ModuleDB::UtilityProcessEnabled() {
+  auto utilityProcessEnabled = sUtilityProcessEnabled.Lock();
+  if (utilityProcessEnabled->isNothing()) {
+    utilityProcessEnabled->emplace(
+        StaticPrefs::security_utility_pkcs11_module_process_enabled());
+  }
+  return **utilityProcessEnabled;
 }
 
 // Using the NSS serial task queue avoids threading issues in NSS'
@@ -165,8 +176,8 @@ PKCS11ModuleDB::DeleteModule(const nsAString& aModuleName, JSContext* aCx,
   auto promiseHolder = MakeRefPtr<nsMainThreadPtrHolder<Promise>>(
       "DeleteModule promise", promise);
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
-  if (StaticPrefs::security_utility_pkcs11_module_process_enabled()) {
+#if !defined(MOZ_NO_SMART_CARDS)
+  if (UtilityProcessEnabled()) {
     if (!mPKCS11ModuleProcessPromise) {
       return NS_ERROR_NOT_AVAILABLE;
     }
@@ -203,7 +214,7 @@ PKCS11ModuleDB::DeleteModule(const nsAString& aModuleName, JSContext* aCx,
     promise.forget(aPromise);
     return NS_OK;
   }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
   nsCOMPtr<nsIRunnable> runnable(NS_NewRunnableFunction(
       "DeleteModule runnable", [promiseHolder, moduleNameNormalized = std::move(
@@ -347,8 +358,8 @@ PKCS11ModuleDB::AddModule(const nsAString& aModuleName,
   auto promiseHolder =
       MakeRefPtr<nsMainThreadPtrHolder<Promise>>("AddModule promise", promise);
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
-  if (StaticPrefs::security_utility_pkcs11_module_process_enabled()) {
+#if !defined(MOZ_NO_SMART_CARDS)
+  if (UtilityProcessEnabled()) {
     if (!mPKCS11ModuleProcessPromise) {
       return NS_ERROR_NOT_AVAILABLE;
     }
@@ -386,7 +397,7 @@ PKCS11ModuleDB::AddModule(const nsAString& aModuleName,
     promise.forget(aPromise);
     return NS_OK;
   }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
   nsCOMPtr<nsIRunnable> runnable(NS_NewRunnableFunction(
       "AddModule runnable",
@@ -432,7 +443,7 @@ nsresult CollectModules(nsTArray<UniqueSECMODModule>& modules) {
   return NS_OK;
 }
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#if !defined(MOZ_NO_SMART_CARDS)
 // Called in the utility process to list modules loaded there.
 nsresult PKCS11ModuleDB::DoListModules(nsTArray<ModuleInfo>& modules) {
   modules.Clear();
@@ -458,7 +469,7 @@ nsresult PKCS11ModuleDB::DoListModules(nsTArray<ModuleInfo>& modules) {
 
   return NS_OK;
 }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
 RefPtr<PKCS11ModuleDB::ListModulesPromise>
 PKCS11ModuleDB::ListMainProcessModules() {
@@ -501,7 +512,7 @@ PKCS11ModuleDB::ListMainProcessModules() {
           });
 }
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#if !defined(MOZ_NO_SMART_CARDS)
 RefPtr<PKCS11ModuleDB::ListModulesPromise>
 PKCS11ModuleDB::ListRemoteProcessModulesGivenParent(
     const RefPtr<PKCS11ModuleParent>& parent) {
@@ -627,7 +638,7 @@ PKCS11ModuleDB::ChangeTokenPasswordGivenParent(
                                                      __func__);
           });
 }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
 NS_IMETHODIMP
 PKCS11ModuleDB::ListModules(JSContext* aCx, Promise** aPromise) {
@@ -639,11 +650,11 @@ PKCS11ModuleDB::ListModules(JSContext* aCx, Promise** aPromise) {
   nsTArray<RefPtr<ListModulesPromise>> promises;
   promises.AppendElement(ListMainProcessModules());
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
-  if (StaticPrefs::security_utility_pkcs11_module_process_enabled()) {
+#if !defined(MOZ_NO_SMART_CARDS)
+  if (UtilityProcessEnabled()) {
     promises.AppendElement(ListRemoteProcessModules());
   }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
   ErrorResult result;
   RefPtr<Promise> promise =
@@ -674,8 +685,10 @@ PKCS11ModuleDB::ListModules(JSContext* aCx, Promise** aPromise) {
 }
 
 const nsLiteralCString kBuiltInModuleNames[] = {
-    kIPCClientCertsModuleName, kNSSInternalModuleName, kOSClientCertsModuleName,
-    kRemoteCertsModuleName,    kRootModuleName,
+    kNSSInternalModuleName,
+    kOSClientCertsModuleName,
+    kRemoteCertsModuleName,
+    kRootModuleName,
 };
 
 void CollectThirdPartyPKCS11ModuleTelemetry(bool aIsInitialization) {
@@ -718,7 +731,7 @@ void CollectThirdPartyPKCS11ModuleTelemetry(bool aIsInitialization) {
       thirdPartyModulesLoaded);
 }
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#if !defined(MOZ_NO_SMART_CARDS)
 RefPtr<PKCS11ModuleDB::TokenInfoPromise> PKCS11ModuleDB::ResetToken(
     SECMODModuleID moduleID, CK_SLOT_ID slotID) {
   if (!mPKCS11ModuleProcessPromise) {
@@ -792,7 +805,7 @@ PKCS11ModuleDB::FindObjectsGivenParent(
   return parent->SendFindObjects(searchingFor)
       ->Then(
           GetCurrentSerialEventTarget(), __func__,
-          [](nsTArray<IPCClientCertObject>&& objects) {
+          [](nsTArray<CryptokiObject>&& objects) {
             return FindObjectsPromise::CreateAndResolve(std::move(objects),
                                                         __func__);
           },
@@ -851,7 +864,7 @@ RefPtr<PKCS11ModuleDB::SignPromise> PKCS11ModuleDB::Sign(
       },
       [](nsresult rv) { return SignPromise::CreateAndReject(rv, __func__); });
 }
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
 void ShowProtectedAuthDialog(const nsCString& tokenName,
                              const nsString& promptId) {

@@ -8,6 +8,7 @@
 #include "RemoteCDMParent.h"
 #include "RemoteMediaManagerChild.h"
 #include "RemoteMediaManagerParent.h"
+#include "mozilla/PRemoteCDMChild.h"
 #include "mozilla/StaticPrefs_media.h"
 
 namespace mozilla {
@@ -69,11 +70,17 @@ MediaResult RemoteAudioDecoderChild::InitIPDL(
           NS_ERROR_DOM_MEDIA_FATAL_ERR,
           RESULT_DETAIL("PRemoteCDMActor is not PRemoteCDMChild."));
     }
+
+    // If the CDM's process crashed, then the CDM must be recreated by the
+    // caller, and we cannot send it.
+    if (!cdm->CanSend() || cdm->Manager() != manager) {
+      return MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR,
+                         RESULT_DETAIL("PRemoteCDMChild is in stale process."));
+    }
   }
 
   if (!manager->SendPRemoteDecoderConstructor(this, aAudioInfo, aOptions,
-                                              Nothing(), aMediaEngineId,
-                                              Nothing(), cdm)) {
+                                              aMediaEngineId, Nothing(), cdm)) {
     return MediaResult(
         NS_ERROR_DOM_MEDIA_FATAL_ERR,
         RESULT_DETAIL("RemoteMediaManager unable to construct."));
@@ -93,8 +100,18 @@ RemoteAudioDecoderParent::RemoteAudioDecoderParent(
 
 IPCResult RemoteAudioDecoderParent::RecvConstruct(
     ConstructResolver&& aResolver) {
-  if (mDecoder || mShutdown) {
+  if (XRE_IsGPUProcess() && !mCDM) {
+    return IPC_FAIL(this, "Audio decoding in GPU process requires a CDM");
+  }
+
+  if (mState != State::Unconstructed) {
     aResolver(MediaResult(NS_ERROR_ALREADY_INITIALIZED, __func__));
+    return IPC_OK();
+  }
+  mState = State::Constructing;
+
+  if (!IsMediaEngineIdAllowed()) {
+    aResolver(MediaResult(NS_ERROR_DOM_MEDIA_FATAL_ERR, __func__));
     return IPC_OK();
   }
 
@@ -113,7 +130,7 @@ IPCResult RemoteAudioDecoderParent::RecvConstruct(
           return;
         }
         MOZ_ASSERT(aValue.ResolveValue());
-        if (self->mDecoder || self->mShutdown) {
+        if (self->mState != State::Constructing) {
           aValue.ResolveValue()->Shutdown();
           resolver(MediaResult(NS_ERROR_ALREADY_INITIALIZED, __func__));
           return;
@@ -121,6 +138,7 @@ IPCResult RemoteAudioDecoderParent::RecvConstruct(
         self->mDecoder =
             new MediaDataDecoderProxy(aValue.ResolveValue().forget(),
                                       do_AddRef(self->mDecodeTaskQueue.get()));
+        self->mState = State::Constructed;
         resolver(NS_OK);
       });
 
@@ -139,7 +157,7 @@ MediaResult RemoteAudioDecoderParent::ProcessDecodedData(
     AudioData* audio = static_cast<AudioData*>(element.get());
     data.AppendElement(audio);
   }
-  auto array = MakeRefPtr<ArrayOfRemoteAudioData>();
+  auto array = MakeNotNull<RefPtr<ArrayOfRemoteAudioData>>();
   if (!array->Fill(std::move(data),
                    [&](size_t aSize) { return AllocateBuffer(aSize); })) {
     return MediaResult(

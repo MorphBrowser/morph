@@ -37,6 +37,10 @@ async function openTabContextMenu(tab = gBrowser.selectedTab) {
     tabContextMenu,
     "shown"
   );
+
+  // Make sure the tab is stable before interacting with it.
+  await BrowserTestUtils.allTabOpenAnimationsFinished(tab.documentGlobal);
+
   tab.scrollIntoView({ behavior: "instant" });
   EventUtils.synthesizeMouseAtCenter(
     tab,
@@ -507,4 +511,56 @@ async function withSplitView(tab1, tab2, taskFn) {
   await taskFn({ tab1, tab2, splitter, splitView });
   // Closes both tabs.
   splitView.close();
+}
+
+/**
+ * Wait for the active Split View splitter to become visible and expose its
+ * current value to accessibility APIs.
+ *
+ * @returns {Promise<XULElement>}
+ *   The active Split View splitter.
+ */
+async function waitForActiveSplitViewSplitter() {
+  const splitter = gBrowser.tabpanels.splitViewSplitter;
+  if (
+    BrowserTestUtils.isVisible(splitter) &&
+    splitter.hasAttribute("aria-valuenow")
+  ) {
+    return splitter;
+  }
+  await BrowserTestUtils.waitForMutationCondition(
+    splitter,
+    { attributes: true },
+    () =>
+      BrowserTestUtils.isVisible(splitter) &&
+      splitter.hasAttribute("aria-valuenow")
+  );
+
+  return splitter;
+}
+
+/**
+ * Asserts that a panel occupies the requested percentage of the tabpanels.
+ *
+ * @param {XULElement} panel
+ *   The panel whose rendered width should be checked.
+ * @param {number} percent
+ *   The expected percentage of the tabpanels width.
+ * @param {number} [tolerance=1]
+ *   The allowed difference in CSS pixels.
+ * @returns {Promise<void>}
+ */
+async function assertSplitViewPanelWidth(panel, percent, tolerance = 1) {
+  const { actualWidth, expectedWidth } = await window.promiseDocumentFlushed(
+    () => ({
+      actualWidth: panel.getBoundingClientRect().width,
+      expectedWidth: (gBrowser.tabpanels.clientWidth * percent) / 100,
+    })
+  );
+
+  Assert.lessOrEqual(
+    Math.abs(actualWidth - expectedWidth),
+    tolerance,
+    `The first panel occupies ${percent}% of the tabpanels`
+  );
 }

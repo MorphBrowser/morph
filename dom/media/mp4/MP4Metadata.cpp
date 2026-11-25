@@ -387,7 +387,7 @@ MP4Metadata::ResultAndTrackInfo MP4Metadata::GetTrackInfo(
                     "Can't get index table for audio track, duration might be "
                     "slightly incorrect");
       }
-      auto track = mozilla::MakeUnique<MP4AudioInfo>();
+      auto track = std::make_unique<MP4AudioInfo>();
       MediaResult updateStatus =
           track->Update(&info, &audio, indices.Ref().get());
       if (NS_FAILED(updateStatus)) {
@@ -416,7 +416,7 @@ MP4Metadata::ResultAndTrackInfo MP4Metadata::GetTrackInfo(
                                           TrackTypeToStr(aType), aTrackNumber)),
                 nullptr};
       }
-      auto track = mozilla::MakeUnique<MP4VideoInfo>();
+      auto track = std::make_unique<MP4VideoInfo>();
       MediaResult updateStatus = track->Update(&info, &video);
       if (NS_FAILED(updateStatus)) {
         MOZ_LOG_FMT(gMP4MetadataLog, LogLevel::Warning,
@@ -443,7 +443,7 @@ MP4Metadata::ResultAndTrackInfo MP4Metadata::GetTrackInfo(
   e->mTimeScale = timeScale;
 
   // No duration in track, use fragment_duration.
-  if (e && !e->mDuration.IsPositive()) {
+  if (!e->mDuration.IsPositive()) {
     Mp4parseFragmentInfo fragmentInfo;
     auto rv = mp4parse_get_fragment_info(mParser.get(), &fragmentInfo);
     if (rv == MP4PARSE_STATUS_OK) {
@@ -459,7 +459,7 @@ MP4Metadata::ResultAndTrackInfo MP4Metadata::GetTrackInfo(
     }
   }
 
-  if (e && e->IsValid()) {
+  if (e->IsValid()) {
     MOZ_LOG_FMT(gMP4MetadataLog, LogLevel::Debug, "parsed a track info ({})",
                 e->ToString().get());
     return {NS_OK, std::move(e)};
@@ -504,16 +504,15 @@ MP4Metadata::ResultAndIndice MP4Metadata::GetTrackIndice(
     }
   }
 
-  UniquePtr<IndiceWrapper> indice;
-  indice = mozilla::MakeUnique<IndiceWrapper>(indiceRawData);
+  auto indice = std::make_unique<IndiceWrapper>(indiceRawData);
 
   return {NS_OK, std::move(indice)};
 }
 
 /*static*/ MP4Metadata::ResultAndByteBuffer MP4Metadata::Metadata(
     ByteStream* aSource) {
-  auto parser = mozilla::MakeUnique<MoofParser>(
-      aSource, AsVariant(ParseAllTracks{}), false);
+  auto parser =
+      std::make_unique<MoofParser>(aSource, AsVariant(ParseAllTracks{}), false);
   RefPtr<mozilla::MediaByteBuffer> buffer = parser->Metadata();
   if (!buffer) {
     return {MediaResult(NS_ERROR_DOM_MEDIA_METADATA_ERR,

@@ -9,6 +9,10 @@ const lazy = XPCOMUtils.declareLazy({
   E10SUtils: "resource://gre/modules/E10SUtils.sys.mjs",
   logConsole: () =>
     console.createInstance({
+      logModule: "MozNewTabRemoteRendererProtocolParent",
+      // @backward-compat { version 162 }
+      // Older versions ignore logModule and name the module after the prefix.
+      // Remove prefix: once 162 reaches Release.
       prefix: "MozNewTabRemoteRendererProtocolParent",
       maxLogLevel: Services.prefs.getBoolPref(
         "browser.newtabpage.activity-stream.remote-renderer.log",
@@ -65,8 +69,7 @@ export class MozNewTabRemoteRendererProtocolParent extends JSWindowActorParent {
 
       if (uri.scheme !== "moz-newtab-remote-renderer") {
         throw new Error(
-          "Expected scheme moz-newtab-remote-renderer, but got ",
-          uri.scheme
+          `Expected scheme moz-newtab-remote-renderer, but got ${uri.scheme}`
         );
       }
     } catch (e) {

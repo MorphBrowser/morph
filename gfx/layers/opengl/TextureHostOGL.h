@@ -38,12 +38,20 @@
 namespace mozilla {
 namespace gfx {
 class DataSourceSurface;
+class SourceSurface;
 }  // namespace gfx
 
 namespace layers {
 
 class Compositor;
 class CompositorOGL;
+#ifdef MOZ_WIDGET_ANDROID
+// Resolve the authorized host's descriptor and retain a best-effort image
+// through readback. Works with forwarding TextureHost wrappers.
+already_AddRefed<gfx::SourceSurface> GetAndroidImageReaderSurfaceForCanvas(
+    TextureHost* aTextureHost);
+#endif
+
 class AndroidHardwareBuffer;
 class AndroidImageConsumer;
 class SurfaceDescriptorAndroidHardwareBuffer;
@@ -392,6 +400,8 @@ class SurfaceTextureHost : public TextureHost {
   // GPU/hardware task end could be checked by android fence.
   // SurfaceTexture uses android fence internally,
   bool NeedsDeferredDeletion() const override { return false; }
+
+  SurfaceDescriptor GetSurfaceDescriptor() override;
 
  protected:
   mozilla::java::GeckoSurfaceTexture::GlobalRef mSurfTex;

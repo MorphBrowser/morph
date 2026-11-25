@@ -211,10 +211,10 @@ function checkPayloadInfo(data, reason) {
     );
   }
 
-  // Check for a valid revision.
+  // Check for a valid revision: an hg.mozilla.org changeset or a GitHub commit.
   if (data.revision != "") {
     const revisionUrlRegEx =
-      /^http[s]?:\/\/hg.mozilla.org(\/[a-z\S]+)+(\/rev\/[0-9a-z]+)$/g;
+      /^https?:\/\/(hg\.mozilla\.org(\/[a-z\S]+)+\/rev\/[0-9a-z]+|github\.com\/[\w.-]+\/[\w.-]+\/commit\/[0-9a-f]+)$/;
     Assert.ok(revisionUrlRegEx.test(data.revision));
   }
 
@@ -403,10 +403,6 @@ function checkPayload(payload, reason, successfulPings) {
   Assert.notEqual(Glean.memory.total.testGetValue(), null); // UNITS_BYTES
   Assert.notEqual(Glean.memory.jsCompartmentsSystem.testGetValue(), null); // UNITS_COUNT
 
-  Assert.ok(
-    "mainThread" in payload.slowSQL && "otherThreads" in payload.slowSQL
-  );
-
   // Check keyed histogram payload.
 
   Assert.ok("keyedHistograms" in payload);
@@ -522,18 +518,14 @@ add_task(async function sessionTimeExcludingAndIncludingSuspend() {
     // We don't support this new probe on android at the moment.
     return;
   }
-  Services.prefs.setBoolPref(
-    "toolkit.telemetry.testing.overrideProductsCheck",
-    true
-  );
   await TelemetryController.testReset();
-  let subsession = TelemetrySession.getPayload("environment-change", true);
-  let parentScalars = subsession.processes.parent.scalars;
+  Services.fog.testResetFOG();
+  TelemetrySession.getPayload("environment-change", true);
 
   let withSuspend =
-    parentScalars["browser.engagement.session_time_including_suspend"];
+    Glean.browserEngagement.sessionTimeIncludingSuspend.testGetValue();
   let withoutSuspend =
-    parentScalars["browser.engagement.session_time_excluding_suspend"];
+    Glean.browserEngagement.sessionTimeExcludingSuspend.testGetValue();
 
   Assert.greater(
     withSuspend,
@@ -569,11 +561,6 @@ add_task(async function sessionTimeExcludingAndIncludingSuspend() {
     withoutSuspend,
     `The uptime with suspend must always been greater or equal to the uptime
      without suspend`
-  );
-
-  Services.prefs.setBoolPref(
-    "toolkit.telemetry.testing.overrideProductsCheck",
-    false
   );
 });
 
@@ -2098,12 +2085,7 @@ add_task(async function test_schedulerNothingDue() {
 });
 
 add_task(async function test_pingExtendedStats() {
-  const EXTENDED_PAYLOAD_FIELDS = [
-    "log",
-    "slowSQL",
-    "fileIOReports",
-    "addonDetails",
-  ];
+  const EXTENDED_PAYLOAD_FIELDS = ["log", "fileIOReports", "addonDetails"];
 
   // Reset telemetry and disable sending extended statistics.
   await TelemetryStorage.testClearPendingPings();
@@ -2124,13 +2106,6 @@ add_task(async function test_pingExtendedStats() {
         " must not be in the payload if the extended set is off."
     );
   }
-
-  // We check this one separately so that we can reuse EXTENDED_PAYLOAD_FIELDS below, since
-  // slowSQLStartup might not be there.
-  Assert.ok(
-    !("slowSQLStartup" in ping.payload),
-    "slowSQLStartup must not be sent if the extended set is off"
-  );
 
   Assert.ok(
     !("addonManager" in ping.payload.simpleMeasurements),

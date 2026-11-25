@@ -727,6 +727,11 @@ vpx_codec_err_t vp9_set_roi_map(VP9_COMP *cpi, unsigned char *map,
     return VPX_CODEC_OK;
   }
 
+  // Each byte of the map is used as a segment id and must be in range.
+  for (unsigned int i = 0; i < rows * cols; ++i) {
+    if (map[i] >= MAX_SEGMENTS) return VPX_CODEC_INVALID_PARAM;
+  }
+
   if (roi->roi_map) {
     vpx_free(roi->roi_map);
     roi->roi_map = NULL;
@@ -865,6 +870,7 @@ static void setup_frame(VP9_COMP *cpi) {
 
 static void vp9_enc_setup_mi(VP9_COMMON *cm) {
   int i;
+  const int mi_grid_size = cm->mi_stride * calc_mi_size(cm->mi_rows);
   cm->mi = cm->mip + cm->mi_stride + 1;
   memset(cm->mip, 0, cm->mi_stride * (cm->mi_rows + 1) * sizeof(*cm->mip));
   cm->prev_mi = cm->prev_mip + cm->mi_stride + 1;
@@ -877,8 +883,9 @@ static void vp9_enc_setup_mi(VP9_COMMON *cm) {
   cm->mi_grid_visible = cm->mi_grid_base + cm->mi_stride + 1;
   cm->prev_mi_grid_visible = cm->prev_mi_grid_base + cm->mi_stride + 1;
 
-  memset(cm->mi_grid_base, 0,
-         cm->mi_stride * (cm->mi_rows + 1) * sizeof(*cm->mi_grid_base));
+  memset(cm->mi_grid_base, 0, mi_grid_size * sizeof(*cm->mi_grid_base));
+  memset(cm->prev_mi_grid_base, 0,
+         mi_grid_size * sizeof(*cm->prev_mi_grid_base));
 }
 
 static int vp9_enc_alloc_mi(VP9_COMMON *cm, int mi_size) {
@@ -1038,7 +1045,7 @@ static void dealloc_compressor_data(VP9_COMP *cpi) {
   vpx_free_frame_buffer(&cpi->scaled_source);
   vpx_free_frame_buffer(&cpi->scaled_last_source);
   vpx_free_frame_buffer(&cpi->tf_buffer);
-#ifdef ENABLE_KF_DENOISE
+#if defined(ENABLE_KF_DENOISE) || CONFIG_VP9_TEMPORAL_DENOISING
   vpx_free_frame_buffer(&cpi->raw_unscaled_source);
   vpx_free_frame_buffer(&cpi->raw_scaled_source);
 #endif
@@ -1052,13 +1059,6 @@ static void dealloc_compressor_data(VP9_COMP *cpi) {
   cpi->tplist[0][0] = NULL;
 
   vp9_free_pc_tree(&cpi->td);
-
-  for (i = 0; i < cpi->svc.number_spatial_layers; ++i) {
-    LAYER_CONTEXT *const lc = &cpi->svc.layer_context[i];
-    vpx_free(lc->rc_twopass_stats_in.buf);
-    lc->rc_twopass_stats_in.buf = NULL;
-    lc->rc_twopass_stats_in.sz = 0;
-  }
 
   for (i = 0; i < MAX_LAG_BUFFERS; ++i) {
     vpx_free_frame_buffer(&cpi->svc.scaled_frames[i]);
@@ -1391,6 +1391,7 @@ static void alloc_compressor_data(VP9_COMP *cpi) {
   alloc_context_buffers_ext(cpi);
 
   vpx_free(cpi->tile_tok[0][0]);
+  cpi->tile_tok[0][0] = NULL;
 
   {
     int64_t tokens = get_token_alloc(cm->mb_rows, cm->mb_cols);
@@ -1401,8 +1402,19 @@ static void alloc_compressor_data(VP9_COMP *cpi) {
           "Size of cpi->tile_tok[0][0] can't be represented in size_t");
     }
 #endif
-    CHECK_MEM_ERROR(&cm->error, cpi->tile_tok[0][0],
-                    vpx_calloc((size_t)tokens, sizeof(*cpi->tile_tok[0][0])));
+    // The token buffer is sized for the worst case, but only the
+    // [start, start + count) range of each superblock row that was written
+    // during tokenization is ever read back by the bitstream packer. Allocate
+    // it without zeroing so that the pages a frame does not use are never
+    // touched, which keeps them out of the resident set.
+    {
+      const size_t tok_size = (size_t)tokens * sizeof(*cpi->tile_tok[0][0]);
+      if (tok_size / sizeof(*cpi->tile_tok[0][0]) != (size_t)tokens) {
+        vpx_internal_error(&cm->error, VPX_CODEC_MEM_ERROR,
+                           "Size of cpi->tile_tok[0][0] overflows size_t");
+      }
+      CHECK_MEM_ERROR(&cm->error, cpi->tile_tok[0][0], vpx_malloc(tok_size));
+    }
   }
 
   sb_rows = mi_cols_aligned_to_sb(cm->mi_rows) >> MI_BLOCK_SIZE_LOG2;
@@ -2172,6 +2184,7 @@ void vp9_change_config(struct VP9_COMP *cpi, const VP9EncoderConfig *oxcf) {
     vp9_free_context_buffers(cm);
     vp9_free_pc_tree(&cpi->td);
     vpx_free(cpi->mbmi_ext_base);
+    cpi->mbmi_ext_base = NULL;
     vpx_free(cpi->content_state_sb_fd);
     cpi->content_state_sb_fd = NULL;
     alloc_compressor_data(cpi);
@@ -2204,14 +2217,16 @@ void vp9_change_config(struct VP9_COMP *cpi, const VP9EncoderConfig *oxcf) {
     CHECK_MEM_ERROR(&cm->error, cpi->skin_map,
                     vpx_calloc(svc_alloc_mi_area, sizeof(*cpi->skin_map)));
 
-    if (cpi->svc.number_spatial_layers > 1) {
 #if CONFIG_VP9_TEMPORAL_DENOISING
-      // Reset the denoiser for svc on the resize change.
-      if (cpi->oxcf.noise_sensitivity > 0) {
-        vp9_denoiser_free(&cpi->denoiser);
-        setup_denoiser_buffer(cpi);
-      }
+    // Reset the denoiser on the resize change.
+    if (cpi->oxcf.noise_sensitivity > 0 ||
+        cpi->denoiser.frame_buffer_initialized) {
+      vp9_denoiser_free(&cpi->denoiser);
+      setup_denoiser_buffer(cpi);
+    }
 #endif
+
+    if (cpi->svc.number_spatial_layers > 1) {
       for (int sl = 0; sl < cpi->svc.number_spatial_layers; ++sl) {
         const int layer =
             LAYER_IDS_TO_IDX(sl, 0, cpi->svc.number_temporal_layers);
@@ -2587,64 +2602,18 @@ VP9_COMP *vp9_create_compressor(const VP9EncoderConfig *oxcf,
   } else if (oxcf->pass == 2) {
     const size_t packet_sz = sizeof(FIRSTPASS_STATS);
     const int packets = (int)(oxcf->two_pass_stats_in.sz / packet_sz);
+    int num_frames;
 
-    if (cpi->svc.number_spatial_layers > 1 ||
-        cpi->svc.number_temporal_layers > 1) {
-      FIRSTPASS_STATS *const stats = oxcf->two_pass_stats_in.buf;
-      FIRSTPASS_STATS *stats_copy[VPX_SS_MAX_LAYERS] = { 0 };
-      int n;
+    cpi->twopass.stats_in_start = oxcf->two_pass_stats_in.buf;
+    cpi->twopass.stats_in = cpi->twopass.stats_in_start;
+    cpi->twopass.stats_in_end = &cpi->twopass.stats_in[packets - 1];
+    // Note the last packet is cumulative first pass stats.
+    // So the number of frames is packet number minus one
+    num_frames = packets - 1;
+    fps_init_first_pass_info(&cpi->twopass.first_pass_info,
+                             oxcf->two_pass_stats_in.buf, num_frames);
 
-      for (n = 0; n < oxcf->ss_number_layers; ++n) {
-        FIRSTPASS_STATS *const last_packet_for_layer =
-            &stats[packets - oxcf->ss_number_layers + n];
-        const int layer_id = (int)last_packet_for_layer->spatial_layer_id;
-        const int packets_in_layer = (int)last_packet_for_layer->count + 1;
-        if (layer_id >= 0 && layer_id < oxcf->ss_number_layers) {
-          int num_frames;
-          LAYER_CONTEXT *const lc = &cpi->svc.layer_context[layer_id];
-
-          vpx_free(lc->rc_twopass_stats_in.buf);
-
-          lc->rc_twopass_stats_in.sz = packets_in_layer * packet_sz;
-          CHECK_MEM_ERROR(&cm->error, lc->rc_twopass_stats_in.buf,
-                          vpx_malloc(lc->rc_twopass_stats_in.sz));
-          lc->twopass.stats_in_start = lc->rc_twopass_stats_in.buf;
-          lc->twopass.stats_in = lc->twopass.stats_in_start;
-          lc->twopass.stats_in_end =
-              lc->twopass.stats_in_start + packets_in_layer - 1;
-          // Note the last packet is cumulative first pass stats.
-          // So the number of frames is packet number minus one
-          num_frames = packets_in_layer - 1;
-          fps_init_first_pass_info(&lc->twopass.first_pass_info,
-                                   lc->rc_twopass_stats_in.buf, num_frames);
-          stats_copy[layer_id] = lc->rc_twopass_stats_in.buf;
-        }
-      }
-
-      for (n = 0; n < packets; ++n) {
-        const int layer_id = (int)stats[n].spatial_layer_id;
-        if (layer_id >= 0 && layer_id < oxcf->ss_number_layers &&
-            stats_copy[layer_id] != NULL) {
-          *stats_copy[layer_id] = stats[n];
-          ++stats_copy[layer_id];
-        }
-      }
-
-      vp9_init_second_pass_spatial_svc(cpi);
-    } else {
-      int num_frames;
-
-      cpi->twopass.stats_in_start = oxcf->two_pass_stats_in.buf;
-      cpi->twopass.stats_in = cpi->twopass.stats_in_start;
-      cpi->twopass.stats_in_end = &cpi->twopass.stats_in[packets - 1];
-      // Note the last packet is cumulative first pass stats.
-      // So the number of frames is packet number minus one
-      num_frames = packets - 1;
-      fps_init_first_pass_info(&cpi->twopass.first_pass_info,
-                               oxcf->two_pass_stats_in.buf, num_frames);
-
-      vp9_init_second_pass(cpi);
-    }
+    vp9_init_second_pass(cpi);
   }
 #endif  // !CONFIG_REALTIME_ONLY
 
@@ -2654,6 +2623,9 @@ VP9_COMP *vp9_create_compressor(const VP9EncoderConfig *oxcf,
   cpi->mi_ssim_rdmult_scaling_factors = NULL;
   cpi->mi_ssim_rdmult_scaling_factors_rows = 0;
   cpi->mi_ssim_rdmult_scaling_factors_cols = 0;
+  cpi->sb_mul_scale = NULL;
+  cpi->sb_mul_scale_rows = 0;
+  cpi->sb_mul_scale_cols = 0;
 
   vp9_set_speed_features_framesize_independent(cpi, oxcf->speed);
   vp9_set_speed_features_framesize_dependent(cpi, oxcf->speed);
@@ -3967,11 +3939,32 @@ static void save_encode_params(VP9_COMP *cpi) {
 }
 
 static INLINE void set_raw_source_frame(VP9_COMP *cpi) {
+#if defined(ENABLE_KF_DENOISE) || CONFIG_VP9_TEMPORAL_DENOISING
+  VP9_COMMON *const cm = &cpi->common;
+  int use_raw_source = 0;
 #ifdef ENABLE_KF_DENOISE
-  if (is_spatial_denoise_enabled(cpi)) {
-    cpi->raw_source_frame = vp9_scale_if_required(
-        cm, &cpi->raw_unscaled_source, &cpi->raw_scaled_source,
-        (oxcf->pass == 0), EIGHTTAP, 0);
+  use_raw_source |= is_spatial_denoise_enabled(cpi);
+#endif
+#if CONFIG_VP9_TEMPORAL_DENOISING
+  use_raw_source |= (cpi->oxcf.noise_sensitivity > 0);
+#endif
+  if (use_raw_source) {
+    if (cpi->Source == cpi->un_scaled_source) {
+      cpi->raw_source_frame = &cpi->raw_unscaled_source;
+    } else {
+      if (vpx_realloc_frame_buffer(
+              &cpi->raw_scaled_source, cpi->Source->y_crop_width,
+              cpi->Source->y_crop_height, cpi->Source->subsampling_x,
+              cpi->Source->subsampling_y,
+#if CONFIG_VP9_HIGHBITDEPTH
+              cm->use_highbitdepth,
+#endif
+              VP9_ENC_BORDER_IN_PIXELS, cm->byte_alignment, NULL, NULL, NULL))
+        vpx_internal_error(&cm->error, VPX_CODEC_MEM_ERROR,
+                           "Failed to allocate scaled raw source frame buffer");
+      vp9_copy_and_extend_frame(cpi->Source, &cpi->raw_scaled_source);
+      cpi->raw_source_frame = &cpi->raw_scaled_source;
+    }
   } else {
     cpi->raw_source_frame = cpi->Source;
   }
@@ -4077,17 +4070,7 @@ static int encode_without_recode_loop(VP9_COMP *cpi, size_t *size,
   // Unfiltered raw source used in metrics calculation if the source
   // has been filtered.
   if (is_psnr_calc_enabled(cpi)) {
-#ifdef ENABLE_KF_DENOISE
-    if (is_spatial_denoise_enabled(cpi)) {
-      cpi->raw_source_frame = vp9_scale_if_required(
-          cm, &cpi->raw_unscaled_source, &cpi->raw_scaled_source,
-          (cpi->oxcf.pass == 0), EIGHTTAP, phase_scaler);
-    } else {
-      cpi->raw_source_frame = cpi->Source;
-    }
-#else
-    cpi->raw_source_frame = cpi->Source;
-#endif
+    set_raw_source_frame(cpi);
   }
 
   if ((cpi->use_svc &&
@@ -4454,17 +4437,7 @@ static void encode_with_recode_loop(VP9_COMP *cpi, size_t *size, uint8_t *dest,
     // Unfiltered raw source used in metrics calculation if the source
     // has been filtered.
     if (is_psnr_calc_enabled(cpi)) {
-#ifdef ENABLE_KF_DENOISE
-      if (is_spatial_denoise_enabled(cpi)) {
-        cpi->raw_source_frame = vp9_scale_if_required(
-            cm, &cpi->raw_unscaled_source, &cpi->raw_scaled_source,
-            (oxcf->pass == 0), EIGHTTAP, 0);
-      } else {
-        cpi->raw_source_frame = cpi->Source;
-      }
-#else
-      cpi->raw_source_frame = cpi->Source;
-#endif
+      set_raw_source_frame(cpi);
     }
 
     if (cpi->unscaled_last_source != NULL)
@@ -5176,18 +5149,23 @@ static void init_mb_wiener_var_buffer(VP9_COMP *cpi) {
 static void init_sb_mul_scale_buffer(VP9_COMP *cpi) {
   VP9_COMMON *cm = &cpi->common;
 
-  if (cpi->mb_wiener_var_rows >= cm->mb_rows &&
-      cpi->mb_wiener_var_cols >= cm->mb_cols)
+  // Note: sb_mul_scale must use its own dimension tracking. It must not share
+  // mb_wiener_var_rows/cols with mb_wiener_variance, otherwise one of the two
+  // buffers may be left unallocated.
+  if (cpi->sb_mul_scale && cpi->sb_mul_scale_rows >= cm->mb_rows &&
+      cpi->sb_mul_scale_cols >= cm->mb_cols)
     return;
 
   vpx_free(cpi->sb_mul_scale);
   cpi->sb_mul_scale = NULL;
+  cpi->sb_mul_scale_rows = 0;
+  cpi->sb_mul_scale_cols = 0;
 
   CHECK_MEM_ERROR(
       &cm->error, cpi->sb_mul_scale,
       vpx_calloc(cm->mb_rows * cm->mb_cols, sizeof(*cpi->sb_mul_scale)));
-  cpi->mb_wiener_var_rows = cm->mb_rows;
-  cpi->mb_wiener_var_cols = cm->mb_cols;
+  cpi->sb_mul_scale_rows = cm->mb_rows;
+  cpi->sb_mul_scale_cols = cm->mb_cols;
 }
 
 static void set_mb_wiener_variance(VP9_COMP *cpi) {
@@ -6317,10 +6295,33 @@ int vp9_get_compressed_data(VP9_COMP *cpi, unsigned int *frame_flags,
     cpi->un_scaled_source = cpi->Source =
         force_src_buffer ? force_src_buffer : &source->img;
 
-#ifdef ENABLE_KF_DENOISE
+#if defined(ENABLE_KF_DENOISE) || CONFIG_VP9_TEMPORAL_DENOISING
     // Copy of raw source for metrics calculation.
-    if (is_psnr_calc_enabled(cpi))
-      vp9_copy_and_extend_frame(cpi->Source, &cpi->raw_unscaled_source);
+    if (is_psnr_calc_enabled(cpi) &&
+        (!cpi->use_svc ||
+         cpi->svc.spatial_layer_id == cpi->svc.first_spatial_layer_to_encode)) {
+      int copy_raw_source = 0;
+#ifdef ENABLE_KF_DENOISE
+      copy_raw_source |= is_spatial_denoise_enabled(cpi);
+#endif
+#if CONFIG_VP9_TEMPORAL_DENOISING
+      copy_raw_source |= (cpi->oxcf.noise_sensitivity > 0);
+#endif
+      if (copy_raw_source) {
+        if (vpx_realloc_frame_buffer(
+                &cpi->raw_unscaled_source, cpi->Source->y_crop_width,
+                cpi->Source->y_crop_height, cpi->Source->subsampling_x,
+                cpi->Source->subsampling_y,
+#if CONFIG_VP9_HIGHBITDEPTH
+                cm->use_highbitdepth,
+#endif
+                VP9_ENC_BORDER_IN_PIXELS, cm->byte_alignment, NULL, NULL, NULL))
+          vpx_internal_error(
+              &cm->error, VPX_CODEC_MEM_ERROR,
+              "Failed to allocate unscaled raw source frame buffer");
+        vp9_copy_and_extend_frame(cpi->Source, &cpi->raw_unscaled_source);
+      }
+    }
 #endif
 
     cpi->unscaled_last_source = last_source != NULL ? &last_source->img : NULL;
@@ -6457,6 +6458,10 @@ int vp9_get_compressed_data(VP9_COMP *cpi, unsigned int *frame_flags,
   start_timing(cpi, setup_tpl_stats_time);
 #endif
   if (should_run_tpl(cpi, cpi->twopass.gf_group.index)) {
+    // vp9_estimate_tpl_qp_gop() may write to sb_mul_scale. TPL can run before
+    // the first call to encode_frame_to_data_rate(), e.g., on the key frame of
+    // a GOP without ARF, so make sure the buffer is allocated here.
+    init_sb_mul_scale_buffer(cpi);
     vp9_init_tpl_buffer(cpi);
     vp9_estimate_tpl_qp_gop(cpi);
     vp9_setup_tpl_stats(cpi);

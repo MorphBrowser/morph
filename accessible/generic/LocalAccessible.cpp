@@ -7,7 +7,6 @@
 #include "AccIterator.h"
 #include "ApplicationAccessible.h"
 #include "CachedTableAccessible.h"
-#include "CssAltContent.h"
 #include "DocAccessible-inl.h"
 #include "EmbeddedObjCollector.h"
 #include "EventTree.h"
@@ -60,6 +59,7 @@
 #include "nsAtom.h"
 #include "nsComputedDOMStyle.h"
 #include "nsContainerFrame.h"
+#include "nsCoreUtils.h"
 #include "nsDisplayList.h"
 #include "nsEventShell.h"
 #include "nsFocusManager.h"
@@ -147,12 +147,12 @@ ENameValueFlag LocalAccessible::Name(nsString& aName) const {
     return eNameFromTooltip;
   }
 
-  if (auto cssAlt = CssAltContent(mContent)) {
+  if (Maybe<nsString> cssAlt = nsCoreUtils::GetCssAltContent(mContent)) {
     // This covers two cases:
     // 1. The CSS content property replaces the content of an element with an
     // image plus alt text.
     // 2. Alt text is provided for a pseudo-element image.
-    cssAlt.AppendToString(aName);
+    aName.Append(*cssAlt);
     return eNameOK;
   }
 
@@ -1154,6 +1154,15 @@ already_AddRefed<AccAttributes> LocalAccessible::Attributes() {
       // aria-placeholder.
       continue;
     }
+
+    if ((attribIter.AttrName() == nsGkAtoms::aria_roledescription ||
+         attribIter.AttrName() == nsGkAtoms::aria_brailleroledescription) &&
+        IsGeneric()) {
+      // We only expose these attributes in accessibles with non generic roles.
+      // https://www.w3.org/TR/wai-aria-1.2/#aria-roledescription
+      continue;
+    }
+
     attribIter.ExposeAttr(attributes);
   }
 
@@ -1198,16 +1207,6 @@ already_AddRefed<AccAttributes> LocalAccessible::Attributes() {
 
 already_AddRefed<AccAttributes> LocalAccessible::NativeAttributes() {
   auto attributes = MakeRefPtr<AccAttributes>();
-
-  // We support values, so expose the string value as well, via the valuetext
-  // object attribute. We test for the value interface because we don't want
-  // to expose traditional Value() information such as URL's on links and
-  // documents, or text in an input.
-  if (HasNumericValue()) {
-    nsString valuetext;
-    Value(valuetext);
-    attributes->SetAttribute(nsGkAtoms::aria_valuetext, std::move(valuetext));
-  }
 
   // Expose checkable object attribute if the accessible has checkable state
   if (State() & states::CHECKABLE) {
@@ -1901,7 +1900,7 @@ double LocalAccessible::CurValue() const {
   return checkValue;
 }
 
-bool LocalAccessible::SetCurValue(double aValue) { return false; }
+bool LocalAccessible::SetCurValue(double /*aValue*/) { return false; }
 
 role LocalAccessible::NativeRole() const { return roles::NOTHING; }
 
@@ -2640,7 +2639,7 @@ void LocalAccessible::DoCommand(uint32_t aActionIndex) const {
       }));
 }
 
-void LocalAccessible::DispatchClickEvent(uint32_t aActionIndex) const {
+void LocalAccessible::DispatchClickEvent(uint32_t /*aActionIndex*/) const {
   if (IsDefunct()) return;
   MOZ_ASSERT(mContent);
 
@@ -3031,7 +3030,8 @@ RootAccessible* LocalAccessible::RootAccessible() const {
 }
 
 nsIFrame* LocalAccessible::GetFrame() const {
-  return mContent ? mContent->GetPrimaryFrame() : nullptr;
+  return mContent ? nsLayoutUtils::GetPrimaryOrAreaImageFrame(mContent)
+                  : nullptr;
 }
 
 nsINode* LocalAccessible::GetNode() const { return mContent; }
@@ -3640,10 +3640,8 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       fields->SetAttribute(CacheKey::Tooltip, DeleteEntry());
     }
 
-    nsString cssAltContent;
-    if (auto cssAlt = CssAltContent(mContent)) {
-      cssAlt.AppendToString(cssAltContent);
-      fields->SetAttribute(CacheKey::CssAltContent, std::move(cssAltContent));
+    if (Maybe<nsString> cssAlt = nsCoreUtils::GetCssAltContent(mContent)) {
+      fields->SetAttribute(CacheKey::CssAltContent, std::move(*cssAlt));
     } else if (IsUpdatePush(CacheDomain::NameAndDescription)) {
       fields->SetAttribute(CacheKey::CssAltContent, DeleteEntry());
     }
@@ -3684,6 +3682,8 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       cacheValueText = true;
     } else if (auto* input = dom::HTMLInputElement::FromNodeOrNull(mContent)) {
       cacheValueText = input->IsInputColor();
+    } else if (IsHTMLCombobox()) {
+      cacheValueText = true;
     }
 
     if (cacheValueText) {
@@ -3904,7 +3904,7 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
     if (boundsChanged) {
       mBounds = Some(newBoundsRect);
 
-      UniquePtr<nsRect> ptr = MakeUnique<nsRect>(newBoundsRect);
+      auto ptr = std::make_unique<nsRect>(newBoundsRect);
       fields->SetAttribute(CacheKey::ParentRelativeBounds, std::move(ptr));
     }
 
@@ -4090,7 +4090,7 @@ already_AddRefed<AccAttributes> LocalAccessible::BundleFieldsForCache(
       // point caching it.
       transformed = !mtx.IsIdentity();
       if (transformed) {
-        UniquePtr<gfx::Matrix4x4> ptr = MakeUnique<gfx::Matrix4x4>(mtx);
+        auto ptr = std::make_unique<gfx::Matrix4x4>(mtx);
         fields->SetAttribute(CacheKey::TransformMatrix, std::move(ptr));
       }
     }

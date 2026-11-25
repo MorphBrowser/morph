@@ -21,6 +21,7 @@
 #include "api/field_trials_view.h"
 #include "api/make_ref_counted.h"
 #include "api/video/resolution.h"
+#include "api/video/video_codec_constants.h"
 #include "api/video/video_codec_type.h"
 #include "api/video_codecs/scalability_mode.h"
 #include "api/video_codecs/video_codec.h"
@@ -149,6 +150,28 @@ TEST(EncoderStreamFactory, SimulcastScaleResolutionDownToUnrestricted) {
               ElementsAre(Resolution{.width = 320, .height = 180},
                           Resolution{.width = 640, .height = 360},
                           Resolution{.width = 1280, .height = 720}));
+}
+
+TEST(EncoderStreamFactory,
+     SimulcastScaleResolutionDownToWithUnalignedResolution) {
+  // When `scale_resolution_down_to` is specified, the input resolution should
+  // not be normalized to a multiple of `2^(number_of_streams - 1)`.
+  FieldTrials field_trials = CreateTestFieldTrials();
+  VideoEncoderConfig encoder_config;
+  encoder_config.number_of_streams = 3;
+  encoder_config.simulcast_layers.resize(3);
+  encoder_config.simulcast_layers[0].scale_resolution_down_to = {
+      .width = 513, .height = 1025};
+  encoder_config.simulcast_layers[1].scale_resolution_down_to = {
+      .width = 513, .height = 1025};
+  encoder_config.simulcast_layers[2].scale_resolution_down_to = {
+      .width = 513, .height = 1025};
+  auto streams = CreateEncoderStreams(
+      field_trials, {.width = 513, .height = 1025}, encoder_config);
+  EXPECT_THAT(GetStreamResolutions(streams),
+              ElementsAre(Resolution{.width = 513, .height = 1025},
+                          Resolution{.width = 513, .height = 1025},
+                          Resolution{.width = 513, .height = 1025}));
 }
 
 TEST(EncoderStreamFactory, SimulcastScaleResolutionDownToWith360pRestriction) {
@@ -791,6 +814,34 @@ TEST(EncoderStreamFactory, H265TemporalLayerCountTransferToStreamSettings) {
   EXPECT_EQ(streams[0].num_temporal_layers, 3);
 }
 #endif
+
+TEST(EncoderStreamFactory, EncodingComplexityTransferredToStreamSettings) {
+  VideoEncoderConfig encoder_config;
+  encoder_config.codec_type = VideoCodecType::kVideoCodecVP8;
+  encoder_config.number_of_streams = 1;
+  encoder_config.simulcast_layers.resize(1);
+  encoder_config.simulcast_layers[0].encoding_complexity =
+      VideoCodecComplexity::kComplexityHigh;
+  auto single_stream = CreateEncoderStreams(
+      CreateTestFieldTrials(), {.width = 1280, .height = 720}, encoder_config);
+  ASSERT_THAT(single_stream, SizeIs(1));
+  EXPECT_EQ(single_stream[0].encoding_complexity,
+            VideoCodecComplexity::kComplexityHigh);
+
+  encoder_config.number_of_streams = 2;
+  encoder_config.simulcast_layers.resize(2);
+  encoder_config.simulcast_layers[0].encoding_complexity =
+      VideoCodecComplexity::kComplexityLow;
+  encoder_config.simulcast_layers[1].encoding_complexity =
+      VideoCodecComplexity::kComplexityMax;
+  auto streams = CreateEncoderStreams(
+      CreateTestFieldTrials(), {.width = 1280, .height = 720}, encoder_config);
+  ASSERT_THAT(streams, SizeIs(2));
+  EXPECT_EQ(streams[0].encoding_complexity,
+            VideoCodecComplexity::kComplexityLow);
+  EXPECT_EQ(streams[1].encoding_complexity,
+            VideoCodecComplexity::kComplexityMax);
+}
 
 TEST(EncoderStreamFactory, VP9SetsMaxBitrateToConfiguredEncodingValue) {
   VideoEncoderConfig encoder_config;

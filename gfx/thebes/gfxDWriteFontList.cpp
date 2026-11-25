@@ -21,6 +21,7 @@
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/Utf16.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/gfx/FontPathSet.h"
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/glean/GfxMetrics.h"
 #include "mozilla/intl/OSPreferences.h"
@@ -661,11 +662,7 @@ void gfxDWriteFontEntry::GetVariationInstancesInternal(
 
 #if MOZ_FONTATIONS
 void gfxDWriteFontEntry::InitSkrifaFontFace() {
-  RefPtr<IDWriteFontFace> face;
-  {
-    AutoReadLock lock(mLock);
-    face = mFontFace;
-  }
+  RefPtr<IDWriteFontFace> face = mFontFace;
   if (!face) {
     if (!mFont || FAILED(mFont->CreateFontFace(getter_AddRefs(face)))) {
       return;
@@ -709,9 +706,9 @@ void gfxDWriteFontEntry::InitSkrifaFontFace() {
     if (!mappedFile.IsValid()) {
       break;
     }
-    const uint8_t* const data = static_cast<const uint8_t*>(mappedFile.Data());
-    const size_t size = mappedFile.Size();
-    if (auto* skf = skrifa_font_new_from_index(data, size, face->GetIndex())) {
+    const Span<const uint8_t> span = mappedFile.AsSpan();
+    if (auto* skf = skrifa_font_new_from_index(span.data(), span.size(),
+                                               face->GetIndex())) {
       SetSkrifaFont(skf, std::move(mappedFile));
     }
     return;
@@ -1671,6 +1668,10 @@ void gfxDWriteFontList::InitSharedFontListForPlatform() {
     return;
   }
 
+  // Rebuild the font path set from the new system font collection, before child
+  // processes can learn about any new fonts.
+  FontPathSet::RebuildFrom(mSystemFonts);
+
 #ifdef MOZ_BUNDLED_FONTS
   // We activate bundled fonts if the pref is > 0 (on) or < 0 (auto), only an
   // explicit value of 0 (off) will disable them.
@@ -1745,6 +1746,10 @@ nsresult gfxDWriteFontList::InitFontListForPlatform() {
         uint32_t(errSystemFontCollection));
     return NS_ERROR_FAILURE;
   }
+
+  // Rebuild the font path set from the new system font collection, before child
+  // processes can learn about any new fonts.
+  FontPathSet::RebuildFrom(mSystemFonts);
 
 #ifdef MOZ_BUNDLED_FONTS
   // Get bundled fonts before the system collection, so that in the case of
@@ -2074,12 +2079,12 @@ void gfxDWriteFontList::AddSubstitute(const nsCString& aSubstituteName,
     }
     if (SharedFontList()->FindFamily(aActualFontName,
                                      /*aPrimaryNameOnly*/ true)) {
-      substitutions.InsertOrUpdate(aSubstituteName,
-                                   MakeUnique<nsCString>(aActualFontName));
+      substitutions.InsertOrUpdate(
+          aSubstituteName, std::make_unique<nsCString>(aActualFontName));
     } else if (substitutions.Get(aActualFontName)) {
       substitutions.InsertOrUpdate(
           aSubstituteName,
-          MakeUnique<nsCString>(*substitutions.Get(aActualFontName)));
+          std::make_unique<nsCString>(*substitutions.Get(aActualFontName)));
     } else {
       mNonExistingFonts.AppendElement(aSubstituteName);
     }
@@ -2130,10 +2135,10 @@ void gfxDWriteFontList::GetDirectWriteSubstitutes() {
       BuildKeyNameFromFontName(actualFontName);
       if (SharedFontList()->FindFamily(actualFontName,
                                        /*aPrimaryNameOnly*/ true)) {
-        mSubstitutions.InsertOrUpdate(substituteName,
-                                      MakeUnique<nsCString>(actualFontName));
+        mSubstitutions.InsertOrUpdate(
+            substituteName, std::make_unique<nsCString>(actualFontName));
         mHardcodedSubstitutions.InsertOrUpdate(
-            substituteName, MakeUnique<nsCString>(actualFontName));
+            substituteName, std::make_unique<nsCString>(actualFontName));
       } else {
         mNonExistingFonts.AppendElement(substituteName);
       }

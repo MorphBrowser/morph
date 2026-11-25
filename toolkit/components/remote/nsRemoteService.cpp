@@ -20,8 +20,11 @@
 #endif
 #include "nsRemoteService.h"
 
+#include "nsIFile.h"
 #include "nsIObserverService.h"
+#include "nsIToolkitProfile.h"
 #include "nsString.h"
+#include "nsXPCOM.h"
 #include "nsServiceManagerUtils.h"
 #include "SpecialSystemDirectory.h"
 #include "mozilla/StaticPtr.h"
@@ -58,7 +61,58 @@ void nsRemoteService::SetProgram(const char* aProgram) {
   mProgram = aProgram;
   ToLowerCase(mProgram);
 }
-void nsRemoteService::SetProfile(nsACString& aProfile) { mProfile = aProfile; }
+
+// Profiles are identified by their path, which can be spelled in several ways
+// for the same directory (e.g. through a symlink), so resolve it to make all
+// instances agree. On Windows, or if resolving fails, the path is left as is.
+static void CanonicalizeProfilePath(nsACString& aPath) {
+#ifndef XP_WIN
+  nsCOMPtr<nsIFile> file;
+  nsAutoCString path;
+  if (NS_SUCCEEDED(NS_NewNativeLocalFile(aPath, getter_AddRefs(file))) &&
+      NS_SUCCEEDED(file->Normalize()) &&
+      NS_SUCCEEDED(file->GetNativePath(path))) {
+    aPath = path;
+  }
+#endif
+}
+
+nsresult nsRemoteService::SetProfile(nsIFile* aProfileDir,
+                                     nsIToolkitProfile* aProfile) {
+  nsAutoCString givenPath;
+#ifdef XP_WIN
+  nsAutoString path;
+  nsresult rv = aProfileDir->GetPath(path);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+  CopyUTF16toUTF8(path, givenPath);
+#else
+  nsresult rv = aProfileDir->GetNativePath(givenPath);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+#endif
+  mProfileId = givenPath;
+  // With `-profile` the path is already resolved, but it can also come as
+  // written from profiles.ini.
+  CanonicalizeProfilePath(mProfileId);
+
+  // Older versions identify the profile by the path as given, and even older
+  // ones by its name.
+  mLegacyProfileIds.Clear();
+  if (!givenPath.Equals(mProfileId)) {
+    mLegacyProfileIds.AppendElement(givenPath);
+  }
+  if (aProfile) {
+    nsAutoCString profileName;
+    aProfile->GetName(profileName);
+    if (!profileName.IsEmpty()) {
+      mLegacyProfileIds.AppendElement(profileName);
+    }
+  }
+  return NS_OK;
+}
 
 #ifdef MOZ_WIDGET_GTK
 void nsRemoteService::SetStartupToken(nsACString& aStartupToken) {
@@ -194,19 +248,19 @@ nsresult nsRemoteService::SendCommandLine(const nsACString& aProfile,
   UniquePtr<nsRemoteClient> client;
 #ifdef MOZ_WIDGET_GTK
 #  if defined(MOZ_ENABLE_DBUS)
-  client = MakeUnique<nsDBusRemoteClient>(mStartupToken);
+  client = std::make_unique<nsDBusRemoteClient>(mStartupToken);
 #  else
-  client = MakeUnique<nsXRemoteClient>(mStartupToken);
+  client = std::make_unique<nsXRemoteClient>(mStartupToken);
 #  endif
 #elif defined(XP_WIN)
-  client = MakeUnique<nsWinRemoteClient>();
+  client = std::make_unique<nsWinRemoteClient>();
 #elif defined(XP_DARWIN)
-  client = MakeUnique<nsMacRemoteClient>();
+  client = std::make_unique<nsMacRemoteClient>();
 #else
   return NS_ERROR_NOT_AVAILABLE;
 #endif
 
-  nsresult rv = client ? client->Init() : NS_ERROR_FAILURE;
+  nsresult rv = client->Init();
   NS_ENSURE_SUCCESS(rv, rv);
 
   return client->SendCommandLine(mProgram.get(),
@@ -218,10 +272,13 @@ NS_IMETHODIMP
 nsRemoteService::SendCommandLine(const nsACString& aProfile,
                                  const nsTArray<nsCString>& aArgs,
                                  bool aRaise) {
+  nsAutoCString profileId(aProfile);
+  CanonicalizeProfilePath(profileId);
+
 #ifdef MOZ_WIDGET_GTK
   // Linux clients block until they receive a response so it is impossible to
   // send a remote command to the current profile.
-  if (aProfile.Equals(mProfile)) {
+  if (profileId.Equals(mProfileId)) {
     return NS_ERROR_INVALID_ARG;
   }
 #endif
@@ -237,12 +294,19 @@ nsRemoteService::SendCommandLine(const nsACString& aProfile,
     args.AppendElement(arg.get());
   }
 
-  return SendCommandLine(aProfile, args.Length(), args.Elements(), aRaise);
+  return SendCommandLine(profileId, args.Length(), args.Elements(), aRaise);
 }
 
 nsresult nsRemoteService::StartClient() {
-  return SendCommandLine(mProfile, gArgc, const_cast<const char**>(gArgv),
-                         true);
+  const char** argv = const_cast<const char**>(gArgv);
+  nsresult rv = SendCommandLine(mProfileId, gArgc, argv, true);
+  for (const nsCString& profileId : mLegacyProfileIds) {
+    if (rv != NS_ERROR_NOT_AVAILABLE) {
+      break;
+    }
+    rv = SendCommandLine(profileId, gArgc, argv, true);
+  }
+  return rv;
 }
 
 void nsRemoteService::StartupServer() {
@@ -250,20 +314,20 @@ void nsRemoteService::StartupServer() {
     return;
   }
 
-  if (mProfile.IsEmpty()) {
+  if (mProfileId.IsEmpty()) {
     return;
   }
 
 #ifdef MOZ_WIDGET_GTK
 #  if defined(MOZ_ENABLE_DBUS)
-  mRemoteServer = MakeUnique<nsDBusRemoteServer>();
+  mRemoteServer = std::make_unique<nsDBusRemoteServer>();
 #  else
-  mRemoteServer = MakeUnique<nsGTKRemoteServer>();
+  mRemoteServer = std::make_unique<nsGTKRemoteServer>();
 #  endif
 #elif defined(XP_WIN)
-  mRemoteServer = MakeUnique<nsWinRemoteServer>();
+  mRemoteServer = std::make_unique<nsWinRemoteServer>();
 #elif defined(XP_DARWIN)
-  mRemoteServer = MakeUnique<nsMacRemoteServer>();
+  mRemoteServer = std::make_unique<nsMacRemoteServer>();
 #else
   return;
 #endif
@@ -272,7 +336,7 @@ void nsRemoteService::StartupServer() {
     return;
   }
 
-  nsresult rv = mRemoteServer->Startup(mProgram.get(), mProfile.get());
+  nsresult rv = mRemoteServer->Startup(mProgram.get(), mProfileId.get());
 
   if (NS_FAILED(rv)) {
     mRemoteServer = nullptr;
@@ -292,8 +356,8 @@ void nsRemoteService::ShutdownServer() { mRemoteServer = nullptr; }
 nsRemoteService::~nsRemoteService() { ShutdownServer(); }
 
 NS_IMETHODIMP
-nsRemoteService::Observe(nsISupports* aSubject, const char* aTopic,
-                         const char16_t* aData) {
+nsRemoteService::Observe(nsISupports* /*aSubject*/, const char* /*aTopic*/,
+                         const char16_t* /*aData*/) {
   // This can be xpcom-shutdown or quit-application, but it's the same either
   // way.
   ShutdownServer();

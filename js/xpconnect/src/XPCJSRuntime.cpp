@@ -29,6 +29,8 @@
 #include "mozilla/Sprintf.h"
 #include "mozilla/UniquePtr.h"
 
+#include <memory>
+
 #include "AccessCheck.h"
 #include "ExpandedPrincipal.h"
 #include "jsapi.h"
@@ -133,8 +135,12 @@ const char* const XPCJSRuntime::mStrings[] = {
     "indexedDB",        // IDX_INDEXEDDB
     "structuredClone",  // IDX_STRUCTUREDCLONE
     "locks",            // IDX_LOCKS
+    "storage",          // IDX_STORAGE
     "suppressed",       // IDX_SUPPRESSED
     "error",            // IDX_ERROR
+    // IDX_REACT_DEVTOOLS_GLOBAL_HOOK
+    // Bug 2072122: Trusted Types readiness experiment only, to be removed.
+    "__REACT_DEVTOOLS_GLOBAL_HOOK__",
 };
 
 /***************************************************************************/
@@ -209,7 +215,7 @@ CompartmentPrivate::CompartmentPrivate(
       isUAWidgetCompartment(false),
       hasExclusiveExpandos(false),
       wasShutdown(false),
-      mWrappedJSMap(mozilla::MakeUnique<JSObject2WrappedJSMap>()),
+      mWrappedJSMap(std::make_unique<JSObject2WrappedJSMap>()),
       mScope(std::move(scope)) {
   MOZ_COUNT_CTOR(xpc::CompartmentPrivate);
 }
@@ -251,7 +257,7 @@ void RealmPrivate::Init(HandleObject aGlobal, const SiteIdentifier& aSite) {
   if (CompartmentPrivate* priv = CompartmentPrivate::Get(c)) {
     MOZ_ASSERT(priv->originInfo.IsSameOrigin(principal));
   } else {
-    auto scope = mozilla::MakeUnique<XPCWrappedNativeScope>(c, aGlobal);
+    auto scope = std::make_unique<XPCWrappedNativeScope>(c, aGlobal);
     priv = new CompartmentPrivate(c, std::move(scope),
                                   BasePrincipal::Cast(principal), aSite);
     JS_SetCompartmentPrivate(c, priv);
@@ -753,6 +759,13 @@ void XPCJSRuntime::TraceAdditionalNativeGrayRoots(JSTracer* trc) {
   XPCWrappedNativeScope::TraceWrappedNativesInAllScopes(this, trc);
 }
 
+static CompartmentPrivate::RemoteProxyMap& RemoteProxyMapForScope(
+    XPCWrappedNativeScope* aScope) {
+  CompartmentPrivate* priv = CompartmentPrivate::Get(aScope->Compartment());
+  MOZ_ASSERT(priv);
+  return priv->GetRemoteProxyMap();
+}
+
 void XPCJSRuntime::TraverseAdditionalNativeRoots(
     nsCycleCollectionNoteRootCallback& cb) {
   XPCWrappedNativeScope::SuspectAllWrappers(cb);
@@ -761,6 +774,19 @@ void XPCJSRuntime::TraverseAdditionalNativeRoots(
   for (auto* wjs : mSubjectToFinalizationWJS) {
     MOZ_DIAGNOSTIC_ASSERT(wjs->IsSubjectToFinalization());
     cb.NoteXPCOMRoot(ToSupports(wjs), parti);
+  }
+
+  // There is a one-to-one mapping between XPCWrappedNativeScope and
+  // CompartmentPrivate, so iterating over mWrappedNativeScopes visits every
+  // remote proxy map.
+  for (XPCWrappedNativeScope* scope : mWrappedNativeScopes) {
+    auto& map = RemoteProxyMapForScope(scope);
+    for (auto iter = map.iter(); !iter.done(); iter.next()) {
+      JSObject* proxy = iter.get().value().unbarrieredGet();
+      if (JS::ObjectIsMarkedGray(proxy) || cb.WantAllTraces()) {
+        cb.NoteJSRoot(proxy);
+      }
+    }
   }
 }
 
@@ -777,7 +803,7 @@ void XPCJSRuntime::BeginCycleCollectionCallback(CCReason aReason) {
 
   nsCOMPtr<nsIObserverService> obs = xpc::GetObserverService();
   if (obs) {
-    obs->NotifyObservers(nullptr, "cycle-collector-begin", nullptr);
+    obs->NotifyWhenScriptSafe(nullptr, "cycle-collector-begin", nullptr);
   }
 }
 
@@ -786,12 +812,30 @@ void XPCJSRuntime::EndCycleCollectionCallback(CycleCollectorResults& aResults) {
 
   nsCOMPtr<nsIObserverService> obs = xpc::GetObserverService();
   if (obs) {
-    obs->NotifyObservers(nullptr, "cycle-collector-end", nullptr);
+    obs->NotifyWhenScriptSafe(nullptr, "cycle-collector-end", nullptr);
   }
 }
 
 void XPCJSRuntime::DispatchDeferredDeletion(bool aContinuation, bool aPurge) {
   mAsyncSnowWhiteFreer->Start(aContinuation, aPurge);
+}
+
+void XPCJSRuntime::ClearWhiteJSWeakReferences(
+    JS::ShouldClearWeakRefTargetCallback aCallback, void* aData) {
+  CycleCollectedJSRuntime::ClearWhiteJSWeakReferences(aCallback, aData);
+
+  // There is a one-to-one mapping between XPCWrappedNativeScope and
+  // CompartmentPrivate, so iterating over mWrappedNativeScopes visits every
+  // remote proxy map.
+  for (XPCWrappedNativeScope* scope : mWrappedNativeScopes) {
+    auto& map = RemoteProxyMapForScope(scope);
+    for (auto iter = map.modIter(); !iter.done(); iter.next()) {
+      JSObject* proxy = iter.get().value().unbarrieredGet();
+      if (aCallback(JS::GCCellPtr(proxy), aData)) {
+        iter.remove();
+      }
+    }
+  }
 }
 
 void xpc_UnmarkSkippableJSHolders() {
@@ -812,10 +856,10 @@ void XPCJSRuntime::GCSliceCallback(JSContext* cx, JS::GCProgress progress,
   if (obs) {
     switch (progress) {
       case JS::GC_CYCLE_BEGIN:
-        obs->NotifyObservers(nullptr, "garbage-collector-begin", nullptr);
+        obs->NotifyWhenScriptSafe(nullptr, "garbage-collector-begin", nullptr);
         break;
       case JS::GC_CYCLE_END:
-        obs->NotifyObservers(nullptr, "garbage-collector-end", nullptr);
+        obs->NotifyWhenScriptSafe(nullptr, "garbage-collector-end", nullptr);
         break;
       default:
         break;
@@ -1784,7 +1828,10 @@ static void ReportRealmStats(const JS::RealmStats& realmStats,
                              nsISupports* data, size_t* gcTotalOut = nullptr) {
   static const nsDependentCString addonPrefix("explicit/add-ons/");
 
-  size_t gcTotal = 0, sundriesGCHeap = 0, sundriesMallocHeap = 0;
+  size_t gcTotal = 0;
+  size_t sundriesGCHeap = 0;
+  size_t sundriesMallocHeap = 0;
+  size_t sundriesNonHeap = 0;
   nsAutoCString realmJSPathPrefix(extras.jsPathPrefix);
   nsAutoCString realmDOMPathPrefix(extras.domPathPrefix);
 
@@ -1822,13 +1869,13 @@ static void ReportRealmStats(const JS::RealmStats& realmStats,
       "JSScript instances. There is one per user-defined function in a "
       "script, and one for the top-level code in a script.");
 
-  ZRREPORT_BYTES(realmJSPathPrefix + "scripts/gc-buffers"_ns,
-                 realmStats.scriptsGCBuffers,
-                 "Various variable-length tables in JSScripts.");
+  ZRREPORT_NONHEAP_BYTES(realmJSPathPrefix + "scripts/gc-buffers"_ns,
+                         realmStats.scriptsGCBuffers,
+                         "Various variable-length tables in JSScripts.");
 
-  ZRREPORT_BYTES(realmJSPathPrefix + "baseline/data"_ns,
-                 realmStats.baselineData,
-                 "The Baseline JIT's compilation data (BaselineScripts).");
+  ZRREPORT_NONHEAP_BYTES(
+      realmJSPathPrefix + "baseline/data"_ns, realmStats.baselineData,
+      "The Baseline JIT's compilation data (BaselineScripts).");
 
   ZRREPORT_BYTES(realmJSPathPrefix + "alloc-sites"_ns, realmStats.allocSites,
                  "GC allocation site data associated with IC stubs.");
@@ -1837,8 +1884,8 @@ static void ReportRealmStats(const JS::RealmStats& realmStats,
                  realmStats.cacheIRStubs,
                  "The JIT's IC stubs (excluding code).");
 
-  ZRREPORT_BYTES(realmJSPathPrefix + "ion-data"_ns, realmStats.ionData,
-                 "The IonMonkey JIT's compilation data (IonScripts).");
+  ZRREPORT_NONHEAP_BYTES(realmJSPathPrefix + "ion-data"_ns, realmStats.ionData,
+                         "The IonMonkey JIT's compilation data (IonScripts).");
 
   ZRREPORT_BYTES(realmJSPathPrefix + "jit-scripts"_ns, realmStats.jitScripts,
                  "JIT data associated with scripts.");
@@ -1878,6 +1925,15 @@ static void ReportRealmStats(const JS::RealmStats& realmStats,
         realmJSPathPrefix + "sundries/malloc-heap"_ns, KIND_HEAP,
         sundriesMallocHeap,
         "The sum of all 'malloc-heap' measurements that are too small to "
+        "be worth showing individually.");
+  }
+
+  if (sundriesNonHeap > 0) {
+    // We deliberately don't use ZRREPORT_NONHEAP_BYTES here.
+    REPORT_BYTES(
+        realmJSPathPrefix + "sundries/other-heap"_ns, KIND_NONHEAP,
+        sundriesNonHeap,
+        "The sum of all non-malloc/gc measurements that are too small to "
         "be worth showing individually.");
   }
 
@@ -2652,10 +2708,6 @@ static void AccumulateTelemetryCallback(JSMetric id,
       glean::javascript_gc::slice_time.ProcessGet().AccumulateRawDuration(
           sample.as<TimeDuration>());
       break;
-    case JSMetric::ION_COMPILE_TIME:
-      glean::javascript_ion::compile_time.AccumulateRawDuration(
-          sample.as<TimeDuration>());
-      break;
     case JSMetric::GC_BUDGET_MS_2:
       glean::javascript_gc::budget.ProcessGet().AccumulateRawDuration(
           sample.as<TimeDuration>());
@@ -2767,6 +2819,17 @@ static void AccumulateTelemetryCallback(JSMetric id,
       } else {
         glean::javascript_gc::is_zone_gc
             .EnumGet(glean::javascript_gc::IsZoneGcLabel::eFalse)
+            .Add(1);
+      }
+      break;
+    case JSMetric::GC_GRAY_BITS_VALID:
+      if (sample.as<bool>()) {
+        glean::javascript_gc::gray_bits_valid
+            .EnumGet(glean::javascript_gc::GrayBitsValidLabel::eTrue)
+            .Add(1);
+      } else {
+        glean::javascript_gc::gray_bits_valid
+            .EnumGet(glean::javascript_gc::GrayBitsValidLabel::eFalse)
             .Add(1);
       }
       break;
@@ -3135,10 +3198,10 @@ static const JSWrapObjectCallbacks WrapObjectCallbacks = {
 
 XPCJSRuntime::XPCJSRuntime(JSContext* aCx)
     : CycleCollectedJSRuntime(aCx),
-      mWrappedJSMap(mozilla::MakeUnique<JSObject2WrappedJSMap>()),
-      mIID2NativeInterfaceMap(mozilla::MakeUnique<IID2NativeInterfaceMap>()),
-      mClassInfo2NativeSetMap(mozilla::MakeUnique<ClassInfo2NativeSetMap>()),
-      mNativeSetMap(mozilla::MakeUnique<NativeSetMap>()),
+      mWrappedJSMap(std::make_unique<JSObject2WrappedJSMap>()),
+      mIID2NativeInterfaceMap(std::make_unique<IID2NativeInterfaceMap>()),
+      mClassInfo2NativeSetMap(std::make_unique<ClassInfo2NativeSetMap>()),
+      mNativeSetMap(std::make_unique<NativeSetMap>()),
       mGCIsRunning(false),
       mDoingFinalization(false),
       mAsyncSnowWhiteFreer(new AsyncFreeSnowWhite()) {
@@ -3270,7 +3333,7 @@ void XPCJSRuntime::Initialize(JSContext* cx) {
   // isRunOnce mode and compiled function bodies (from
   // JS::CompileFunction). In practice, this means content scripts and event
   // handlers.
-  mozilla::UniquePtr<XPCJSSourceHook> hook(new XPCJSSourceHook);
+  auto hook = std::make_unique<XPCJSSourceHook>();
   js::SetSourceHook(cx, std::move(hook));
 
   // Register memory reporters and distinguished amount functions.

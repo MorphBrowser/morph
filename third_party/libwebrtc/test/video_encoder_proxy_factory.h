@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "api/environment/environment.h"
@@ -31,10 +32,6 @@
 
 namespace webrtc {
 namespace test {
-
-namespace {
-const VideoEncoder::Capabilities kCapabilities(false);
-}  // namespace
 
 // An encoder factory with a single underlying VideoEncoder object,
 // intended for test purposes. Each call to CreateVideoEncoder returns
@@ -119,6 +116,13 @@ class VideoEncoderProxyFactory : public VideoEncoderFactory {
 
     void SetRates(const RateControlParameters& parameters) override {
       encoder_->SetRates(parameters);
+    }
+
+    void SetComplexity(
+        std::span<const VideoCodecComplexity> complexity_by_spatial_layer,
+        ComplexityControlMode complexity_control_mode) override {
+      encoder_->SetComplexity(complexity_by_spatial_layer,
+                              complexity_control_mode);
     }
 
     VideoEncoder::EncoderInfo GetEncoderInfo() const override {

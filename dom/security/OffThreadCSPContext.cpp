@@ -13,19 +13,6 @@
 
 namespace mozilla::dom {
 
-/* static */
-Result<UniquePtr<OffThreadCSPContext>, nsresult>
-OffThreadCSPContext::CreateFromCSP(nsIContentSecurityPolicy* aCSP) {
-  MOZ_ASSERT(NS_IsMainThread());
-
-  mozilla::ipc::CSPInfo cspInfo;
-  nsresult rv = CSPToCSPInfo(aCSP, &cspInfo);
-  if (NS_FAILED(rv)) {
-    return Err(rv);
-  }
-  return MakeUnique<OffThreadCSPContext>(std::move(cspInfo));
-}
-
 const nsTArray<UniquePtr<const nsCSPPolicy>>& OffThreadCSPContext::Policies() {
   EnsureIPCPoliciesRead();
   return mPolicies;
@@ -41,9 +28,9 @@ bool OffThreadCSPContext::IsEvalAllowed(bool& aReportViolation) {
   for (const UniquePtr<const nsCSPPolicy>& policy : Policies()) {
     if (!(trustedTypesRequired &&
           policy->allows(nsIContentSecurityPolicy::SCRIPT_SRC_DIRECTIVE,
-                         CSP_TRUSTED_TYPES_EVAL, u""_ns)) &&
+                         CSP_TRUSTED_TYPES_EVAL)) &&
         !policy->allows(nsIContentSecurityPolicy::SCRIPT_SRC_DIRECTIVE,
-                        CSP_UNSAFE_EVAL, u""_ns)) {
+                        CSP_UNSAFE_EVAL)) {
       aReportViolation = true;
       if (!policy->getReportOnlyFlag()) {
         return false;
@@ -58,9 +45,9 @@ bool OffThreadCSPContext::IsWasmEvalAllowed(bool& aReportViolation) {
   for (const UniquePtr<const nsCSPPolicy>& policy : Policies()) {
     // Either 'unsafe-eval' or 'wasm-unsafe-eval' can allow this
     if (!policy->allows(nsIContentSecurityPolicy::SCRIPT_SRC_DIRECTIVE,
-                        CSP_WASM_UNSAFE_EVAL, u""_ns) &&
+                        CSP_WASM_UNSAFE_EVAL) &&
         !policy->allows(nsIContentSecurityPolicy::SCRIPT_SRC_DIRECTIVE,
-                        CSP_UNSAFE_EVAL, u""_ns)) {
+                        CSP_UNSAFE_EVAL)) {
       aReportViolation = true;
       if (!policy->getReportOnlyFlag()) {
         return false;

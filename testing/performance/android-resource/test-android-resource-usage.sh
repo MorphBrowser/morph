@@ -3,25 +3,47 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ACTIVITY="org.mozilla.fenix.HomeActivity"
-TOOLBAR_BOUNDS_ID="toolbar"
-TABS_TRAY_BUTTON_BOUNDS_ID="counter_box"
+TOOLBAR_RESOURCE_ID="ADDRESSBAR_URL_BOX"
+TABS_TRAY_BUTTON_RESOURCE_ID="ADDRESSBAR_TABS_COUNTER"
+LAUNCH_EXTRAS="--ez performancetest true"
 
 XML_FILE=$TESTING_DIR/window_dump.xml
 XMLSTARLET_CMD=${XMLSTARLET:-xmlstarlet}
+
+# Emulates `xmlstarlet sel -t -v XPATH FILE` on hosts without xmlstarlet,
+# such as the macOS workers running the Android emulator.
+xmllint_sel() {
+    xmllint --xpath "string($4)" "$5" 2>/dev/null
+}
+
+if ! command -v "$XMLSTARLET_CMD" > /dev/null && command -v xmllint > /dev/null; then
+    XMLSTARLET_CMD=xmllint_sel
+fi
 TEST_TIME=$1
 
 URL_MOZILLA="https://www.mozilla.org/"
 
 if [[ $BROWSER_BINARY == *"chrome"* ]]; then
   ACTIVITY="com.google.android.apps.chrome.Main"
-  TOOLBAR_BOUNDS_ID="search_box_text"
-  TABS_TRAY_BUTTON_BOUNDS_ID="tab_switcher_button"
+  TOOLBAR_RESOURCE_ID="$BROWSER_BINARY:id/search_box_text"
+  TOOLBAR_FALLBACK_RESOURCE_ID="$BROWSER_BINARY:id/url_bar"
+  TABS_TRAY_BUTTON_RESOURCE_ID="$BROWSER_BINARY:id/tab_switcher_button"
+  LAUNCH_EXTRAS=""
 fi
 
 TAP_X=0
 TAP_Y=0
 
+fail() {
+    echo "ERROR: $1"
+    pkill -f collect-proc-info
+    exit 1
+}
+
 calculate_tap_coords() {
+    if [ -z "$1" ]; then
+        fail "Could not find bounds for $2"
+    fi
     x1=$(($(echo "$1" | awk -F'[][]' '{print $2}' | awk -F',' '{print $1}')))
     x2=$(($(echo "$1" | awk -F'[][]' '{print $4}' | awk -F',' '{print $1}')))
     sum_x=$(($x1+$x2))
@@ -38,8 +60,38 @@ tap_at_coords(){
     adb shell input tap $TAP_X $TAP_Y
 }
 
+GECKOVIEW_CONFIG=/data/local/tmp/$BROWSER_BINARY-geckoview-config.yaml
+
+remove_geckoview_config() {
+    adb shell rm -f $GECKOVIEW_CONFIG
+    adb shell am clear-debug-app
+}
+
+# Set various prefs so that any fresh-profile work runs early on after
+# startup. We just did a pm clear so we'll have stuff like update checks and
+# Safe Browsing update running; with the prefs they'll run sooner and won't
+# cloud the measurement. GeckoView only reads its config file for debuggable
+# apps or for the debug app.
+use_early_first_run_prefs() {
+    trap remove_geckoview_config EXIT
+    adb shell am set-debug-app --persistent $BROWSER_BINARY
+    local config=$TESTING_DIR/geckoview-config.yaml
+    cat > $config <<EOF
+prefs:
+  # Milliseconds; 10000 is the minimum.
+  app.update.timerFirstInterval: 10000
+  browser.safebrowsing.provider.google4.nextupdatetime: "1"
+  browser.safebrowsing.provider.mozilla.nextupdatetime: "1"
+EOF
+    adb push $config $GECKOVIEW_CONFIG
+    rm $config
+}
+
 adb shell pm clear $BROWSER_BINARY
-adb shell am start -n "$BROWSER_BINARY/$ACTIVITY"
+if [[ $BROWSER_BINARY != *"chrome"* ]]; then
+    use_early_first_run_prefs
+fi
+adb shell am start $LAUNCH_EXTRAS -n "$BROWSER_BINARY/$ACTIVITY"
 sleep 4
 
 if [[ $BROWSER_BINARY == *"chrome"* ]]; then
@@ -51,8 +103,10 @@ if [[ $BROWSER_BINARY == *"chrome"* ]]; then
     DISMISS_BOUNDS=$($XMLSTARLET_CMD sel -t -v 'string(//node[@resource-id = "'$BROWSER_BINARY':id/signin_fre_dismiss_button"]/@bounds)' "$XML_FILE")
     sleep 1
 
-    calculate_tap_coords $DISMISS_BOUNDS
-    tap_at_coords
+    if [ -n "$DISMISS_BOUNDS" ]; then
+        calculate_tap_coords "$DISMISS_BOUNDS"
+        tap_at_coords
+    fi
     sleep 2
 
     # navigate away from privacy notice
@@ -63,8 +117,24 @@ if [[ $BROWSER_BINARY == *"chrome"* ]]; then
     DISMISS_BOUNDS=$($XMLSTARLET_CMD sel -t -v 'string(//node[@resource-id = "'$BROWSER_BINARY':id/ack_button"]/@bounds)' "$XML_FILE")
     sleep 1
 
-    calculate_tap_coords $DISMISS_BOUNDS
-    tap_at_coords
+    if [ -n "$DISMISS_BOUNDS" ]; then
+        calculate_tap_coords "$DISMISS_BOUNDS"
+        tap_at_coords
+    fi
+    sleep 1
+
+    # navigate away from notification permission prompt
+    adb shell uiautomator dump
+    adb pull /sdcard/window_dump.xml $XML_FILE
+    sleep 1
+
+    DISMISS_BOUNDS=$($XMLSTARLET_CMD sel -t -v 'string(//node[@resource-id = "'$BROWSER_BINARY':id/negative_button"]/@bounds)' "$XML_FILE")
+    sleep 1
+
+    if [ -n "$DISMISS_BOUNDS" ]; then
+        calculate_tap_coords "$DISMISS_BOUNDS"
+        tap_at_coords
+    fi
     sleep 1
 fi
 
@@ -73,18 +143,23 @@ adb pull /sdcard/window_dump.xml $XML_FILE
 sleep 1
 
 # calculate toolbar coordinates
-TOOLBAR_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@resource-id = "'$BROWSER_BINARY':id/'$TOOLBAR_BOUNDS_ID'"]/@bounds' $XML_FILE)
+TOOLBAR_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@resource-id = "'$TOOLBAR_RESOURCE_ID'"]/@bounds' $XML_FILE)
+# Chrome may start on a non-NTP homepage (e.g. carrier builds), which only has the omnibox
+if [ -z "$TOOLBAR_BOUNDS" ] && [ -n "$TOOLBAR_FALLBACK_RESOURCE_ID" ]; then
+    TOOLBAR_RESOURCE_ID=$TOOLBAR_FALLBACK_RESOURCE_ID
+    TOOLBAR_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@resource-id = "'$TOOLBAR_RESOURCE_ID'"]/@bounds' $XML_FILE)
+fi
 sleep 1
 
-calculate_tap_coords $TOOLBAR_BOUNDS
+calculate_tap_coords "$TOOLBAR_BOUNDS" "$TOOLBAR_RESOURCE_ID"
 TOOLBAR_X_COORDINATE=$TAP_X
 TOOLBAR_Y_COORDINATE=$TAP_Y
 
 # calculate tabs tray coordinates
-TABS_TRAY_BUTTON_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@resource-id = "'$BROWSER_BINARY':id/'$TABS_TRAY_BUTTON_BOUNDS_ID'"]/@bounds' $XML_FILE)
+TABS_TRAY_BUTTON_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@resource-id = "'$TABS_TRAY_BUTTON_RESOURCE_ID'"]/@bounds' $XML_FILE)
 sleep 1
 
-calculate_tap_coords $TABS_TRAY_BUTTON_BOUNDS
+calculate_tap_coords "$TABS_TRAY_BUTTON_BOUNDS" "$TABS_TRAY_BUTTON_RESOURCE_ID"
 TABS_TRAY_BUTTON_X_COORDINATE=$TAP_X
 TABS_TRAY_BUTTON_Y_COORDINATE=$TAP_Y
 
@@ -96,13 +171,13 @@ adb pull /sdcard/window_dump.xml $XML_FILE
 
 # calculate new tab button coordinates
 if [[ $BROWSER_BINARY == *"chrome"* ]]; then
-    ADD_TAB_BUTTON_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@resource-id="new_tab_view_button"]/@bounds' $XML_FILE)
+    ADD_TAB_BUTTON_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@resource-id="new_tab_view_button" or @resource-id="'$BROWSER_BINARY':id/toolbar_action_button"]/@bounds' $XML_FILE)
 else
     ADD_TAB_BUTTON_BOUNDS=$($XMLSTARLET_CMD sel -t -v '//node[@content-desc="Add tab"]/@bounds' $XML_FILE)
 fi
 sleep 1
 
-calculate_tap_coords $ADD_TAB_BUTTON_BOUNDS
+calculate_tap_coords "$ADD_TAB_BUTTON_BOUNDS" "add tab button"
 ADD_TAB_BUTTON_X_COORDINATE=$TAP_X
 ADD_TAB_BUTTON_Y_COORDINATE=$TAP_Y
 
@@ -114,11 +189,16 @@ sleep 1
 
 function tapToFocusToolbar() {
     adb shell input tap $TOOLBAR_X_COORDINATE $TOOLBAR_Y_COORDINATE
-    sleep 2
+    sleep 4
 }
 
 function inputTextToToolbar() {
-    adb shell input text $1
+    local text=$1
+    while [ -n "$text" ]; do
+        adb shell input text "${text:0:4}"
+        text=${text:4}
+        sleep 0.5
+    done
     sleep 2
 }
 

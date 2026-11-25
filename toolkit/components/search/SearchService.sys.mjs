@@ -39,7 +39,7 @@ const lazy = XPCOMUtils.declareLazy({
     "moz-src:///toolkit/components/search/UserSearchEngine.sys.mjs",
   logConsole: () =>
     console.createInstance({
-      prefix: "SearchService",
+      logModule: "SearchService",
       maxLogLevel: lazy.SearchUtils.loggingEnabled ? "Debug" : "Warn",
     }),
   timerManager: {
@@ -62,7 +62,9 @@ const lazy = XPCOMUtils.declareLazy({
  * @import {SearchEngineSelector} from "./SearchEngineSelector.sys.mjs"
  * @import {
  *   RefinedSearchConfig,
+ *   RefinedSearchConfigV3,
  *   SearchEngineDefinition,
+ *   SearchEngineDefinitionV3,
  * } from "../uniffi-bindgen-gecko-js/components/generated/RustSearch.sys.mjs";
  * @import {UserSearchEngine, FormInfo} from "./UserSearchEngine.sys.mjs"
  */
@@ -94,6 +96,9 @@ const ENGINES_SEEN_FOR_PROMPT = 1;
  */
 export const SearchService = new (class SearchService {
   constructor() {
+    if (Services.appinfo.processType != Services.appinfo.PROCESS_TYPE_DEFAULT) {
+      throw new Error("Search Service should only run in the main process.");
+    }
     this._settings = new lazy.SearchSettings(this);
   }
 
@@ -384,6 +389,27 @@ export const SearchService = new (class SearchService {
       }
     }
 
+    return null;
+  }
+
+  /**
+   * Returns the OpenSearch engine installed from the given description url.
+   *
+   * @param {string} installURL
+   *   The url of the OpenSearch description.
+   * @returns {?SearchEngine}
+   *   The associated engine if found, null otherwise.
+   */
+  getEngineByInstallURL(installURL) {
+    this.#ensureInitialized();
+    for (let engine of this._engines.values()) {
+      if (
+        engine instanceof lazy.OpenSearchEngine &&
+        engine.installURL == installURL
+      ) {
+        return engine;
+      }
+    }
     return null;
   }
 
@@ -1076,16 +1102,14 @@ export const SearchService = new (class SearchService {
   }
 
   /**
-   * @typedef {object} ParseSubmissionResult
-   * @property {?SearchEngine} engine
-   *   The search engine associated with the URL passed in to
-   *   ``parseSubmissionURL``, or null if the URL does not represent a search
-   *   submission.
+   * @typedef {object} ParseSubmissionResultTerms
    * @property {string} terms
    *   String containing the sought terms. This can be an empty string in case
    *   no terms were specified or the URL does not represent a search submission.
-   * @property {string} termsParameterName
-   *   The name of the query parameter used by `engine` for queries. E.g. "q".
+   */
+
+  /**
+   * @typedef {submissionMapEntry & ParseSubmissionResultTerms} ParseSubmissionResult
    */
 
   /**
@@ -1104,11 +1128,18 @@ export const SearchService = new (class SearchService {
    * @returns {ParseSubmissionResult}
    */
   parseSubmissionURL(url) {
+    let emptyResult = {
+      engine: null,
+      terms: "",
+      termsParameterName: "",
+      partnerCodeParameterName: "",
+    };
+
     if (!this.hasSuccessfullyInitialized) {
       // If search is not initialized or failed initializing, do nothing.
       // This allows us to use this function early in telemetry.
       // The only other consumer of this (places) uses it much later.
-      return { engine: null, terms: "", termsParameterName: "" };
+      return emptyResult;
     }
 
     if (!this.#parseSubmissionMap) {
@@ -1122,7 +1153,7 @@ export const SearchService = new (class SearchService {
 
       // Exclude any URL that is not HTTP or HTTPS from the beginning.
       if (!soughtUrl.schemeIs("http") && !soughtUrl.schemeIs("https")) {
-        return { engine: null, terms: "", termsParameterName: "" };
+        return emptyResult;
       }
 
       // Reading these URL properties may fail and raise an exception.
@@ -1130,13 +1161,13 @@ export const SearchService = new (class SearchService {
       soughtQuery = soughtUrl.query;
     } catch (ex) {
       // Errors while parsing the URL or accessing the properties are not fatal.
-      return { engine: null, terms: "", termsParameterName: "" };
+      return emptyResult;
     }
 
     // Look up the domain and path in the map to identify the search engine.
     let mapEntry = this.#parseSubmissionMap.get(soughtKey);
     if (!mapEntry) {
-      return { engine: null, terms: "", termsParameterName: "" };
+      return emptyResult;
     }
 
     // Extract the search terms from the parameter, for example "caff%C3%A8"
@@ -1156,7 +1187,7 @@ export const SearchService = new (class SearchService {
       }
     }
     if (encodedTerms === null) {
-      return { engine: null, terms: "", termsParameterName: "" };
+      return emptyResult;
     }
 
     // Decode the terms using the charset defined in the search engine.
@@ -1168,13 +1199,14 @@ export const SearchService = new (class SearchService {
       );
     } catch (ex) {
       // Decoding errors will cause this match to be ignored.
-      return { engine: null, terms: "", termsParameterName: "" };
+      return emptyResult;
     }
 
     return {
       engine: mapEntry.engine,
       terms,
       termsParameterName: mapEntry.termsParameterName,
+      partnerCodeParameterName: mapEntry.partnerCodeParameterName,
     };
   }
 
@@ -1338,6 +1370,8 @@ export const SearchService = new (class SearchService {
    *   The search engine.
    * @property {string} termsParameterName
    *   The search term parameter name.
+   * @property {string} partnerCodeParameterName
+   *   The partner code parameter name.
    */
 
   /**
@@ -1896,7 +1930,7 @@ export const SearchService = new (class SearchService {
    *
    * @param {object} settings
    *   An object representing the search engine settings.
-   * @param {RefinedSearchConfig} refinedConfig
+   * @param {RefinedSearchConfig|RefinedSearchConfigV3} refinedConfig
    *   The refined search configuration for this user.
    */
   async #loadEngines(settings, refinedConfig) {
@@ -1909,7 +1943,8 @@ export const SearchService = new (class SearchService {
     lazy.logConsole.debug("#loadEngines: start");
     this.#setDefaultFromSelector(refinedConfig);
 
-    this.#loadEnginesFromConfig(refinedConfig.engines, settings);
+    let configEngines = this.#filterDeprecatedEngines(refinedConfig.engines);
+    this.#loadEnginesFromConfig(configEngines, settings);
 
     await this.#loadStartupEngines(settings);
 
@@ -1920,7 +1955,7 @@ export const SearchService = new (class SearchService {
     // override, then we don't want to show the notification box.
     let skipDefaultChangedNotification = await this.#loadEnginesFromSettings(
       settings,
-      refinedConfig.engines
+      configEngines
     );
 
     // If #loadEnginesFromSettings changed the default engine, then we don't
@@ -2048,10 +2083,23 @@ export const SearchService = new (class SearchService {
   }
 
   /**
+   * Returns the engine configurations that are not deprecated.
+   *
+   * @param {(SearchEngineDefinition|SearchEngineDefinitionV3)[]} engineConfigs
+   *   An array of engines configurations based on the schema.
+   * @returns {(SearchEngineDefinition|SearchEngineDefinitionV3)[]}
+   */
+  #filterDeprecatedEngines(engineConfigs) {
+    return engineConfigs.filter(
+      config => !("deprecated" in config && config.deprecated)
+    );
+  }
+
+  /**
    * Loads engines as specified by the configuration. We only expect
    * configured engines here, user engines should not be listed.
    *
-   * @param {SearchEngineDefinition[]} engineConfigs
+   * @param {(SearchEngineDefinition|SearchEngineDefinitionV3)[]} engineConfigs
    *   An array of engines configurations based on the schema.
    * @param {object} [settings]
    *   The saved settings for the user.
@@ -2260,7 +2308,9 @@ export const SearchService = new (class SearchService {
 
     let refinedConfig = await this._fetchEngineSelectorEngines();
 
-    let availableConfigEngines = [...refinedConfig.engines];
+    let availableConfigEngines = this.#filterDeprecatedEngines(
+      refinedConfig.engines
+    );
     let oldEngineList = [...this._engines.values()];
 
     for (let engine of oldEngineList) {
@@ -2653,7 +2703,7 @@ export const SearchService = new (class SearchService {
    *
    * @param {object} [settings]
    *   The saved settings for the user.
-   * @param {SearchEngineDefinition[]} [engines]
+   * @param {(SearchEngineDefinition|SearchEngineDefinitionV3)[]} [engines]
    *   The saved settings for the user.
    * @returns {Promise<boolean>}
    *   Returns true if the default engine was changed.
@@ -3822,6 +3872,7 @@ export const SearchService = new (class SearchService {
       let mapValueForEngine = {
         engine,
         termsParameterName: urlParsingInfo.termsParameterName,
+        partnerCodeParameterName: urlParsingInfo.partnerCodeParameterName,
       };
 
       let processDomain = (domain, isAlternate) => {

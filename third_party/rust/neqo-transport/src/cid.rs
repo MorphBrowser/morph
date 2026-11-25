@@ -18,10 +18,11 @@ use std::{
 use neqo_common::{
     Buffer, Decoder, Encoder, expect_usize,
     hex::{Hex, HexWithLen},
-    qdebug, qinfo, to_u64,
+    to_u64,
 };
 use nss::{random, randomize};
 use smallvec::{SmallVec, smallvec};
+use tracing::info;
 
 use crate::{
     Error, Res,
@@ -179,7 +180,6 @@ pub trait ConnectionIdGenerator: ConnectionIdDecoder {
     fn generates_empty_cids(&self) -> bool {
         false
     }
-    fn as_decoder(&self) -> &dyn ConnectionIdDecoder;
 }
 
 /// An `EmptyConnectionIdGenerator` generates empty connection IDs.
@@ -195,9 +195,6 @@ impl ConnectionIdDecoder for EmptyConnectionIdGenerator {
 impl ConnectionIdGenerator for EmptyConnectionIdGenerator {
     fn generate_cid(&mut self) -> Option<ConnectionId> {
         Some(ConnectionId::from(&[]))
-    }
-    fn as_decoder(&self) -> &dyn ConnectionIdDecoder {
-        self
     }
     fn generates_empty_cids(&self) -> bool {
         true
@@ -229,10 +226,6 @@ impl ConnectionIdGenerator for RandomConnectionIdGenerator {
         let mut buf = smallvec![0; self.len];
         randomize(&mut buf);
         Some(ConnectionId::from(buf))
-    }
-
-    fn as_decoder(&self) -> &dyn ConnectionIdDecoder {
-        self
     }
 
     fn generates_empty_cids(&self) -> bool {
@@ -388,7 +381,7 @@ impl ConnectionIdStore<Srt> {
         }
         // It's not OK if any individual piece matches though.
         if self.cids.iter().any(|c| c.any_part_equal(&entry)) {
-            qinfo!("ConnectionIdStore found reused part in NEW_CONNECTION_ID");
+            info!("ConnectionIdStore found reused part in NEW_CONNECTION_ID");
             return Err(Error::ProtocolViolation);
         }
 
@@ -426,11 +419,11 @@ pub struct ConnectionIdDecoderRef<'a> {
     generator: Ref<'a, dyn ConnectionIdGenerator>,
 }
 
-// Ideally this would be an implementation of `Deref`, but it doesn't
-// seem to be possible to convince the compiler to build anything useful.
-impl<'a: 'b, 'b> ConnectionIdDecoderRef<'a> {
-    pub fn as_ref(&'a self) -> &'b dyn ConnectionIdDecoder {
-        self.generator.as_decoder()
+impl<'a> Deref for ConnectionIdDecoderRef<'a> {
+    type Target = dyn ConnectionIdDecoder + 'a;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.generator
     }
 }
 
@@ -499,9 +492,13 @@ impl ConnectionIdManager {
         }
     }
 
+    fn generates_empty_cids(&self) -> bool {
+        self.generator.deref().borrow().generates_empty_cids()
+    }
+
     /// Generate a connection ID and stateless reset token for a preferred address.
     pub fn preferred_address_cid(&mut self) -> Res<(ConnectionId, Srt)> {
-        if self.generator.deref().borrow().generates_empty_cids() {
+        if self.generates_empty_cids() {
             return Err(Error::ConnectionIdsExhausted);
         }
         match self.generator.borrow_mut().generate_cid() {
@@ -525,6 +522,9 @@ impl ConnectionIdManager {
     }
 
     pub fn retire(&mut self, seqno: u64) -> Res<()> {
+        if self.generates_empty_cids() {
+            return Err(Error::ProtocolViolation);
+        }
         // RFC 9000, Section 19.16: receipt of a RETIRE_CONNECTION_ID frame whose
         // sequence number is greater than any we have issued (i.e. not below the
         // next sequence number to be used) is a connection error.
@@ -534,18 +534,8 @@ impl ConnectionIdManager {
 
         // TODO(mt) - consider keeping connection IDs around for a short while.
 
-        let empty_cid = seqno == Self::SEQNO_EMPTY
-            || self
-                .connection_ids
-                .cids
-                .iter()
-                .any(|c| c.seqno == seqno && c.cid.is_empty());
-        if empty_cid {
-            qdebug!("Connection ID {seqno} is zero-length, not retiring");
-        } else {
-            self.connection_ids.retire(seqno);
-            self.lost_new_connection_id.retain(|cid| cid.seqno != seqno);
-        }
+        self.connection_ids.retire(seqno);
+        self.lost_new_connection_id.retain(|cid| cid.seqno != seqno);
         Ok(())
     }
 
@@ -575,7 +565,7 @@ impl ConnectionIdManager {
         tokens: &mut recovery::Tokens,
         stats: &mut FrameStats,
     ) {
-        if self.generator.deref().borrow().generates_empty_cids() {
+        if self.generates_empty_cids() {
             debug_assert_eq!(
                 self.generator
                     .borrow_mut()
@@ -613,6 +603,8 @@ impl ConnectionIdManager {
                 let entry = ConnectionIdEntry::new(seqno, cid, Srt::random());
                 entry.write(builder, stats);
                 tokens.push(recovery::Token::NewConnectionId(Box::new(entry)));
+            } else {
+                break;
             }
         }
     }
@@ -630,15 +622,107 @@ impl ConnectionIdManager {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use neqo_common::Encoder;
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+
+    use neqo_common::{Decoder, Encoder};
     use test_fixture::fixture_init;
 
     use crate::{
         Token as Srt,
-        cid::{ConnectionId, ConnectionIdEntry, ConnectionIdManager},
-        packet,
+        cid::{
+            ConnectionId, ConnectionIdDecoder, ConnectionIdEntry, ConnectionIdGenerator,
+            ConnectionIdManager, ConnectionIdRef,
+        },
+        packet, recovery,
         stats::FrameStats,
     };
+
+    #[derive(Default)]
+    struct ScriptedConnectionIdGenerator {
+        cids: VecDeque<Option<ConnectionId>>,
+    }
+
+    impl ConnectionIdDecoder for ScriptedConnectionIdGenerator {
+        fn decode_cid<'a>(&self, dec: &mut Decoder<'a>) -> Option<ConnectionIdRef<'a>> {
+            dec.decode(1).map(ConnectionIdRef::from)
+        }
+    }
+
+    impl ConnectionIdGenerator for ScriptedConnectionIdGenerator {
+        fn generate_cid(&mut self) -> Option<ConnectionId> {
+            // Fail promptly if a write retries after exhaustion instead of hanging the test.
+            let Some(cid) = self.cids.pop_front() else {
+                panic!("unexpected CID generation attempt");
+            };
+            cid
+        }
+    }
+
+    #[test]
+    fn cid_generator_exhaustion() {
+        fixture_init();
+        let generator = Rc::new(RefCell::new(ScriptedConnectionIdGenerator::default()));
+        let manager_generator = Rc::clone(&generator);
+        let mut manager = ConnectionIdManager::new(manager_generator, ConnectionId::from(&[0]));
+        manager.set_limit(3);
+        let enc = Encoder::with_capacity(1024);
+        let mut builder = packet::Builder::short(enc, false, Some(&[]), 1024);
+        let mut tokens = recovery::Tokens::new();
+        let mut stats = FrameStats::default();
+
+        // Exhaustion must leave the packet and CID state unchanged, including on later writes.
+        for _ in 0..2 {
+            generator.borrow_mut().cids.push_back(None);
+            let remaining = builder.remaining();
+            manager.write_frames(&mut builder, &mut tokens, &mut stats);
+            assert_eq!(builder.remaining(), remaining);
+            assert!(tokens.is_empty());
+            assert_eq!(stats.new_connection_id, 0);
+            assert_eq!(manager.connection_ids.len(), 1);
+            assert_eq!(manager.next_seqno, 1);
+        }
+
+        // A generator can provide more IDs on a later write, then run out partway through.
+        generator
+            .borrow_mut()
+            .cids
+            .extend([Some(ConnectionId::from(&[1])), None]);
+        manager.write_frames(&mut builder, &mut tokens, &mut stats);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(stats.new_connection_id, 1);
+        assert_eq!(manager.connection_ids.len(), 2);
+        assert_eq!(manager.next_seqno, 2);
+        assert!(manager.is_valid(ConnectionIdRef::from(&[1])));
+
+        // Previously issued IDs can still be retransmitted while generation is exhausted.
+        let recovery::Token::NewConnectionId(entry) = tokens.pop().unwrap() else {
+            panic!("expected a NEW_CONNECTION_ID recovery token");
+        };
+        manager.lost(&entry);
+        generator.borrow_mut().cids.push_back(None);
+        manager.write_frames(&mut builder, &mut tokens, &mut stats);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(stats.new_connection_id, 2);
+        assert_eq!(manager.connection_ids.len(), 2);
+        assert_eq!(manager.next_seqno, 2);
+        assert!(manager.lost_new_connection_id.is_empty());
+        let recovery::Token::NewConnectionId(retransmitted) = tokens.pop().unwrap() else {
+            panic!("expected a NEW_CONNECTION_ID recovery token");
+        };
+        assert_eq!(retransmitted, entry);
+
+        generator
+            .borrow_mut()
+            .cids
+            .push_back(Some(ConnectionId::from(&[2])));
+        manager.write_frames(&mut builder, &mut tokens, &mut stats);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(stats.new_connection_id, 3);
+        assert_eq!(manager.connection_ids.len(), 3);
+        assert_eq!(manager.next_seqno, 3);
+        assert!(manager.is_valid(ConnectionIdRef::from(&[2])));
+        assert!(generator.borrow().cids.is_empty());
+    }
 
     #[test]
     fn generate_initial_cid() {
@@ -703,7 +787,7 @@ mod tests {
     #[test]
     fn connection_id_ref_debug_format() {
         let bytes = [0xde, 0xad];
-        let cid_ref = crate::cid::ConnectionIdRef::from(&bytes[..]);
+        let cid_ref = ConnectionIdRef::from(&bytes[..]);
         assert_eq!(format!("{cid_ref:?}"), "CID [2]: dead");
     }
 

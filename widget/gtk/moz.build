@@ -132,11 +132,13 @@ if CONFIG["MOZ_WAYLAND"]:
     ]
     SOURCES += [
         "nsWindowWayland.cpp",  # conflicts with X11 headers
+        "nsWindowWaylandGtk.cpp",  # conflicts with X11 headers
         "WaylandVsyncSource.cpp",  # conflicts with X11 headers
     ]
     SOURCE_HEADERS += [
         "nsDragServiceWayland.h",
         "nsWindowWayland.h",
+        "nsWindowWaylandGtk.h",
         "RetrievalContextGtk.h",
         "RetrievalContextWayland.h",
         "WaylandVsyncSource.h",
@@ -156,11 +158,11 @@ if CONFIG["MOZ_X11"]:
         "nsShmImage.cpp",
         "RetrievalContextX11.cpp",
         "WindowSurfaceX11.cpp",
-        "WindowSurfaceX11Image.cpp",
         "WindowSurfaceX11SHM.cpp",
     ]
     SOURCES += [
         "nsWindowX11.cpp",  # conflicts with X11 headers
+        "WindowSurfaceX11Image.cpp",  # conflicts with X11 headers
     ]
     SOURCE_HEADERS += [
         "nsShmImage.h",
@@ -207,8 +209,6 @@ if not CONFIG["MOZ_SYSTEM_LIBDRM"]:
         "/third_party/drm/drm/include",
         "/third_party/drm/drm/include/libdrm",
     ]
-
-DEFINES["CAIRO_GFX"] = True
 
 DEFINES["MOZ_APP_NAME"] = '"%s"' % CONFIG["MOZ_APP_NAME"]
 

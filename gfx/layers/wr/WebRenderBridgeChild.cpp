@@ -4,8 +4,6 @@
 
 #include "mozilla/layers/WebRenderBridgeChild.h"
 
-#include "PDMFactory.h"
-#include "gfxPlatform.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/layers/CompositableClient.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
@@ -35,7 +33,7 @@ WebRenderBridgeChild::WebRenderBridgeChild(const wr::PipelineId& aPipelineId)
       mFontInstanceKeysDeleted(0) {}
 
 WebRenderBridgeChild::~WebRenderBridgeChild() {
-  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_RELEASE_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(mDestroyed);
 }
 
@@ -121,8 +119,11 @@ bool WebRenderBridgeChild::EndTransaction(
 
   TimeStamp fwdTime = TimeStamp::Now();
 
+  // Destroyed actors stay queued with the destroy commands that reference them.
+  nsTArray<OpDestroy> destroyedActors;
   if (!aRenderOffscreen) {
     MergeWebRenderParentCommands();
+    destroyedActors = std::move(mDestroyedActors);
   }
   aDisplayListData.mCommands = std::move(mParentCommands);
   aDisplayListData.mIdNamespace = mIdNamespace;
@@ -134,16 +135,18 @@ bool WebRenderBridgeChild::EndTransaction(
 
   mSentDisplayList = true;
   bool ret = this->SendSetDisplayList(
-      std::move(aDisplayListData), mDestroyedActors, GetFwdTransactionId(),
+      std::move(aDisplayListData), destroyedActors, GetFwdTransactionId(),
       aTransactionId, aContainsSVGGroup, aVsyncId, aVsyncStartTime,
       aRefreshStartTime, aTxnStartTime, aTxnURL, fwdTime, payloads,
       aRenderOffscreen);
 
   // With multiple render roots, we may not have sent all of our
   // mParentCommands, so go ahead and go through our mParentCommands and ensure
-  // they get sent.
-  ProcessWebRenderParentCommands();
-  mDestroyedActors.Clear();
+  // they get sent. Destroy commands must stay queued after an offscreen
+  // transaction, until the main display list stops referencing their resources.
+  if (!aRenderOffscreen) {
+    ProcessWebRenderParentCommands();
+  }
   mIsInTransaction = false;
 
   return ret;
@@ -223,24 +226,24 @@ struct FontFileDataSink {
   wr::IpcResourceUpdateQueue* mResources;
 };
 
-static void WriteFontFileData(const uint8_t* aData, uint32_t aLength,
+static bool WriteFontFileData(const uint8_t* aData, uint32_t aLength,
                               uint32_t aIndex, void* aBaton) {
   FontFileDataSink* sink = static_cast<FontFileDataSink*>(aBaton);
 
   *sink->mFontKey = sink->mWrBridge->GetNextFontKey();
 
-  sink->mResources->AddRawFont(
+  return sink->mResources->AddRawFont(
       *sink->mFontKey, Range<uint8_t>(const_cast<uint8_t*>(aData), aLength),
       aIndex);
 }
 
-static void WriteFontDescriptor(const uint8_t* aData, uint32_t aLength,
+static bool WriteFontDescriptor(const uint8_t* aData, uint32_t aLength,
                                 uint32_t aIndex, void* aBaton) {
   FontFileDataSink* sink = static_cast<FontFileDataSink*>(aBaton);
 
   *sink->mFontKey = sink->mWrBridge->GetNextFontKey();
 
-  sink->mResources->AddFontDescriptor(
+  return sink->mResources->AddFontDescriptor(
       *sink->mFontKey, Range<uint8_t>(const_cast<uint8_t*>(aData), aLength),
       aIndex);
 }
@@ -522,7 +525,7 @@ void WebRenderBridgeChild::EndClearCachedResources() {
 void WebRenderBridgeChild::SetWebRenderLayerManager(
     WebRenderLayerManager* aManager) {
   MOZ_ASSERT(aManager && !mManager);
-  MOZ_ASSERT(NS_IsMainThread() || !XRE_IsContentProcess());
+  MOZ_RELEASE_ASSERT(NS_IsMainThread() || !XRE_IsContentProcess());
   mManager = aManager;
 }
 
@@ -534,13 +537,7 @@ ipc::IShmemAllocator* WebRenderBridgeChild::GetShmemAllocator() {
 }
 
 RefPtr<KnowsCompositor> WebRenderBridgeChild::GetForMedia() {
-  MOZ_ASSERT(NS_IsMainThread());
-
-  // Ensure device initialization for video playback unless they are all remote.
-  // The devices are lazily initialized with WebRender to reduce memory usage.
-  if (!PDMFactory::AllDecodersAreRemote()) {
-    gfxPlatform::GetPlatform()->EnsureDevicesInitialized();
-  }
+  MOZ_RELEASE_ASSERT(NS_IsMainThread());
 
   return MakeAndAddRef<KnowsCompositorMediaProxy>(
       GetTextureFactoryIdentifier());

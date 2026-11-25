@@ -610,8 +610,9 @@ class GCRuntime {
   bool isCompactingGc() const { return isCompacting; }
   bool didCompactZones() const { return isCompacting && zonesCompacted; }
 
-  bool areGrayBitsValid() const { return grayBitsValid; }
+  bool areGrayBitsValid() const { return grayBitsInvalid == 0; }
   void setGrayBitsInvalid();
+  void setGrayBitsInvalidForReset();
 
   mozilla::TimeStamp lastGCStartTime() const { return lastGCStartTime_; }
   mozilla::TimeStamp lastGCEndTime() const { return lastGCEndTime_; }
@@ -760,6 +761,7 @@ class GCRuntime {
                        Handle<WeakRefObject*> weakRef);
   void traceKeptObjects(JSTracer* trc);
 
+  void noteWeakRefTargets(JS::NoteWeakRefTargetCallback callback, void* data);
   void maybeClearWeakRefTargets(JS::ShouldClearWeakRefTargetCallback callback,
                                 void* data);
 
@@ -965,8 +967,10 @@ class GCRuntime {
 
 #ifdef DEBUG
   void assertNoMarkingWork() const;
+  void assertNoMarkingWorkInSweepingZones() const;
 #else
   void assertNoMarkingWork() const {}
+  void assertNoMarkingWorkInSweepingZones() const {}
 #endif
 
   void markDelayedChildren(gc::Arena* arena, MarkColor color);
@@ -1247,7 +1251,9 @@ class GCRuntime {
    * The gray bits can become invalid if UnmarkGray overflows the stack. A
    * full GC will reset this bit, since it fills in all the gray bits.
    */
-  UnprotectedData<bool> grayBitsValid;
+  static constexpr uint32_t GrayBitsInvalid = Bit(0);
+  static constexpr uint32_t GrayBitsInvalidatedInCurrentGC = Bit(1);
+  mozilla::Atomic<uint32_t, mozilla::Relaxed> grayBitsInvalid;
 
   mozilla::Atomic<JS::GCReason, mozilla::ReleaseAcquire> majorGCTriggerReason;
 

@@ -55,7 +55,7 @@ class UninstallSurveyBottomSheetFragment : BottomSheetDialogFragment() {
 
     private var microsurveyUIData by mutableStateOf<MicrosurveyUIData?>(null)
 
-    private val closeBottomSheet = { findNavController().popBackStack() }
+    private val closeBottomSheet: () -> Unit = { findNavController().popBackStack() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -124,11 +124,9 @@ class UninstallSurveyBottomSheetFragment : BottomSheetDialogFragment() {
                     },
                     onCloseButtonClicked = {
                         microsurveyMessageController.onMicrosurveyDismissed(it.id)
-                        requireComponents.settings.shouldShowMicrosurveyPrompt = false
                         closeBottomSheet()
                     },
                     onSubmitButtonClicked = { answer ->
-                        requireComponents.settings.shouldShowMicrosurveyPrompt = false
                         microsurveyMessageController.onSurveyCompleted(it.id, answer)
                         activity.maybeTriggerDeviceUninstallPrompt()
                         closeBottomSheet()

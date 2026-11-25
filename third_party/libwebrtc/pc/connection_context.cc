@@ -25,7 +25,6 @@
 #include "pc/media_factory.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/internal/default_socket_server.h"
-#include "rtc_base/logging.h"
 #include "rtc_base/network.h"
 #include "rtc_base/socket_factory.h"
 #include "rtc_base/socket_server.h"
@@ -89,14 +88,14 @@ scoped_refptr<ConnectionContext> ConnectionContext::Create(
       new ConnectionContext(env, dependencies));
 }
 
-// Access to the media engine operations is constrained to the worker thread.
+// Access to the media engine operations is constrained to the network thread.
 // This accessor via `MediaEngineReference` is provided to help ensure that a
-// reference is held and that the call is being issued on the worker thread.
+// reference is held and that the call is being issued on the network thread.
 MediaEngineInterface* ConnectionContext::MediaEngineReference::media_engine()
     const {
-  RTC_DCHECK_RUN_ON(c_->worker_thread());
-  RTC_DCHECK(c_->media_engine_w());
-  return c_->media_engine_w();
+  RTC_DCHECK_RUN_ON(c_->network_thread());
+  RTC_DCHECK(c_->media_engine_n());
+  return c_->media_engine_n();
 }
 
 ConnectionContext::ConnectionContext(
@@ -106,9 +105,6 @@ ConnectionContext::ConnectionContext(
       network_thread_(MaybeStartNetworkThread(dependencies->network_thread,
                                               owned_socket_factory_,
                                               owned_network_thread_)),
-      worker_thread_(dependencies->worker_thread != nullptr
-                         ? dependencies->worker_thread
-                         : network_thread_),
       signaling_thread_(MaybeWrapThread(dependencies->signaling_thread,
                                         wraps_current_thread_)),
       media_engine_(
@@ -126,39 +122,19 @@ ConnectionContext::ConnectionContext(
                                  network_thread())) {
   RTC_DCHECK_RUN_ON(signaling_thread_);
   RTC_DCHECK(network_thread_ != nullptr);
-  RTC_DCHECK(worker_thread_ != nullptr);
   RTC_DCHECK(!(default_network_manager_ && network_monitor_factory_))
       << "You can't set both network_manager and network_monitor_factory.";
 
-  if (dependencies->worker_thread != nullptr &&
-      dependencies->worker_thread != network_thread_) {
-    RTC_LOG(LS_ERROR)
-        << "\n"
-        << "***************************************************************\n"
-        << "* DEPRECATION: A worker thread distinct from the network      *\n"
-        << "* thread is configured. Support for a separate worker thread  *\n"
-        << "* is being removed. Applications must stop supplying          *\n"
-        << "* PeerConnectionFactoryDependencies::worker_thread.           *\n"
-        << "* PSA: https://groups.google.com/g/discuss-webrtc/c/Fs_Hd5XNJh0\n"
-        << "***************************************************************";
-  }
-
-  signaling_thread_->AllowInvokesToThread(worker_thread());
   signaling_thread_->AllowInvokesToThread(network_thread_);
-  worker_thread_->AllowInvokesToThread(network_thread_);
   if (!network_thread_->IsCurrent()) {
     // network_thread_->IsCurrent() == true means signaling_thread_ is
     // network_thread_. In this case, no further action is required as
     // signaling_thread_ can already invoke network_thread_.
-    network_thread_->PostTask(
-        [thread = network_thread_, worker_thread = worker_thread_] {
-          thread->DisallowBlockingCalls();
-          thread->DisallowAllInvokes();
-          if (worker_thread == thread) {
-            // In this case, worker_thread_ == network_thread_
-            thread->AllowInvokesToThread(thread);
-          }
-        });
+    network_thread_->PostTask([network_thread = network_thread_] {
+      network_thread->DisallowBlockingCalls();
+      network_thread->DisallowAllInvokes();
+      network_thread->AllowInvokesToThread(network_thread);
+    });
   }
 
   SocketFactory* socket_factory = dependencies->socket_factory;
@@ -190,7 +166,6 @@ ConnectionContext::ConnectionContext(
   // restrictive limits and end with the least permissive ones.
   // This will give warnings for all cases.
   signaling_thread_->SetDispatchWarningMs(100);
-  worker_thread_->SetDispatchWarningMs(30);
   network_thread_->SetDispatchWarningMs(10);
 
   blocking_media_engine_destruction_ =
@@ -207,7 +182,7 @@ ConnectionContext::~ConnectionContext() {
   // `blocking_media_engine_destruction_` flag.
   RTC_DCHECK_EQ(media_engine_reference_count_, 0);
 
-  // `media_engine_` requires destruction to happen on the worker thread.
+  // `media_engine_` requires destruction to happen on the network thread.
   if (blocking_media_engine_destruction_) {
     // The media engine shares its Environment with objects that may outlive
     // the ConnectionContext if this call is not blocking. If Environment is
@@ -217,12 +192,12 @@ ConnectionContext::~ConnectionContext() {
     // The plan is to address the problem with a new Terminate(callback) method,
     // which is referenced in webrtc:443588673, but pending this one can
     // control this with field trial `WebRTC-SynchronousDestructors`.
-    worker_thread_->BlockingCall([&] { media_engine_ = nullptr; });
+    network_thread_->BlockingCall([&] { media_engine_ = nullptr; });
   } else {
-    worker_thread_->PostTask([media_engine = std::move(media_engine_)] {});
+    network_thread_->PostTask([media_engine = std::move(media_engine_)] {});
   }
 
-  // Make sure `worker_thread()` and `signaling_thread()` outlive
+  // Make sure `network_thread()` and `signaling_thread()` outlive
   // `default_socket_factory_` and `default_network_manager_`.
   default_socket_factory_ = nullptr;
   default_network_manager_ = nullptr;
@@ -231,13 +206,13 @@ ConnectionContext::~ConnectionContext() {
     ThreadManager::Instance()->UnwrapCurrentThread();
 }
 
-MediaEngineInterface* ConnectionContext::media_engine_w() {
-  RTC_DCHECK_RUN_ON(worker_thread());
+MediaEngineInterface* ConnectionContext::media_engine_n() {
+  RTC_DCHECK_RUN_ON(network_thread());
   return media_engine_.get();
 }
 
 void ConnectionContext::ApplyGlobalAudioOptions(const AudioOptions& options) {
-  RTC_DCHECK_RUN_ON(worker_thread());
+  RTC_DCHECK_RUN_ON(network_thread());
   global_audio_options_.SetAll(options);
   if (media_engine_reference_count_ > 0) {
     media_engine_->voice().ApplyGlobalOptions(global_audio_options_);
@@ -245,7 +220,7 @@ void ConnectionContext::ApplyGlobalAudioOptions(const AudioOptions& options) {
 }
 
 void ConnectionContext::AddRefMediaEngine() {
-  RTC_DCHECK_RUN_ON(worker_thread());
+  RTC_DCHECK_RUN_ON(network_thread());
   RTC_DCHECK_GE(media_engine_reference_count_, 0);
   RTC_DCHECK(media_engine_);
   ++media_engine_reference_count_;
@@ -256,7 +231,7 @@ void ConnectionContext::AddRefMediaEngine() {
 }
 
 void ConnectionContext::ReleaseMediaEngine() {
-  RTC_DCHECK_RUN_ON(worker_thread());
+  RTC_DCHECK_RUN_ON(network_thread());
   RTC_DCHECK_GT(media_engine_reference_count_, 0);
   RTC_DCHECK(media_engine_);
   --media_engine_reference_count_;

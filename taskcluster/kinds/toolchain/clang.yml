@@ -7,7 +7,6 @@ task-defaults:
     worker:
         max-run-time: 7200
     run:
-        clone-with: hg
         resources:
             - 'build/build-clang/build-clang.py'
 
@@ -156,10 +155,12 @@ linux64-clang-22-raw:
             - 'build/build-clang/use-clang-artifact.json'
             - 'build/build-clang/clang-22.json'
             - 'build/build-clang/stage-4-pgo.json'
+            - 'build/build-clang/stage-4-bolt.json'
         resources:
             - 'build/build-clang/use-clang-artifact.json'
             - 'build/build-clang/clang-22.json'
             - 'build/build-clang/stage-4-pgo.json'
+            - 'build/build-clang/stage-4-bolt.json'
         toolchain-artifact: public/build/clang.tar.zst
     fetches:
         fetch:
@@ -199,6 +200,7 @@ linux64-clang-22:
             - linux32-compiler-rt-22
             - linux64-aarch64-compiler-rt-22
             - linux64-x64-compiler-rt-22
+            - linux64-x64-libcxx-22
             - macosx64-aarch64-compiler-rt-22
             - macosx64-x64-compiler-rt-22
             - wasm32-wasi-compiler-rt-22
@@ -261,6 +263,7 @@ linux64-aarch64-clang-22:
             - linux32-compiler-rt-22
             - linux64-aarch64-compiler-rt-22
             - linux64-x64-compiler-rt-22
+            - linux64-x64-libcxx-22
             - macosx64-aarch64-compiler-rt-22
             - macosx64-x64-compiler-rt-22
             - wasm32-wasi-compiler-rt-22
@@ -383,6 +386,7 @@ macosx64-clang-22:
             - linux32-compiler-rt-22
             - linux64-aarch64-compiler-rt-22
             - linux64-x64-compiler-rt-22
+            - linux64-x64-libcxx-22
             - macosx64-aarch64-compiler-rt-22
             - macosx64-x64-compiler-rt-22
             - wasm32-wasi-compiler-rt-22
@@ -503,6 +507,7 @@ macosx64-aarch64-clang-22:
             - linux32-compiler-rt-22
             - linux64-aarch64-compiler-rt-22
             - linux64-x64-compiler-rt-22
+            - linux64-x64-libcxx-22
             - macosx64-aarch64-compiler-rt-22
             - macosx64-x64-compiler-rt-22
             - wasm32-wasi-compiler-rt-22
@@ -540,7 +545,7 @@ win64-clang-22-profile:
     description: "Clang-cl 22 toolchain build"
     treeherder:
         symbol: TW64(clang-22-profile)
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 9000
     run:
@@ -626,6 +631,7 @@ win64-clang-22:
             - linux32-compiler-rt-22
             - linux64-aarch64-compiler-rt-22
             - linux64-x64-compiler-rt-22
+            - linux64-x64-libcxx-22
             - macosx64-aarch64-compiler-rt-22
             - macosx64-x64-compiler-rt-22
             - wasm32-wasi-compiler-rt-22
@@ -657,7 +663,7 @@ win64-aarch64-clang-22-raw:
             - clang-22
         toolchain:
             - linux64-clang-22-stage1
-            - linux64-clang-22-profile
+            - win64-clang-22-profile
             - win64-aarch64-compiler-rt-22
             - vs-toolchain
             - win64-aarch64-libxml2
@@ -691,6 +697,7 @@ win64-aarch64-clang-22:
             - linux32-compiler-rt-22
             - linux64-aarch64-compiler-rt-22
             - linux64-x64-compiler-rt-22
+            - linux64-x64-libcxx-22
             - macosx64-aarch64-compiler-rt-22
             - macosx64-x64-compiler-rt-22
             - wasm32-wasi-compiler-rt-22
@@ -793,10 +800,12 @@ linux64-clang-23-raw:
             - 'build/build-clang/use-clang-artifact.json'
             - 'build/build-clang/clang-23.json'
             - 'build/build-clang/stage-4-pgo.json'
+            - 'build/build-clang/stage-4-bolt.json'
         resources:
             - 'build/build-clang/use-clang-artifact.json'
             - 'build/build-clang/clang-23.json'
             - 'build/build-clang/stage-4-pgo.json'
+            - 'build/build-clang/stage-4-bolt.json'
         toolchain-artifact: public/build/clang.tar.zst
     fetches:
         fetch:
@@ -832,6 +841,7 @@ linux64-clang-23:
             - linux32-compiler-rt-23
             - linux64-aarch64-compiler-rt-23
             - linux64-x64-compiler-rt-23
+            - linux64-x64-libcxx-23
             - macosx64-aarch64-compiler-rt-23
             - macosx64-x64-compiler-rt-23
             - wasm32-wasi-compiler-rt-23
@@ -890,6 +900,7 @@ linux64-aarch64-clang-23:
             - linux32-compiler-rt-23
             - linux64-aarch64-compiler-rt-23
             - linux64-x64-compiler-rt-23
+            - linux64-x64-libcxx-23
             - macosx64-aarch64-compiler-rt-23
             - macosx64-x64-compiler-rt-23
             - wasm32-wasi-compiler-rt-23
@@ -1006,6 +1017,7 @@ macosx64-clang-23:
             - linux32-compiler-rt-23
             - linux64-aarch64-compiler-rt-23
             - linux64-x64-compiler-rt-23
+            - linux64-x64-libcxx-23
             - macosx64-aarch64-compiler-rt-23
             - macosx64-x64-compiler-rt-23
             - wasm32-wasi-compiler-rt-23
@@ -1122,6 +1134,7 @@ macosx64-aarch64-clang-23:
             - linux32-compiler-rt-23
             - linux64-aarch64-compiler-rt-23
             - linux64-x64-compiler-rt-23
+            - linux64-x64-libcxx-23
             - macosx64-aarch64-compiler-rt-23
             - macosx64-x64-compiler-rt-23
             - wasm32-wasi-compiler-rt-23
@@ -1159,7 +1172,7 @@ win64-clang-23-profile:
     description: "Clang-cl 23 toolchain build"
     treeherder:
         symbol: TW64(clang-23-profile)
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 9000
     run:
@@ -1239,6 +1252,7 @@ win64-clang-23:
             - linux32-compiler-rt-23
             - linux64-aarch64-compiler-rt-23
             - linux64-x64-compiler-rt-23
+            - linux64-x64-libcxx-23
             - macosx64-aarch64-compiler-rt-23
             - macosx64-x64-compiler-rt-23
             - wasm32-wasi-compiler-rt-23
@@ -1270,7 +1284,7 @@ win64-aarch64-clang-23-raw:
             - clang-23
         toolchain:
             - linux64-clang-23-stage1
-            - linux64-clang-23-profile
+            - win64-clang-23-profile
             - win64-aarch64-compiler-rt-23
             - vs-toolchain
             - win64-aarch64-libxml2
@@ -1300,6 +1314,7 @@ win64-aarch64-clang-23:
             - linux32-compiler-rt-23
             - linux64-aarch64-compiler-rt-23
             - linux64-x64-compiler-rt-23
+            - linux64-x64-libcxx-23
             - macosx64-aarch64-compiler-rt-23
             - macosx64-x64-compiler-rt-23
             - wasm32-wasi-compiler-rt-23
@@ -1424,10 +1439,12 @@ linux64-clang-trunk-raw:
             - 'build/build-clang/use-clang-artifact.json'
             - 'build/build-clang/clang-trunk.json'
             - 'build/build-clang/stage-4-pgo.json'
+            - 'build/build-clang/stage-4-bolt.json'
         resources:
             - 'build/build-clang/use-clang-artifact.json'
             - 'build/build-clang/clang-trunk.json'
             - 'build/build-clang/stage-4-pgo.json'
+            - 'build/build-clang/stage-4-bolt.json'
         toolchain-artifact: public/build/clang.tar.zst
     fetches:
         fetch:
@@ -1467,6 +1484,7 @@ linux64-clang-trunk:
             - linux32-compiler-rt-trunk
             - linux64-aarch64-compiler-rt-trunk
             - linux64-x64-compiler-rt-trunk
+            - linux64-x64-libcxx-trunk
             - macosx64-aarch64-compiler-rt-trunk
             - macosx64-x64-compiler-rt-trunk
             - wasm32-wasi-compiler-rt-trunk
@@ -1531,6 +1549,7 @@ linux64-aarch64-clang-trunk:
             - linux32-compiler-rt-trunk
             - linux64-aarch64-compiler-rt-trunk
             - linux64-x64-compiler-rt-trunk
+            - linux64-x64-libcxx-trunk
             - macosx64-aarch64-compiler-rt-trunk
             - macosx64-x64-compiler-rt-trunk
             - wasm32-wasi-compiler-rt-trunk
@@ -1660,6 +1679,7 @@ macosx64-clang-trunk:
             - linux32-compiler-rt-trunk
             - linux64-aarch64-compiler-rt-trunk
             - linux64-x64-compiler-rt-trunk
+            - linux64-x64-libcxx-trunk
             - macosx64-aarch64-compiler-rt-trunk
             - macosx64-x64-compiler-rt-trunk
             - wasm32-wasi-compiler-rt-trunk
@@ -1786,6 +1806,7 @@ macosx64-aarch64-clang-trunk:
             - linux32-compiler-rt-trunk
             - linux64-aarch64-compiler-rt-trunk
             - linux64-x64-compiler-rt-trunk
+            - linux64-x64-libcxx-trunk
             - macosx64-aarch64-compiler-rt-trunk
             - macosx64-x64-compiler-rt-trunk
             - wasm32-wasi-compiler-rt-trunk
@@ -1827,7 +1848,7 @@ win64-clang-trunk-profile:
         cached_task: false
     treeherder:
         symbol: TW64(clang-trunk-profile)
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 9000
     run:
@@ -1913,6 +1934,7 @@ win64-clang-trunk:
             - linux32-compiler-rt-trunk
             - linux64-aarch64-compiler-rt-trunk
             - linux64-x64-compiler-rt-trunk
+            - linux64-x64-libcxx-trunk
             - macosx64-aarch64-compiler-rt-trunk
             - macosx64-x64-compiler-rt-trunk
             - wasm32-wasi-compiler-rt-trunk
@@ -1946,7 +1968,7 @@ win64-aarch64-clang-trunk-raw:
             - clang-trunk
         toolchain:
             - linux64-clang-trunk-stage1
-            - linux64-clang-trunk-profile
+            - win64-clang-trunk-profile
             - win64-aarch64-compiler-rt-trunk
             - vs-toolchain
             - win64-aarch64-libxml2
@@ -1980,6 +2002,7 @@ win64-aarch64-clang-trunk:
             - linux32-compiler-rt-trunk
             - linux64-aarch64-compiler-rt-trunk
             - linux64-x64-compiler-rt-trunk
+            - linux64-x64-libcxx-trunk
             - macosx64-aarch64-compiler-rt-trunk
             - macosx64-x64-compiler-rt-trunk
             - wasm32-wasi-compiler-rt-trunk

@@ -5,7 +5,7 @@ fuzzy(1,10) == nested-mask.yaml nested-mask-ref.yaml
 scale(*) != mask.yaml green.yaml
 scale(*) == aligned-layer-rect.yaml aligned-layer-rect-ref.yaml
 scale(*) == mask-transformed-to-empty-rect.yaml mask-transformed-to-empty-rect-ref.yaml
-platform(linux,mac) == rounded-corners.yaml rounded-corners.png
+platform(linux,mac) fuzzy(1,16) == rounded-corners.yaml rounded-corners.png
 scale(*) != mask.yaml out-of-bounds.yaml
 platform(linux,mac) fuzzy(1,17500) color_targets(3) alpha_targets(0) == mask-atomicity.yaml mask-atomicity-ref.yaml
 platform(linux,mac) fuzzy(1,17500) == mask-atomicity-tiling.yaml mask-atomicity-ref.yaml
@@ -19,3 +19,4 @@ platform(linux,mac) == mask-multiple-coord-systems.yaml mask-multiple-coord-syst
 fuzzy(1,10) fuzzy-if(platform(swgl),5,100) == shaped-corners.yaml shaped-corners.png
 platform(linux,mac) == shaped-corners-inset.yaml shaped-corners-inset.png
 platform(linux,mac) == shaped-corners-outset.yaml shaped-corners-outset.png
+options(disable-subpixel) == 2077649-mask-fractional-scroll-root.yaml 2077649-mask-fractional-scroll-root-ref.yaml

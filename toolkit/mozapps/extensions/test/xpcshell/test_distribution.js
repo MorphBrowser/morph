@@ -113,3 +113,84 @@ add_task(async function run_test_6() {
   let a1 = await AddonManager.getAddonByID(ID);
   Assert.equal(a1, null);
 });
+
+// Tests that a distribution add-on that fails signature verification is not
+// marked as installed, so it is installed once it verifies on a later startup
+add_task(async function test_unsigned_retried() {
+  const UNSIGNED_ID = "unsigned@tests.mozilla.org";
+  let xpi = await createTempWebExtensionFile({
+    manifest: {
+      version: "1.0",
+      browser_specific_settings: { gecko: { id: UNSIGNED_ID } },
+    },
+  });
+  xpi.copyTo(distroDir, `${UNSIGNED_ID}.xpi`);
+
+  gUseRealCertChecks = true;
+  await promiseRestartManager();
+
+  Assert.equal(await AddonManager.getAddonByID(UNSIGNED_ID), null);
+  Assert.ok(
+    !Services.prefs.prefHasUserValue(
+      `extensions.installedDistroAddon.${UNSIGNED_ID}`
+    )
+  );
+
+  gUseRealCertChecks = false;
+  await promiseRestartManager();
+
+  let addon = await AddonManager.getAddonByID(UNSIGNED_ID);
+  Assert.notEqual(addon, null);
+  Assert.ok(addon.isActive);
+  Assert.ok(
+    Services.prefs.getBoolPref(`extensions.installedDistroAddon.${UNSIGNED_ID}`)
+  );
+});
+
+// Tests that distribution entries that hit an exception when stat-ed
+// are not breaking startup and other add-ons are still installed as expected.
+add_task(
+  { skip_if: () => AppConstants.platform == "win" },
+  async function test_unreadable_distribution_entries() {
+    const PROFILE_ID = "profile-addon@tests.mozilla.org";
+    await promiseInstallWebExtension({
+      manifest: { browser_specific_settings: { gecko: { id: PROFILE_ID } } },
+    });
+
+    let localeDir = distroDir.clone();
+    localeDir.append("locale-xx");
+    localeDir.create(Ci.nsIFile.DIRECTORY_TYPE, 0o755);
+
+    // Without the search permission the directory entries can be listed but
+    // nsIFile.isDirectory() calls in XPIProvider installDistributionAddons
+    // throw NS_ERROR_FILE_ACCESS_DENIED.
+    await IOUtils.setPermissions(distroDir.path, 0o444);
+    let messages;
+    try {
+      ({ messages } = await AddonTestUtils.promiseConsoleOutput(() =>
+        promiseRestartManager("5")
+      ));
+    } finally {
+      await IOUtils.setPermissions(distroDir.path, 0o755);
+    }
+
+    // Expect one warning from the locale scan and one from the add-ons scan.
+    const expectedWarning = {
+      message: new RegExp(
+        `Ignoring distribution entry ${RegExp.escape(localeDir.path)}.*NS_ERROR_FILE_ACCESS_DENIED`
+      ),
+    };
+    AddonTestUtils.checkMessages(
+      messages,
+      { expected: [expectedWarning, expectedWarning] },
+      "Got the expected warnings for the unreadable distribution entries"
+    );
+
+    let addon = await AddonManager.getAddonByID(PROFILE_ID);
+    notEqual(addon, null);
+    ok(addon.isActive, "Profile add-on is still active");
+
+    await addon.uninstall();
+    await IOUtils.remove(localeDir.path, { recursive: true });
+  }
+);

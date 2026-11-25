@@ -167,8 +167,9 @@ export class MarionetteCommandsParent extends JSWindowActorParent {
 
   clickElement(webEl, capabilities) {
     return this.sendQuery("MarionetteCommandsParent:clickElement", {
+      accessibilityChecks: capabilities.get("moz:accessibilityChecks"),
       elem: webEl,
-      capabilities: capabilities.toJSON(),
+      webdriverClick: capabilities.get("moz:webdriverClick"),
     });
   }
 
@@ -176,14 +177,6 @@ export class MarionetteCommandsParent extends JSWindowActorParent {
     return this.sendQuery("MarionetteCommandsParent:executeScript", {
       script,
       args: lazy.json.mapFromNavigableIds(args),
-      opts,
-    });
-  }
-
-  findElement(strategy, selector, opts) {
-    return this.sendQuery("MarionetteCommandsParent:findElement", {
-      strategy,
-      selector,
       opts,
     });
   }
@@ -291,30 +284,32 @@ export class MarionetteCommandsParent extends JSWindowActorParent {
 
   async isElementDisplayed(webEl, capabilities) {
     return this.sendQuery("MarionetteCommandsParent:isElementDisplayed", {
-      capabilities: capabilities.toJSON(),
+      accessibilityChecks: capabilities.get("moz:accessibilityChecks"),
       elem: webEl,
     });
   }
 
   async isElementEnabled(webEl, capabilities) {
     return this.sendQuery("MarionetteCommandsParent:isElementEnabled", {
-      capabilities: capabilities.toJSON(),
+      accessibilityChecks: capabilities.get("moz:accessibilityChecks"),
       elem: webEl,
     });
   }
 
   async isElementSelected(webEl, capabilities) {
     return this.sendQuery("MarionetteCommandsParent:isElementSelected", {
-      capabilities: capabilities.toJSON(),
+      accessibilityChecks: capabilities.get("moz:accessibilityChecks"),
       elem: webEl,
     });
   }
 
   async sendKeysToElement(webEl, text, capabilities) {
     return this.sendQuery("MarionetteCommandsParent:sendKeysToElement", {
-      capabilities: capabilities.toJSON(),
+      accessibilityChecks: capabilities.get("moz:accessibilityChecks"),
       elem: webEl,
+      strictFileInteractability: capabilities.get("strictFileInteractability"),
       text,
+      webdriverClick: capabilities.get("moz:webdriverClick"),
     });
   }
 
@@ -339,7 +334,47 @@ export class MarionetteCommandsParent extends JSWindowActorParent {
     };
   }
 
-  async takeScreenshot(webEl, format, full, scroll) {
+  async takeScreenshot(webEl, format, full, scroll, readback = false) {
+    // Readback captures the whole content area (i.e. the whole viewport). So
+    // if the caller has requested a different area (e.g. an element or the full
+    // document), we behave as if the 'readback' param were 'false'. (Otherwise,
+    // our screenshot would silently crop to the visible content area.)
+    if (readback && (webEl || full)) {
+      lazy.logger.warn(
+        `Ignoring readback for ${webEl ? "an element" : "a full-document"} ` +
+          "screenshot; using drawSnapshot instead"
+      );
+      readback = false;
+    }
+
+    if (lazy.capture.usesReadback(this.browsingContext, readback)) {
+      // Readback captures whatever was last composited, so let pending paints
+      // and resizes land first. Ask the top-level document's actor rather than
+      // this one, since this actor belongs to the frame that's currently
+      // selected via WebDriver:SwitchToFrame, which may be an out-of-process
+      // iframe.
+      const top = this.browsingContext.top;
+      const chromeWindow = top.embedderElement && top.topChromeWindow;
+      if (chromeWindow) {
+        // The <browser>'s current size is only sent to content at the end of a
+        // chrome refresh tick (in UpdateRemoteFrameEffects), so wait for a
+        // tick to complete. Then we wait for content to handle that size
+        // update, via the query below: it goes over the same IPC channel as the
+        // size update, so content handles the size update first.
+        await new Promise(resolve =>
+          chromeWindow.requestAnimationFrame(() =>
+            chromeWindow.requestAnimationFrame(resolve)
+          )
+        );
+      }
+      const topWindowGlobal = top.currentWindowGlobal;
+      if (topWindowGlobal) {
+        await topWindowGlobal
+          .getActor("MarionetteCommands")
+          .sendQuery("MarionetteCommandsParent:_waitForPaintedViewport");
+      }
+    }
+
     const rect = await this.sendQuery(
       "MarionetteCommandsParent:getScreenshotRect",
       {
@@ -367,7 +402,8 @@ export class MarionetteCommandsParent extends JSWindowActorParent {
       rect.x,
       rect.y,
       rect.width,
-      rect.height
+      rect.height,
+      { readback }
     );
 
     switch (format) {

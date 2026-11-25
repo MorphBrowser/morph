@@ -2,16 +2,24 @@
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
 // Bug 1895789 to standarize contextmenu helpers in BrowserTestUtils
-async function openContextMenu(doc = document) {
+async function openContextMenu(doc = document, targetEl) {
   const contextMenu = doc.getElementById("contentAreaContextMenu");
   const promise = BrowserTestUtils.waitForEvent(contextMenu, "popupshown");
-  await BrowserTestUtils.synthesizeMouse(
-    null,
-    0,
-    0,
-    { type: "contextmenu" },
-    doc.documentGlobal.gBrowser.selectedBrowser
-  );
+  if (targetEl) {
+    await BrowserTestUtils.synthesizeMouseAtCenter(
+      targetEl,
+      { type: "contextmenu" },
+      doc.documentGlobal.gBrowser.selectedBrowser
+    );
+  } else {
+    await BrowserTestUtils.synthesizeMouse(
+      null,
+      0,
+      0,
+      { type: "contextmenu" },
+      doc.documentGlobal.gBrowser.selectedBrowser
+    );
+  }
   await promise;
 }
 
@@ -371,6 +379,340 @@ add_task(async function test_custom_prompt() {
     Glean.genaiChatbot.contextmenuPromptClick.testGetValue()[0].extra.prompt,
     "custom",
     "Custom id replaced with 'custom'"
+  );
+
+  await SpecialPowers.popPrefEnv();
+});
+
+const TURN_ON_ITEM = "context-turn-on-highlight-menu";
+const MENU_OFF_PREFS = [
+  ["browser.highlightToSearch.featureGate", true],
+  ["browser.highlightToSearch.enabled", false],
+  ["browser.highlightToSearch.search.enabled", false],
+  ["browser.highlightToSearch.copy.enabled", false],
+  ["browser.ml.chat.shortcuts", false],
+  ["browser.ml.chat.shortcut.onboardingMouseoverCount", 2],
+  ["browser.ml.chat.provider", "http://localhost:8080"],
+];
+
+async function selectAllText(browser) {
+  await SpecialPowers.spawn(browser, [], () => {
+    content.getSelection().selectAllChildren(content.document.body);
+  });
+}
+
+/**
+ * Check that the item to turn the selection menu back on is only offered over
+ * a selection while the menu is off.
+ */
+add_task(async function test_turn_on_highlight_menu_visibility() {
+  await SpecialPowers.pushPrefEnv({ set: MENU_OFF_PREFS });
+
+  await BrowserTestUtils.withNewTab("data:text/plain,hi", async browser => {
+    await openContextMenu();
+    Assert.ok(
+      document.getElementById(TURN_ON_ITEM).hidden,
+      "Not offered without a selection"
+    );
+    await hideContextMenu();
+
+    await selectAllText(browser);
+    await openContextMenu();
+    Assert.ok(
+      !document.getElementById(TURN_ON_ITEM).hidden,
+      "Offered over a selection while the menu is off"
+    );
+    await hideContextMenu();
+
+    await SpecialPowers.pushPrefEnv({
+      set: [["browser.highlightToSearch.enabled", true]],
+    });
+    await openContextMenu();
+    Assert.ok(
+      document.getElementById(TURN_ON_ITEM).hidden,
+      "Not offered while the menu is on"
+    );
+    await hideContextMenu();
+    await SpecialPowers.popPrefEnv();
+
+    await SpecialPowers.pushPrefEnv({
+      set: [["browser.highlightToSearch.featureGate", false]],
+    });
+    await openContextMenu();
+    Assert.ok(
+      document.getElementById(TURN_ON_ITEM).hidden,
+      "Not offered without the feature gate"
+    );
+    await hideContextMenu();
+    await SpecialPowers.popPrefEnv();
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Check that the item is not offered over text selected in a text field, where
+ * the selection menu is never shown.
+ */
+add_task(async function test_turn_on_highlight_menu_not_in_text_field() {
+  await SpecialPowers.pushPrefEnv({ set: MENU_OFF_PREFS });
+
+  await BrowserTestUtils.withNewTab(
+    "data:text/html,<body style='margin:0'><textarea>some text</textarea>",
+    async browser => {
+      await SpecialPowers.spawn(browser, [], () => {
+        const textarea = content.document.querySelector("textarea");
+        textarea.focus();
+        textarea.select();
+      });
+      await openContextMenu();
+      Assert.ok(
+        document.getElementById(TURN_ON_ITEM).hidden,
+        "Not offered over text selected in a text field"
+      );
+      await hideContextMenu();
+    }
+  );
+
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Check that the item turns the menu on with every action, records it, and
+ * shows the menu over the selection, where it hides like any other.
+ */
+add_task(async function test_turn_on_highlight_menu_click() {
+  Services.fog.testResetFOG();
+  await SpecialPowers.pushPrefEnv({
+    set: [...MENU_OFF_PREFS, ["browser.highlightToSearch.callout.seen", false]],
+  });
+
+  await BrowserTestUtils.withNewTab("data:text/plain,hi", async browser => {
+    await selectAllText(browser);
+    await openContextMenu();
+
+    const contextMenu = document.getElementById("contentAreaContextMenu");
+    const panel = document.getElementById("selection-shortcut-action-panel");
+    const menuHidden = BrowserTestUtils.waitForEvent(
+      contextMenu,
+      "popuphidden"
+    );
+    contextMenu.activateItem(document.getElementById(TURN_ON_ITEM));
+    await menuHidden;
+    Assert.ok(
+      Services.prefs.getBoolPref("browser.highlightToSearch.callout.seen"),
+      "Turning the menu on counts as seeing the callout"
+    );
+
+    await TestUtils.waitForCondition(
+      () => panel.getAttribute("panelopen") === "true",
+      "The selection menu opens over the selection"
+    );
+    for (const pref of [
+      "browser.highlightToSearch.enabled",
+      "browser.highlightToSearch.search.enabled",
+      "browser.highlightToSearch.copy.enabled",
+      "browser.ml.chat.shortcuts",
+    ]) {
+      Assert.ok(Services.prefs.getBoolPref(pref), `${pref} is on`);
+    }
+    for (const id of [
+      "ai-action-button",
+      "search-action-button",
+      "copy-action-button",
+    ]) {
+      Assert.ok(!document.getElementById(id).hidden, `${id} is shown`);
+    }
+
+    const toggled = Glean.selectionMenu.optionToggled.testGetValue();
+    Assert.deepEqual(
+      toggled.map(e => [e.extra.action, e.extra.enabled, e.extra.source]),
+      [["master", "true", "context_menu"]],
+      "Turning the menu on is recorded"
+    );
+
+    const panelHidden = BrowserTestUtils.waitForEvent(panel, "popuphidden");
+    await SpecialPowers.spawn(browser, [], () =>
+      content.getSelection().removeAllRanges()
+    );
+    await panelHidden;
+    Assert.equal(panel.state, "closed", "It hides when the selection changes");
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Check that the item keeps the actions that were left on, rather than
+ * turning everything on.
+ */
+add_task(async function test_turn_on_highlight_menu_keeps_actions() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ...MENU_OFF_PREFS,
+      ["browser.highlightToSearch.search.enabled", true],
+    ],
+  });
+
+  await BrowserTestUtils.withNewTab("data:text/plain,hi", async browser => {
+    await selectAllText(browser);
+    await openContextMenu();
+
+    const contextMenu = document.getElementById("contentAreaContextMenu");
+    const panel = document.getElementById("selection-shortcut-action-panel");
+    const menuHidden = BrowserTestUtils.waitForEvent(
+      contextMenu,
+      "popuphidden"
+    );
+    contextMenu.activateItem(document.getElementById(TURN_ON_ITEM));
+    await menuHidden;
+    await TestUtils.waitForCondition(
+      () => panel.getAttribute("panelopen") === "true",
+      "The selection menu opens"
+    );
+    Assert.ok(
+      !Services.prefs.getBoolPref("browser.highlightToSearch.copy.enabled"),
+      "Copy stays off"
+    );
+    Assert.ok(
+      document.getElementById("copy-action-button").hidden,
+      "Copy is not shown"
+    );
+
+    const panelHidden = BrowserTestUtils.waitForEvent(panel, "popuphidden");
+    panel.hide();
+    await panelHidden;
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Check that the item brings Search and Copy back when the chatbot is blocked,
+ * where the AI action can't be what the menu was left with.
+ */
+add_task(async function test_turn_on_highlight_menu_chatbot_blocked() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ...MENU_OFF_PREFS,
+      ["browser.ml.chat.enabled", false],
+      ["browser.ml.chat.shortcuts", true],
+    ],
+  });
+
+  await BrowserTestUtils.withNewTab("data:text/plain,hi", async browser => {
+    await selectAllText(browser);
+    await openContextMenu();
+
+    const contextMenu = document.getElementById("contentAreaContextMenu");
+    const panel = document.getElementById("selection-shortcut-action-panel");
+    const menuHidden = BrowserTestUtils.waitForEvent(
+      contextMenu,
+      "popuphidden"
+    );
+    contextMenu.activateItem(document.getElementById(TURN_ON_ITEM));
+    await menuHidden;
+    await TestUtils.waitForCondition(
+      () => panel.getAttribute("panelopen") === "true",
+      "The selection menu opens with something to offer"
+    );
+    for (const pref of [
+      "browser.highlightToSearch.search.enabled",
+      "browser.highlightToSearch.copy.enabled",
+    ]) {
+      Assert.ok(Services.prefs.getBoolPref(pref), `${pref} is on`);
+    }
+
+    const panelHidden = BrowserTestUtils.waitForEvent(panel, "popuphidden");
+    panel.hide();
+    await panelHidden;
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Check that the item is not offered in Smart Window.
+ */
+add_task(async function test_turn_on_highlight_menu_not_in_smart_window() {
+  await SpecialPowers.pushPrefEnv({ set: MENU_OFF_PREFS });
+
+  await BrowserTestUtils.withNewTab("data:text/plain,hi", async browser => {
+    await selectAllText(browser);
+    document.documentElement.setAttribute("ai-window", "");
+    try {
+      await openContextMenu();
+      Assert.ok(
+        document.getElementById(TURN_ON_ITEM).hidden,
+        "Not offered in Smart Window"
+      );
+      await hideContextMenu();
+    } finally {
+      document.documentElement.removeAttribute("ai-window");
+    }
+  });
+
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Check that the item is not offered over a link, even when its text is
+ * selected.
+ */
+add_task(async function test_turn_on_highlight_menu_not_on_link() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ...MENU_OFF_PREFS,
+      ["ui.mouse.right_click.select_under_cursor", false],
+    ],
+  });
+
+  await BrowserTestUtils.withNewTab(
+    "data:text/html,<a href='https://example.com/'>some link text</a>",
+    async browser => {
+      await selectAllText(browser);
+      await openContextMenu(undefined, "a");
+      Assert.ok(gContextMenu.onLink, "The menu was opened on a link");
+      Assert.ok(
+        document.getElementById(TURN_ON_ITEM).hidden,
+        "Not offered over a link"
+      );
+      await hideContextMenu();
+    }
+  );
+
+  await SpecialPowers.popPrefEnv();
+});
+
+/**
+ * Check that the item is not offered over selected text that looks like a URL.
+ */
+add_task(async function test_turn_on_highlight_menu_not_on_plain_text_link() {
+  await SpecialPowers.pushPrefEnv({
+    set: [
+      ...MENU_OFF_PREFS,
+      ["ui.mouse.right_click.select_under_cursor", false],
+    ],
+  });
+
+  await BrowserTestUtils.withNewTab(
+    "data:text/html,<p>visit <span>example.com</span> today</p>",
+    async browser => {
+      await SpecialPowers.spawn(browser, [], () => {
+        const span = content.document.querySelector("span");
+        content.getSelection().selectAllChildren(span);
+      });
+      await openContextMenu(undefined, "span");
+      Assert.ok(
+        gContextMenu.onPlainTextLink,
+        "The menu was opened on a plain text link"
+      );
+      Assert.ok(
+        document.getElementById(TURN_ON_ITEM).hidden,
+        "Not offered over a plain text link"
+      );
+      await hideContextMenu();
+    }
   );
 
   await SpecialPowers.popPrefEnv();

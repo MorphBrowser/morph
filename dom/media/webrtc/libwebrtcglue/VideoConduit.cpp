@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -81,7 +82,6 @@
 #include "mozilla/ReentrantMonitor.h"
 #include "mozilla/ReverseIterator.h"
 #include "mozilla/StateWatching.h"
-#include "mozilla/UniquePtr.h"
 #include "mozilla/dom/BindingDeclarations.h"
 #include "mozilla/dom/RTCStatsReportBinding.h"
 #include "mozilla/fallible.h"
@@ -260,7 +260,6 @@ bool operator!=(
              aOther.rtcp_xr.receiver_reference_time_report ||
          aThis.remb != aOther.remb || aThis.tmmbr != aOther.tmmbr ||
          aThis.keyframe_method != aOther.keyframe_method ||
-         aThis.lntf.enabled != aOther.lntf.enabled ||
          aThis.nack.rtp_history_ms != aOther.nack.rtp_history_ms ||
          aThis.ulpfec_payload_type != aOther.ulpfec_payload_type ||
          aThis.red_payload_type != aOther.red_payload_type ||
@@ -291,7 +290,6 @@ bool operator!=(const webrtc::RtpConfig& aThis,
          aThis.payload_name != aOther.payload_name ||
          aThis.payload_type != aOther.payload_type ||
          aThis.raw_payload != aOther.raw_payload ||
-         aThis.lntf.enabled != aOther.lntf.enabled ||
          aThis.nack.rtp_history_ms != aOther.nack.rtp_history_ms ||
          !(aThis.ulpfec == aOther.ulpfec) ||
          aThis.flexfec.payload_type != aOther.flexfec.payload_type ||
@@ -397,9 +395,9 @@ WebrtcVideoConduit::WebrtcVideoConduit(
       INIT_CANONICAL(mReceivingSize, mFrameRecvThread, {}),
       mWatchManager(this, mCall->mCallThread),
       mMutex("WebrtcVideoConduit::mMutex"),
-      mDecoderFactory(MakeUnique<WebrtcVideoDecoderFactory>(
+      mDecoderFactory(std::make_unique<WebrtcVideoDecoderFactory>(
           mCallThread.get(), aPCHandle, aRecvTrackingId)),
-      mEncoderFactory(MakeUnique<WebrtcVideoEncoderFactory>(
+      mEncoderFactory(std::make_unique<WebrtcVideoEncoderFactory>(
           mCallThread.get(), std::move(aPCHandle))),
       mRecvSinkProxy(this),
       mSendSinkProxy(this),
@@ -1489,6 +1487,7 @@ RefPtr<GenericPromise> WebrtcVideoConduit::Shutdown() {
         // Clear the stats send stream stats cache
         mTransitionalSendStreamStats = Nothing();
 
+        UpdateNetworkState(false);
         SetIsShutdown();
 
         return GenericPromise::CreateAndResolve(true, __func__);
@@ -1719,8 +1718,7 @@ void WebrtcVideoConduit::OnRtcpReceived(webrtc::CopyOnWriteBuffer&& aPacket) {
   MOZ_ASSERT(mCallThread->IsOnCurrentThread());
 
   if (mCall->Call()) {
-    mCall->Call()->Receiver()->DeliverRtcpPacket(
-        std::forward<webrtc::CopyOnWriteBuffer>(aPacket));
+    mCall->Call()->Receiver()->DeliverRtcpPacket(std::move(aPacket));
   }
 }
 
@@ -1766,9 +1764,6 @@ void WebrtcVideoConduit::StartTransmitting() {
   CSFLogDebug(LOGTAG, "%s Starting send stream", __FUNCTION__);
 
   mSendStream->Start();
-  // XXX File a bug to consider hooking this up to the state of mtransport
-  mCall->Call()->SignalChannelNetworkState(webrtc::MediaType::VIDEO,
-                                           webrtc::kNetworkUp);
   mEngineTransmitting = true;
 }
 
@@ -1805,9 +1800,6 @@ void WebrtcVideoConduit::StartReceiving() {
   // Start Receiving on the video engine
   mRecvStream->Start();
 
-  // XXX File a bug to consider hooking this up to the state of mtransport
-  mCall->Call()->SignalChannelNetworkState(webrtc::MediaType::VIDEO,
-                                           webrtc::kNetworkUp);
   mEngineReceiving = true;
 }
 
@@ -2062,6 +2054,19 @@ void WebrtcVideoConduit::SetTransportActive(bool aActive) {
 
   // If false, This stops us from sending
   mTransportActive = aActive;
+
+  MOZ_ALWAYS_SUCCEEDS(mCallThread->Dispatch(NS_NewRunnableFunction(
+      __func__,
+      [this, self = RefPtr(this), aActive] { UpdateNetworkState(aActive); })));
+}
+
+void WebrtcVideoConduit::UpdateNetworkState(bool aReady) {
+  MOZ_ASSERT(mCallThread->IsOnCurrentThread());
+  if (mIsShutdown || mNetworkReady == aReady) {
+    return;
+  }
+  mNetworkReady = aReady;
+  mCall->UpdateReadyTransports(webrtc::MediaType::VIDEO, aReady ? 1 : -1);
 }
 
 const std::vector<webrtc::RtpSource>&
@@ -2150,6 +2155,15 @@ void WebrtcVideoConduit::GenerateKeyFrame(const Maybe<std::string>& aRid,
         // videoEncoder.
 
         mSendStream->GenerateKeyFrame(rids);
+      }));
+}
+
+void WebrtcVideoConduit::GenerateKeyFrames(std::vector<std::string> aRids) {
+  mCallThread->Dispatch(NS_NewRunnableFunction(
+      __func__, [this, self = RefPtr(this), rids = std::move(aRids)] {
+        if (mSendStream) {
+          mSendStream->GenerateKeyFrame(rids);
+        }
       }));
 }
 

@@ -88,15 +88,29 @@ class WasmFrameIter {
   bool failedUnwindSignatureMismatch_ = false;
   // Whether the current frame is on a different stack from the previous stack.
   bool currentFrameStackSwitched_ = false;
-  // Whether reaching the current frame skipped the hidden frame of a
-  // cross-instance return_call. See GenerateReturnCallTrampoline.
-  bool skippedReturnCallTrampoline_ = false;
+  // Whether the current frame is paused at a ReturnCallFallback call site.
+  bool currentFrameIsReturnCallFallback_ = false;
 #ifdef ENABLE_WASM_JSPI
   ContStack* contStack_ = nullptr;
-  // A continuation stack that the trap occurred on but which has no frame in
-  // this iteration (its only frame was torn down by a trapping return_call).
+  // A continuation stack that the exit or trap occurred on but which has no
+  // frame in this iteration (its only frame was torn down by a return_call).
   // Exception unwinding must free it even though no iterated frame is on it.
   ContStack* unwoundContStack_ = nullptr;
+#endif
+#ifdef JS_HW_SHADOW_STACK
+  // These fields track the shadow stack pointer while unwinding the stack for
+  // exception handling. They are nullptr if we're not unwinding or if the
+  // shadow stack is disabled.
+  //
+  // The shadow stack pointer to the entry corresponding to the current frame
+  // (i.e., the entry containing fp_->returnAddress()).
+  uintptr_t* shadowStackPointer_ = nullptr;
+  // The shadow stack pointer corresponding to the resume/exit point of the
+  // current frame's continuation stack. In case we do need to resume in this
+  // stack to handle the exception, we switch to the continuation's shadow stack
+  // using this pointer. It is nullptr if the current frame is on the main
+  // stack.
+  uintptr_t* shadowStackSwitchPointer_ = nullptr;
 #endif
 
   //
@@ -125,9 +139,22 @@ class WasmFrameIter {
   void popContBaseFrame();
 #endif
 
+#ifdef JS_HW_SHADOW_STACK
+  // Advance the shadow stack pointer by exactly one entry with the provided
+  // return address.
+  void unwindShadowStackEntry(const void* returnAddress);
+#endif
+
  public:
   // See comment above this class definition.
-  explicit WasmFrameIter(jit::JitActivation* activation, Frame* fp = nullptr);
+  //
+  // When unwinding, `shadowStackPointer` is either the value read on entry to
+  // the exception handler, or handed over from the JSJitFrameIter. It's
+  // internally adjusted to point to the shadow stack entry corresponding to
+  // the current frame's return address, popping the entry for the Wasm exit
+  // frame, or for the frame wasm::StartUnwinding() unwound on a trap.
+  explicit WasmFrameIter(jit::JitActivation* activation, Frame* fp = nullptr,
+                         uintptr_t* shadowStackPointer = nullptr);
 
   // Iterate over frames from a known starting (instance, fp, ra).
   WasmFrameIter(Instance* instance, Frame* fp, void* returnAddress);
@@ -208,10 +235,12 @@ class WasmFrameIter {
     return currentFrameStackSwitched_;
   }
 
-  // Whether reaching the current frame skipped the hidden frame of a
-  // cross-instance return_call. See skippedReturnCallTrampoline_.
-  bool skippedReturnCallTrampoline() const {
-    return skippedReturnCallTrampoline_;
+  // Whether the current frame made a return call as a regular call, see
+  // ReturnCallFallback. Semantically the frame has already returned, so it is
+  // hidden from stack traces, the debugger, and exception handling.
+  bool currentFrameIsReturnCallFallback() const {
+    MOZ_ASSERT(!done());
+    return currentFrameIsReturnCallFallback_;
   }
 
 #ifdef ENABLE_WASM_JSPI
@@ -224,6 +253,22 @@ class WasmFrameIter {
   // described there.
   ContStack* unwoundContStack() const { return unwoundContStack_; }
 #endif
+
+  uintptr_t* shadowStackPointer() const {
+#ifdef JS_HW_SHADOW_STACK
+    return shadowStackPointer_;
+#else
+    return nullptr;
+#endif
+  }
+
+  uintptr_t* shadowStackSwitchPointer() const {
+#ifdef JS_HW_SHADOW_STACK
+    return shadowStackSwitchPointer_;
+#else
+    return nullptr;
+#endif
+  }
 
   //
   // Debug information about the current frame
@@ -585,10 +630,13 @@ void GenerateJitEntryPrologue(jit::MacroAssembler& masm,
 void GenerateJitEntryEpilogue(jit::MacroAssembler& masm,
                               CallableOffsets* offsets);
 
+// If `badSigTrap` is non-null and a signature check is generated, the
+// location of the IndirectCallBadSig trap instruction is written there.
 void GenerateFunctionPrologue(jit::MacroAssembler& masm,
                               const CallIndirectId& callIndirectId,
                               const mozilla::Maybe<uint32_t>& tier1FuncIndex,
-                              FuncOffsets* offsets);
+                              FuncOffsets* offsets,
+                              FaultingCodeRange* badSigTrap = nullptr);
 void GenerateFunctionEpilogue(jit::MacroAssembler& masm, unsigned framePushed,
                               FuncOffsets* offsets);
 

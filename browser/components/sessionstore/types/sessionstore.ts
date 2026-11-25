@@ -5,6 +5,12 @@
 // Session state shapes are documented as JSDoc typedefs in the modules that
 // own them. Aliasing them here makes them available to every module in the
 // project without a per-module `@import`.
+//
+// Most window and tab state properties are optional, because the objects are
+// built incrementally and a session file read back may lack any of them.
+// Written state is checked against `session.schema.json` only in tests that set
+// `browser.sessionstore.debug.validate_state`, and a file read back is never
+// checked, so code reading an optional property has to handle its absence.
 
 type WindowID = import("../SessionStore.sys.mjs").WindowID;
 type WindowStateData = import("../SessionStore.sys.mjs").WindowStateData;
@@ -20,6 +26,8 @@ type SavedTabGroupStateData =
   import("../TabGroupState.sys.mjs").SavedTabGroupStateData;
 type SavedGroupTabStateData =
   import("../TabGroupState.sys.mjs").SavedGroupTabStateData;
+
+type SessionWriteStep = import("../SessionWriter.sys.mjs").SessionWriteStep;
 
 type SessionStoreLogger =
   typeof import("../SessionLogger.sys.mjs").sessionStoreLogger;

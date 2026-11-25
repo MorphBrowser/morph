@@ -184,6 +184,7 @@ void HWInferenceParent::SendWhenReady(Send&& aSend) {
       []() { LOGD("HWInference never came up: dropping the endpoint"); });
 }
 
+#ifdef MOZ_WEBSPEECH
 void HWInferenceParent::StartContentSpeechRecognition(
     Endpoint<PSpeechRecognitionParent>&& aEndpoint,
     dom::ContentParentId aChildId) {
@@ -192,6 +193,7 @@ void HWInferenceParent::StartContentSpeechRecognition(
     return aSelf.SendNewContentSpeechRecognition(std::move(endpoint), aChildId);
   });
 }
+#endif  // MOZ_WEBSPEECH
 
 void HWInferenceParent::StartTextGeneration(
     Endpoint<PTextGenerationChild>&& aEndpoint,
@@ -215,6 +217,14 @@ void HWInferenceParent::ActorDestroy(ActorDestroyReason aReason) {
 nsresult HWInferenceParent::BindToUtilityProcess(
     const RefPtr<ipc::UtilityProcessParent>& aUtilityParent) {
   LOGD("{}", __func__);
+  if (!aUtilityParent) {
+    mReadyPromise->Reject(NS_ERROR_NOT_AVAILABLE, __func__);
+    if (mOwner) {
+      mOwner->OnLaunchFailed(this);
+    }
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+
   if (!aUtilityParent->SendPHWInferenceConstructor(this)) {
     LOGE("Failed to construct the HWInference actor");
     MOZ_ASSERT(false, "HWInference actor construction failure");

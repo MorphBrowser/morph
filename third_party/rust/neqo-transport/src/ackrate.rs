@@ -8,7 +8,8 @@
 
 use std::{cmp::max, time::Duration};
 
-use neqo_common::{Buffer, qtrace};
+use neqo_common::Buffer;
+use tracing::trace;
 
 use crate::{
     connection::params::ConnectionParameters, frame::FrameType, packet, recovery,
@@ -40,8 +41,9 @@ impl AckRate {
         let packets = cwnd * PACKET_RATIO / mtu / usize::from(ratio);
         let packets = packets.clamp(MIN_PACKETS, MAX_PACKETS);
         let delay = rtt * RTT_RATIO / u32::from(ratio);
-        let delay = delay.clamp(minimum, MAX_DELAY);
-        qtrace!("AckRate inputs: {cwnd}/{mtu}/{ratio}, {rtt:?}");
+        // The peer's minimum takes precedence over our preferred maximum.
+        let delay = delay.min(MAX_DELAY).max(minimum);
+        trace!("AckRate inputs: {cwnd}/{mtu}/{ratio}, {rtt:?}");
         Self {
             packets: u16::try_from(packets).expect("clamped to MAX_PACKETS"),
             delay: Self::delay_us(delay),
@@ -90,7 +92,7 @@ impl FlexibleAckRate {
         mtu: usize,
         rtt: Duration,
     ) -> Self {
-        qtrace!("FlexibleAckRate: {max_ack_delay:?} {min_ack_delay:?} {ratio}");
+        trace!("FlexibleAckRate: {max_ack_delay:?} {min_ack_delay:?} {ratio}");
         let ratio = max(ConnectionParameters::ACK_RATIO_SCALE, ratio); // clamp it
         Self {
             current: AckRate {
@@ -115,7 +117,7 @@ impl FlexibleAckRate {
             && self.current.needs_update(self.target)
             && self.target.write_frame(builder, self.next_frame_seqno)
         {
-            qtrace!("FlexibleAckRate: write frame {:?}", self.target);
+            trace!("FlexibleAckRate: write frame {:?}", self.target);
             self.frame_outstanding = true;
             self.next_frame_seqno += 1;
             tokens.push(recovery::Token::AckFrequency(self.target));
@@ -134,7 +136,7 @@ impl FlexibleAckRate {
 
     fn update(&mut self, cwnd: usize, mtu: usize, rtt: Duration) {
         self.target = AckRate::new(self.min_ack_delay, self.ratio, cwnd, mtu, rtt);
-        qtrace!("FlexibleAckRate: {:?} -> {:?}", self.current, self.target);
+        trace!("FlexibleAckRate: {:?} -> {:?}", self.current, self.target);
     }
 
     fn peer_ack_delay(&self) -> Duration {
@@ -211,5 +213,35 @@ impl PeerAckDelay {
 impl Default for PeerAckDelay {
     fn default() -> Self {
         Self::fixed(DEFAULT_REMOTE_ACK_DELAY)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AckRate, ConnectionParameters, Duration};
+
+    #[test]
+    fn ack_delay_bounds() {
+        for (minimum_us, rtt_us, expected_us) in [
+            (1_000, 0, 1_000),
+            (1_000, 25_000, 25_000),
+            (1_000, 100_000, 50_000),
+            (50_000, 100_000, 50_000),
+            (50_001, 25_000, 50_001),
+            (60_000, 100_000, 60_000),
+            (16_383_000, 100_000, 16_383_000),
+        ] {
+            let rate = AckRate::new(
+                Duration::from_micros(minimum_us),
+                ConnectionParameters::ACK_RATIO_SCALE,
+                12_000,
+                1_200,
+                Duration::from_micros(rtt_us),
+            );
+            assert_eq!(
+                rate.delay, expected_us,
+                "minimum={minimum_us}us, RTT={rtt_us}us"
+            );
+        }
     }
 }

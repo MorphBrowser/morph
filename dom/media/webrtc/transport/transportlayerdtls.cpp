@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 
 #include "dtlsidentity.h"
@@ -456,7 +457,7 @@ bool TransportLayerDtls::Setup() {
     MOZ_MTLOG(ML_ERROR, "DTLS layer with nothing below. This is useless");
     return false;
   }
-  nspr_io_adapter_ = MakeUnique<TransportLayerNSPRAdapter>(downward_);
+  nspr_io_adapter_ = std::make_unique<TransportLayerNSPRAdapter>(downward_);
 
   if (!identity_) {
     MOZ_MTLOG(ML_ERROR, "Can't start DTLS without an identity");
@@ -1173,7 +1174,7 @@ void TransportLayerDtls::GetDecryptedPackets() {
       // nICEr uses a 9216 bytes buffer to allow support for jumbo frames
       // Can we peek to get a better idea of the actual size?
       static const size_t kBufferSize = 9216;
-      auto buffer = MakeUnique<uint8_t[]>(kBufferSize);
+      auto buffer = std::make_unique<uint8_t[]>(kBufferSize);
       rv = PR_Recv(ssl_fd_.get(), buffer.get(), kBufferSize, 0,
                    PR_INTERVAL_NO_WAIT);
       if (rv > 0) {
@@ -1460,35 +1461,33 @@ SECStatus TransportLayerDtls::HandleSrtpXtn(
     return SECFailure;
   }
 
+  std::optional<uint16_t> preferred_common_cipher;
+  for (auto supported : self->enabled_srtp_ciphers_) {
+    auto it = std::find(advertised.begin(), advertised.end(), supported);
+    if (it != advertised.end()) {
+      preferred_common_cipher = supported;
+      break;
+    }
+  }
+
   if (message == ssl_hs_client_hello) {
     MOZ_ASSERT(self->role_ == SERVER);
-    if (self->enabled_srtp_ciphers_.empty()) {
-      // We don't have SRTP enabled, which is probably bad, but no sense in
-      // having the handshake fail at this point, let the client decide if
-      // this is a problem.
-      return SECSuccess;
+    if (!preferred_common_cipher.has_value()) {
+      *alert = kTlsAlertHandshakeFailure;
+      return SECFailure;
     }
-
-    for (auto supported : self->enabled_srtp_ciphers_) {
-      auto it = std::find(advertised.begin(), advertised.end(), supported);
-      if (it != advertised.end()) {
-        self->srtp_cipher_ = supported;
-        return SECSuccess;
-      }
-    }
-
-    // No common cipher.
-    *alert = kTlsAlertHandshakeFailure;
-    return SECFailure;
+    self->srtp_cipher_ = preferred_common_cipher.value();
+    return SECSuccess;
   }
 
   if (message == SrtpXtnServerMessage(fd)) {
     MOZ_ASSERT(self->role_ == CLIENT);
-    if (advertised.size() != 1 || mki_len > 0) {
+    if (advertised.size() != 1 || mki_len > 0 ||
+        !preferred_common_cipher.has_value()) {
       *alert = kTlsAlertIllegalParameter;
       return SECFailure;
     }
-    self->srtp_cipher_ = advertised[0];
+    self->srtp_cipher_ = preferred_common_cipher.value();
     return SECSuccess;
   }
 

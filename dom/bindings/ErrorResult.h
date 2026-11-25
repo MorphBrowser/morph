@@ -228,7 +228,13 @@ class TErrorResult {
   // Use SuppressException when you want to suppress any exception that might be
   // on the TErrorResult.  After this call, the TErrorResult will be back a "no
   // exception thrown" state.
-  void SuppressException();
+  void SuppressException() {
+    WouldReportJSException();
+    MaybeClearUnionData();
+    // We don't use AssignErrorCode, because we want to override existing error
+    // states, which AssignErrorCode is not allowed to do.
+    mResult = NS_OK;
+  }
 
   // Use StealNSResult() when you want to safely convert the TErrorResult to
   // an nsresult that you will then return to a caller.  This will
@@ -237,10 +243,7 @@ class TErrorResult {
     nsresult rv = ErrorCode();
     SuppressException();
     // Don't propagate out our internal error codes that have special meaning.
-    if (rv == NS_ERROR_INTERNAL_ERRORRESULT_TYPEERROR ||
-        rv == NS_ERROR_INTERNAL_ERRORRESULT_RANGEERROR ||
-        rv == NS_ERROR_INTERNAL_ERRORRESULT_JS_EXCEPTION ||
-        rv == NS_ERROR_INTERNAL_ERRORRESULT_DOMEXCEPTION) {
+    if (NS_ERROR_GET_MODULE(rv) == NS_ERROR_MODULE_ERRORRESULT) {
       // What to pick here?
       return NS_ERROR_DOM_INVALID_STATE_ERR;
     }
@@ -434,7 +437,7 @@ class TErrorResult {
   // Throw() here because people can easily pass success codes to
   // this.  This operator is deprecated and ideally shouldn't be used.
   void operator=(nsresult rv) {
-    ClearUnionData();
+    MaybeClearUnionData();
     AssignErrorCode(rv);
   }
 
@@ -576,6 +579,17 @@ class TErrorResult {
   // reinitialize it or change mResult to something that will not involve us
   // touching the union anymore.
   void ClearUnionData();
+
+  // The union only holds data when mResult is one of our internal failure
+  // codes, so a success result has nothing to clear.
+  MOZ_ALWAYS_INLINE void MaybeClearUnionData() {
+    AssertInOwningThread();
+    if (Failed()) {
+      ClearUnionData();
+    } else {
+      MOZ_ASSERT(mUnionState == HasNothing);
+    }
+  }
 
   // Methods for setting various specific kinds of pending exceptions.  See
   // documentation of MaybeSetPendingException for the "context" argument.

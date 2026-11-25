@@ -222,7 +222,7 @@ gfx::ContiguousBuffer& CanvasDrawEventRecorder::GetContiguousBuffer(
         mCurrentBuffer =
             CanvasBuffer(std::move(mRecycledBuffers.front().shmem));
         mRecycledBuffers.pop();
-        mDropBufferOnZero = 1;
+        mDropBufferOnZero = mDropBufferLimit;
       }
     } else {
       mDropBufferOnZero = mDropBufferLimit;
@@ -260,13 +260,12 @@ gfx::ContiguousBuffer& CanvasDrawEventRecorder::GetContiguousBuffer(
 }
 
 void CanvasDrawEventRecorder::DropFreeBuffers() {
-  while (mRecycledBuffers.size() > 1 &&
+  // If we encountered an error, we may have invalidated mCurrentBuffer in
+  // GetContiguousBuffer. We must not make it valid again, because the reader
+  // would not know to switch to the new buffer.
+  while (mCurrentBuffer.IsValid() && mRecycledBuffers.size() > 1 &&
          mRecycledBuffers.front().eventCount < mHeader->processedCount) {
-    // If we encountered an error, we may have invalidated mCurrentBuffer in
-    // GetContiguousBuffer. No need to write the DROP_BUFFER event.
-    if (mCurrentBuffer.IsValid()) {
-      WriteInternalEvent(DROP_BUFFER);
-    }
+    WriteInternalEvent(DROP_BUFFER);
     mCurrentBuffer = CanvasBuffer(std::move(mRecycledBuffers.front().shmem));
     mRecycledBuffers.pop();
   }
@@ -449,22 +448,25 @@ void CanvasDrawEventRecorder::StoreImageRecording(
   ClearProcessedExternalImages();
 }
 
-void CanvasDrawEventRecorder::ClearProcessedExternalSurfaces() {
-  while (!mExternalSurfaces.empty()) {
-    if (mExternalSurfaces.front().mEventCount > mHeader->processedCount) {
-      break;
-    }
-    mExternalSurfaces.pop_front();
+template <typename Holder>
+static void ClearProcessedEntries(Holder& aEntries, int64_t aProcessedCount) {
+  // Find the first entry that has not been processed.
+  auto it = aEntries.begin();
+  while (it != aEntries.end() && it->mEventCount <= aProcessedCount) {
+    ++it;
+  }
+  // Erase any processed entries up to the unprocessed entry.
+  if (it != aEntries.begin()) {
+    aEntries.erase(aEntries.begin(), it);
   }
 }
 
+void CanvasDrawEventRecorder::ClearProcessedExternalSurfaces() {
+  ClearProcessedEntries(mExternalSurfaces, mHeader->processedCount);
+}
+
 void CanvasDrawEventRecorder::ClearProcessedExternalImages() {
-  while (!mExternalImages.empty()) {
-    if (mExternalImages.front().mEventCount > mHeader->processedCount) {
-      break;
-    }
-    mExternalImages.pop_front();
-  }
+  ClearProcessedEntries(mExternalImages, mHeader->processedCount);
 }
 
 }  // namespace layers

@@ -38,11 +38,17 @@
 .labels-container {
   display: flex;
   flex-direction: column;
+  /* Lets long labels shrink and ellipsize. */
+  min-width: 0;
 
-  > .label {
+  > .label,
+  > .description:not(.smart-form-fill-sources) {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  > .label {
     font-size: var(--row-item-label-font-size);
   }
 
@@ -52,6 +58,7 @@
 }
 
 .icon {
+  flex-shrink: 0;
   height: var(--icon-height);
   width: var(--icon-width);
   -moz-context-properties: fill, fill-opacity, stroke;
@@ -61,6 +68,7 @@
 
 .secondary-action {
   visibility: hidden;
+  flex-shrink: 0;
   margin-inline-start: auto;
 }
 
@@ -128,7 +136,6 @@
   gap: var(--space-medium);
   padding: var(--space-small) var(--space-medium);
   border-radius: var(--border-radius-medium);
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   background-color: var(--sff-pill-bg-color);
 
   &:is(:hover, :active) {
@@ -147,7 +154,6 @@
   cursor: pointer;
 
   :host([subfocused]) & {
-    /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
     background-color: var(--sff-pill-bg-color-focus);
     outline: var(--focus-outline);
   }
@@ -201,13 +207,11 @@
 }
 
 .source-favicon-single {
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   margin-inline-end: calc(-1 * var(--space-xsmall));
 }
 
 /* sff loader */
 .sff-loader {
-  /* stylelint-disable-next-line stylelint-plugin-mozilla/use-design-tokens */
   background-color: var(--sff-pill-bg-color);
   border-radius: var(--border-radius-large);
   display: flex;

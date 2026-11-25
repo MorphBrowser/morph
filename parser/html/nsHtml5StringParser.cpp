@@ -35,8 +35,12 @@ nsresult nsHtml5StringParser::ParseFragment(
     bool aPreventScriptExecution, bool aAllowDeclarativeShadowRoots,
     mozilla::Maybe<RefPtr<mozilla::dom::CustomElementRegistry>>
         aCustomElementRegistry,
-    mozilla::dom::Sanitizer* aSanitizer, bool aSanitizerSafe) {
+    mozilla::dom::Sanitizer* aSanitizer,
+    nsContentUtils::SanitizerMode aSanitizerMode) {
   NS_ENSURE_TRUE(aSourceBuffer.Length() <= INT32_MAX, NS_ERROR_OUT_OF_MEMORY);
+
+  mTokenizer->setProcessingInstructionsEnabled(
+      mozilla::StaticPrefs::dom_template_for_enabled());
 
   Document* doc = aTargetNode->OwnerDoc();
   nsIURI* uri = doc->GetDocumentURI();
@@ -47,9 +51,10 @@ nsresult nsHtml5StringParser::ParseFragment(
   mTreeBuilder->setFragmentContext(aContextLocalName, aContextNamespace,
                                    aTargetNode, aQuirks);
   // Step 4 (create a new HTML parser, whose "parser sanitizer configuration" is
-  // aSanitizer and whose "remove javascript navigation URLs" is aSanitizerSafe)
-  // is this object itself.
-  mTreeBuilder->SetSanitizer(aSanitizer, aSanitizerSafe);
+  // aSanitizer and whose "remove javascript navigation URLs" is true iff
+  // aSanitizerMode is Safe) is this object itself.
+  mTreeBuilder->SetSanitizer(
+      aSanitizer, aSanitizerMode == nsContentUtils::SanitizerMode::Safe);
 
   // Step 12 of the spec asks to look up the registry from aTargetNode, but this
   // is often a DocumentFragment which has no registry. So instead it's passed
@@ -87,15 +92,20 @@ nsresult nsHtml5StringParser::ParseFragment(
 nsresult nsHtml5StringParser::ParseDocument(
     const nsAString& aSourceBuffer, Document* aTargetDoc,
     bool aScriptingEnabledForNoscriptParsing,
-    mozilla::dom::Sanitizer* aSanitizer, bool aSanitizerSafe) {
+    mozilla::dom::Sanitizer* aSanitizer,
+    nsContentUtils::SanitizerMode aSanitizerMode) {
   MOZ_ASSERT(!aTargetDoc->GetFirstChild());
 
   NS_ENSURE_TRUE(aSourceBuffer.Length() <= INT32_MAX, NS_ERROR_OUT_OF_MEMORY);
 
+  mTokenizer->setProcessingInstructionsEnabled(
+      mozilla::StaticPrefs::dom_template_for_enabled());
+
   mTreeBuilder->setFragmentContext(nullptr, kNameSpaceID_None, nullptr, false);
   mTreeBuilder->SetCustomElementRegistry(mozilla::Nothing());
 
-  mTreeBuilder->SetSanitizer(aSanitizer, aSanitizerSafe);
+  mTreeBuilder->SetSanitizer(
+      aSanitizer, aSanitizerMode == nsContentUtils::SanitizerMode::Safe);
   mTreeBuilder->SetPreventScriptExecution(true);
 
   return Tokenize(aSourceBuffer, aTargetDoc,

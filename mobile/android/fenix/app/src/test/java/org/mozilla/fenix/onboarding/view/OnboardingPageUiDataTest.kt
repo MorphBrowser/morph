@@ -21,14 +21,14 @@ class OnboardingPageUiDataTest {
     @Test
     fun `GIVEN last page in the list WHEN sequencePosition called THEN returns the index plus 1`() {
         val expected = "3"
-        val actual = allKnownPages.sequencePosition(notificationPageUiData.type)
+        val actual = allKnownPages.sequencePosition(termsOfServicePageUiData.type)
 
         assertEquals(expected, actual)
     }
 
     @Test
     fun `GIVEN all known pages of WHEN sequenceId() called THEN should map to the correct sequence id`() {
-        val expected = "default_sync_notification"
+        val expected = "default_sync_terms_of_service"
         val actual = allKnownPages.telemetrySequenceId()
 
         assertEquals(expected, actual)
@@ -40,6 +40,13 @@ class OnboardingPageUiDataTest {
         val actual = listOf(defaultBrowserPageUiData, syncPageUiData).telemetrySequenceId()
 
         assertEquals(expected, actual)
+    }
+
+    @Test
+    fun `GIVEN a pairing install sequence WHEN sequenceId() is called THEN should map to the correct sequence id`() {
+        val pages = listOf(termsOfServicePageUiData, syncPairingPageUiData)
+
+        assertEquals("terms_of_service_sync_pairing", pages.telemetrySequenceId())
     }
 
     @Test
@@ -71,19 +78,28 @@ val syncPageUiData =
         secondaryButtonLabel = "sync secondary button text",
     )
 
-val notificationPageUiData =
+val syncPairingPageUiData =
     OnboardingPageUiData(
-        type = OnboardingPageUiData.Type.NOTIFICATION_PERMISSION,
-        imageRes = R.drawable.ic_notification_permission,
-        title = "notification title",
-        description = "notification body",
-        primaryButtonLabel = "notification primary button text",
-        secondaryButtonLabel = "notification secondary button text",
+        type = OnboardingPageUiData.Type.SYNC_PAIRING,
+        imageRes = R.drawable.nova_onboarding_sync_qr,
+        title = "sync pairing title",
+        description = "sync pairing body",
+        primaryButtonLabel = "sync pairing scan button text",
+        secondaryButtonLabel = "sync pairing email button text",
+    )
+
+val termsOfServicePageUiData =
+    OnboardingPageUiData(
+        type = OnboardingPageUiData.Type.TERMS_OF_SERVICE,
+        imageRes = R.drawable.nova_onboarding_tou,
+        title = "terms of service title",
+        description = "terms of service body",
+        primaryButtonLabel = "terms of service primary button text",
     )
 
 private val allKnownPages =
     listOf(
         defaultBrowserPageUiData,
         syncPageUiData,
-        notificationPageUiData,
+        termsOfServicePageUiData,
     )

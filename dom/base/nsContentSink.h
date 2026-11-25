@@ -48,8 +48,14 @@ struct LinkHeader;
 
 //----------------------------------------------------------------------
 
+#define NS_CONTENTSINK_IID \
+  {0x7c0e56f4, 0x5e12, 0x4c41, {0xbd, 0x3a, 0x3a, 0x4e, 0x7c, 0x8f, 0x9e, 0x12}}
+
 class nsContentSink : public nsICSSLoaderObserver,
                       public nsSupportsWeakReference {
+ public:
+  NS_INLINE_DECL_STATIC_IID(NS_CONTENTSINK_IID)
+
  protected:
   using Document = mozilla::dom::Document;
 
@@ -89,8 +95,8 @@ class nsContentSink : public nsICSSLoaderObserver,
   MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual nsresult ProcessStyleLinkFromHeader(
       const nsAString& aHref, bool aAlternate, const nsAString& aTitle,
       const nsAString& aIntegrity, const nsAString& aType,
-      const nsAString& aMedia, const nsAString& aReferrerPolicy,
-      const nsAString& aFetchPriority);
+      const nsAString& aMedia, const nsAString& aCrossOrigin,
+      const nsAString& aReferrerPolicy, const nsAString& aFetchPriority);
 
   void PrefetchHref(const nsAString& aHref, const nsAString& aAs,
                     const nsAString& aType, const nsAString& aMedia);

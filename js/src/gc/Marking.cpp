@@ -785,7 +785,7 @@ void MarkingTracerT<opts>::markEphemeronEdges(EphemeronEdgeVector& edges,
     MarkColor targetColor = std::min(srcColor, MarkColor(edge.color()));
     MOZ_ASSERT(markColor() >= targetColor);
 
-    Zone* zone = edge.target()->zone();
+    Zone* zone = edge.target()->zoneFromAnyThread();
     if (targetColor == markColor() && zone->shouldMarkInZone(targetColor)) {
       ApplyGCThingTyped(edge.target(), edge.target()->getTraceKind(),
                         [this](auto t) { this->markAndTraverse(t); });
@@ -932,7 +932,8 @@ bool MarkingTracerT<opts>::onEdge(T** thingp, const char* name) {
 }
 
 template <uint32_t opts>
-bool MarkingTracerT<opts>::onBufferEdge(void** bufferp, const char* name) {
+JSTracer::TraceBufferResult MarkingTracerT<opts>::onBufferEdge(
+    void** bufferp, const char* name) {
   return BufferAllocator::MarkBuffer(this, bufferp, name);
 }
 
@@ -3031,6 +3032,7 @@ inline void GCRuntime::forEachDelayedMarkingArena(F&& f) {
 }
 
 #ifdef DEBUG
+
 void GCMarker::checkZone(Cell* cell) {
   MOZ_ASSERT(state != NotActive);
   if (cell->isTenured()) {
@@ -3039,6 +3041,27 @@ void GCMarker::checkZone(Cell* cell) {
                zone->isAtomsZone());
   }
 }
+
+static void ForEachMarkStackCell(const MarkStack& stack,
+                                 mozilla::FunctionRef<void(Cell*)> f) {
+  // MarkStackIter allows mutation so we have to cast away constness. We don't
+  // mutate the stack.
+  for (MarkStackIter iter(const_cast<MarkStack&>(stack)); !iter.done();
+       iter.next()) {
+    if (iter.isSlotsOrElementsRange()) {
+      f(iter.slotsOrElementsRange().ptr().asRangeObject());
+    } else {
+      f(iter.peekPtr().ptr());
+    }
+  }
+}
+
+void GCMarker::forEachMarkStackCell(
+    mozilla::FunctionRef<void(gc::Cell*)> f) const {
+  ForEachMarkStackCell(stack, f);
+  ForEachMarkStackCell(otherStack, f);
+}
+
 #endif
 
 size_t GCMarker::sizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const {
@@ -3304,7 +3327,7 @@ JS_FOR_EACH_PUBLIC_TAGGED_GC_POINTER_TYPE(
  * Handling these implicit edges has two parts:
  * - A special pass enumerating all of the containers that know about the
  *   implicit edges to fix any black-gray edges that have been created. This
- *   is implemented in nsXPConnect::FixWeakMappingGrayBits.
+ *   is implemented in js::FixWeakMappingGrayBits.
  * - To prevent any incorrectly gray objects from escaping to live JS outside
  *   of the containers, we must add unmark-graying read barriers to these
  *   containers.

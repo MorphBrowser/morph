@@ -82,6 +82,12 @@ class WebProgressListener final : public nsIWebProgressListener,
       rv.ThrowInvalidStateError("Unable to open window");
       mPromise->Reject(rv, __func__);
       mPromise = nullptr;
+      if (browsingContext) {
+        if (nsCOMPtr<nsIWebProgress> webProgress =
+                browsingContext->GetWebProgress()) {
+          (void)webProgress->RemoveProgressListener(this);
+        }
+      }
       return NS_OK;
     }
 
@@ -396,7 +402,8 @@ void GeckoViewOpenWindow(const ClientOpenWindowArgsParsed& aArgsValidated,
   // passes the request to open a new window to GeckoView. Allowing the
   // application to decide how to hand the open window request.
   nsCOMPtr<nsIGeckoViewServiceWorker> sw = do_ImportESModule(
-      "resource://gre/modules/GeckoViewServiceWorker.sys.mjs");
+      "moz-src:///mobile/shared/components/geckoview/"
+      "GeckoViewServiceWorker.sys.mjs");
   MOZ_ASSERT(sw);
 
   RefPtr<dom::Promise> promise;
@@ -448,27 +455,8 @@ RefPtr<ClientOpPromise> ClientOpenWindow(
   RefPtr<ClientOpPromise::Private> promise =
       new ClientOpPromise::Private(__func__);
 
-  // [[1. Let url be the result of parsing url with entry settings object's API
-  //   base URL.]]
-  nsCOMPtr<nsIURI> baseURI;
-  nsresult rv = NS_NewURI(getter_AddRefs(baseURI), aArgs.baseURL());
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    nsPrintfCString err("Invalid base URL \"%s\"", aArgs.baseURL().get());
-    CopyableErrorResult errResult;
-    errResult.ThrowTypeError(err);
-    promise->Reject(errResult, __func__);
-    return promise;
-  }
-
-  nsCOMPtr<nsIURI> uri;
-  rv = NS_NewURI(getter_AddRefs(uri), aArgs.url(), nullptr, baseURI);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    nsPrintfCString err("Invalid URL \"%s\"", aArgs.url().get());
-    CopyableErrorResult errResult;
-    errResult.ThrowTypeError(err);
-    promise->Reject(errResult, __func__);
-    return promise;
-  }
+  nsCOMPtr<nsIURI> uri = aArgs.uri().get();
+  nsCOMPtr<nsIURI> baseURI = aArgs.baseURI().get();
 
   auto principalOrErr = PrincipalInfoToPrincipal(aArgs.principalInfo());
   if (NS_WARN_IF(principalOrErr.isErr())) {
@@ -480,10 +468,11 @@ RefPtr<ClientOpPromise> ClientOpenWindow(
   nsCOMPtr<nsIPrincipal> principal = principalOrErr.unwrap();
   MOZ_DIAGNOSTIC_ASSERT(principal);
 
-  rv = nsContentUtils::GetSecurityManager()->CheckLoadURIWithPrincipal(
+  nsresult rv = nsContentUtils::GetSecurityManager()->CheckLoadURIWithPrincipal(
       principal, uri, nsIScriptSecurityManager::DONT_REPORT_ERRORS, 0);
   if (NS_FAILED(rv)) {
-    nsPrintfCString err("Opening \"%s\" is not allowed", aArgs.url().get());
+    nsPrintfCString err("Opening \"%s\" is not allowed",
+                        uri->GetSpecOrDefault().get());
     CopyableErrorResult errResult;
     errResult.ThrowTypeError(err);
     promise->Reject(errResult, __func__);

@@ -1,0 +1,110 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+package org.mozilla.fenix.components.menu.compose.customize
+
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import androidx.fragment.app.Fragment
+import androidx.fragment.compose.content
+import androidx.lifecycle.coroutineScope
+import androidx.navigation.fragment.findNavController
+import mozilla.components.compose.menu.store.CustomizableMenuAction.BackPressed
+import mozilla.components.compose.menu.store.CustomizableMenuState
+import mozilla.components.compose.menu.store.CustomizableMenuStore
+import mozilla.components.compose.menu.ui.customize.CustomizeMenuContent
+import mozilla.components.lib.state.helpers.StoreProvider.Companion.fragmentStore
+import mozilla.components.support.base.feature.UserInteractionHandler
+import mozilla.components.support.base.feature.ViewBoundFeatureWrapper
+import org.mozilla.fenix.R
+import org.mozilla.fenix.components.menu.MenuItemsRegistry
+import org.mozilla.fenix.components.menu.configuration.BrowserMenuConfiguration
+import org.mozilla.fenix.components.menu.middleware.CustomizeMenuMiddleware
+import org.mozilla.fenix.components.menu.middleware.CustomizeMenuNavigationMiddleware
+import org.mozilla.fenix.components.menu.middleware.CustomizeMenuTelemetryMiddleware
+import org.mozilla.fenix.e2e.SystemInsetsPaddedFragment
+import org.mozilla.fenix.ext.isToolbarAtBottom
+import org.mozilla.fenix.ext.requireComponents
+import org.mozilla.fenix.ext.showToolbar
+import org.mozilla.fenix.snackbar.FenixSnackbarDelegate
+import org.mozilla.fenix.snackbar.SnackbarBinding
+import org.mozilla.fenix.theme.FirefoxTheme
+
+/** Screen allowing the user to customize the order of and what menu items or menu sections are to be shown. */
+class CustomizeMenuFragment : Fragment(), UserInteractionHandler, SystemInsetsPaddedFragment {
+    private val snackbarBinding = ViewBoundFeatureWrapper<SnackbarBinding>()
+
+    private val menuStore: CustomizableMenuStore by
+        fragmentStore(CustomizableMenuState(emptyList())) { restoredState ->
+            val components = requireComponents
+            val menuItemsRegistry =
+                MenuItemsRegistry(
+                    configuration = BrowserMenuConfiguration.allSections(),
+                    resolver = buildCustomizeMenuItemProvidersFactory()::buildProviderFor,
+                )
+
+            CustomizableMenuStore(
+                initialState = restoredState,
+                middleware =
+                    listOf(
+                        CustomizeMenuMiddleware(
+                            repository = components.menuCustomizationRepository,
+                            registry = menuItemsRegistry,
+                            isToolbarAtBottom = requireContext().isToolbarAtBottom(),
+                            isExpandedToolbarEnabled = components.settings.shouldUseExpandedToolbar,
+                            isToolsMenuCustomizationEnabled = components.settings.isToolsMenuCustomizationEnabled,
+                            scope = viewLifecycleOwner.lifecycle.coroutineScope,
+                            appStore = components.appStore,
+                            cannotHideSectionMessage = getString(R.string.customize_menu_cannot_hide_section),
+                        ),
+                        CustomizeMenuNavigationMiddleware(findNavController()),
+                        CustomizeMenuTelemetryMiddleware(),
+                    ),
+            )
+        }
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?,
+    ): View = content {
+        FirefoxTheme {
+            CustomizeMenuContent(store = menuStore)
+        }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        val components = requireComponents
+        snackbarBinding.set(
+            feature =
+                SnackbarBinding(
+                    context = requireContext(),
+                    browserStore = components.core.store,
+                    appStore = components.appStore,
+                    snackbarDelegate = FenixSnackbarDelegate(view),
+                    navController = findNavController(),
+                    tabsUseCases = components.useCases.tabsUseCases,
+                    sendTabUseCases = null,
+                    customTabSessionId = null,
+                    applicationScope = components.applicationScope,
+                ),
+            owner = this,
+            view = view,
+        )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        showToolbar(getString(R.string.customize_menu))
+    }
+
+    override fun onBackPressed(): Boolean {
+        menuStore.dispatch(BackPressed)
+        return false
+    }
+}

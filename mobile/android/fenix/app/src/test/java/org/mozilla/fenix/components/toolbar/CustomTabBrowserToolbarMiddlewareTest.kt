@@ -45,7 +45,7 @@ import mozilla.components.compose.browser.toolbar.concept.PageOrigin.Companion.P
 import mozilla.components.compose.browser.toolbar.store.BrowserToolbarInteraction.BrowserToolbarEvent
 import mozilla.components.compose.browser.toolbar.store.BrowserToolbarStore
 import mozilla.components.compose.browser.toolbar.store.ProgressBarConfig
-import mozilla.components.concept.engine.ipprotection.IPProtectionHandler.StateInfo
+import mozilla.components.concept.engine.ipprotection.ProxyState
 import mozilla.components.concept.engine.ipprotection.ServiceState
 import mozilla.components.concept.engine.permission.SitePermissionsStorage
 import mozilla.components.feature.customtabs.R as customtabsR
@@ -71,7 +71,6 @@ import org.junit.runner.RunWith
 import org.mozilla.fenix.GleanMetrics.Events
 import org.mozilla.fenix.GleanMetrics.Toolbar
 import org.mozilla.fenix.R
-import org.mozilla.fenix.browser.BrowserFragmentDirections
 import org.mozilla.fenix.components.AppStore
 import org.mozilla.fenix.components.appstate.AppAction.URLCopiedToClipboard
 import org.mozilla.fenix.components.menu.MenuAccessPoint
@@ -80,7 +79,7 @@ import org.mozilla.fenix.components.toolbar.CustomTabBrowserToolbarMiddleware.Co
 import org.mozilla.fenix.components.toolbar.CustomTabBrowserToolbarMiddleware.Companion.EndPageActions.CustomButtonClicked
 import org.mozilla.fenix.components.toolbar.CustomTabBrowserToolbarMiddleware.Companion.StartBrowserActions.CloseClicked
 import org.mozilla.fenix.components.toolbar.CustomTabBrowserToolbarMiddleware.Companion.StartPageActions.SiteInfoClicked
-import org.mozilla.fenix.ext.nav
+import org.mozilla.fenix.customtabs.ExternalAppBrowserFragmentDirections
 import org.mozilla.fenix.helpers.FenixGleanTestRule
 import org.mozilla.fenix.telemetry.ACTION_CLOSE_CLICKED
 import org.mozilla.fenix.telemetry.ACTION_MENU_CLICKED
@@ -597,14 +596,8 @@ class CustomTabBrowserToolbarMiddlewareTest {
         assertEquals(1, toolbarPageActions.size)
         assertIs<ActionButtonRes>(toolbarPageActions[0])
 
-        ipProtectionStore.dispatch(
-            IPProtectionAction.EngineStateChanged(
-                StateInfo(
-                    serviceState = ServiceState.Ready,
-                    proxyState = StateInfo.PROXY_STATE_ACTIVE,
-                )
-            )
-        )
+        ipProtectionStore.dispatch(IPProtectionAction.ServiceAction.ServiceStateChanged(ServiceState.Ready))
+        ipProtectionStore.dispatch(IPProtectionAction.ProxyAction.ProxyStateChanged(ProxyState.ACTIVE))
         testDispatcher.scheduler.advanceUntilIdle()
 
         toolbarPageActions = toolbarStore.state.displayState.pageActionsStart
@@ -641,14 +634,8 @@ class CustomTabBrowserToolbarMiddlewareTest {
             assertEquals(1, toolbarPageActions.size)
             assertIs<AnimatedPillActionRes>(toolbarPageActions[0])
 
-            ipProtectionStore.dispatch(
-                IPProtectionAction.EngineStateChanged(
-                    StateInfo(
-                        serviceState = ServiceState.Ready,
-                        proxyState = StateInfo.PROXY_STATE_READY,
-                    )
-                )
-            )
+            ipProtectionStore.dispatch(IPProtectionAction.ServiceAction.ServiceStateChanged(ServiceState.Ready))
+            ipProtectionStore.dispatch(IPProtectionAction.ProxyAction.ProxyStateChanged(ProxyState.READY))
             testDispatcher.scheduler.advanceUntilIdle()
 
             toolbarPageActions = toolbarStore.state.displayState.pageActionsStart
@@ -681,20 +668,14 @@ class CustomTabBrowserToolbarMiddlewareTest {
                 )
             val toolbarStore = buildStore(middleware)
 
-            ipProtectionStore.dispatch(
-                IPProtectionAction.EngineStateChanged(
-                    StateInfo(
-                        serviceState = ServiceState.Ready,
-                        proxyState = StateInfo.PROXY_STATE_READY,
-                    )
-                )
-            )
+            ipProtectionStore.dispatch(IPProtectionAction.ServiceAction.ServiceStateChanged(ServiceState.Ready))
+            ipProtectionStore.dispatch(IPProtectionAction.ProxyAction.ProxyStateChanged(ProxyState.READY))
             testDispatcher.scheduler.advanceUntilIdle()
             assertIs<AnimatedPillActionRes>(toolbarStore.state.displayState.pageActionsStart[0])
 
             // Simulates the pill's onAnimationFinished callback, normally invoked by Compose once
             // the collapse animation has actually finished on screen.
-            ipProtectionStore.dispatch(IPProtectionAction.ProxyActivationShown)
+            ipProtectionStore.dispatch(IPProtectionAction.ActivationAction.ProxyActivationShown)
             testDispatcher.scheduler.advanceUntilIdle()
 
             val toolbarPageActions = toolbarStore.state.displayState.pageActionsStart
@@ -1077,7 +1058,7 @@ class CustomTabBrowserToolbarMiddlewareTest {
         every { customTab.config.showShareMenuItem } returns false
         val expectedMenuButton =
             ActionButtonRes(
-                drawableResId = iconsR.drawable.mozac_ic_ellipsis_vertical_24,
+                drawableResId = iconsR.drawable.mozac_ic_more_vertical_round_24,
                 contentDescription = R.string.content_description_menu,
                 onClick = MenuClicked,
             )
@@ -1095,7 +1076,7 @@ class CustomTabBrowserToolbarMiddlewareTest {
         every { customTab.config.showShareMenuItem } returns true
         val expectedMenuButton =
             ActionButtonRes(
-                drawableResId = iconsR.drawable.mozac_ic_ellipsis_vertical_24,
+                drawableResId = iconsR.drawable.mozac_ic_more_vertical_round_24,
                 contentDescription = R.string.content_description_menu,
                 onClick = MenuClicked,
             )
@@ -1110,7 +1091,10 @@ class CustomTabBrowserToolbarMiddlewareTest {
 
     @Test
     fun `GIVEN a non-sandbox custom tab WHEN the menu button is clicked THEN navigate to menu with isSandboxCustomTab false`() {
-        val navController: NavController = mockk(relaxed = true)
+        val navController: NavController =
+            mockk(relaxed = true) {
+                every { currentDestination?.id } returns R.id.externalAppBrowserFragment
+            }
         val middleware = buildMiddleware(navController = navController, isSandboxCustomTab = false)
         val toolbarStore = buildStore(middleware)
 
@@ -1118,13 +1102,13 @@ class CustomTabBrowserToolbarMiddlewareTest {
         testDispatcher.scheduler.advanceUntilIdle()
 
         verify {
-            navController.nav(
-                R.id.externalAppBrowserFragment,
-                BrowserFragmentDirections.actionGlobalMenuDialogFragment(
-                    accesspoint = MenuAccessPoint.External,
+            navController.navigate(
+                ExternalAppBrowserFragmentDirections.actionExternalAppBrowserFragmentToMenuFragment(
+                    accessPoint = MenuAccessPoint.External,
                     customTabSessionId = customTabId,
                     isSandboxCustomTab = false,
                 ),
+                null,
             )
         }
 
@@ -1137,7 +1121,10 @@ class CustomTabBrowserToolbarMiddlewareTest {
 
     @Test
     fun `GIVEN a sandbox custom tab WHEN the menu button is clicked THEN navigate to menu with isSandboxCustomTab true`() {
-        val navController: NavController = mockk(relaxed = true)
+        val navController: NavController =
+            mockk(relaxed = true) {
+                every { currentDestination?.id } returns R.id.externalAppBrowserFragment
+            }
         val middleware = buildMiddleware(navController = navController, isSandboxCustomTab = true)
         val toolbarStore = buildStore(middleware)
 
@@ -1145,13 +1132,13 @@ class CustomTabBrowserToolbarMiddlewareTest {
         testDispatcher.scheduler.advanceUntilIdle()
 
         verify {
-            navController.nav(
-                R.id.externalAppBrowserFragment,
-                BrowserFragmentDirections.actionGlobalMenuDialogFragment(
-                    accesspoint = MenuAccessPoint.External,
+            navController.navigate(
+                ExternalAppBrowserFragmentDirections.actionExternalAppBrowserFragmentToMenuFragment(
+                    accessPoint = MenuAccessPoint.External,
                     customTabSessionId = customTabId,
                     isSandboxCustomTab = true,
                 ),
+                null,
             )
         }
 

@@ -21,6 +21,7 @@
 #include "mozilla/layers/BufferTexture.h"
 #include "mozilla/layers/CompositableTransactionParent.h"
 #include "mozilla/layers/Compositor.h"
+#include "mozilla/layers/LayerTreeLog.h"
 #include "mozilla/layers/LayersMessages.h"  // for EditReply
 #include "mozilla/layers/PImageBridgeParent.h"
 #include "mozilla/layers/RemoteTextureMap.h"
@@ -54,7 +55,7 @@ static StaticRefPtr<ImageBridgeParent> sImageBridgeParentSingleton;
 
 /* static */
 void ImageBridgeParent::Setup() {
-  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_RELEASE_ASSERT(NS_IsMainThread());
   if (!sImageBridgesLock) {
     sImageBridgesLock = new Monitor("ImageBridges");
     mozilla::ClearOnShutdown(&sImageBridgesLock);
@@ -70,7 +71,7 @@ ImageBridgeParent::ImageBridgeParent(nsISerialEventTarget* aThread,
       mNamespace(aNamespace),
       mClosed(false),
       mCompositorThreadHolder(CompositorThreadHolder::GetSingleton()) {
-  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_RELEASE_ASSERT(NS_IsMainThread());
   SetOtherEndpointProcInfo(aChildProcessInfo);
   mRemoteTextureTxnScheduler = RemoteTextureTxnScheduler::Create(this);
 }
@@ -85,8 +86,8 @@ ImageBridgeParent* ImageBridgeParent::CreateSameProcess(uint32_t aNamespace) {
 
   {
     MonitorAutoLock lock(*sImageBridgesLock);
-    MOZ_RELEASE_ASSERT(sImageBridges.count(procInfo.mPid) == 0);
-    sImageBridges[procInfo.mPid] = parent;
+    MOZ_RELEASE_ASSERT(sImageBridges.count(procInfo.mChildID) == 0);
+    sImageBridges[procInfo.mChildID] = parent;
   }
 
   sImageBridgeParentSingleton = parent;
@@ -96,7 +97,7 @@ ImageBridgeParent* ImageBridgeParent::CreateSameProcess(uint32_t aNamespace) {
 /* static */
 bool ImageBridgeParent::CreateForGPUProcess(
     Endpoint<PImageBridgeParent>&& aEndpoint, uint32_t aNamespace) {
-  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_GPU);
+  MOZ_RELEASE_ASSERT(XRE_GetProcessType() == GeckoProcessType_GPU);
 
   nsCOMPtr<nsISerialEventTarget> compositorThread = CompositorThread();
   if (!compositorThread) {
@@ -143,6 +144,8 @@ void ImageBridgeParent::Shutdown() {
 }
 
 void ImageBridgeParent::ActorDestroy(ActorDestroyReason aWhy) {
+  LAYERTREE_LOG("Image bridge namespace {} destroyed, reason {}", mNamespace,
+                fmt::enums::format_as(aWhy));
   // Can't alloc/dealloc shmems from now on.
   mClosed = true;
 
@@ -155,7 +158,10 @@ void ImageBridgeParent::ActorDestroy(ActorDestroyReason aWhy) {
   mCompositables.clear();
   {
     MonitorAutoLock lock(*sImageBridgesLock);
-    sImageBridges.erase(OtherPid());
+    sImageBridges.erase(OtherChildID());
+  }
+  if (auto* remoteTextureMap = RemoteTextureMap::Get()) {
+    remoteTextureMap->ClearDestroyedProcess(OtherChildID());
   }
   GetThread()->Dispatch(
       NewRunnableMethod("layers::ImageBridgeParent::DeferredDestroy", this,
@@ -181,6 +187,7 @@ class MOZ_STACK_CLASS AutoImageBridgeParentAsyncMessageSender final {
 
   ~AutoImageBridgeParentAsyncMessageSender() {
     mImageBridge->SendPendingAsyncMessages();
+    mImageBridge->ClearAboutToSendAsyncMessages();
     if (mToDestroy) {
       mImageBridge->DestroyActors(*mToDestroy);
     }
@@ -249,12 +256,12 @@ bool ImageBridgeParent::CreateForContent(
 void ImageBridgeParent::Bind(Endpoint<PImageBridgeParent>&& aEndpoint) {
   if (!aEndpoint.Bind(this)) return;
 
-  // If the child process ID was reused by the OS before the ImageBridgeParent
-  // object was destroyed, we need to clean it up first.
+  // If the child process already has an ImageBridgeParent which hasn't been
+  // destroyed yet, we need to clean it up first.
   RefPtr<ImageBridgeParent> oldActor;
   {
     MonitorAutoLock lock(*sImageBridgesLock);
-    ImageBridgeMap::const_iterator i = sImageBridges.find(OtherPid());
+    ImageBridgeMap::const_iterator i = sImageBridges.find(OtherChildID());
     if (i != sImageBridges.end()) {
       oldActor = i->second;
     }
@@ -268,8 +275,10 @@ void ImageBridgeParent::Bind(Endpoint<PImageBridgeParent>&& aEndpoint) {
 
   {
     MonitorAutoLock lock(*sImageBridgesLock);
-    sImageBridges[OtherPid()] = this;
+    sImageBridges[OtherChildID()] = this;
   }
+  LAYERTREE_LOG("Image bridge bound, namespace {}, content {}, child {}",
+                mNamespace, mContentId, OtherChildID());
 }
 
 mozilla::ipc::IPCResult ImageBridgeParent::RecvWillClose() {
@@ -293,7 +302,7 @@ mozilla::ipc::IPCResult ImageBridgeParent::RecvNewCompositable(
     return IPC_FAIL_NO_REASON(this);
   }
 
-  host->SetAsyncRef(AsyncCompositableRef(OtherPid(), aHandle));
+  host->SetAsyncRef(AsyncCompositableRef(OtherChildID(), aHandle));
   return IPC_OK();
 }
 
@@ -348,7 +357,7 @@ ImageBridgeParent::AllocPMediaSystemResourceManagerParent() {
 
 bool ImageBridgeParent::DeallocPMediaSystemResourceManagerParent(
     PMediaSystemResourceManagerParent* aActor) {
-  MOZ_ASSERT(aActor);
+  MOZ_RELEASE_ASSERT(aActor);
   delete static_cast<mozilla::media::MediaSystemResourceManagerParent*>(aActor);
   return true;
 }
@@ -358,38 +367,38 @@ void ImageBridgeParent::SendAsyncMessage(
   (void)SendParentAsyncMessages(aMessage);
 }
 
-class ProcessIdComparator {
+class ChildIDComparator {
  public:
   bool Equals(const ImageCompositeNotificationInfo& aA,
               const ImageCompositeNotificationInfo& aB) const {
-    return aA.mImageBridgeProcessId == aB.mImageBridgeProcessId;
+    return aA.mImageBridgeChildID == aB.mImageBridgeChildID;
   }
   bool LessThan(const ImageCompositeNotificationInfo& aA,
                 const ImageCompositeNotificationInfo& aB) const {
-    return aA.mImageBridgeProcessId < aB.mImageBridgeProcessId;
+    return aA.mImageBridgeChildID < aB.mImageBridgeChildID;
   }
 };
 
 /* static */
 bool ImageBridgeParent::NotifyImageComposites(
     nsTArray<ImageCompositeNotificationInfo>& aNotifications) {
-  // Group the notifications by destination process ID and then send the
+  // Group the notifications by destination process and then send the
   // notifications in one message per group.
-  aNotifications.Sort(ProcessIdComparator());
+  aNotifications.Sort(ChildIDComparator());
   uint32_t i = 0;
   bool ok = true;
   while (i < aNotifications.Length()) {
     AutoTArray<ImageCompositeNotification, 1> notifications;
     notifications.AppendElement(aNotifications[i].mNotification);
     uint32_t end = i + 1;
-    MOZ_ASSERT(aNotifications[i].mNotification.compositable());
-    ProcessId pid = aNotifications[i].mImageBridgeProcessId;
+    MOZ_RELEASE_ASSERT(aNotifications[i].mNotification.compositable());
+    GeckoChildID childID = aNotifications[i].mImageBridgeChildID;
     while (end < aNotifications.Length() &&
-           aNotifications[end].mImageBridgeProcessId == pid) {
+           aNotifications[end].mImageBridgeChildID == childID) {
       notifications.AppendElement(aNotifications[end].mNotification);
       ++end;
     }
-    RefPtr<ImageBridgeParent> bridge = GetInstance(pid);
+    RefPtr<ImageBridgeParent> bridge = GetInstance(childID);
     if (!bridge || bridge->mClosed) {
       i = end;
       continue;
@@ -406,8 +415,8 @@ bool ImageBridgeParent::NotifyImageComposites(
 void ImageBridgeParent::DeferredDestroy() { mCompositorThreadHolder = nullptr; }
 
 already_AddRefed<ImageBridgeParent> ImageBridgeParent::GetInstance(
-    ProcessId aId) {
-  MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
+    GeckoChildID aId) {
+  MOZ_RELEASE_ASSERT(CompositorThreadHolder::IsInCompositorThread());
   MonitorAutoLock lock(*sImageBridgesLock);
   ImageBridgeMap::const_iterator i = sImageBridges.find(aId);
   if (i == sImageBridges.end()) {
@@ -445,7 +454,7 @@ bool ImageBridgeParent::DeallocShmem(ipc::Shmem& aShmem) {
 }
 
 bool ImageBridgeParent::IsSameProcess() const {
-  return OtherPid() == base::GetCurrentProcId();
+  return OtherChildID() == XRE_GetChildID();
 }
 
 void ImageBridgeParent::NotifyNotUsed(PTextureParent* aTexture,

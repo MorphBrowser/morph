@@ -9,11 +9,13 @@
 #include "MockHttpAuth.h"
 #include "mozilla/BasePrincipal.h"
 #include "mozilla/Components.h"
+#include "mozilla/Preferences.h"
 #include "mozilla/StoragePrincipalHelper.h"
 #include "mozilla/Tokenizer.h"
 #include "netCore.h"
 #include "nsAuthInformationHolder.h"
 #include "nsCRT.h"
+#include "nsCharSeparatedTokenizer.h"
 #include "nsContentUtils.h"
 #include "nsEscape.h"
 #include "nsHttp.h"
@@ -84,8 +86,7 @@ nsHttpChannelAuthProvider::Init(nsIHttpAuthenticableChannel* channel) {
   nsresult rv = mAuthChannel->GetURI(getter_AddRefs(mURI));
   if (NS_FAILED(rv)) return rv;
 
-  rv = mAuthChannel->GetIsSSL(&mUsingSSL);
-  if (NS_FAILED(rv)) return rv;
+  mUsingSSL = mURI->SchemeIs("https");
 
   nsCOMPtr<nsIProxiedChannel> proxied(channel);
   if (proxied) {
@@ -167,7 +168,8 @@ nsHttpChannelAuthProvider::ProcessAuthentication(uint32_t httpStatus,
 
   nsAutoCString creds;
   rv = GetCredentials(challenges, mProxyAuth, creds);
-  if (rv == NS_ERROR_IN_PROGRESS || rv == NS_ERROR_BASIC_HTTP_AUTH_DISABLED) {
+  if (rv == NS_ERROR_IN_PROGRESS || rv == NS_ERROR_BASIC_HTTP_AUTH_DISABLED ||
+      rv == NS_ERROR_HTTP_AUTH_SCHEME_DISABLED) {
     return rv;
   }
 
@@ -543,6 +545,26 @@ ChallengeRank Rank(const nsACString& aChallenge) {
   return ChallengeRank::Unknown;
 }
 
+// Parses the value of network.http.auth.disabled-schemes into a bitmask of
+// disabled ChallengeRank values, so filtering a whole list of challenges
+// only pays for one pass over the pref value instead of one per challenge.
+static uint8_t ParseDisabledAuthSchemes(const nsACString& aDisabledSchemes) {
+  uint8_t disabled = 0;
+  for (const auto& token :
+       nsCCharSeparatedTokenizer(aDisabledSchemes, ',').ToRange()) {
+    if (token.LowerCaseEqualsASCII("basic")) {
+      disabled |= 1 << ChallengeRank::Basic;
+    } else if (token.LowerCaseEqualsASCII("digest")) {
+      disabled |= 1 << ChallengeRank::Digest;
+    } else if (token.LowerCaseEqualsASCII("ntlm")) {
+      disabled |= 1 << ChallengeRank::NTLM;
+    } else if (token.LowerCaseEqualsASCII("negotiate")) {
+      disabled |= 1 << ChallengeRank::Negotiate;
+    }
+  }
+  return disabled;
+}
+
 nsresult nsHttpChannelAuthProvider::GetCredentials(
     const nsACString& aChallenges, bool proxyAuth, nsCString& creds) {
   LOG(("nsHttpChannelAuthProvider::GetCredentials"));
@@ -580,6 +602,19 @@ nsresult nsHttpChannelAuthProvider::GetCredentials(
                                              &qop);
     }
     cc.AppendElement(std::move(ac));
+  }
+
+  nsAutoCString disabledSchemes;
+  Preferences::GetCString("network.http.auth.disabled-schemes",
+                          disabledSchemes);
+  if (!disabledSchemes.IsEmpty() && !cc.IsEmpty()) {
+    uint8_t disabledMask = ParseDisabledAuthSchemes(disabledSchemes);
+    cc.RemoveElementsBy([disabledMask](const AuthChallenge& c) {
+      return disabledMask & (1 << c.rank);
+    });
+    if (cc.IsEmpty()) {
+      return NS_ERROR_HTTP_AUTH_SCHEME_DISABLED;
+    }
   }
 
   // Returns true if an authorization is in progress
@@ -682,6 +717,7 @@ nsresult nsHttpChannelAuthProvider::GetCredentials(
         // expected asynchronously, save current challenge being
         // processed and all remaining challenges to use later in
         // OnAuthAvailable and now immediately return
+        *currentAuthType = authType;
         mCurrentChallenge = cc[i].challenge;
         // imperfect; does not save server-side preference ordering.
         // instead, continues with remaining string as provided by client
@@ -1415,6 +1451,10 @@ NS_IMETHODIMP nsHttpChannelAuthProvider::OnAuthAvailable(
   nsCString creds;
   rv = GenCredsAndSetEntry(auth, mProxyAuth, scheme, host, port, path, realm,
                            mCurrentChallenge, *ident, sessionStateGrip, creds);
+  if (rv == NS_ERROR_IN_PROGRESS) {
+    // OnCredsGenerated will be called and needs mCurrentChallenge.
+    return NS_OK;
+  }
 
   mCurrentChallenge.Truncate();
   if (NS_FAILED(rv)) {
@@ -1463,8 +1503,10 @@ NS_IMETHODIMP nsHttpChannelAuthProvider::OnAuthCancelled(nsISupports* aContext,
       // next challenges since it is no longer relevant.
       if (mProxyAuth) {
         NS_IF_RELEASE(mProxyAuthContinuationState);
+        mProxyAuthType.Truncate();
       } else {
         NS_IF_RELEASE(mAuthContinuationState);
+        mAuthType.Truncate();
       }
       nsAutoCString creds;
       rv = GetCredentials(mRemainingChallenges, mProxyAuth, creds);

@@ -9,8 +9,10 @@
 #include "GLReadTexImageHelper.h"
 #include "GLUploadHelpers.h"
 #include "GeckoProfiler.h"
-#include "GfxTexturesReporter.h"   // for GfxTexturesReporter
-#include "gfx2DGlue.h"             // for ContentForFormat, etc
+#include "GfxTexturesReporter.h"  // for GfxTexturesReporter
+#include "gfx2DGlue.h"            // for ContentForFormat, etc
+#include "mozilla/ScopeExit.h"
+#include "mozilla/UniquePtrExtensions.h"
 #include "mozilla/gfx/2D.h"        // for DataSourceSurface
 #include "mozilla/gfx/BaseSize.h"  // for BaseSize
 #include "mozilla/gfx/Logging.h"   // for gfxCriticalError
@@ -28,6 +30,7 @@
 #ifdef MOZ_WIDGET_ANDROID
 #  include "mozilla/layers/AndroidHardwareBuffer.h"
 #  include "mozilla/layers/AndroidImageConsumer.h"
+#  include "mozilla/layers/AndroidImageReader.h"
 #  include "mozilla/webrender/RenderAndroidHardwareBufferTextureHost.h"
 #  include "mozilla/webrender/RenderAndroidImageReaderImageTextureHost.h"
 #  include "mozilla/webrender/RenderAndroidSurfaceTextureHost.h"
@@ -63,6 +66,11 @@ already_AddRefed<TextureHost> CreateTextureHostOGL(
   switch (aDesc.type()) {
 #ifdef MOZ_WIDGET_ANDROID
     case SurfaceDescriptor::TSurfaceTextureDescriptor: {
+      if (gfx::gfxVars::ForceAImageReaderAndroid()) {
+        MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+        gfxCriticalError() << "ForceAImageReader is enabled";
+        return nullptr;
+      }
       const SurfaceTextureDescriptor& desc =
           aDesc.get_SurfaceTextureDescriptor();
       java::GeckoSurfaceTexture::LocalRef surfaceTexture =
@@ -379,9 +387,8 @@ gfx::Matrix4x4 SurfaceTextureSource::GetTextureTransform() {
 
   // GetTransformMatrix() returns the transform set by the producer side of the
   // SurfaceTexture that must be applied to texture coordinates when
-  // sampling. In some cases we may have set an override value, such as in
-  // AndroidNativeWindowTextureData where we own the producer side, or for
-  // MediaCodec output on devices where where we know the value is incorrect.
+  // sampling. In some cases we may have set an override value, such as for
+  // MediaCodec output on devices where we know the value is incorrect.
   if (mTransformOverride) {
     ret = *mTransformOverride;
   } else {
@@ -545,6 +552,15 @@ bool SurfaceTextureHost::SupportsExternalCompositing(
   return aBackend == WebRenderBackend::SOFTWARE;
 }
 
+SurfaceDescriptor SurfaceTextureHost::GetSurfaceDescriptor() {
+  if (!mSurfTex) {
+    return SurfaceDescriptor();
+  }
+  return SurfaceTextureDescriptor(mSurfTex->GetHandle(), mSize, mFormat,
+                                  mContinuousUpdate, mForceBT709ColorSpace,
+                                  mTransformOverride);
+}
+
 ////////////////////////////////////////////////////////////////////////
 // AndroidHardwareBufferTextureSource
 
@@ -576,24 +592,55 @@ bool AndroidHardwareBufferTextureSource::EnsureEGLImage() {
     const auto& gle = gl::GLContextEGL::Cast(mGL);
     const auto& egl = gle->mEgl;
 
-    const EGLint attribs[] = {LOCAL_EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
-                              fenceFd.get(), LOCAL_EGL_NONE};
+    // Like Chromium's AndroidImageBacking::BeginRead() and
+    // ImageReaderGLOwner::ScopedCurrentImageRef::GetReadyFence(), give EGL a
+    // duplicate FD while retaining the original fence. Restore it on failure
+    // so a subsequent bind or readback still waits for the producer.
+    auto restoreAcquireFence = MakeScopeExit(
+        [&] { mAndroidHardwareBuffer->SetAcquireFence(std::move(fenceFd)); });
+    UniqueFileHandle importFd = DuplicateFileHandle(fenceFd);
+    if (!importFd) {
+      gfxCriticalNoteOnce
+          << "AHB compositor: failed to duplicate acquire fence FD";
+      DeleteTextureHandle();
+      DestroyEGLImage();
+      return false;
+    }
 
+    // EGL takes ownership of the duplicate, including on creation failure.
+    const EGLint attribs[] = {LOCAL_EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+                              importFd.release(), LOCAL_EGL_NONE};
     EGLSync sync =
         egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-    if (sync) {
-      // Release fd here, since it is owned by EGLSync
-      (void)fenceFd.release();
-
-      if (egl->IsExtensionSupported(gl::EGLExtension::KHR_wait_sync)) {
-        egl->fWaitSync(sync, 0);
-      } else {
-        egl->fClientWaitSync(sync, 0, LOCAL_EGL_FOREVER);
-      }
-      egl->fDestroySync(sync);
-    } else {
-      gfxCriticalNote << "Failed to create EGLSync from acquire fence fd";
+    if (!sync) {
+      const EGLint eglError = egl->mLib->fGetError();
+      gfxCriticalNoteOnce
+          << "AHB compositor: failed to import acquire fence, EGL error: "
+          << eglError;
+      DeleteTextureHandle();
+      DestroyEGLImage();
+      return false;
     }
+    bool waitSucceeded;
+    if (egl->IsExtensionSupported(gl::EGLExtension::KHR_wait_sync)) {
+      // Queue a GPU-side wait without blocking the CPU.
+      waitSucceeded = egl->fWaitSync(sync, 0) == LOCAL_EGL_TRUE;
+    } else {
+      // Without server-side wait support, block the CPU until the fence
+      // signals.
+      waitSucceeded = egl->fClientWaitSync(sync, 0, LOCAL_EGL_FOREVER) ==
+                      LOCAL_EGL_CONDITION_SATISFIED;
+    }
+    egl->fDestroySync(sync);
+    if (!waitSucceeded) {
+      gfxCriticalNoteOnce << "AHB compositor: acquire fence wait failed";
+      DeleteTextureHandle();
+      DestroyEGLImage();
+      return false;
+    }
+
+    // A successful wait no longer needs the original FD for retry.
+    restoreAcquireFence.release();
   }
 
   if (mTextureHandle) {
@@ -873,6 +920,42 @@ void AndroidImageReaderImageTextureSource::DeallocateDeviceData() {
 }
 
 ////////////////////////////////////////////////////////////////////////
+
+already_AddRefed<gfx::SourceSurface> GetAndroidImageReaderSurfaceForCanvas(
+    TextureHost* aTextureHost) {
+  const auto desc = aTextureHost->GetSurfaceDescriptor();
+  if (desc.type() != SurfaceDescriptor::TAndroidImageReaderImageDescriptor) {
+    return nullptr;
+  }
+  const auto& sd = desc.get_AndroidImageReaderImageDescriptor();
+  if (!gfx::Factory::AllowedSurfaceSize(sd.size())) {
+    return nullptr;
+  }
+  auto map = GpuProcessAndroidImageReaderMap::Get();
+  RefPtr<AndroidImageReader> reader =
+      map ? map->GetImageReader(sd.imageReaderId()) : nullptr;
+  RefPtr<AndroidImageWrapper> image =
+      reader ? reader->AcquireImageForCanvas(sd.frameId()) : nullptr;
+  if (!image || !gfx::Factory::AllowedSurfaceSize(image->mSize)) {
+    return nullptr;
+  }
+  // Use the retained image's format, including when it supplies a fallback.
+  gfx::SurfaceFormat format;
+  switch (image->mFormat) {
+    case gfx::SurfaceFormat::R8G8B8A8:
+      format = gfx::SurfaceFormat::B8G8R8A8;
+      break;
+    case gfx::SurfaceFormat::R8G8B8X8:
+      format = gfx::SurfaceFormat::B8G8R8X8;
+      break;
+    default:
+      return nullptr;
+  }
+  // Snapshot the retained image once on the GPU process's readback context.
+  // The returned CPU pixels remain stable when the reader advances. Apply the
+  // acquired crop at the descriptor's size to preserve recorded coordinates.
+  return image->GetAsSurface(sd.size(), format);
+}
 
 AndroidImageReaderImageTextureHost::AndroidImageReaderImageTextureHost(
     TextureFlags aFlags, const AndroidImageReaderImageDescriptor& aDescriptor)

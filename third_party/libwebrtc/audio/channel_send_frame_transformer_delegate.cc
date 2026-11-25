@@ -208,7 +208,7 @@ ChannelSendFrameTransformerDelegate::ChannelSendFrameTransformerDelegate(
     SendFrameCallback send_frame_callback,
     scoped_refptr<FrameTransformerInterface> frame_transformer,
     TaskQueueBase* send_queue)
-    : send_frame_callback_(send_frame_callback),
+    : send_frame_callback_(std::move(send_frame_callback)),
       frame_transformer_(std::move(frame_transformer)),
       send_queue_(send_queue) {}
 
@@ -269,6 +269,11 @@ void ChannelSendFrameTransformerDelegate::OnTransformedFrame(
 void ChannelSendFrameTransformerDelegate::StartShortCircuiting() {
   MutexLock lock(&send_lock_);
   short_circuit_ = true;
+}
+
+void ChannelSendFrameTransformerDelegate::StopShortCircuiting() {
+  MutexLock lock(&send_lock_);
+  short_circuit_ = false;
 }
 
 void ChannelSendFrameTransformerDelegate::SendFrame(

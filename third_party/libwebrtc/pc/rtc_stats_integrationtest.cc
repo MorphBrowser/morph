@@ -8,11 +8,13 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
@@ -33,11 +35,13 @@
 #include "api/scoped_refptr.h"
 #include "api/stats/attribute.h"
 #include "api/stats/rtc_stats.h"
+#include "api/stats/rtc_stats_collector_callback.h"
 #include "api/stats/rtc_stats_report.h"
 #include "api/stats/rtcstats_objects.h"
 #include "api/test/rtc_error_matchers.h"
 #include "api/units/time_delta.h"
 #include "pc/rtc_stats_traversal.h"
+#include "pc/test/mock_peer_connection_observers.h"
 #include "pc/test/peer_connection_test_wrapper.h"
 #include "pc/test/rtc_stats_obtainer.h"
 #include "rtc_base/checks.h"
@@ -836,8 +840,6 @@ class RTCStatsReportVerifier {
       verifier.TestAttributeIsDefined(outbound_stream.key_frames_encoded);
       verifier.TestAttributeIsNonNegative<double>(
           outbound_stream.total_encode_time);
-      verifier.TestAttributeIsNonNegative<uint64_t>(
-          outbound_stream.total_encoded_bytes_target);
       verifier.TestAttributeIsDefined(
           outbound_stream.quality_limitation_reason);
       verifier.TestAttributeIsDefined(
@@ -881,8 +883,6 @@ class RTCStatsReportVerifier {
       verifier.TestAttributeIsUndefined(outbound_stream.key_frames_encoded);
       verifier.TestAttributeIsUndefined(outbound_stream.total_encode_time);
       verifier.TestAttributeIsUndefined(
-          outbound_stream.total_encoded_bytes_target);
-      verifier.TestAttributeIsUndefined(
           outbound_stream.quality_limitation_reason);
       verifier.TestAttributeIsUndefined(
           outbound_stream.quality_limitation_durations);
@@ -921,11 +921,21 @@ class RTCStatsReportVerifier {
     verifier.TestAttributeIsIDReference(remote_inbound_stream.local_id,
                                         RTCOutboundRtpStreamStats::kType);
     verifier.TestAttributeIsNonNegative<double>(
-        remote_inbound_stream.round_trip_time);
-    verifier.TestAttributeIsNonNegative<double>(
         remote_inbound_stream.total_round_trip_time);
     verifier.TestAttributeIsNonNegative<int32_t>(
         remote_inbound_stream.round_trip_time_measurements);
+    // `round_trip_time_measurements` should always be defined since it's a
+    // counter and it is implemented, but if it isn't the only sensible
+    // interpretation for missing value is "no measurements", i.e. 0. If missing
+    // the `verifier` will mark the attribute as such above and fail the test.
+    if (remote_inbound_stream.round_trip_time_measurements.value_or(0) > 0) {
+      verifier.TestAttributeIsNonNegative<double>(
+          remote_inbound_stream.round_trip_time);
+    } else {
+      // It's possible to have an RTCP report without any round trip time
+      // measurements yet, in which case this value is undefined.
+      verifier.TestAttributeIsUndefined(remote_inbound_stream.round_trip_time);
+    }
     // TODO: bugs.webrtc.org/42225697 - move to RTCReceivedRtpStreamStats
     // when wiring the RFC 8888 feedback to stats.
     verifier.TestAttributeIsUndefined<int64_t>(
@@ -1548,6 +1558,122 @@ TEST_F(RTCStatsRtpLifetimeTest, InboundRtpForEarlyMedia) {
       {.timeout = TimeDelta::Millis(kGetStatsTimeoutMs)}));
   ASSERT_THAT(inbound_rtps, SizeIs(1));
   EXPECT_GT(inbound_rtps[0]->packets_received.value_or(0), 0u);
+}
+
+// Holds the only reference to a PeerConnection and releases it inside
+// OnStatsDelivered() before reading `report`, verifying that `report` remains
+// valid even after ~PeerConnection() destroys the RTCStatsCollector.
+class ReleaseOnStatsDeliveredCallback : public RTCStatsCollectorCallback {
+ public:
+  ReleaseOnStatsDeliveredCallback(scoped_refptr<PeerConnectionInterface> pc,
+                                  test::RunLoop* run_loop,
+                                  size_t expected_min_stats = 1)
+      : pc_(std::move(pc)),
+        run_loop_(run_loop),
+        expected_min_stats_(expected_min_stats) {}
+
+  bool called() const { return called_; }
+
+  void OnStatsDelivered(
+      const scoped_refptr<const RTCStatsReport>& report) override {
+    ASSERT_NE(pc_, nullptr) << "Called more than once.";
+    called_ = true;
+    // Drop the last reference to the PeerConnection before inspecting `report`.
+    pc_ = nullptr;
+    ASSERT_NE(report, nullptr);
+    EXPECT_GE(report->size(), expected_min_stats_);
+    EXPECT_EQ(report->ToJson().empty(), report->size() == 0);
+    if (run_loop_ != nullptr) {
+      run_loop_->Quit();
+    }
+  }
+
+ private:
+  scoped_refptr<PeerConnectionInterface> pc_;
+  test::RunLoop* const run_loop_;
+  const size_t expected_min_stats_;
+  bool called_ = false;
+};
+
+TEST_F(RTCStatsRtpLifetimeTest, ReleaseInGetStatsCallback) {
+  NullPeerConnectionObserver pc_observer;
+  auto pc_or_error = caller_->pc_factory()->CreatePeerConnectionOrError(
+      {}, PeerConnectionDependencies(&pc_observer));
+  ASSERT_THAT(pc_or_error, IsRtcOk());
+  scoped_refptr<PeerConnectionInterface> pc = pc_or_error.MoveValue();
+  ASSERT_THAT(pc->AddTransceiver(MediaType::AUDIO), IsRtcOk());
+  PeerConnectionInterface* pc_ptr = pc.get();
+  auto callback = make_ref_counted<ReleaseOnStatsDeliveredCallback>(
+      std::move(pc), &run_loop_);
+  pc_ptr->GetStats(callback.get());
+  run_loop_.RunFor(TimeDelta::Millis(kGetStatsTimeoutMs));
+  EXPECT_TRUE(callback->called());
+}
+
+TEST_F(RTCStatsRtpLifetimeTest, ReleaseInCoalescedGetStatsCallback) {
+  NullPeerConnectionObserver pc_observer;
+  auto pc_or_error = caller_->pc_factory()->CreatePeerConnectionOrError(
+      {}, PeerConnectionDependencies(&pc_observer));
+  ASSERT_THAT(pc_or_error, IsRtcOk());
+  scoped_refptr<PeerConnectionInterface> pc = pc_or_error.MoveValue();
+  ASSERT_THAT(pc->AddTransceiver(MediaType::AUDIO), IsRtcOk());
+  PeerConnectionInterface* pc_ptr = pc.get();
+  auto callback1 = make_ref_counted<ReleaseOnStatsDeliveredCallback>(
+      std::move(pc), &run_loop_);
+  bool callback2_called = false;
+  scoped_refptr<RTCStatsObtainer> callback2 =
+      RTCStatsObtainer::Create(nullptr, [&]() { callback2_called = true; });
+  pc_ptr->GetStats(callback1.get());
+  pc_ptr->GetStats(callback2.get());
+  run_loop_.RunFor(TimeDelta::Millis(kGetStatsTimeoutMs));
+  EXPECT_TRUE(callback1->called());
+  EXPECT_FALSE(callback2_called);
+}
+
+TEST_F(RTCStatsRtpLifetimeTest, ReleaseInCachedGetStatsCallback) {
+  NullPeerConnectionObserver pc_observer;
+  auto pc_or_error = caller_->pc_factory()->CreatePeerConnectionOrError(
+      {}, PeerConnectionDependencies(&pc_observer));
+  ASSERT_THAT(pc_or_error, IsRtcOk());
+  scoped_refptr<PeerConnectionInterface> pc = pc_or_error.MoveValue();
+  ASSERT_THAT(pc->AddTransceiver(MediaType::AUDIO), IsRtcOk());
+  // Populate the stats cache first.
+  ASSERT_NE(GetStats(pc.get()), nullptr);
+
+  PeerConnectionInterface* pc_ptr = pc.get();
+  auto callback1 = make_ref_counted<ReleaseOnStatsDeliveredCallback>(
+      std::move(pc), &run_loop_);
+  bool callback2_called = false;
+  scoped_refptr<RTCStatsObtainer> callback2 =
+      RTCStatsObtainer::Create(nullptr, [&]() { callback2_called = true; });
+  pc_ptr->GetStats(callback1.get());
+  pc_ptr->GetStats(callback2.get());
+  run_loop_.RunFor(TimeDelta::Millis(kGetStatsTimeoutMs));
+  EXPECT_TRUE(callback1->called());
+  EXPECT_FALSE(callback2_called);
+}
+
+TEST_F(RTCStatsRtpLifetimeTest, ReleaseInSelectorGetStatsCallback) {
+  NullPeerConnectionObserver pc_observer;
+  auto pc_or_error = caller_->pc_factory()->CreatePeerConnectionOrError(
+      {}, PeerConnectionDependencies(&pc_observer));
+  ASSERT_THAT(pc_or_error, IsRtcOk());
+  scoped_refptr<PeerConnectionInterface> pc = pc_or_error.MoveValue();
+  auto transceiver_or_error = pc->AddTransceiver(MediaType::AUDIO);
+  ASSERT_THAT(transceiver_or_error, IsRtcOk());
+  scoped_refptr<RtpSenderInterface> sender =
+      transceiver_or_error.MoveValue()->sender();
+  PeerConnectionInterface* pc_ptr = pc.get();
+  auto callback1 = make_ref_counted<ReleaseOnStatsDeliveredCallback>(
+      std::move(pc), &run_loop_, /*expected_min_stats=*/0);
+  bool callback2_called = false;
+  scoped_refptr<RTCStatsObtainer> callback2 =
+      RTCStatsObtainer::Create(nullptr, [&]() { callback2_called = true; });
+  pc_ptr->GetStats(std::move(sender), callback1);
+  pc_ptr->GetStats(callback2.get());
+  run_loop_.RunFor(TimeDelta::Millis(kGetStatsTimeoutMs));
+  EXPECT_TRUE(callback1->called());
+  EXPECT_FALSE(callback2_called);
 }
 #endif  // WEBRTC_HAVE_SCTP
 

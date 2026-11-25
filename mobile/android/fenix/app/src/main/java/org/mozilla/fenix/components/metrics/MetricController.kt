@@ -7,7 +7,6 @@ package org.mozilla.fenix.components.metrics
 import androidx.annotation.VisibleForTesting
 import java.util.UUID
 import mozilla.components.browser.engine.gecko.facts.GeckoEngineViewFacts
-import mozilla.components.browser.menu.facts.BrowserMenuFacts
 import mozilla.components.browser.thumbnails.facts.BrowserThumbnailsFacts
 import mozilla.components.browser.toolbar.facts.ToolbarFacts
 import mozilla.components.compose.browser.awesomebar.AwesomeBarFacts as ComposeAwesomeBarFacts
@@ -20,6 +19,7 @@ import mozilla.components.feature.awesomebar.provider.HistoryStorageSuggestionPr
 import mozilla.components.feature.awesomebar.provider.SearchSuggestionProvider
 import mozilla.components.feature.awesomebar.provider.SessionSuggestionProvider
 import mozilla.components.feature.contextmenu.facts.ContextMenuFacts
+import mozilla.components.feature.downloads.facts.ShareResourceFacts
 import mozilla.components.feature.fxsuggest.FxSuggestInteractionInfo
 import mozilla.components.feature.fxsuggest.facts.FxSuggestFacts
 import mozilla.components.feature.media.facts.MediaFacts
@@ -46,7 +46,6 @@ import mozilla.components.support.base.log.logger.Logger
 import mozilla.components.support.webextensions.facts.WebExtensionFacts
 import mozilla.telemetry.glean.private.NoExtras
 import org.mozilla.fenix.BuildConfig
-import org.mozilla.fenix.GleanMetrics.Addons
 import org.mozilla.fenix.GleanMetrics.Addresses
 import org.mozilla.fenix.GleanMetrics.AndroidAutofill
 import org.mozilla.fenix.GleanMetrics.Awesomebar
@@ -67,10 +66,12 @@ import org.mozilla.fenix.GleanMetrics.NativeShareSheet
 import org.mozilla.fenix.GleanMetrics.PerfAwesomebar
 import org.mozilla.fenix.GleanMetrics.Pings
 import org.mozilla.fenix.GleanMetrics.ProgressiveWebApp
+import org.mozilla.fenix.GleanMetrics.ShareSheet
 import org.mozilla.fenix.GleanMetrics.SitePermissions
 import org.mozilla.fenix.GleanMetrics.Sync
 import org.mozilla.fenix.GleanMetrics.SyncedTabs
 import org.mozilla.fenix.GleanMetrics.TrackingProtection
+import org.mozilla.fenix.browser.TabGroupContextMenuCandidate
 import org.mozilla.fenix.components.share.ShareSource
 import org.mozilla.fenix.utils.Settings
 
@@ -219,11 +220,6 @@ internal class ReleaseMetricController(
                 } ?: Unit
             }
 
-            Component.BROWSER_MENU to BrowserMenuFacts.Items.WEB_EXTENSION_MENU_ITEM -> {
-                metadata?.get("id")?.let {
-                    Addons.openAddonInToolbarMenu.record(Addons.OpenAddonInToolbarMenuExtra(it.toString()))
-                } ?: Unit
-            }
             Component.FEATURE_PROMPTS to CreditCardAutofillDialogFacts.Items.AUTOFILL_CREDIT_CARD_FORM_DETECTED ->
                 CreditCards.formDetected.record(NoExtras())
             Component.FEATURE_PROMPTS to CreditCardAutofillDialogFacts.Items.AUTOFILL_CREDIT_CARD_SUCCESS ->
@@ -542,6 +538,28 @@ internal class ReleaseMetricController(
                 } ?: Unit
             }
 
+            Component.FEATURE_DOWNLOADS to ShareResourceFacts.Items.SHARE_DURATION -> {
+                (metadata?.get(ShareResourceFacts.MetadataKeys.DURATION_MS) as? Long)?.let {
+                    ShareSheet.shareFileResourceSuccess.record(
+                        ShareSheet.ShareFileResourceSuccessExtra(
+                            shareType = metadata?.get(ShareResourceFacts.MetadataKeys.SHARE_TYPE) as? String,
+                            contentType = metadata?.get(ShareResourceFacts.MetadataKeys.CONTENT_TYPE) as? String,
+                            durationMs = it.toInt(),
+                        )
+                    )
+                } ?: Unit
+            }
+
+            Component.FEATURE_DOWNLOADS to ShareResourceFacts.Items.SHARE_FAILED -> {
+                ShareSheet.shareFileResourceFail.record(
+                    ShareSheet.ShareFileResourceFailExtra(
+                        shareType = metadata?.get(ShareResourceFacts.MetadataKeys.SHARE_TYPE) as? String,
+                        contentType = metadata?.get(ShareResourceFacts.MetadataKeys.CONTENT_TYPE) as? String,
+                        failureReason = metadata?.get(ShareResourceFacts.MetadataKeys.FAILURE_REASON) as? String,
+                    )
+                )
+            }
+
             else -> {
                 // no-op
             }
@@ -666,6 +684,7 @@ internal class ReleaseMetricController(
                 "mozac.feature.contextmenu.copy_image_location" to "copy_image_location",
                 "mozac.feature.contextmenu.share_image" to "share_image",
                 "fenix.contextmenu.open_with_google_lens" to "open_with_google_lens",
+                TabGroupContextMenuCandidate.OPEN_IN_TAB_GROUP_ID to "open_in_tab_group",
             )
     }
 }

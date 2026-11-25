@@ -15,21 +15,11 @@
 }
 
 .extension-controlled-icon {
-  height: 16px;
-  width: 16px;
+  height: var(--icon-size);
+  width: var(--icon-size);
   vertical-align: bottom;
-
-  &.alltabs-icon {
-    background: url("chrome://browser/skin/search-tabs.svg");
-    -moz-context-properties: fill;
-    fill: currentColor;
-
-    @media (-moz-platform: windows) {
-      &:not(.alltabs-icon-generic) {
-        background-image: url("chrome://global/skin/icons/arrow-down.svg");
-      }
-    }
-  }
+  -moz-context-properties: fill;
+  fill: currentColor;
 }
 
 /* prettier-ignore */

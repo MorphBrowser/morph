@@ -579,19 +579,23 @@ class HTMLMediaElement::MediaControlKeyListener final
     }
   }
 
-  void SuspendForInterrupt() override {
+  void SuspendForInterrupt(AudioSessionInterruptKind aKind) override {
     MOZ_ASSERT(NS_IsMainThread());
     // Only an audible, playing element yields to an interruption; a paused or
     // inaudible element (muted, volume 0, or no audio track) is left alone.
-    if (!Owner() || Owner()->Paused() || !mIsOwnerAudible) {
-      return;
+    const bool willPause = Owner() && !Owner()->Paused() && mIsOwnerAudible;
+    MEDIACONTROL_LOG("SuspendForInterrupt {}, pause={}",
+                     dom::EnumValueToString(aKind), willPause);
+    if (willPause) {
+      // Pausing clears mSuspendedByInterrupt (see NotifyPaused); set it back
+      // right after our own pause so ResumeFromInterrupt knows this element is
+      // the one the interruption suspended.
+      Owner()->Pause();
+      mSuspendedByInterrupt = true;
     }
-    MEDIACONTROL_LOG("SuspendForInterrupt");
-    // Pausing clears mSuspendedByInterrupt (see NotifyPaused); set it back
-    // right after our own pause so ResumeFromInterrupt knows this element is
-    // the one the interruption suspended.
-    Owner()->Pause();
-    mSuspendedByInterrupt = true;
+    if (aKind == AudioSessionInterruptKind::Permanent) {
+      mSuspendedByInterrupt = false;
+    }
   }
 
   void ResumeFromInterrupt() override {
@@ -877,6 +881,8 @@ class HTMLMediaElement::MediaStreamRenderer {
       : mVideoContainer(aVideoContainer),
         mAudioOutputKey(aAudioOutputKey),
         mWatchManager(this, aMainThread),
+        mGraphCurrentTime(aMainThread, 0,
+                          "MediaStreamRenderer::mGraphCurrentTime"),
         mFirstFrameVideoOutput(aFirstFrameVideoOutput) {
     if (mFirstFrameVideoOutput) {
       mWatchManager.Watch(mFirstFrameVideoOutput->mFirstFrameRendered,
@@ -900,13 +906,21 @@ class HTMLMediaElement::MediaStreamRenderer {
       RemoveTrack(mVideoTrack.Ref()->AsVideoStreamTrack());
     }
     mWatchManager.Shutdown();
+    mGraphCurrentTime.DisconnectIfConnected();
+    if (mGraphTimeTracker && !mGraphTimeTracker->IsDestroyed()) {
+      mGraphTimeTracker->Destroy();
+    }
     mFirstFrameVideoOutput = nullptr;
     mVideoOutput = nullptr;
   }
 
-  void UpdateGraphTime() {
-    mGraphTime =
-        mGraphTimeDummy->mTrack->Graph()->CurrentTime() - *mGraphTimeOffset;
+  void UpdateCurrentTime() {
+    if (!mProgressingCurrentTime) {
+      // The graph may still advance mGraphTimeTracker until it has been
+      // suspended on the graph thread. currentTime must not change meanwhile.
+      return;
+    }
+    mCurrentTime = mGraphCurrentTime.Ref();
   }
 
   void SetFirstFrameRendered() {
@@ -929,16 +943,15 @@ class HTMLMediaElement::MediaStreamRenderer {
       return;
     }
 
-    MOZ_DIAGNOSTIC_ASSERT(mGraphTimeDummy);
+    MOZ_DIAGNOSTIC_ASSERT(mGraphTimeTracker);
     mProgressingCurrentTime = aProgress;
-    MediaTrackGraph* graph = mGraphTimeDummy->mTrack->Graph();
     if (mProgressingCurrentTime) {
-      mGraphTimeOffset = Some(graph->CurrentTime().Ref() - mGraphTime);
-      mWatchManager.Watch(graph->CurrentTime(),
-                          &MediaStreamRenderer::UpdateGraphTime);
+      // The time may have changed on the graph since a prior suspend. If so,
+      // this fires the first time update immediately.
+      mCurrentTime = mGraphCurrentTime.Ref();
+      mGraphTimeTracker->Resume();
     } else {
-      mWatchManager.Unwatch(graph->CurrentTime(),
-                            &MediaStreamRenderer::UpdateGraphTime);
+      mGraphTimeTracker->Suspend();
     }
   }
 
@@ -950,7 +963,7 @@ class HTMLMediaElement::MediaStreamRenderer {
     LOG(LogLevel::Info, ("MediaStreamRenderer={} Start", fmt::ptr(this)));
     mRendering = true;
 
-    if (!mGraphTimeDummy) {
+    if (!mGraphTimeTracker) {
       return;
     }
 
@@ -974,7 +987,7 @@ class HTMLMediaElement::MediaStreamRenderer {
     LOG(LogLevel::Info, ("MediaStreamRenderer={} Stop", fmt::ptr(this)));
     mRendering = false;
 
-    if (!mGraphTimeDummy) {
+    if (!mGraphTimeTracker) {
       return;
     }
 
@@ -1073,7 +1086,7 @@ class HTMLMediaElement::MediaStreamRenderer {
   void AddTrack(AudioStreamTrack* aTrack) {
     MOZ_DIAGNOSTIC_ASSERT(!mAudioTracks.Contains(aTrack));
     mAudioTracks.AppendElement(aTrack);
-    EnsureGraphTimeDummy();
+    EnsureGraphTimeTracker();
     if (mRendering) {
       aTrack->AddAudioOutput(mAudioOutputKey, mAudioOutputSink);
       aTrack->SetAudioOutputVolume(mAudioOutputKey, mAudioOutputVolume);
@@ -1085,7 +1098,7 @@ class HTMLMediaElement::MediaStreamRenderer {
       return;
     }
     mVideoTrack = aTrack;
-    EnsureGraphTimeDummy();
+    EnsureGraphTimeTracker();
     // Video output attachment is handled by UpdateVideoTrackListeners via the
     // mVideoTrack Watchable, when mVideoContainer is known to not be in use
     // from a VideoOutput for a previous track on a potentially different
@@ -1123,14 +1136,14 @@ class HTMLMediaElement::MediaStreamRenderer {
   }
 
   double CurrentTime() const {
-    if (!mGraphTimeDummy) {
+    if (!mGraphTimeTracker) {
       return 0.0;
     }
 
-    return mGraphTimeDummy->mTrack->GraphImpl()->MediaTimeToSeconds(mGraphTime);
+    return mGraphTimeTracker->TrackTimeToSeconds(mCurrentTime);
   }
 
-  Watchable<GraphTime>& CurrentGraphTime() { return mGraphTime; }
+  Watchable<TrackTime>& CurrentTrackTime() { return mCurrentTime; }
 
   // Set if we're rendering video.
   const RefPtr<VideoFrameContainer> mVideoContainer;
@@ -1141,8 +1154,8 @@ class HTMLMediaElement::MediaStreamRenderer {
  private:
   ~MediaStreamRenderer() { Shutdown(); }
 
-  void EnsureGraphTimeDummy() {
-    if (mGraphTimeDummy) {
+  void EnsureGraphTimeTracker() {
+    if (mGraphTimeTracker) {
       return;
     }
 
@@ -1162,9 +1175,12 @@ class HTMLMediaElement::MediaStreamRenderer {
       return;
     }
 
-    // This dummy keeps `graph` alive and ensures access to it.
-    mGraphTimeDummy = MakeRefPtr<SharedDummyTrack>(
-        graph->CreateSourceTrack(MediaSegment::AUDIO));
+    mGraphTimeTracker = graph->CreateSourceTrack(
+        MediaSegment::VIDEO, {SourceMediaTrack::Flag::EnableCanonicals});
+    mGraphTimeTracker->Suspend();
+    mGraphCurrentTime.Connect(&mGraphTimeTracker->CanonicalCurrentTime());
+    mWatchManager.Watch(mGraphCurrentTime,
+                        &MediaStreamRenderer::UpdateCurrentTime);
   }
 
   void UpdateVideoTrackListeners() {
@@ -1218,7 +1234,7 @@ class HTMLMediaElement::MediaStreamRenderer {
   // playing.
   Watchable<bool> mRendering = {false, "MediaStreamRenderer::mRendering"};
 
-  // True while we're progressing mGraphTime. False otherwise.
+  // True while we're progressing mCurrentTime. False otherwise.
   bool mProgressingCurrentTime = false;
 
   // The audio output volume for all audio tracks.
@@ -1236,19 +1252,17 @@ class HTMLMediaElement::MediaStreamRenderer {
 
   WatchManager<MediaStreamRenderer> mWatchManager;
 
-  // A dummy MediaTrack to guarantee a MediaTrackGraph is kept alive while
-  // we're actively rendering, so we can track the graph's current time. Set
-  // when the first track is added, never unset.
-  RefPtr<SharedDummyTrack> mGraphTimeDummy;
+  // Mirror of mGraphTimeTracker's current time.
+  Mirror<TrackTime> mGraphCurrentTime;
 
-  // Watchable that relays the graph's currentTime updates to the media element
-  // only while we're rendering. This is the current time of the rendering in
-  // GraphTime units.
-  Watchable<GraphTime> mGraphTime = {0, "MediaStreamRenderer::mGraphTime"};
+  // A MediaTrack to measure the duration for which we have been rendering media
+  // on the graph. Set when the first track is added, never unset.
+  RefPtr<SourceMediaTrack> mGraphTimeTracker;
 
-  // Nothing until a track has been added. Then, the current GraphTime at the
-  // time when we were last Start()ed.
-  Maybe<GraphTime> mGraphTimeOffset;
+  // Watchable that relays mGraphCurrentTime, the mirrored current time of
+  // mGraphTimeTracker, to the media element only while mProgressingCurrentTime
+  // is set. This is the current time of the rendering in TrackTime units.
+  Watchable<TrackTime> mCurrentTime = {0, "MediaStreamRenderer::mCurrentTime"};
 
   // Currently enabled (and rendered) audio tracks.
   nsTArray<WeakPtr<MediaStreamTrack>> mAudioTracks;
@@ -2289,6 +2303,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(HTMLMediaElement,
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mIncomingMediaKeys)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSelectedVideoStreamTrack)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPendingPlayPromises)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPendingPlayPromisesRunners)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSeekDOMPromise)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSetMediaKeysDOMPromise)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mEventBlocker)
@@ -2343,6 +2358,7 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(HTMLMediaElement,
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mIncomingMediaKeys)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mSelectedVideoStreamTrack)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mPendingPlayPromises)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mPendingPlayPromisesRunners)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mSeekDOMPromise)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mSetMediaKeysDOMPromise)
   if (tmp->mMediaControlKeyListener) {
@@ -2389,7 +2405,7 @@ already_AddRefed<Promise> HTMLMediaElement::MozRequestDebugInfo(
   if (NS_WARN_IF(aRv.Failed())) {
     return nullptr;
   }
-  auto result = MakeUnique<dom::HTMLMediaElementDebugInfo>();
+  auto result = std::make_unique<dom::HTMLMediaElementDebugInfo>();
   if (mMediaKeys) {
     GetEMEInfo(result->mEMEInfo);
   }
@@ -2605,9 +2621,6 @@ void HTMLMediaElement::ShutdownDecoder() {
   NS_ASSERTION(mDecoder, "Must have decoder to shut down");
 
   mWaitingForKeyListener.DisconnectIfExists();
-  if (mMediaSource) {
-    mMediaSource->CompletePendingTransactions();
-  }
   mDecoder->Shutdown();
   DDUNLINKCHILD(mDecoder.get());
   mDecoder = nullptr;
@@ -2616,6 +2629,7 @@ void HTMLMediaElement::ShutdownDecoder() {
 void HTMLMediaElement::AbortExistingLoads() {
   MOZ_ASSERT(NS_IsMainThread());
   LOG(LogLevel::Debug, ("{} Abort existing loads", fmt::ptr(this)));
+  mLazyLoadingCompleted = false;
   // Abort any already-running instance of the resource selection algorithm.
   mLoadWaitStatus = NOT_WAITING;
 
@@ -2862,6 +2876,44 @@ static nsCString DocumentOrigin(Document* aDoc) {
   return origin;
 }
 
+void HTMLMediaElement::SetLazyLoading() {
+  if (!StaticPrefs::media_lazy_loading_enabled()) {
+    return;
+  }
+
+  if (mLazyLoading || mLazyLoadingCompleted || !MaybeStartLazyLoading()) {
+    return;
+  }
+
+  mLazyLoading = true;
+  ChangeNetworkState(NETWORK_IDLE);
+  LOG(LogLevel::Debug, ("{} SetLazyLoading: pending", fmt::ptr(this)));
+}
+
+void HTMLMediaElement::StopLazyLoading(StartLoad aStartLoad) {
+  if (!mLazyLoading) {
+    return;
+  }
+
+  mLazyLoading = false;
+  Element::StopLazyLoading();
+
+  if (IsVideo() && aStartLoad == StartLoad::Yes) {
+    if (nsVideoFrame* videoFrame = do_QueryFrame(GetPrimaryFrame())) {
+      videoFrame->UpdatePosterSource(true);
+    }
+  }
+
+  if (aStartLoad == StartLoad::Yes) {
+    LOG(LogLevel::Debug, ("{} StopLazyLoading: loading now", fmt::ptr(this)));
+    DoLoad();
+    mLazyLoadingCompleted = true;
+  } else {
+    LOG(LogLevel::Debug,
+        ("{} StopLazyLoading: stopped without loading", fmt::ptr(this)));
+  }
+}
+
 void HTMLMediaElement::Load() {
   LOG(LogLevel::Debug,
       ("{} Load() hasSrcAttrStream={} hasSrcAttr={} hasSourceChildren={} "
@@ -2878,8 +2930,20 @@ void HTMLMediaElement::Load() {
     return;
   }
 
+  // An explicit load() call must override lazy loading deferral.
+  // StartLoad::No: DoLoad() handles resource selection itself and skips
+  // UpdatePosterSource. An explicit load() should not trigger poster loading,
+  // matching the spec's load() steps, which invoke only the media lazy load
+  // resumption steps.
+  const bool wasLazyLoading = mLazyLoading;
+  StopLazyLoading(StartLoad::No);
+
   mIsDoingExplicitLoad = true;
   DoLoad();
+
+  if (wasLazyLoading) {
+    mLazyLoadingCompleted = true;
+  }
 }
 
 void HTMLMediaElement::DoLoad() {
@@ -2891,6 +2955,11 @@ void HTMLMediaElement::DoLoad() {
   }
 
   if (mIsRunningLoadMethod) {
+    return;
+  }
+
+  if (mLazyLoading) {
+    LOG(LogLevel::Debug, ("{} DoLoad: load deferred (lazy)", fmt::ptr(this)));
     return;
   }
 
@@ -2954,6 +3023,12 @@ void HTMLMediaElement::SelectResource(
     // element children, abort the load.
     ChangeNetworkState(NETWORK_EMPTY);
     ChangeDelayLoadStatus(false);
+    return;
+  }
+
+  if (mLazyLoading) {
+    LOG(LogLevel::Debug,
+        ("{} SelectResource: load deferred (lazy)", fmt::ptr(this)));
     return;
   }
 
@@ -3188,7 +3263,7 @@ void HTMLMediaElement::DealWithFailedElement(nsIContent* aSourceElement) {
 
 void HTMLMediaElement::LoadFromSourceChildren(
     const JSCallingLocation& aCallingLocation) {
-  NS_ASSERTION(mDelayingLoadEvent,
+  NS_ASSERTION(mDelayingLoadEvent || LoadingState() == Loading::Lazy,
                "Should delay load event (if in document) during load");
   NS_ASSERTION(mIsLoadingFromSourceChildren,
                "Must remember we're loading from source children");
@@ -3461,7 +3536,7 @@ void HTMLMediaElement::UpdatePreloadAction(
 
 MediaResult HTMLMediaElement::LoadResource(
     const JSCallingLocation& aCallingLocation) {
-  NS_ASSERTION(mDelayingLoadEvent,
+  NS_ASSERTION(mDelayingLoadEvent || LoadingState() == Loading::Lazy,
                "Should delay load event (if in document) during load");
 
   if (mChannelLoader) {
@@ -3800,6 +3875,7 @@ void HTMLMediaElement::Pause(ErrorResult& aRv) {
 }
 
 void HTMLMediaElement::PauseInternal() {
+  RefPtr<HTMLMediaElement> kungFuDeathGrip(this);
   if (mDecoder && mNetworkState != NETWORK_EMPTY) {
     mDecoder->Pause();
   }
@@ -4390,11 +4466,11 @@ already_AddRefed<DOMMediaStream> HTMLMediaElement::CaptureStreamInternal(
         return nullptr;
       }
 
-      MediaTrackGraph::GraphDriverType graphDriverType =
-          HasAudio() ? MediaTrackGraph::AUDIO_THREAD_DRIVER
-                     : MediaTrackGraph::SYSTEM_THREAD_DRIVER;
+      // A new graph will choose a SystemClockDriver until an audio output is
+      // added, so don't open an audio stream up front.
       graph = MediaTrackGraph::GetInstance(
-          graphDriverType, window, MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE,
+          MediaTrackGraph::SYSTEM_THREAD_DRIVER, window,
+          MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE,
           MediaTrackGraph::DEFAULT_OUTPUT_DEVICE);
     }
     mTracksCaptured = MakeRefPtr<SharedDummyTrack>(
@@ -5155,6 +5231,17 @@ already_AddRefed<Promise> HTMLMediaElement::Play(ErrorResult& aRv) {
   // play promises.
   // Note: Promise appended to list of pending promises as needed below.
 
+  // Per spec, play() invokes the media lazy load resumption steps but not the
+  // poster lazy load resumption steps. Handle this before other checks so
+  // loading begins even if play is later blocked or delayed.
+  if (mLazyLoading) {
+    StopLazyLoading(StartLoad::No);
+    DoLoad();
+    // Must be set after DoLoad(): DoLoad() calls AbortExistingLoads(), which
+    // resets mLazyLoadingCompleted to false.
+    mLazyLoadingCompleted = true;
+  }
+
   if (ShouldBeSuspendedByInactiveDocShell()) {
     LOG(LogLevel::Debug,
         ("{} no allow to play by the docShell for now", fmt::ptr(this)));
@@ -5610,6 +5697,10 @@ bool HTMLMediaElement::ParseAttribute(int32_t aNamespaceID, nsAtom* aAttribute,
                                     // not a recognised value.
                                     kPreloadDefaultType);
     }
+
+    if (aAttribute == nsGkAtoms::loading) {
+      return ParseLoadingAttribute(aValue, aResult);
+    }
   }
 
   return nsGenericHTMLElement::ParseAttribute(aNamespaceID, aAttribute, aValue,
@@ -5645,7 +5736,14 @@ void HTMLMediaElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
                                     nsIPrincipal* aMaybeScriptedPrincipal,
                                     bool aNotify) {
   if (aNameSpaceID == kNameSpaceID_None) {
-    if (aName == nsGkAtoms::src) {
+    if (aName == nsGkAtoms::loading) {
+      if (aValue && Loading(aValue->GetEnumValue()) == Loading::Lazy) {
+        SetLazyLoading();
+      } else if (aOldValue &&
+                 Loading(aOldValue->GetEnumValue()) == Loading::Lazy) {
+        StopLazyLoading(StartLoad(aNotify));
+      }
+    } else if (aName == nsGkAtoms::src) {
       mSrcMediaSource = nullptr;
       nsAttrValueOrString srcVal(aValue);
       mSrcAttrTriggeringPrincipal = nsContentUtils::GetAttrTriggeringPrincipal(
@@ -5662,11 +5760,13 @@ void HTMLMediaElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
     } else if (aName == nsGkAtoms::autoplay) {
       if (aNotify) {
         if (aValue) {
+          if (!mLazyLoading) {
 #if defined(MOZ_WIDGET_ANDROID)
-          StartObservingGVAutoplayIfNeeded();
+            StartObservingGVAutoplayIfNeeded();
 #endif
-          StopSuspendingAfterFirstFrame();
-          CheckAutoplayDataReady();
+            StopSuspendingAfterFirstFrame();
+            CheckAutoplayDataReady();
+          }
         }
         // This attribute can affect AddRemoveSelfReference
         AddRemoveSelfReference();
@@ -5725,6 +5825,15 @@ void HTMLMediaElement::AfterMaybeChangeAttr(int32_t aNamespaceID, nsAtom* aName,
                                             bool aNotify) {
   if (aNamespaceID == kNameSpaceID_None) {
     if (aName == nsGkAtoms::src) {
+      mLazyLoadingCompleted = false;
+
+      if (StaticPrefs::media_lazy_loading_enabled() &&
+          LoadingState() == Loading::Lazy) {
+        if (!mLazyLoading) {
+          AbortExistingLoads();
+        }
+        SetLazyLoading();
+      }
       DoLoad();
     }
   }
@@ -5742,6 +5851,10 @@ nsresult HTMLMediaElement::BindToTree(BindContext& aContext, nsINode& aParent) {
     UpdatePreloadAction(JSCallingLocation::Get());
   }
 
+  if (mLazyLoading) {
+    LazyLoadingElementBindToTree(aContext);
+  }
+
   NotifyDecoderActivityChanges();
   mMediaControlKeyListener->UpdateOwnerBrowsingContextIfNeeded();
   return rv;
@@ -5752,6 +5865,10 @@ void HTMLMediaElement::UnbindFromTree(UnbindContext& aContext) {
 
   if (IsInComposedDoc()) {
     TeardownUAShadowRoot(NotifyUAWidget::Yes);
+  }
+
+  if (mLazyLoading) {
+    LazyLoadingElementUnbindFromTree(aContext);
   }
 
   nsGenericHTMLElement::UnbindFromTree(aContext);
@@ -6110,7 +6227,7 @@ void HTMLMediaElement::SetupSrcMediaStreamPlayback(DOMMediaStream* aStream) {
                       &HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying);
   mWatchManager.Watch(mSrcStreamPlaybackEnded,
                       &HTMLMediaElement::UpdateSrcStreamReportPlaybackEnded);
-  mWatchManager.Watch(mMediaStreamRenderer->CurrentGraphTime(),
+  mWatchManager.Watch(mMediaStreamRenderer->CurrentTrackTime(),
                       &HTMLMediaElement::UpdateSrcStreamTime);
   SetVolumeInternal();
   if (mSink.second) {
@@ -6161,7 +6278,7 @@ void HTMLMediaElement::EndSrcMediaStreamPlayback() {
     mWatchManager.Unwatch(
         mSrcStreamPlaybackEnded,
         &HTMLMediaElement::UpdateSrcStreamReportPlaybackEnded);
-    mWatchManager.Unwatch(mMediaStreamRenderer->CurrentGraphTime(),
+    mWatchManager.Unwatch(mMediaStreamRenderer->CurrentTrackTime(),
                           &HTMLMediaElement::UpdateSrcStreamTime);
     mMediaStreamRenderer->Shutdown();
     mMediaStreamRenderer = nullptr;
@@ -6698,6 +6815,15 @@ bool HTMLMediaElement::IsCORSSameOrigin() {
          ShouldCheckAllowOrigin();
 }
 
+void HTMLMediaElement::UpdateReadyState() {
+  if (AppShutdown::IsInOrBeyond(ShutdownPhase::XPCOMShutdownFinal)) {
+    // The final shutdown cycle collection unbinds track elements without a
+    // current AbstractThread to notify on.
+    return;
+  }
+  mWatchManager.ManualNotify(&HTMLMediaElement::UpdateReadyStateInternal);
+}
+
 void HTMLMediaElement::UpdateReadyStateInternal() {
   if (!mDecoder && !mSrcStream) {
     // Not initialized - bail out.
@@ -6913,6 +7039,8 @@ void HTMLMediaElement::ChangeReadyState(nsMediaReadyState aState) {
   if (mReadyState == aState) {
     return;
   }
+
+  RefPtr<HTMLMediaElement> kungFuDeathGrip(this);
 
   nsMediaReadyState oldState = mReadyState;
   mReadyState = aState;
@@ -7673,6 +7801,11 @@ HTMLSourceElement* HTMLMediaElement::GetNextSource() {
 }
 
 void HTMLMediaElement::ChangeDelayLoadStatus(bool aDelay) {
+  if (aDelay && LoadingState() == Loading::Lazy) {
+    // Lazy media must not delay the document load event after deferral resumes.
+    aDelay = false;
+  }
+
   if (mDelayingLoadEvent == aDelay) {
     return;
   }
@@ -7789,6 +7922,7 @@ bool HTMLMediaElement::ShouldQueueTimeupdateAsyncTask(
 
 void HTMLMediaElement::FireTimeUpdate(TimeupdateType aType) {
   NS_ASSERTION(NS_IsMainThread(), "Should be on main thread.");
+  RefPtr<HTMLMediaElement> kungFuDeathGrip(this);
 
   if (ShouldQueueTimeupdateAsyncTask(aType)) {
     RefPtr<nsMediaEventRunner> runner =
@@ -8956,6 +9090,11 @@ void HTMLMediaElement::NodeInfoChanged(Document* aOldDoc) {
   if (mMediaSource) {
     OwnerDoc()->AddMediaElementWithMSE();
     aOldDoc->RemoveMediaElementWithMSE();
+  }
+
+  StopLazyLoading(StartLoad::No);
+  if (LoadingState() == Loading::Lazy) {
+    SetLazyLoading();
   }
 
   nsGenericHTMLElement::NodeInfoChanged(aOldDoc);

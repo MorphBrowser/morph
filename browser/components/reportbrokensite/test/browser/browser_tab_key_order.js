@@ -7,6 +7,8 @@
 
 add_common_setup();
 
+add_setup(setupBuiltInTestTrackers);
+
 async function ensureTabOrder(rbs, order, expectBackButton = true) {
   let foundBackAlready = false;
   for (let matches of order) {
@@ -95,11 +97,11 @@ async function checkDetailsPanel(
       expectScreenshotToggle,
       "#report-broken-site-popup-screenshot-toggle"
     ),
+    "#report-broken-site-popup-preview-button",
     ...maybe(
       expectSendMoreInfo,
       "#report-broken-site-popup-send-more-info-button"
     ),
-    "#report-broken-site-popup-preview-button",
     // moz-button-groups swap the order of buttons to follow
     // platform conventions, so the order of send/cancel will vary.
     [

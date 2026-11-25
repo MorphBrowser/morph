@@ -10,6 +10,7 @@
 #include "mozilla/layers/APZPublicUtils.h"  // for APZWheelAction, DispatchToContent
 #include "mozilla/layers/LayersTypes.h"          // for ScrollDirections
 #include "mozilla/layers/ScrollableLayerGuid.h"  // for ScrollableLayerGuid
+#include "nsISupportsImpl.h"
 
 namespace mozilla {
 
@@ -219,6 +220,10 @@ struct APZEventResult {
 
   // Whether APZ found a horizontal scroll target.
   bool mTargetCanScrollHorizontally = false;
+
+  // Nothing if APZ cannot tell the swipable directions yet. If so, APZ
+  // notifies the widget of them later with mInputBlockId.
+  Maybe<SideBits> mSwipableDirectionsForTouch = Some(SideBits::eNone);
 };
 
 /**
@@ -231,6 +236,8 @@ struct APZEventResult {
  * APZCTreeManager overrides and implements these methods directly.
  */
 class APZBridge {
+  NS_INLINE_DECL_PURE_VIRTUAL_REFCOUNTING
+
  public:
   using InputBlockCallback = std::function<void(
       uint64_t aInputBlockId, const APZHandledResult& aHandledResult)>;

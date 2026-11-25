@@ -4,9 +4,9 @@
 
 import { html, nothing } from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/ai-grouped-chip-container.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/aitab-page-actions.mjs";
 
 /** @typedef {{ favicon?: string, title?: string, href: string }} SourceLink */
@@ -26,6 +26,8 @@ import "chrome://browser/content/aiwindow/components/aitab-page-actions.mjs";
  * @property {string} subhead - One sentence of context below the title.
  * @property {SourceLink[]} references - Pages this report was built from.
  * @property {boolean} refreshing - Whether sources are being re-fetched.
+ * @property {boolean} editable - Whether the page can be revised, which
+ *   decides the page actions offered.
  */
 export class AITabHeader extends MozLitElement {
   static properties = {
@@ -34,6 +36,7 @@ export class AITabHeader extends MozLitElement {
     subhead: { type: String },
     references: { type: Array },
     refreshing: { type: Boolean },
+    editable: { type: Boolean },
   };
 
   constructor() {
@@ -43,6 +46,7 @@ export class AITabHeader extends MozLitElement {
     this.subhead = "";
     this.references = [];
     this.refreshing = false;
+    this.editable = true;
   }
 
   #renderCreatedAt() {
@@ -65,6 +69,7 @@ export class AITabHeader extends MozLitElement {
     return html`<ai-grouped-chip-container
       class="aitab-references"
       .chips=${chips}
+      .chipsLabel=${"smart-window-aitab-sources-count"}
       openLinkEvent="AITab:OpenLink"
     ></ai-grouped-chip-container>`;
   }
@@ -83,6 +88,7 @@ export class AITabHeader extends MozLitElement {
         <aitab-page-actions
           class="aitab-header-actions"
           ?refreshing=${this.refreshing}
+          .editable=${this.editable}
         ></aitab-page-actions>
         ${this.#renderCreatedAt()}
         <h1 class="aitab-title">${this.title}</h1>

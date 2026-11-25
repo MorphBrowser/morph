@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-/* eslint-disable import/no-unassigned-import */
+/* eslint-disable import-x/no-unassigned-import */
 
 import { NetErrorCard } from "chrome://global/content/net-error-card.mjs";
 import {
@@ -13,6 +13,7 @@ import {
   gOffline,
   searchParams,
   getHostName,
+  getLoopbackInfo,
   getSubjectAltNames,
   getFailedCertificatesAsPEMString,
   recordSecurityUITelemetry,
@@ -21,6 +22,7 @@ import {
   retryThis,
   handleNSSFailure,
   detectClockSkew,
+  isVPNError,
 } from "chrome://global/content/aboutNetErrorHelpers.mjs";
 import { initializeRegistry } from "chrome://global/content/errors/error-registry.mjs";
 import {
@@ -73,6 +75,7 @@ const KNOWN_ERROR_TITLE_IDS = new Set([
   "certerror-mitm-title",
   "general-body-title",
   "problem-with-this-site-title",
+  "neterror-http-auth-scheme-disabled-title",
 ]);
 
 /* The error message IDs from nsserror.ftl get processed into
@@ -311,6 +314,10 @@ function initTitleAndBodyIds(baseURL, isTRROnlyFailure) {
       bodyTitleId = "general-body-title";
       tryAgain.hidden = true;
       break;
+    case "httpAuthSchemeDisabled":
+      bodyTitleId = "neterror-http-auth-scheme-disabled-title";
+      tryAgain.hidden = true;
+      break;
     case "blockedByPolicy":
       pageTitleId = "neterror-blocked-by-policy-page-title";
       document.body.classList.add("blocked");
@@ -320,7 +327,8 @@ function initTitleAndBodyIds(baseURL, isTRROnlyFailure) {
       tryAgain.hidden = true;
       break;
     case "blockedByCOOP":
-    case "blockedByCOEP": {
+    case "blockedByCOEP":
+    case "blockedByConnectionAllowlist": {
       bodyTitleId = "general-body-title";
       document.body.classList.add("blocked");
       tryAgain.hidden = true;
@@ -682,6 +690,9 @@ function getNetErrorDescParts(noConnectivity) {
     noConnectivity,
     showOSXPermissionWarning: RPMShowOSXLocalNetworkPermissionWarning(),
     offline: gOffline,
+    // Only a refused connection means "nothing is listening"; timeouts and
+    // resets on loopback can have other causes.
+    loopback: gErrorCode == "connectionFailure" ? getLoopbackInfo() : null,
   };
 
   // The legacy page looks up configs by gErrorCode (the URL e= parameter).
@@ -1328,7 +1339,9 @@ async function main() {
     customElements.define("net-error-card", NetErrorCard);
     document.body.classList.add("felt-privacy-body");
     const warning = document.getElementById("sslKeyLoggingWarning");
-    document.body.replaceChildren(document.createElement("net-error-card"));
+    const card = document.createElement("net-error-card");
+    card.vpnError = await isVPNError();
+    document.body.replaceChildren(card);
     if (warning) {
       document.body.prepend(warning);
     }

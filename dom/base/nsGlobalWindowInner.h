@@ -94,7 +94,6 @@ enum class ScreenOrientation : uint32_t;
 namespace dom {
 class BarProp;
 class BrowsingContext;
-struct ChannelPixelLayout;
 class Credential;
 class ClientSource;
 class Console;
@@ -108,7 +107,6 @@ class External;
 class FunctionOrTrustedScriptOrString;
 class Gamepad;
 class ContentMediaController;
-enum class ImageBitmapFormat : uint8_t;
 class IdleRequest;
 class IdleRequestCallback;
 class IdleRequestMap;
@@ -554,14 +552,6 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   void NotifyActiveVRDisplaysChanged();
   void NotifyDetectXRRuntimesCompleted();
   void NotifyPresentationGenerationChanged(uint32_t aDisplayID);
-
-  void DispatchVRDisplayActivate(uint32_t aDisplayID,
-                                 mozilla::dom::VRDisplayEventReason aReason);
-  void DispatchVRDisplayDeactivate(uint32_t aDisplayID,
-                                   mozilla::dom::VRDisplayEventReason aReason);
-  void DispatchVRDisplayConnect(uint32_t aDisplayID);
-  void DispatchVRDisplayDisconnect(uint32_t aDisplayID);
-  void DispatchVRDisplayPresentChange(uint32_t aDisplayID);
 
 #define EVENT(name_, id_, type_, struct_)                              \
   mozilla::dom::EventHandlerNonNull* GetOn##name_() {                  \
@@ -1216,7 +1206,7 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   void DisconnectAndClearGroupMessageManagers() {
     MOZ_RELEASE_ASSERT(IsChromeWindow());
     for (const auto& entry : mChromeFields.mGroupMessageManagers) {
-      mozilla::dom::ChromeMessageBroadcaster* mm = entry.GetWeak();
+      mozilla::dom::ChromeMessageBroadcaster* mm = entry.GetRawPtr();
       if (mm) {
         mm->Disconnect();
       }
@@ -1321,7 +1311,11 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
     return mClientSource.get();
   }
 
+  void HoldOldPrincipal(nsIPrincipal* aPrincipal);
+
  private:
+  void ClearOldPrincipalsIfNotNestedEventLoop();
+
   RefPtr<mozilla::dom::ContentMediaController> mContentMediaController;
 
   RefPtr<mozilla::dom::WebTaskSchedulerMainThread> mWebTaskScheduler;
@@ -1536,6 +1530,12 @@ class nsGlobalWindowInner final : public mozilla::dom::EventTarget,
   RefPtr<mozilla::dom::DataTransfer> mCurrentPasteDataTransfer;
 
   nsTArray<nsCString> mMediaSourceURLs;
+
+  // Holder for past principals to keep them alive so that we need to refcount
+  // them only when we actually swap principals and we don't need to refcount
+  // them on hot code paths in bindings that use raw pointers and must not
+  // get the principal deleted from underneath them.
+  nsTArray<nsCOMPtr<nsIPrincipal>> mOldPrincipals;
 
   // These fields are used by the inner and outer windows to prevent
   // programatically moving the window while the mouse is down.

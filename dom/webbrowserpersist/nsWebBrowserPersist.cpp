@@ -52,6 +52,7 @@
 #include "nsNetCID.h"
 #include "nsNetUtil.h"
 #include "nsStreamUtils.h"
+#include "nsUTF8Utils.h"
 #include "nspr.h"
 
 #ifdef XP_WIN
@@ -124,7 +125,7 @@ struct nsWebBrowserPersist::OutputData {
         mOriginalLocation(aOriginalLocation),
         mStreamMutex("nsWebBrowserPersist::OutputData::mStreamMutex"),
         mSelfProgress(0),
-        mSelfProgressMax(10000),
+        mSelfProgressMax(-1),
         mCalcFileExt(aCalcFileExt) {}
   ~OutputData() {
     // Gaining this lock in the destructor is pretty icky. It should be OK
@@ -144,7 +145,7 @@ struct nsWebBrowserPersist::UploadData {
   int64_t mSelfProgressMax;
 
   explicit UploadData(nsIURI* aFile)
-      : mFile(aFile), mSelfProgress(0), mSelfProgressMax(10000) {}
+      : mFile(aFile), mSelfProgress(0), mSelfProgressMax(-1) {}
 };
 
 struct nsWebBrowserPersist::CleanupData {
@@ -312,6 +313,27 @@ nsCString GenerateRandomSeed() {
   return seed;
 }
 
+// Returns the largest length <= aLength that doesn't split a UTF-8 sequence.
+uint32_t LengthAtCharBoundary(const nsACString& aStr, uint32_t aLength) {
+  MOZ_ASSERT(aLength <= aStr.Length());
+  while (aLength > 0 && aLength < aStr.Length() &&
+         UTF8traits::isInSeq(aStr[aLength])) {
+    --aLength;
+  }
+  return aLength;
+}
+
+uint32_t FirstCharLength(const nsACString& aStr) {
+  if (aStr.IsEmpty()) {
+    return 0;
+  }
+  uint32_t length = 1;
+  while (length < aStr.Length() && UTF8traits::isInSeq(aStr[length])) {
+    ++length;
+  }
+  return length;
+}
+
 }  // namespace
 
 nsWebBrowserPersist::nsWebBrowserPersist()
@@ -329,6 +351,7 @@ nsWebBrowserPersist::nsWebBrowserPersist()
       mIsPrivate(false),
       mPersistFlags(kDefaultPersistFlags),
       mPersistResult(NS_OK),
+      mCompletedProgress(0),
       mTotalCurrentProgress(0),
       mTotalMaxProgress(0),
       mWrapColumn(72),
@@ -588,7 +611,8 @@ nsresult nsWebBrowserPersist::StartUpload(nsIInputStream* aInputStream,
 
   // add this to the upload list
   nsCOMPtr<nsISupports> keyPtr = do_QueryInterface(destChannel);
-  mUploadList.InsertOrUpdate(keyPtr, MakeUnique<UploadData>(aDestinationURI));
+  mUploadList.InsertOrUpdate(keyPtr,
+                             std::make_unique<UploadData>(aDestinationURI));
 
   return NS_OK;
 }
@@ -606,7 +630,7 @@ void nsWebBrowserPersist::SerializeNextFile() {
   // Persist each file in the uri map. The document(s)
   // will be saved after the last one of these is saved.
   for (const auto& entry : mURIMap) {
-    URIData* data = entry.GetWeak();
+    URIData* data = entry.GetRawPtr();
 
     if (!data->mNeedsPersisting || data->mSaved) {
       continue;
@@ -709,7 +733,7 @@ void nsWebBrowserPersist::SerializeNextFile() {
   RefPtr<FlatURIMap> flatMap = new FlatURIMap(targetBaseSpec);
   for (const auto& uriEntry : mURIMap) {
     nsAutoCString mapTo;
-    nsresult rv = uriEntry.GetWeak()->GetLocalURI(mTargetBaseURI, mapTo);
+    nsresult rv = uriEntry.GetRawPtr()->GetLocalURI(mTargetBaseURI, mapTo);
     if (NS_SUCCEEDED(rv) || !mapTo.IsVoid()) {
       flatMap->Add(uriEntry.GetKey(), mapTo);
     }
@@ -915,6 +939,12 @@ NS_IMETHODIMP nsWebBrowserPersist::OnStopRequest(nsIRequest* request,
       SendErrorStatusChange(true, status, request, data->mFile);
     }
 
+    // Data to upload is skipped, because its upload counts the same bytes.
+    nsCOMPtr<nsIFileURL> fileURL = do_QueryInterface(data->mFile);
+    if (fileURL) {
+      mCompletedProgress += data->mSelfProgress;
+    }
+
     // If there is a stream ref and we weren't canceled,
     // close it away from the main thread.
     // We don't do this when there's an error/cancelation,
@@ -948,6 +978,7 @@ NS_IMETHODIMP nsWebBrowserPersist::OnStopRequest(nsIRequest* request,
     // if we didn't find the data in mOutputMap, try mUploadList
     UploadData* upData = mUploadList.Get(keyPtr);
     if (upData) {
+      mCompletedProgress += upData->mSelfProgress;
       mUploadList.Remove(keyPtr);
     }
   }
@@ -1518,8 +1549,8 @@ nsresult nsWebBrowserPersist::SaveChannelInternal(nsIChannel* aChannel,
   MutexAutoLock lock(mOutputMapMutex);
   // Add the output transport to the output map with the channel as the key
   nsCOMPtr<nsISupports> keyPtr = do_QueryInterface(aChannel);
-  mOutputMap.InsertOrUpdate(keyPtr,
-                            MakeUnique<OutputData>(aFile, mURI, aCalcFileExt));
+  mOutputMap.InsertOrUpdate(
+      keyPtr, std::make_unique<OutputData>(aFile, mURI, aCalcFileExt));
 
   return NS_OK;
 }
@@ -2026,14 +2057,17 @@ nsresult nsWebBrowserPersist::CalculateUniqueFilename(
   // Test if the filename is longer than allowed by the OS
   int32_t needToChop = filename.Length() - kDefaultMaxFilenameLength;
   if (needToChop > 0) {
-    // Truncate the base first and then the ext if necessary
+    // Truncate the base first, keeping at least its first character, and then
+    // the ext if necessary.
+    uint32_t newBaseLength = 0;
     if (base.Length() > (uint32_t)needToChop) {
-      base.Truncate(base.Length() - needToChop);
-    } else {
-      needToChop -= base.Length() - 1;
-      base.Truncate(1);
+      newBaseLength = LengthAtCharBoundary(base, base.Length() - needToChop);
+    }
+    if (newBaseLength == 0) {
+      newBaseLength = FirstCharLength(base);
+      needToChop -= base.Length() - newBaseLength;
       if (ext.Length() > (uint32_t)needToChop) {
-        ext.Truncate(ext.Length() - needToChop);
+        ext.Truncate(LengthAtCharBoundary(ext, ext.Length() - needToChop));
       } else {
         ext.Truncate(0);
       }
@@ -2041,6 +2075,7 @@ nsresult nsWebBrowserPersist::CalculateUniqueFilename(
       // but that won't happen because it will be set to a sensible
       // value.
     }
+    base.Truncate(newBaseLength);
 
     filename.Assign(base);
     filename.Append(mFilenameRandomSeed);
@@ -2069,7 +2104,10 @@ nsresult nsWebBrowserPersist::CalculateUniqueFilename(
         if (filename.Length() < kDefaultMaxFilenameLength - 4) {
           tmpBase = base;
         } else {
-          base.Mid(tmpBase, 0, base.Length() - 4);
+          base.Mid(tmpBase, 0,
+                   base.Length() >= 4
+                       ? LengthAtCharBoundary(base, base.Length() - 4)
+                       : base.Length());
         }
         tmpBase.Append(tmp.get());
       } else {
@@ -2483,17 +2521,26 @@ nsresult nsWebBrowserPersist::FixRedirectedChannelEntry(
 }
 
 void nsWebBrowserPersist::CalcTotalProgress() {
-  mTotalCurrentProgress = 0;
-  mTotalMaxProgress = 0;
+  mTotalCurrentProgress = mCompletedProgress;
+  mTotalMaxProgress = mCompletedProgress;
+  bool isMaxUnknown = false;
 
   if (mOutputMap.Count() > 0) {
     // Total up the progress of each output stream
     for (const auto& data : mOutputMap.Values()) {
       // Only count toward total progress if destination file is local.
+      // Data to upload is skipped, because its upload counts the same bytes,
+      // but the total size stays unknown until it has been uploaded.
       nsCOMPtr<nsIFileURL> fileURL = do_QueryInterface(data->mFile);
       if (fileURL) {
         mTotalCurrentProgress += data->mSelfProgress;
-        mTotalMaxProgress += data->mSelfProgressMax;
+        if (data->mSelfProgressMax < 0) {
+          isMaxUnknown = true;
+        } else {
+          mTotalMaxProgress += data->mSelfProgressMax;
+        }
+      } else {
+        isMaxUnknown = true;
       }
     }
   }
@@ -2503,16 +2550,18 @@ void nsWebBrowserPersist::CalcTotalProgress() {
     for (const auto& data : mUploadList.Values()) {
       if (data) {
         mTotalCurrentProgress += data->mSelfProgress;
-        mTotalMaxProgress += data->mSelfProgressMax;
+        if (data->mSelfProgressMax < 0) {
+          isMaxUnknown = true;
+        } else {
+          mTotalMaxProgress += data->mSelfProgressMax;
+        }
       }
     }
   }
 
-  // XXX this code seems pretty bogus and pointless
-  if (mTotalCurrentProgress == 0 && mTotalMaxProgress == 0) {
-    // No output streams so we must be complete
-    mTotalCurrentProgress = 10000;
-    mTotalMaxProgress = 10000;
+  // A maximum of zero means that nothing has been counted yet.
+  if (isMaxUnknown || mTotalMaxProgress == 0) {
+    mTotalMaxProgress = -1;
   }
 }
 
@@ -2712,7 +2761,7 @@ nsresult nsWebBrowserPersist::SaveSubframeContent(
   // We shouldn't use SaveDocumentInternal for the contents
   // of frames that are not documents, e.g. images.
   if (DocumentEncoderExists(contentType.get())) {
-    auto toWalk = mozilla::MakeUnique<WalkData>();
+    auto toWalk = std::make_unique<WalkData>();
     toWalk->mDocument = aFrameContent;
     toWalk->mFile = frameURI;
     toWalk->mDataPath = frameDataURI;

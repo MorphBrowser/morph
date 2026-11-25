@@ -6,13 +6,21 @@ use super::CrashGenerator;
 
 use anyhow::Result;
 use crash_helper_common::{
+    crash_annotations::CrashAnnotation,
     messages::{self},
-    ApplicationInfo, GeckoChildId,
+    ApplicationInfo, GeckoChildId, RawProcessHandle,
 };
-use minidump_writer::minidump_writer::DirectAuxvDumpInfo;
+use minidump_writer::{
+    minidump_writer::DirectAuxvDumpInfo, remote_process_inspection::OUTPUT_BUFFER_LEN,
+};
 use mozannotation_server::CAnnotation;
 use once_cell::sync::Lazy;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    os::fd::{BorrowedFd, RawFd},
+    sync::Mutex,
+};
 
 // Table holding the information about the auxiliary vector of potentially
 // every process registered with the crash helper.
@@ -54,4 +62,32 @@ pub(crate) fn create_platform_specific_annotations(
     _app_info: &ApplicationInfo,
 ) -> Result<Vec<CAnnotation>> {
     Ok(Vec::new())
+}
+
+fn process_uptime_internal(pid: RawProcessHandle) -> Result<f64> {
+    let metadata = fs::metadata(format!("/proc/{pid}"))?;
+    let creation_time = metadata.modified()?;
+    let uptime = creation_time.elapsed()?;
+    Ok(uptime.as_secs_f64())
+}
+
+pub(crate) fn process_uptime(pid: RawProcessHandle) -> f64 {
+    match process_uptime_internal(pid) {
+        Ok(uptime) => uptime,
+        Err(err) => {
+            log::error!("Could not calculate uptime for process {pid}: {err}");
+            0.0f64
+        }
+    }
+}
+
+/// Read the crash annotations of a process through its remote executor.
+pub(crate) fn retrieve_annotations_remote(remote_executor_fd: RawFd) -> Result<Vec<CAnnotation>> {
+    // SAFETY: Breakpad keeps the endpoint open for the duration of the dump callback.
+    let socket = unsafe { BorrowedFd::borrow_raw(remote_executor_fd) }.try_clone_to_owned()?;
+    Ok(mozannotation_server::retrieve_annotations_remote(
+        socket,
+        OUTPUT_BUFFER_LEN,
+        CrashAnnotation::Count as usize,
+    )?)
 }

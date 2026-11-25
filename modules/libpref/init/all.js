@@ -251,8 +251,8 @@ pref("media.videocontrols.keyboard-tab-to-all-controls", true);
   pref("media.navigator.video.offer_rtcp_rsize", true);
 
   #ifdef NIGHTLY_BUILD
-    pref("media.peerconnection.sdp.parser", "sipcc");
-    pref("media.peerconnection.sdp.alternate_parse_mode", "parallel");
+    pref("media.peerconnection.sdp.parser", "webrtc-sdp");
+    pref("media.peerconnection.sdp.alternate_parse_mode", "never");
     pref("media.peerconnection.sdp.strict_success", false);
   #else
     pref("media.peerconnection.sdp.parser", "sipcc");
@@ -260,7 +260,6 @@ pref("media.videocontrols.keyboard-tab-to-all-controls", true);
     pref("media.peerconnection.sdp.strict_success", false);
   #endif
 
-  pref("media.peerconnection.sctp.use_dcsctp", true);
   pref("media.peerconnection.sdp.disable_stereo_fmtp", false);
   pref("media.webrtc.debug.log_file", "");
 
@@ -521,9 +520,6 @@ pref("toolkit.tabbox.switchByScrolling", false);
 pref("toolkit.telemetry.server", "https://incoming.telemetry.mozilla.org");
 // Telemetry server owner. Please change if you set toolkit.telemetry.server to a different server
 pref("toolkit.telemetry.server_owner", "Mozilla");
-// Determines whether full SQL strings are returned when they might contain sensitive info
-// i.e. dynamically constructed SQL strings or SQL executed by addons against addon DBs
-pref("toolkit.telemetry.debugSlowSql", false);
 // Whether to use the unified telemetry behavior, requires a restart.
 pref("toolkit.telemetry.unified", true);
 
@@ -767,7 +763,6 @@ pref("dom.allow_scripts_to_close_windows",          false);
 
 pref("dom.popup_allowed_events", "change click dblclick auxclick mousedown mouseup pointerdown pointerup notificationclick reset submit touchend contextmenu");
 
-pref("dom.storage.shadow_writes", false);
 pref("dom.storage.snapshot_prefill", 16384);
 pref("dom.storage.snapshot_gradual_prefill", 4096);
 pref("dom.storage.snapshot_reusing", true);
@@ -3004,6 +2999,9 @@ pref("signon.signupDetection.confidenceThreshold",     "0.75");
 #endif
 // Kill switch for restoring logins out of a deactivated Rust backend.
 pref("signon.storage.rust.restoreEnabled", true);
+// Stop prompting for the primary password at startup to migrate after this
+// many canceled prompts; 0 means no limit.
+pref("signon.storage.rust.maxPrimaryPasswordDeferrals", 3);
 // The following four prefs are managed by Fx internally:
 pref("signon.storage.rust.active", false);
 pref("signon.storage.rust.migrationAttempts", 0);
@@ -3011,6 +3009,7 @@ pref("signon.storage.rust.restoreAttempts", 0);
 pref("signon.storage.rust.restoreAttemptsVersion", 0);
 pref("signon.storage.rust.restoreVersion", 0);
 pref("signon.storage.rust.restoreTargetVersion", 1);
+pref("signon.storage.rust.primaryPasswordDeferrals", 0);
 
 // Satchel (Form Manager) prefs
 pref("browser.formfill.debug",            false);
@@ -3072,6 +3071,11 @@ pref("network.tcp.keepalive.idle_time", 600); // seconds; 10 mins
   // Timeout for outbound network geolocation provider.
   pref("geo.provider.network.timeout", 60000);
 #endif
+
+// Maximum age, in days, of a response the NetworkGeolocationProvider request
+// cache (which is persisted across browser sessions) may reuse. Clamped to
+// the range 1 to 30.
+pref("geo.provider.network.requestCache.maxAgeDays", 30);
 
 #ifdef XP_MACOSX
   pref("geo.provider.use_corelocation", true);
@@ -3138,17 +3142,6 @@ pref("browser.aboutaddons.novaThemesPickerEnabled", false);
 pref("extensions.recommendations.privacyPolicyUrl", "");
 // The URL for a recommended theme, shown on the theme page in about:addons.
 pref("extensions.recommendations.themeRecommendationUrl", "");
-
-// Report Site Issue button
-// Note that on enabling the button in other release channels, make sure to
-// disable it in problematic tests, see disableNonReleaseActions() inside
-// browser/modules/test/browser/head.js
-pref("extensions.webcompat-reporter.newIssueEndpoint", "https://webcompat.com/issues/new");
-#if MOZ_UPDATE_CHANNEL != release && MOZ_UPDATE_CHANNEL != esr
-  pref("extensions.webcompat-reporter.enabled", true);
-#else
-  pref("extensions.webcompat-reporter.enabled", false);
-#endif
 
 // Add-on content security policies.
 pref("extensions.webextensions.base-content-security-policy", "script-src 'self' https://* http://localhost:* http://127.0.0.1:* moz-extension: blob: filesystem: 'unsafe-eval' 'wasm-unsafe-eval' 'unsafe-inline';");
@@ -3245,14 +3238,6 @@ pref("gfx.vr.osvr.clientKitLibPath", "");
 // actions when the fifo is written to.  Disable this in general.
 pref("memory_info_dumper.watch_fifo.enabled", false);
 
-// If minInterval is 0, the check will only happen
-// when the service has a strong suspicion we are in a captive portal
-pref("network.captive-portal-service.minInterval", 60000); // 60 seconds
-pref("network.captive-portal-service.maxInterval", 1500000); // 25 minutes
-// Every 10 checks, the delay is increased by a factor of 5
-pref("network.captive-portal-service.backoffFactor", "5.0");
-pref("network.captive-portal-service.enabled", false);
-
 pref("network.connectivity-service.enabled", true);
 pref("network.connectivity-service.DNSv4.domain", "example.org");
 pref("network.connectivity-service.DNSv6.domain", "example.org");
@@ -3284,6 +3269,10 @@ pref("captivedetect.canonicalContent", "");
 pref("captivedetect.maxWaitingTime", 5000);
 pref("captivedetect.pollingTime", 3000);
 pref("captivedetect.maxRetryCount", 5);
+// When the canonical URL looks intercepted, confirm with a request to this
+// HTTPS endpoint. If it succeeds, the network is treated as an unlocked portal.
+pref("captivedetect.httpsCheck.enabled", true);
+pref("captivedetect.httpsCheck.url", "https://firefox-portal-detection.com/generate_204");
 
 // The tables used for Safebrowsing phishing and malware checks
 pref("urlclassifier.malwareTable", "goog-malware-proto,goog-unwanted-proto,moztest-harmful-simple,moztest-malware-simple,moztest-unwanted-simple");
@@ -3457,6 +3446,12 @@ pref("browser.search.suggest.enabled.private", false);
 pref("browser.search.separatePrivateDefault.enabled", false);
 pref("browser.search.separatePrivateDefault.featureGate", false);
 pref("browser.search.removeEngineInfobar.enabled", true);
+
+// Enables a new search configuration style with no functional changes for the
+// user. This is solely intended as a rollout button - it will go away once the
+// new configuration has been rolled out.
+// Whether search-config-v3 is enabled.
+pref("browser.search.configV3.featureGate", true);
 
 // GMPInstallManager prefs
 
@@ -3639,6 +3634,7 @@ pref("browser.ai.control.linkPreviewKeyPoints", "default");
 pref("browser.ai.control.sidebarChatbot", "default");
 pref("browser.ai.control.smartWindow", "default");
 pref("browser.ai.control.speechRecognition", "default");
+pref("browser.ai.control.generatedWidgets", "default");
 
 // Enable the experimental machine learning inference engine.
 pref("browser.ml.enable", true);
@@ -3670,6 +3666,14 @@ pref("browser.pageextractor.youtube.enabled", true);
 // How long, in milliseconds, to wait for the YouTube transcript panel to render
 // after it is opened before giving up and returning metadata alone.
 pref("browser.pageextractor.youtube.timeoutMs", 3000);
+
+// Read Google Docs documents through their plain HTML view during page
+// extraction.
+pref("browser.pageextractor.googledocs.enabled", true);
+
+// How long, in milliseconds, to wait for a Google Docs plain HTML view before
+// keeping the generic page extraction.
+pref("browser.pageextractor.googledocs.timeoutMs", 5000);
 
 // When a user cancels this number of authentication dialogs coming from
 // a single web page in a row, all following authentication dialogs will
@@ -3824,13 +3828,6 @@ pref("services.common.log.logger.tokenserverclient", "Debug");
   pref("services.sync.telemetry.submissionInterval", 43200); // 12 hours in seconds
   pref("services.sync.telemetry.maxPayloadCount", 500);
 
-  #ifdef EARLY_BETA_OR_EARLIER
-    // Enable the (fairly costly) client/server validation through early Beta, but
-    // not release candidates or Release.
-    pref("services.sync.engine.bookmarks.validation.enabled", true);
-    pref("services.sync.engine.passwords.validation.enabled", true);
-  #endif
-
   // We consider validation this frequently. After considering validation, even
   // if we don't end up validating, we won't try again unless this much time has passed.
   pref("services.sync.engine.bookmarks.validation.interval", 86400); // 24 hours in seconds
@@ -3954,11 +3951,14 @@ pref("devtools.policy.disabled", false);
 // Enable deprecation warnings.
 pref("devtools.errorconsole.deprecation_warnings", true);
 
-#ifdef NIGHTLY_BUILD
-  // Don't show the Browser Toolbox prompt on local builds / nightly.
-  pref("devtools.debugger.prompt-connection", false, sticky);
-#else
+// Enable the DevTools remote debugging connection prompt.
+// Typically displayed when using the Browser Toolbox or about:debugging's
+// remote debugging.
+#ifdef MOZILLA_OFFICIAL
   pref("devtools.debugger.prompt-connection", true, sticky);
+#else
+  // In local builds, don't show the Browser Toolbox prompt.
+  pref("devtools.debugger.prompt-connection", false, sticky);
 #endif
 
 #ifdef MOZILLA_OFFICIAL
@@ -4073,6 +4073,10 @@ pref("extensions.formautofill.useml.timeoutMS", 120000);
 // Controlled by the autofill-ml-ignore-field-types Nimbus feature.
 pref("extensions.formautofill.useml.ignoreFieldTypes", "");
 
+// If ML identifies a field as 'other' or cannot identify a field,
+// use the heuristics value instead if assigned.
+pref("extensions.formautofill.useml.useHeuristicsForOther", false);
+
 // Optional AutoFill tokenizer features, as a JSON array of feature keys that
 // change a field's exported mlData:
 //   "select_option"    - "<first>...<last>" option-range token for a <select>.
@@ -4084,6 +4088,14 @@ pref("extensions.formautofill.useml.ignoreFieldTypes", "");
 // Default "[]" (none). Each feature changes the mlData contract, so the consuming
 // model must be trained with the same features enabled.
 pref("extensions.formautofill.useml.features", "[]");
+
+// Field types whose regex-heuristic recommendation is fed to the model as a
+// "**hint<class>" token (the "regex_hint" mlFeature); a regex prediction outside
+// this set becomes "**hintnone". Only takes effect when "regex_hint" is in
+// useml.features. This list is part of the model's input contract and must match
+// the hintable set the shipped model was trained with.
+pref("extensions.formautofill.useml.hint.fields",
+  "[\"email\",\"tel\",\"tel-country-code\",\"street-address\",\"address-line1\",\"address-line2\",\"address-line3\",\"postal-code\",\"address-level1\",\"address-level2\",\"organization\",\"country\",\"name\",\"given-name\",\"family-name\",\"cc-name\",\"cc-type\"]");
 
 // Pin the ML model revision to load (the encoder and head engines share one
 // version). Empty = use the Remote Settings default.
@@ -4113,19 +4125,21 @@ pref("extensions.formautofill.addresses.storage.rust.enabled", false);
 // reading from where its addresses are.
 pref("extensions.formautofill.addresses.storage.rust.active", false);
 // Run the migration purely to measure it, while the pref above is still off.
-// The copy is reported through migrate_to_rust and then wiped. Nightly only,
-// and once per profile per generation: it is what says whether the real move is
-// safe to make.
-#ifdef NIGHTLY_BUILD
-  pref("extensions.formautofill.addresses.storage.rust.runMigrationTest", true);
-#else
-  pref("extensions.formautofill.addresses.storage.rust.runMigrationTest", false);
-#endif
+// The copy is reported through migrate_to_rust and then wiped. A failed run is
+// retried on later launches until it succeeds or spends its budget; each
+// generation is measured once per profile. It is what says whether the real
+// move is safe to make.
+pref("extensions.formautofill.addresses.storage.rust.runMigrationTest", false);
 // Which generation of the dry run above this profile has done, so a build that
 // fixes a migration bug can bump it and measure the same profiles again.
 pref("extensions.formautofill.addresses.storage.rust.migrationTestVersion", 0);
+// How many launches have already tried and failed the dry run of the current
+// generation. Managed by Firefox, which records the generation as done after a
+// budget.
+pref("extensions.formautofill.addresses.storage.rust.migrationTestAttempts", 0);
 // How many launches have already tried and failed to migrate. Managed by
-// Firefox, which gives up after a budget.
+// Firefox, which gives up after a budget: the enabled pref above is then
+// treated as false while this stays at the budget.
 pref("extensions.formautofill.addresses.storage.rust.migrationAttempts", 0);
 
 // Move desktop credit cards to the Application Services autofill store. Read at
@@ -4137,14 +4151,37 @@ pref("extensions.formautofill.creditCards.storage.rust.enabled", false);
 // reading from where its cards are.
 pref("extensions.formautofill.creditCards.storage.rust.active", false);
 // Run the migration purely to measure it, while the pref above is still off.
-// The copy is reported through migrate_to_rust and then wiped.
-pref("extensions.formautofill.creditCards.storage.rust.runMigrationTest", false);
+// The copy is reported through migrate_to_rust and then wiped. A failed run is
+// retried on later launches until it succeeds or spends its budget; each
+// generation is measured once per profile. Nightly only: it is what says whether
+// the real move is safe to make.
+#ifdef NIGHTLY_BUILD
+  pref("extensions.formautofill.creditCards.storage.rust.runMigrationTest", true);
+#else
+  pref("extensions.formautofill.creditCards.storage.rust.runMigrationTest", false);
+#endif
 // Which generation of the dry run above this profile has done, so a build that
 // fixes a migration bug can bump it and measure the same profiles again.
 pref("extensions.formautofill.creditCards.storage.rust.migrationTestVersion", 0);
+// How many launches have already tried and failed the dry run of the current
+// generation. Managed by Firefox, which records the generation as done after a
+// budget.
+pref("extensions.formautofill.creditCards.storage.rust.migrationTestAttempts", 0);
 // How many launches have already tried and failed to migrate. Managed by
-// Firefox, which gives up after a budget.
+// Firefox, which gives up after a budget: the enabled pref above is then
+// treated as false while this stays at the budget.
 pref("extensions.formautofill.creditCards.storage.rust.migrationAttempts", 0);
+// How many of those attempts in a row failed with a card whose number would not
+// decrypt. Managed by Firefox.
+pref("extensions.formautofill.creditCards.storage.rust.migrationUndecryptableAttempts", 0);
+// Whether the migration may leave out cards whose number would not decrypt,
+// rather than failing on them. Set through the Nimbus feature
+// autofill-credit-cards-drop-undecryptable.
+pref("extensions.formautofill.creditCards.storage.rust.dropUndecryptable", false);
+// Once that many attempts have failed, the last of them failing to decrypt a
+// card too, cards whose number would not decrypt are left out of the migration
+// rather than failing it.
+pref("extensions.formautofill.creditCards.storage.rust.dropUndecryptableAfterAttempts", 3);
 pref("extensions.formautofill.creditCards.supported", "on");
 pref("extensions.formautofill.creditCards.enabled", true);
 pref("extensions.formautofill.creditCards.ignoreAutocompleteOff", true);
@@ -4153,6 +4190,9 @@ pref("extensions.formautofill.creditCards.ignoreAutocompleteOff", true);
 // "on"/"off" values as the other supported prefs above. Nothing about the CVV
 // (cc-csc) field is offered while this is "off", including the setting that
 // lets the user turn capture on or off.
+// Given that Android also relies on this flag to determine cvv enablement, 
+// do not flip this value for all platforms and instead use platform specific 
+// checks to enable and disable this in a controlled per platform capacity.
 pref("extensions.formautofill.creditCards.cvv.supported", "off");
 // The user's own choice, exposed as a setting once the feature is supported.
 // CVVs are only captured and stored when both prefs are true; see

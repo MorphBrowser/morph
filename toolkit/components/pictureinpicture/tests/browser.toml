@@ -62,6 +62,8 @@ prefs = [
 
 ["browser_closePipPause.js"]
 
+["browser_closePip_emptiedWhileHidden.js"]
+
 ["browser_closePip_emptySrc.js"]
 
 ["browser_closePip_pageNavigationChanges.js"]
@@ -81,9 +83,6 @@ prefs = [
 ["browser_controlButtonClickFocus.js"]
 
 ["browser_controlsHover.js"]
-skip-if = [
-  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11' && socketprocess_networking", # bug 1784652
-]
 
 ["browser_controlsTabOrder.js"]
 
@@ -99,9 +98,6 @@ run-if = [
 ["browser_durationChange.js"]
 
 ["browser_flipIconWithRTL.js"]
-skip-if = [
-  "os == 'linux' && os_version == '24.04' && arch == 'x86_64' && display == 'x11' && ccov", # Bug 1678091
-]
 
 ["browser_fontSize_change.js"]
 
@@ -143,6 +139,11 @@ support-files = ["test-page-with-nan-video-duration.html"]
 ["browser_occludedSelectedTab.js"]
 
 ["browser_occluded_window.js"]
+
+["browser_pipMenuBar_mac.js"]
+run-if = [
+  "os == 'mac'",
+]
 
 ["browser_playbackRate.js"]
 
@@ -191,9 +192,6 @@ skip-if = [
 ["browser_text_tracks_webvtt_2.js"]
 
 ["browser_text_tracks_webvtt_3.js"]
-skip-if = [
-  "os == 'win' && os_version == '11.26200' && arch == 'x86_64' && ccov",
-]
 
 ["browser_thirdPartyIframe.js"]
 

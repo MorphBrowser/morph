@@ -80,7 +80,7 @@ ipprotection-feature-introduction-title-private-browsing = Maximize privacy with
 ipprotection-feature-introduction-link-text-private-browsing-2 = Use our new <a data-l10n-name="learn-more-vpn">built-in VPN</a> to hide your location and protect your data, even when you’re in a Private Window.
 ipprotection-feature-introduction-description-private-browsing = Browse with extra protection by hiding your location, even when you’re in a Private Window.
 # Alternate version of the feature discovery callout copy used after we've released site inclusions for the VPN. Users have the option to turn the VPN on for specific sites only
-ipprotection-feature-introduction-description-private-browsing-1 = Help hide your location for <a data-l10n-name="learn-more-vpn">extra privacy</a> as you browse. Set rules to turn on the VPN for extra privacy or location-based browsing, and off where you don’t.
+ipprotection-feature-introduction-description-private-browsing-3 = Help hide your location as you browse. Set rules to turn on VPN when you want <a data-l10n-name="learn-more-vpn">extra privacy</a> or location-based browsing, and off when you don’t.
 
 ## Callout shown when the user logs in to a captive portal network
 
@@ -90,6 +90,7 @@ ipprotection-feature-introduction-description-captive-portal = Browse with extra
 ## Callout shown to users who have expressed an interest in privacy and security
 
 ipprotection-feature-introduction-title-privacy = Add another layer of privacy
+ipprotection-feature-introduction-title-privacy-1 = Add another layer of privacy with built-in VPN
 ipprotection-feature-introduction-link-text-privacy-3 = Get <a data-l10n-name="learn-more-vpn">extra privacy</a> by choosing from multiple locations to hide where you browse.
 
 # Used for multiple discovery callouts after release of the site inclusions feature
@@ -137,10 +138,18 @@ ipprotection-android-promo-callout-primary-button = Got it
 # Here 'browse on' means continue browsing
 ipprotection-site-inclusions-callout-title-existing-users = Set built-in VPN rules, then browse on
 ipprotection-site-inclusions-callout-title-lapsed-users = Try built-in VPN, now site by site
-ipprotection-site-inclusions-callout-description = Turn it on when you want extra privacy or location-based browsing, and off where you don’t.
+ipprotection-site-inclusions-callout-description-1 = Turn on VPN when you want extra privacy or location-based browsing, and off where you don’t.
+ipprotection-site-inclusions-callout-description-lapsed-users = Set rules to turn on VPN when you want extra privacy or location-based browsing, and off when you don’t.
 ipprotection-site-inclusions-callout-primary-button = Set rules
 ipprotection-site-inclusions-callout-secondary-button-existing-users = Not now
 ipprotection-site-inclusions-callout-secondary-button-lapsed-users = Dismiss
+
+## Holiday Promotion Callout
+
+ipprotection-holiday-promo-title-1 = Get unlimited VPN until January 31
+ipprotection-holiday-promo-description = Make your browsing private and harder to trace with built-in VPN.
+ipprotection-holiday-promo-primary-button = Open VPN
+ipprotection-holiday-promo-secondary-button = Dismiss
 
 ## Panel
 
@@ -172,6 +181,13 @@ site-rules-description-exclusion = VPN is off for this site
 # Used in the panel when a user navigates to a site where the VPN is on due to a site inclusion
 site-rules-description-inclusion = VPN is on for this site
 
+# Message shown in the panel the first time a user turns on the VPN, offering to always turn on VPN for the current website
+# Variables
+#   $website (string) - The host of the current website (e.g. "example.com")
+site-rules-inclusion-prompt =
+  .heading = Always turn on VPN for { $website }?
+  .message = Update your rules anytime in settings.
+
 ipprotection-settings-link =
   .label = Settings
 
@@ -187,22 +203,27 @@ ipprotection-connection-status-connecting-1 = VPN is connecting…
   .aria-label = VPN is connecting…
 
 # Button to turn off the VPN
-ipprotection-button-turn-vpn-off = Turn off VPN
+ipprotection-button-turn-vpn-off-1 = Turn off
 # Button to turn off the VPN when the VPN panel is open while viewing
 # a page from an excluded site.
 ipprotection-button-turn-vpn-off-excluded-site = Turn off VPN everywhere
 # Button to turn on the VPN
-ipprotection-button-turn-vpn-on = Turn on VPN
+ipprotection-button-turn-vpn-on-1 = Turn on
 # Button while VPN is connecting
 ipprotection-button-connecting = Turning on…
+
+## Unlimited bandwidth disclaimer shown during a promotion or if the user has a Mozilla VPN subscription
+
+# Variables
+#   $endDate (date) - The date the promotion ends, formatted as month and day (e.g. "January 31")
+ipprotection-unlimited-bandwidth-promo = Unlimited bandwidth until { DATETIME($endDate, month: "long", day: "numeric") }
+ipprotection-unlimited-bandwidth-upgraded = Unlimited bandwidth
 
 ## Location controls
 
 # The button displays the selected VPN location.
 # This shows the default selection, "Recommended" which is the recommended location as determined by Firefox.
 ipprotection-recommended-location-button = Location: Recommended
-ipprotection-recommended-location-description = { -brand-product-name } finds the fastest location
-ipprotection-recommended-location-badge = NEW
 
 # Variables
 #   $country (string) - The country selected for the VPN server location
@@ -226,6 +247,17 @@ ipprotection-locations-subview-promo =
   .message = Choose from 300+ locations and protect all your apps on up to 5 devices.
 ipprotection-locations-subview-promo-button = Get { -mozilla-vpn-brand-name }
 
+# Variables:
+#   $count (number) - The number of additional VPN locations available after setting Firefox as the default browser
+ipprotection-locations-subview-set-default-promo =
+  .heading = More locations. More protection.
+  .message =
+    { $count ->
+        [one] Make { -brand-short-name } your default and get { $count } more location. Your links open here, where VPN is built in.
+       *[other] Make { -brand-short-name } your default and get { $count } more locations. Your links open here, where VPN is built in.
+    }
+ipprotection-locations-subview-set-default-promo-button = Open links with { -brand-short-name }
+
 ## VPN paused state
 
 ipprotection-connection-status-paused-title-2 = VPN is paused
@@ -239,10 +271,12 @@ upgrade-vpn-button = Try { -mozilla-vpn-brand-name }
 
 ## Messages and errors
 
-ipprotection-connection-status-generic-error-title-1 = Couldn’t connect to VPN
-  .aria-label = Couldn’t connect to VPN
-ipprotection-connection-status-generic-error-description = Try again in a few minutes.
-ipprotection-connection-status-generic-error-try-again = Please try again later.
+ipprotection-connection-status-try-again-button = Try again
+# Label for button that causes the VPN to deactivate the VPN (but any site inclusions continue to use the VPN)
+ipprotection-connection-error-continue-without-vpn = Continue without VPN
+# Shown in place of the error title while the VPN tries to connect again
+ipprotection-connection-status-trying-again-title = Trying again…
+  .aria-label = Trying again…
 
 ipprotection-connection-status-network-error-title-1 = Check your internet connection
   .aria-label = Check your internet connection
@@ -267,11 +301,21 @@ ipprotection-message-bandwidth-warning-mb =
   .heading = Getting close to your VPN limit
   .message = You have { $usageLeft } MB of { $maxUsage } GB left this month.
 
+# Variables
+#   $additionalLocationsCount (number) - The number of additional VPN locations now available
+ipprotection-message-default-browser-confirmation =
+   .heading = { $additionalLocationsCount ->
+      [one] You’ve got { $additionalLocationsCount } more VPN location
+     *[other] You’ve got { $additionalLocationsCount } more VPN locations
+  }
+  .message = Thanks for making { -brand-short-name } your default. We’ve added more locations you can browse.
+
 ipprotection-message-continuous-onboarding-intro = Turn on VPN to hide your location and add extra encryption to your browsing.
 ipprotection-message-continuous-onboarding-autostart = <a data-l10n-name="setting-link">Set VPN to turn on</a> every time you open { -brand-short-name } for an extra layer of protection.
 ipprotection-message-continuous-onboarding-site-settings = { -brand-short-name } will remember which websites you’ve set to use VPN. Update these in <a data-l10n-name="setting-link">settings</a> anytime.
 
 confirmation-hint-ipprotection-navigated-to-excluded-site = VPN is off for this site
+confirmation-hint-ipprotection-navigated-to-included-site = VPN is on for this site
 
 ipprotection-open-button = Open { -brand-product-name }
 ipprotection-come-back-title = Come back to try built-in VPN
@@ -306,11 +350,14 @@ ip-protection-description-1 =
   .description = Get extra privacy by hiding your location while browsing.
 ip-protection-learn-more = Learn more
 
-# Variables
-#   $maxUsage (number) - The maximum amount of data a user can use in a month (in GB)
 ip-protection-not-opted-in-4 =
   .heading = Try { -brand-short-name }’s built-in VPN
   .message = Browse with extra protection by hiding your location.
+# Variables
+#   $maxUsage (number) - The maximum amount of data a user can use in a month (in GB)
+ip-protection-not-opted-in-inclusions-enabled =
+  .heading = Ready to try it?
+  .message = Get { $maxUsage } GB free each month and choose which sites use VPN.
 ip-protection-not-opted-in-button = Get started
 
 # Variables:
@@ -323,11 +370,37 @@ ip-protection-site-exceptions-all-sites-button =
        *[other] { $count } websites
     }
 
-ip-protection-site-rules-header =
-  .heading = Manage website rules
-ip-protection-site-rules-button =
-  .label = Manage website rules
+ip-protection-site-rules-header-1 =
+  .heading = Manage VPN rules
+ip-protection-site-rules-button-1 =
+  .label = Manage VPN rules
   .description = Set rules for sites that need extra privacy or VPN turned off.
+
+ip-protection-site-rules-list-section-1 =
+  .label = Website rules
+  .description = Set rules to turn VPN on or off automatically.
+
+ip-protection-site-rules-add-button =
+  .label = Set rule
+ip-protection-site-rules-delete-all-button =
+  .label = Delete all rules
+ip-protection-site-rules-empty = Rules you set will appear here.
+
+# Shown on a website whose rule turns the VPN on for it
+ip-protection-site-rules-rule-included = VPN always on
+# Shown on a website whose rule turns the VPN off for it
+ip-protection-site-rules-rule-excluded = VPN always off
+
+# Variables:
+#   $website (string) - The website the rule applies to, e.g. https://example.com
+ip-protection-site-rules-edit-button =
+  .title = Edit
+  .aria-label = Edit the rule for { $website }
+# Variables:
+#   $website (string) - The website the rule applies to, e.g. https://example.com
+ip-protection-site-rules-delete-button =
+  .title = Delete
+  .aria-label = Delete the rule for { $website }
 
 ip-protection-autostart =
   .label = Turn on VPN automatically
@@ -348,6 +421,53 @@ ip-protection-vpn-upgrade-link-1 =
 ip-protection-exceptions-dialog-window =
   .title = Manage website settings
 ip-protection-exclusions-desc = Use VPN for all websites except ones on this list. Add a website here or by opening VPN.
+
+ip-protection-site-rule-window =
+  .title = Set rule
+ip-protection-edit-site-rule-window =
+  .title = Edit rule
+ip-protection-site-rule-dialog =
+  .buttonlabelaccept = Set
+  .buttonaccesskeyaccept = S
+ip-protection-edit-site-rule-dialog =
+  .buttonlabelaccept = Save
+  .buttonaccesskeyaccept = S
+# VPN status refers to a state of 'always on' or 'always off' applied to a site
+ip-protection-site-rule-intro = Enter a site, then select its VPN status.
+# "ex:" is short for "example".
+ip-protection-site-rule-website-field =
+  .label = Website
+  .placeholder = ex: acme.com
+# VPN status refers to a state of 'always on' or 'always off' applied to a site
+ip-protection-site-rule-status-field =
+  .label = VPN status
+ip-protection-site-rule-status-on =
+  .label = Always on
+ip-protection-site-rule-status-off =
+  .label = Always off
+# Shown below the website field when what was typed is not a website address.
+ip-protection-site-rule-invalid-error = Enter a valid website address.
+# Shown below the website field when the typed website already has a rule.
+ip-protection-site-rule-duplicate-error = This site already has a rule.
+# Shown at the top of the dialog when the rule could not be saved.
+ip-protection-site-rule-save-error =
+  .message = Error creating rule. Please try again.
+# Variables:
+#   $website (string) - The website the rule applies to, e.g. https://example.com
+ip-protection-delete-site-rule-message = Delete rule for { $website }?
+ip-protection-delete-site-rule-cancel =
+  .label = Cancel
+ip-protection-delete-site-rule-confirm =
+  .label = Delete
+ip-protection-delete-all-site-rules-message = Delete all website rules?
+ip-protection-delete-all-site-rules-confirm =
+  .label = Delete all rules
+# Shown in place of the delete confirmation when deleting a rule fails.
+ip-protection-delete-site-rule-error = Couldn’t delete rule
+# Shown in place of the delete confirmation when deleting all rules fails.
+ip-protection-delete-all-site-rules-error = Couldn’t delete rules
+ip-protection-delete-site-rule-retry =
+  .label = Try again
 
 ## IP Protection Bandwidth
 
@@ -413,8 +533,5 @@ vpn-error-page-new-session = Start a new session
 
 vpn-paused-alert-close-tabs-button = Close all tabs
 vpn-paused-alert-continue-wo-vpn-button = Continue without VPN
-
-vpn-error-alert-title = VPN isn’t working right now.
-vpn-error-alert-body = Try again later.
 
 ##

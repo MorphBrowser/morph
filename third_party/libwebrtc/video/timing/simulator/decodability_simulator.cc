@@ -161,7 +161,7 @@ class DecodabilitySimulatorStream : public RtcEventLogDriver::StreamInterface {
     DecodabilitySimulator::Stream stream = collector_.GetStream();
     if (!stream.IsEmpty()) {
       RTC_DCHECK_NE(stream.ssrc, 0u);
-      results_.streams.push_back(stream);
+      results_.streams.push_back(std::move(stream));
     }
   }
 
@@ -176,7 +176,8 @@ class DecodabilitySimulatorStream : public RtcEventLogDriver::StreamInterface {
 
 }  // namespace
 
-DecodabilitySimulator::DecodabilitySimulator(Config config) : config_(config) {}
+DecodabilitySimulator::DecodabilitySimulator(Config config)
+    : config_(std::move(config)) {}
 
 DecodabilitySimulator::~DecodabilitySimulator() = default;
 
@@ -194,9 +195,7 @@ DecodabilitySimulator::Results DecodabilitySimulator::Simulate(
   // Decodability should not be a function of any field trials, so we pass the
   // empty string here.
   RtcEventLogDriver rtc_event_log_simulator(
-      {.reuse_streams = config_.reuse_streams,
-       .ssrc_filter = config_.ssrc_filter},
-      &parsed_log,
+      {.ssrc_filter = config_.ssrc_filter}, &parsed_log,
       /*field_trials_string=*/"", std::move(stream_factory));
   rtc_event_log_simulator.Simulate();
 

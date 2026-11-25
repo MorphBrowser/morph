@@ -10,6 +10,7 @@
 
 #include "gfxTypes.h"
 #include "mozilla/Atomics.h"  // for Atomic
+#include "mozilla/ProcessType.h"
 #include "mozilla/dom/ipc/IdType.h"
 #include "mozilla/gfx/Point.h"  // for IntSize
 #include "mozilla/ipc/Shmem.h"
@@ -119,7 +120,7 @@ class HostIPCAllocator : public ISurfaceAllocator {
   /**
    * Get child side's process Id.
    */
-  virtual base::ProcessId GetChildProcessId() = 0;
+  virtual GeckoChildID GetChildID() = 0;
 
   virtual void NotifyNotUsed(PTextureParent* aTexture,
                              uint64_t aTransactionId) = 0;
@@ -132,6 +133,7 @@ class HostIPCAllocator : public ISurfaceAllocator {
   }
 
   bool IsAboutToSendAsyncMessages() { return mAboutToSendAsyncMessages; }
+  void ClearAboutToSendAsyncMessages() { mAboutToSendAsyncMessages = false; }
 
  protected:
   nsTArray<AsyncParentMessageData> mPendingAsyncMessage;
@@ -198,7 +200,7 @@ class GfxMemoryImageReporter final : public nsIMemoryReporter {
     // There must be only one instance of this class, due to |sAmount|
     // being static.
     static bool hasRun = false;
-    MOZ_ASSERT(!hasRun);
+    MOZ_RELEASE_ASSERT(!hasRun);
     hasRun = true;
 #endif
   }

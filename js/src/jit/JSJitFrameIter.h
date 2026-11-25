@@ -12,6 +12,7 @@
 #include "jit/JitCode.h"
 #include "jit/MachineState.h"
 #include "jit/Snapshots.h"
+#include "js/Exception.h"
 #include "js/ProfilingFrameIterator.h"
 #include "vm/JSFunction.h"
 #include "vm/JSScript.h"
@@ -19,6 +20,7 @@
 namespace js {
 
 class ArgumentsObject;
+class SavedFrame;
 
 namespace jit {
 
@@ -91,6 +93,12 @@ class OsiIndex;
 
 void AssertJitStackInvariants(JSContext* cx);
 
+#ifdef DEBUG
+void AssertCurrentRealmIsOnStack(JSContext* cx);
+#else
+inline void AssertCurrentRealmIsOnStack(JSContext* cx) {}
+#endif
+
 // A JSJitFrameIter can iterate over a linear frame group of JS jit frames
 // only. It will stop at the first frame that is not of the same kind, or at
 // the end of an activation.
@@ -113,15 +121,33 @@ class JSJitFrameIter {
   mutable const SafepointIndex* cachedSafepointIndex_ = nullptr;
   const JitActivation* activation_;
 
+#ifdef JS_HW_SHADOW_STACK
+  // While unwinding, this is the pointer to the shadow stack entry containing
+  // |returnAddress()|. If the current frame was not entered through a call
+  // (e.g., a fake exit frame), it has no entry on the shadow stack and this
+  // instead points to the entry corresponding to the nearest caller frame that
+  // was. It is nullptr if we're not unwinding or the shadow stack is disabled.
+  uintptr_t* shadowStackPointer_ = nullptr;
+#endif
+
   void dumpBaseline() const;
 
  public:
   // See comment above the class.
-  explicit JSJitFrameIter(const JitActivation* activation);
+  //
+  // When unwinding, |shadowStackPointer| is the value read on entry to the
+  // exception handler. It's internally adjusted to point to the shadow stack
+  // entry corresponding to the current frame's return address, potentially
+  // skipping the entry left by a discarded VM exit frame if iteration starts
+  // on an UnwoundJit exit frame.
+  explicit JSJitFrameIter(const JitActivation* activation,
+                          uintptr_t* shadowStackPointer = nullptr);
 
   // A constructor specialized for jit->wasm frames, which starts at a
-  // specific FP.
-  JSJitFrameIter(const JitActivation* activation, uint8_t* fp, bool unwinding);
+  // specific FP. When unwinding, |shadowStackPointer| is handed over from the
+  // WasmFrameIter.
+  JSJitFrameIter(const JitActivation* activation, uint8_t* fp, bool unwinding,
+                 uintptr_t* shadowStackPointer = nullptr);
 
   void setResumePCInCurrentFrame(uint8_t* newAddr) {
     resumePCinCurrentFrame_ = newAddr;
@@ -146,6 +172,14 @@ class JSJitFrameIter {
   // places the invalidated Ion script in |ionScript|.
   bool checkInvalidation(IonScript** ionScript) const;
   bool checkInvalidation() const;
+
+  uintptr_t* shadowStackPointer() const {
+#ifdef JS_HW_SHADOW_STACK
+    return shadowStackPointer_;
+#else
+    return nullptr;
+#endif
+  }
 
   bool isExitFrame() const { return type_ == FrameType::Exit; }
   bool isScripted() const {
@@ -309,6 +343,12 @@ class RInstructionResults {
   // avoid evaluating the recover instruction twice.
   bool initialized_;
 
+  // Set if computing the results failed. Later attempts to run the recover
+  // instructions will report the same failure.
+  mozilla::Maybe<JS::ExceptionStatus> failureStatus_;
+  HeapPtr<Value> exception_;
+  HeapPtr<SavedFrame*> exceptionStack_;
+
  public:
   explicit RInstructionResults(JitFrameLayout* fp);
   RInstructionResults(RInstructionResults&& src);
@@ -320,6 +360,10 @@ class RInstructionResults {
   [[nodiscard]] bool init(JSContext* cx, uint32_t numResults);
   bool isInitialized() const;
   size_t length() const;
+
+  bool hasFailure() const { return failureStatus_.isSome(); }
+  void saveFailure(JSContext* cx);
+  void restoreFailure(JSContext* cx) const;
 
   JitFrameLayout* frame() const;
 
@@ -353,7 +397,7 @@ class RResumePoint;
 
 // Reads frame information in snapshot-encoding order (that is, outermost frame
 // to innermost frame).
-class SnapshotIterator {
+class MOZ_STACK_CLASS SnapshotIterator {
  protected:
   SnapshotReader snapshot_;
   RecoverReader recover_;
@@ -609,6 +653,8 @@ class SnapshotIterator {
   // allocation located at one index.
   Value maybeReadAllocByIndex(size_t index);
 
+  void trace(JSTracer* trc);
+
 #ifdef TRACK_SNAPSHOTS
   void spewBailingFrom() const { snapshot_.spewBailingFrom(); }
 #endif
@@ -616,7 +662,7 @@ class SnapshotIterator {
 
 // Reads frame information in callstack order (that is, innermost frame to
 // outermost frame).
-class InlineFrameIterator {
+class MOZ_STACK_CLASS InlineFrameIterator : public JS::CustomAutoRooter {
   const JSJitFrameIter* frame_;
   SnapshotIterator start_;
   SnapshotIterator si_;
@@ -635,10 +681,10 @@ class InlineFrameIterator {
   // allocation implies that the |calleeTemplate_| is the template JSFunction
   // from which the effective one would be derived and cached by the Recover
   // instruction result.
-  RootedFunction calleeTemplate_;
+  JSFunction* calleeTemplate_;
   RValueAllocation calleeRVA_;
 
-  RootedScript script_;
+  JSScript* script_;
   jsbytecode* pc_;
   uint32_t numActualArgs_;
 
@@ -845,6 +891,8 @@ class InlineFrameIterator {
     MOZ_ASSERT(frameCount_ != UINT32_MAX);
     return frameCount_;
   }
+
+  void trace(JSTracer* trc) override;
 };
 
 }  // namespace jit

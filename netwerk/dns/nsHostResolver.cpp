@@ -179,7 +179,7 @@ nsresult nsHostResolver::Init() MOZ_NO_THREAD_SAFETY_ANALYSIS {
 #elif defined(XP_LINUX) || defined(XP_MACOSX) || defined(XP_FREEBSD)
   sNativeHTTPSSupported = true;
 #endif
-  LOG(("Native HTTPS records supported=%d", bool(sNativeHTTPSSupported)));
+  LOG(("Native HTTPS records supported=%d", sNativeHTTPSSupported.load()));
 
   nsCOMPtr<nsIThreadPool> threadPool = new nsThreadPool();
   MOZ_ALWAYS_SUCCEEDS(threadPool->SetThreadLimit(MaxResolverThreads()));
@@ -225,6 +225,8 @@ void nsHostResolver::ClearPendingQueue(
 // right now, so we need to mark them to get re-resolved on completion!
 
 void nsHostResolver::FlushCache(bool aTrrToo, bool aFlushEvictionQueue) {
+  DNSNetworkChanged();
+
   MutexAutoLock dbLock(mDBLock);
   MutexAutoLock queueLock(mQueue.mLock);
 
@@ -749,7 +751,7 @@ already_AddRefed<nsHostRecord> nsHostResolver::FromIPLiteral(
     AddrHostRecord* aAddrRec, const NetAddr& aAddr) {
   // ok, just copy the result into the host record, and be
   // done with it! ;-)
-  aAddrRec->addr = MakeUnique<NetAddr>(aAddr);
+  aAddrRec->addr = std::make_unique<NetAddr>(aAddr);
   glean::dns::lookup_method.AccumulateSingleSample(METHOD_LITERAL);
   // put reference to host record on stack...
   RefPtr<nsHostRecord> result = aAddrRec;
@@ -1249,8 +1251,7 @@ nsresult nsHostResolver::NameLookup(nsHostRecord* rec) {
   }
 
   LOG(("NameLookup: %s effectiveTRRmode: %d flags: %X", rec->host.get(),
-       static_cast<nsIRequest::TRRMode>(rec->mEffectiveTRRMode),
-       static_cast<uint32_t>(rec->flags)));
+       rec->mEffectiveTRRMode.load(), static_cast<uint32_t>(rec->flags)));
 
   if (rec->flags & nsIDNSService::RESOLVE_DISABLE_TRR) {
     rec->RecordReason(TRRSkippedReason::TRR_DISABLED_FLAG);
@@ -1534,7 +1535,7 @@ nsHostResolver::LookupStatus nsHostResolver::CompleteLookupLocked(
   LOG((
       "nsHostResolver::CompleteLookup %s %p %X resolver=%d stillResolving=%d\n",
       addrRec->host.get(), aNewRRSet, (unsigned int)status, (int)type,
-      int(addrRec->mResolving)));
+      addrRec->mResolving.load()));
 
   if (type != DNSResolverType::Native) {
     if (NS_FAILED(status) && status != NS_ERROR_UNKNOWN_HOST &&
@@ -1883,7 +1884,13 @@ void nsHostResolver::ResolveHostTask() {
       LOG(("byType on DNS thread"));
       TypeRecordResultType result = AsVariant(mozilla::Nothing());
       uint32_t ttl = UINT32_MAX;
-      nsresult status = ResolveHTTPSRecord(rec->host, rec->flags, result, ttl);
+      Maybe<nsCString> originHost;
+      if (RefPtr<TypeHostRecord> typeRec = do_QueryObject(rec)) {
+        MutexAutoLock lock(typeRec->mResultsLock);
+        originHost = typeRec->mOriginHost;
+      }
+      nsresult status =
+          ResolveHTTPSRecord(rec->host, rec->flags, result, ttl, originHost);
       mozilla::glean::networking::dns_native_count
           .EnumGet(rec->pb
                        ? glean::networking::DnsNativeCountLabel::eHttpsPrivate
@@ -1960,7 +1967,7 @@ void nsHostResolver::GetDNSCacheEntries(nsTArray<DNSCacheEntries>* args) {
   for (const auto& recordEntry : mRecordDB) {
     // We don't pay attention to address literals, only resolved domains.
     // Also require a host.
-    nsHostRecord* rec = recordEntry.GetWeak();
+    nsHostRecord* rec = recordEntry.GetRawPtr();
     MOZ_ASSERT(rec, "rec should never be null here!");
 
     if (!rec) {

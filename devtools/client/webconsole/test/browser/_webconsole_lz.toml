@@ -300,9 +300,6 @@ fail-if = [
 ["browser_webconsole_select_all.js"]
 
 ["browser_webconsole_show_subresource_security_errors.js"]
-skip-if = [
-  "verify",
-]
 
 ["browser_webconsole_shows_reqs_from_netmonitor.js"]
 
@@ -337,6 +334,8 @@ skip-if = [
 ["browser_webconsole_split_persist.js"]
 
 ["browser_webconsole_stacktrace_location_debugger_link.js"]
+
+["browser_webconsole_stacktrace_location_javascript_protocol_link.js"]
 
 ["browser_webconsole_stacktrace_mapped_location_debugger_link.js"]
 

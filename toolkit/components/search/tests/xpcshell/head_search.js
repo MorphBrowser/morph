@@ -59,7 +59,7 @@ Services.prefs.setBoolPref(
 
 // For tests, allow the settings to write sooner than it would do normally so that
 // the tests that need to wait for it can run a bit faster.
-SearchSettings.SETTNGS_INVALIDATION_DELAY = 250;
+SearchSettings.SETTINGS_INVALIDATION_DELAY = 250;
 
 async function promiseSettingsData() {
   let path = PathUtils.join(PathUtils.profileDir, SETTINGS_FILENAME);
@@ -652,13 +652,18 @@ async function assertSelectorEnginesEqualsExpected(
         aliases: [],
         charset: "UTF-8",
         optional: false,
-        partnerCode: "",
-        telemetrySuffix: "",
         orderHint: null,
-        clickUrl: null,
         isNewUntil: null,
         ...expectedEngines[i],
       };
+      if (SearchUtils.configV3FeatureGate) {
+        expectedEngines[i].partner ||= null;
+        expectedEngines[i].deprecated ??= false;
+      } else {
+        expectedEngines[i].partnerCode ||= "";
+        expectedEngines[i].telemetrySuffix ||= "";
+        expectedEngines[i].clickUrl ||= null;
+      }
       expectedEngines[i].classification =
         expectedEngines[i].classification == "general"
           ? SearchEngineClassification.GENERAL

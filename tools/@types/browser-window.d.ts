@@ -4,62 +4,47 @@
 
 // Globals that browser.xhtml's scripts define on the browser window. A project
 // with modules that run in that window names this file in its tsconfig
-// `include`. Objects that a subscript defines declare only the members read
-// from a checked module.
+// `include`. browser-window-globals.d.ts declares their types. The system
+// modules the window also holds are left out: a module imports those itself.
 
-declare var AppConstants: typeof import("resource://gre/modules/AppConstants.sys.mjs").AppConstants;
-declare var BrowserUIUtils: typeof import("resource:///modules/BrowserUIUtils.sys.mjs").BrowserUIUtils;
-declare var BrowserWindowTracker: typeof import("resource:///modules/BrowserWindowTracker.sys.mjs").BrowserWindowTracker;
-declare var ContextualIdentityService: typeof import("moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs").ContextualIdentityService;
-declare var CustomizableUI: typeof import("moz-src:///browser/components/customizableui/CustomizableUI.sys.mjs").CustomizableUI;
-declare var NewTabPagePreloading: typeof import("moz-src:///browser/components/tabbrowser/NewTabPagePreloading.sys.mjs").NewTabPagePreloading;
-declare var PrivateBrowsingUtils: typeof import("resource://gre/modules/PrivateBrowsingUtils.sys.mjs").PrivateBrowsingUtils;
-declare var SessionStore: typeof import("moz-src:///browser/components/sessionstore/SessionStore.sys.mjs").SessionStore;
-declare var XPCOMUtils: typeof import("resource://gre/modules/XPCOMUtils.sys.mjs").XPCOMUtils;
+/// <reference path="./browser-window-globals.d.ts" />
 
-// The class and its instance, as a class declaration would provide them.
-declare var Tabbrowser: typeof import("moz-src:///browser/components/tabbrowser/Tabbrowser.sys.mjs").Tabbrowser;
-type Tabbrowser =
-  import("moz-src:///browser/components/tabbrowser/Tabbrowser.sys.mjs").Tabbrowser;
+type Tabbrowser = BrowserWindow.Tabbrowser;
 
-declare var gBrowser: Tabbrowser;
-declare var gMultiProcessBrowser: boolean;
-declare var RTL_UI: boolean;
+declare var gBrowser: BrowserWindow["gBrowser"];
+declare var gCustomizeMode: BrowserWindow["gCustomizeMode"];
+declare var gInitialPages: BrowserWindow["gInitialPages"];
+declare var gMultiProcessBrowser: BrowserWindow["gMultiProcessBrowser"];
+declare var gURLBar: BrowserWindow["gURLBar"];
+declare var delayedStartupPromise: BrowserWindow["delayedStartupPromise"];
+declare var RTL_UI: BrowserWindow["RTL_UI"];
 
-declare function isBlankPageURL(aURL: string): boolean;
-declare function CreateContainerTabMenu(event: Event): void;
+declare var isBlankPageURL: BrowserWindow["isBlankPageURL"];
+declare var isElementVisible: BrowserWindow["isElementVisible"];
+declare var isInitialPage: BrowserWindow["isInitialPage"];
+declare var CreateContainerTabMenu: BrowserWindow["CreateContainerTabMenu"];
+declare var createUserContextMenu: BrowserWindow["createUserContextMenu"];
+declare var showFullScreenViewContextMenuItems: BrowserWindow["showFullScreenViewContextMenuItems"];
+declare var UpdatePopupNotificationsVisibility: BrowserWindow["UpdatePopupNotificationsVisibility"];
+declare var openPreferences: BrowserWindow["openPreferences"];
+declare var openTrustedLinkIn: BrowserWindow["openTrustedLinkIn"];
 
-// browser-commands.js
-declare var BrowserCommands: {
-  openTab(options?: { event?: Event; url?: string }): void;
-};
-
-// browser-customtitlebar.js
-declare var CustomTitlebar: {
-  readonly enabled: boolean;
-};
-
-// browser-webrtc.js
-declare var gSharedTabWarning: {
-  willShowSharedTabWarning(
-    tab: import("moz-src:///browser/components/tabbrowser/content/tab.mjs").MozTabbrowserTab
-  ): boolean;
-};
-
-// browser.js
-declare const DynamicShortcutTooltip: {
-  nodeToTooltipMap: Record<string, string>;
-  cache: Map<string, string>;
-  getText(nodeId: string): string;
-};
-
-declare const gClickAndHoldListenersOnElement: {
-  add(aElm: Element): void;
-  remove(aButton: Element): void;
-};
-
-declare var FirefoxViewHandler: {
-  tab:
-    | import("moz-src:///browser/components/tabbrowser/content/tab.mjs").MozTabbrowserTab
-    | null;
-};
+declare var gBrowserInit: BrowserWindow["gBrowserInit"];
+declare var BrowserCommands: BrowserWindow["BrowserCommands"];
+declare var CustomTitlebar: BrowserWindow["CustomTitlebar"];
+declare var SidebarController: BrowserWindow["SidebarController"];
+declare var gSync: BrowserWindow["gSync"];
+declare var gSharedTabWarning: BrowserWindow["gSharedTabWarning"];
+declare var gKeywordURIFixup: BrowserWindow["gKeywordURIFixup"];
+declare var gNavToolbox: BrowserWindow["gNavToolbox"];
+declare const DynamicShortcutTooltip: BrowserWindow["DynamicShortcutTooltip"];
+declare const gClickAndHoldListenersOnElement: BrowserWindow["gClickAndHoldListenersOnElement"];
+declare var FirefoxViewHandler: BrowserWindow["FirefoxViewHandler"];
+declare var XULBrowserWindow: BrowserWindow["XULBrowserWindow"];
+declare var MousePosTracker: BrowserWindow["MousePosTracker"];
+declare var PanelUI: BrowserWindow["PanelUI"];
+declare var gTabsPanel: BrowserWindow["gTabsPanel"];
+declare var ctrlTab: BrowserWindow["ctrlTab"];
+declare var StatusPanel: BrowserWindow["StatusPanel"];
+declare var TabBarVisibility: BrowserWindow["TabBarVisibility"];
+declare var TabContextMenu: BrowserWindow["TabContextMenu"];

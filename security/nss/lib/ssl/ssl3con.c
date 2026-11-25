@@ -2733,9 +2733,6 @@ ssl3_SendRecord(sslSocket *ss,
         PORT_Assert(IS_DTLS(ss) &&
                     (ct == ssl_ct_handshake ||
                      ct == ssl_ct_change_cipher_spec));
-        spec = cwSpec;
-    } else {
-        spec = ss->ssl3.cwSpec;
     }
 
     while (nIn > 0) {
@@ -2743,6 +2740,7 @@ ssl3_SendRecord(sslSocket *ss,
         PRInt32 sent;
 
         ssl_GetSpecReadLock(ss);
+        spec = cwSpec ? cwSpec : ss->ssl3.cwSpec;
         rv = ssl_ProtectNextRecord(ss, spec, ct, pIn, nIn, &written);
         ssl_ReleaseSpecReadLock(ss);
         if (rv != SECSuccess) {
@@ -14093,9 +14091,11 @@ ssl3_HandleRecord(sslSocket *ss, SSL3Ciphertext *cText)
     if (rType == ssl_ct_application_data) {
         if (ss->firstHsDone)
             return SECSuccess;
+        /* Only epoch 1 carries early data. */
         if (ss->version >= SSL_LIBRARY_VERSION_TLS_1_3 &&
             ss->sec.isServer &&
-            ss->ssl3.hs.zeroRttState == ssl_0rtt_accepted) {
+            ss->ssl3.hs.zeroRttState == ssl_0rtt_accepted &&
+            epoch == TrafficKeyEarlyApplicationData) {
             return tls13_HandleEarlyApplicationData(ss, plaintext);
         }
         plaintext->len = 0;

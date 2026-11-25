@@ -3,6 +3,10 @@
 
 "use strict";
 
+const { MockEngineManager } = ChromeUtils.importESModule(
+  "resource://testing-common/AIWindowTestUtils.sys.mjs"
+);
+
 async function setupConversationWithToolUI(aichatBrowser, data) {
   await SpecialPowers.spawn(aichatBrowser, [data], async config => {
     const chatContent = await ContentTaskUtils.waitForCondition(
@@ -101,9 +105,7 @@ async function getDisplayCardActionDetail(
   } = {}
 ) {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Watching this page."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -164,7 +166,8 @@ async function getDisplayCardActionDetail(
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 }
 
@@ -176,9 +179,7 @@ add_setup(async function () {
 
 add_task(async function test_agent_monitor_item_renders_in_chat() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Set up a monitor for this page."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -212,15 +213,14 @@ add_task(async function test_agent_monitor_item_renders_in_chat() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
 add_task(async function test_create_card_autofocuses_task_name() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Set up a monitor for this page."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -247,15 +247,14 @@ add_task(async function test_create_card_autofocuses_task_name() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
 add_task(async function test_monitor_start_dispatches_create_update() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Set up a monitor for this page."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -317,15 +316,14 @@ add_task(async function test_monitor_start_dispatches_create_update() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
 add_task(async function test_form_edit_dispatches_draft_update() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Set up a monitor for this page."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -392,15 +390,14 @@ add_task(async function test_form_edit_dispatches_draft_update() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
 add_task(async function test_monitor_cancel_dispatches_cancel_update() {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Set up a monitor for this page."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const win = await openAIWindow();
 
   try {
@@ -447,7 +444,8 @@ add_task(async function test_monitor_cancel_dispatches_cancel_update() {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 });
 
@@ -513,7 +511,7 @@ add_task(async function test_check_now_dispatches_check_update() {
 });
 
 add_task(async function test_watch_url_chip_dispatches_open_link() {
-  const detail = await getDisplayCardActionDetail("ai-website-chip", {
+  const detail = await getDisplayCardActionDetail("smartwindow-chip", {
     eventType: "AIChatContent:OpenLink",
     innerSelector: ".chip",
   });
@@ -527,6 +525,66 @@ add_task(async function test_watch_url_chip_dispatches_open_link() {
     detail.preferSwitchToTab,
     "A watched page prefers an already open tab"
   );
+});
+
+add_task(async function test_create_card_chip_shows_open_tab_title() {
+  const OPEN_URL =
+    "https://example.com/browser/browser/components/aiwindow/ui/test/browser/test_context_url_page.html";
+  const CLOSED_URL = "https://example.org/not-open";
+  const tab = await BrowserTestUtils.openNewForegroundTab(gBrowser, OPEN_URL);
+  const openTitle = tab.linkedBrowser.contentTitle;
+  Assert.ok(openTitle, "The open test page has a title");
+
+  const restoreSignIn = skipSignIn();
+  const mockEngineManager = new MockEngineManager();
+  const win = await openAIWindow();
+
+  try {
+    const aichatBrowser = await getAichatBrowser(win.gBrowser.selectedBrowser);
+    await setupConversationWithToolUI(aichatBrowser, {
+      ...MONITOR_CARD,
+      toolUIData: {
+        ...MONITOR_CARD.toolUIData,
+        properties: {
+          agent: {
+            ...MONITOR_CARD.toolUIData.properties.agent,
+            url: OPEN_URL,
+            watchUrls: [OPEN_URL, CLOSED_URL],
+          },
+        },
+      },
+    });
+
+    await SpecialPowers.spawn(aichatBrowser, [openTitle], async title => {
+      const chatContent = content.document.querySelector("ai-chat-content");
+      const card = await ContentTaskUtils.waitForCondition(
+        () => chatContent.shadowRoot.querySelector("agent-monitor-item"),
+        "Wait for agent-monitor-item"
+      );
+      const chipLabels = () =>
+        [
+          ...card.shadowRoot.querySelectorAll(
+            ".page-pills-row smartwindow-chip"
+          ),
+        ].map(chip => chip.getAttribute("label"));
+
+      await ContentTaskUtils.waitForCondition(
+        () => chipLabels()[0] === title,
+        "Wait for the open tab's title to reach its chip"
+      );
+      Assert.deepEqual(
+        chipLabels(),
+        [title, "example.org"],
+        "An open page is labelled with its tab title, others keep the hostname"
+      );
+    });
+  } finally {
+    await BrowserTestUtils.closeWindow(win);
+    BrowserTestUtils.removeTab(tab);
+    restoreSignIn();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
+  }
 });
 
 // The sidebar's chat header lives in chrome and floats over the chat document,
@@ -615,9 +673,7 @@ function getHeaderBottom(sidebarBrowser, aichatBrowser) {
  */
 async function withMonitorCardInSidebar(task) {
   const restoreSignIn = skipSignIn();
-  const { restore } = await stubEngineNetworkBoundaries({
-    serverOptions: { streamChunks: ["Set up a monitor for this page."] },
-  });
+  const mockEngineManager = new MockEngineManager();
   const { win, sidebarBrowser } = await openAIWindowWithSidebar();
 
   try {
@@ -627,7 +683,8 @@ async function withMonitorCardInSidebar(task) {
   } finally {
     await BrowserTestUtils.closeWindow(win);
     restoreSignIn();
-    await restore();
+    await mockEngineManager.rejectAllRequests();
+    mockEngineManager.cleanupMocks();
   }
 }
 

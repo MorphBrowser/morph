@@ -7,12 +7,17 @@
 use std::{
     cell::RefCell,
     fmt::{self, Display, Formatter},
+    num::NonZeroUsize,
     rc::Rc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use neqo_common::{Bytes, Header, qdebug, qinfo, qtrace};
-use neqo_transport::{Connection, DatagramTracking, StreamId, server::ConnectionRef};
+use neqo_common::{Bytes, Header};
+use neqo_transport::{
+    Connection, DatagramQueueOutcome, DatagramTracking, StreamId, server::ConnectionRef,
+    streams::SendGroupId,
+};
+use tracing::{debug, info, trace};
 
 use crate::{
     Error, Http3Client, Http3ServerEvent, Http3State, Http3StreamInfo, Http3StreamType, Res,
@@ -23,6 +28,22 @@ use crate::{
     request_target::RequestTarget,
     server_events::{Http3ServerEvents, StreamHandler},
 };
+
+/// Connect-udp has no API of its own to set an outgoing-datagram max-buffered
+/// limit (unlike `WebTransport`'s `outgoingMaxBufferedDatagrams`), so every
+/// connect-udp session, created or accepted, gets this one.  It matches the
+/// depth the legacy connection-wide datagram queue enforced for everyone
+/// before per-session queues replaced it, so connect-udp keeps the
+/// backpressure signal PR #3859 added.
+const MAX_BUFFERED_DATAGRAMS: NonZeroUsize = NonZeroUsize::new(10).expect("nonzero");
+
+fn configure_datagram_queue(conn: &mut Connection, session_id: StreamId, now: Instant) {
+    conn.set_max_buffered_datagrams(session_id, Some(MAX_BUFFERED_DATAGRAMS));
+
+    // This is equivalent to disabling datagram expiration, which is a
+    // WebTransport concept that doesn't apply to connect-udp.
+    conn.set_datagram_max_age(session_id, Some(Duration::MAX), now);
+}
 
 pub trait ClientSession {
     /// Whether `CONNECT_UDP` is enabled on the connection.
@@ -38,7 +59,7 @@ pub trait ClientSession {
     fn connect_udp_create_session<T: RequestTarget>(
         &mut self,
         now: Instant,
-        target: T,
+        target: &T,
         headers: &[Header],
     ) -> Res<StreamId>;
 
@@ -64,8 +85,11 @@ pub trait ClientSession {
     ///
     /// # Returns
     ///
-    /// `Ok(false)` when the outgoing QUIC datagram queue is full; the sender
-    /// should then wait for an [`OutgoingDatagramSpaceAvailable`] event.
+    /// The queue's backpressure signal (see
+    /// [`DatagramQueueOutcome`]); the
+    /// sender should wait for an [`OutgoingDatagramSpaceAvailable`] event
+    /// before sending more once the outcome is no longer
+    /// [`DatagramQueueOutcome::Ok`].
     ///
     /// # Errors
     ///
@@ -80,7 +104,7 @@ pub trait ClientSession {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool>;
+    ) -> Res<DatagramQueueOutcome>;
 }
 
 impl ClientSession for Http3Client {
@@ -91,13 +115,13 @@ impl ClientSession for Http3Client {
     fn connect_udp_create_session<T: RequestTarget>(
         &mut self,
         now: Instant,
-        target: T,
+        target: &T,
         headers: &[Header],
     ) -> Res<StreamId> {
         let events = Box::new(self.client_events().clone());
         let output = {
             let (conn, handler) = self.connection_and_handler();
-            handler.connect_udp_create_session(conn, events, target, headers)
+            handler.connect_udp_create_session(conn, events, target, headers, now)
         };
 
         if let Err(e) = &output
@@ -125,8 +149,8 @@ impl ClientSession for Http3Client {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool> {
-        qtrace!("connect_udp_send_datagram session:{session_id:?}");
+    ) -> Res<DatagramQueueOutcome> {
+        trace!("connect_udp_send_datagram session:{session_id:?}");
         let (conn, handler) = self.connection_and_handler();
         handler.connect_udp_send_datagram(conn, session_id, buf, id, now)
     }
@@ -138,8 +162,9 @@ trait Handler {
         &mut self,
         conn: &mut Connection,
         events: Box<dyn extended_connect::ExtendedConnectEvents>,
-        target: T,
+        target: &T,
         headers: &[Header],
+        now: Instant,
     ) -> Res<StreamId>;
 
     fn connect_udp_session_accept(
@@ -160,7 +185,6 @@ trait Handler {
         now: Instant,
     ) -> Res<()>;
 
-    /// Returns `Ok(false)` when the outgoing QUIC datagram queue is full.
     fn connect_udp_send_datagram<I: Into<DatagramTracking>>(
         &self,
         conn: &mut Connection,
@@ -168,7 +192,7 @@ trait Handler {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool>;
+    ) -> Res<DatagramQueueOutcome>;
 }
 
 impl Handler for Http3Connection {
@@ -176,20 +200,23 @@ impl Handler for Http3Connection {
         &mut self,
         conn: &mut Connection,
         events: Box<dyn extended_connect::ExtendedConnectEvents>,
-        target: T,
+        target: &T,
         headers: &[Header],
+        now: Instant,
     ) -> Res<StreamId> {
-        qinfo!("[{self}] Create ConnectUdp");
+        info!("[{self}] Create ConnectUdp");
         if !self.connect_udp_enabled() {
             return Err(Error::Unavailable);
         }
-        self.extended_connect_create_session(
+        let id = self.extended_connect_create_session(
             conn,
             events,
             target,
             headers,
             extended_connect::ExtendedConnectType::ConnectUdp,
-        )
+        )?;
+        configure_datagram_queue(conn, id, now);
+        Ok(id)
     }
 
     fn connect_udp_session_accept(
@@ -200,7 +227,7 @@ impl Handler for Http3Connection {
         accept_res: &SessionAcceptAction,
         now: Instant,
     ) -> Res<()> {
-        qtrace!("Respond to ConnectUdp session with accept={accept_res}");
+        trace!("Respond to ConnectUdp session with accept={accept_res}");
         if !self.connect_udp_enabled() {
             return Err(Error::Unavailable);
         }
@@ -211,7 +238,11 @@ impl Handler for Http3Connection {
             accept_res,
             extended_connect::ExtendedConnectType::ConnectUdp,
             now,
-        )
+        )?;
+        if !matches!(accept_res, SessionAcceptAction::Reject(_)) {
+            configure_datagram_queue(conn, stream_id, now);
+        }
+        Ok(())
     }
 
     fn connect_udp_close_session(
@@ -222,7 +253,7 @@ impl Handler for Http3Connection {
         message: &str,
         now: Instant,
     ) -> Res<()> {
-        qtrace!("Close ConnectUdp session {session_id:?}");
+        trace!("Close ConnectUdp session {session_id:?}");
         self.extended_connect_close_session(
             conn,
             session_id,
@@ -230,7 +261,8 @@ impl Handler for Http3Connection {
             error,
             message,
             now,
-        )
+        )?;
+        Ok(())
     }
 
     fn connect_udp_send_datagram<I: Into<DatagramTracking>>(
@@ -240,8 +272,10 @@ impl Handler for Http3Connection {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool> {
-        self.extended_connect_send_datagram(session_id, conn, buf, id, now)
+    ) -> Res<DatagramQueueOutcome> {
+        // connect-udp has no sendGroup/sendOrder concept of its own: always
+        // ungrouped, default priority.
+        self.extended_connect_send_datagram(session_id, conn, buf, id, now, SendGroupId::new(0), 0)
     }
 }
 
@@ -264,7 +298,6 @@ pub(crate) trait ServerHandler {
         now: Instant,
     ) -> Res<()>;
 
-    /// Returns `Ok(false)` when the outgoing QUIC datagram queue is full.
     fn connect_udp_send_datagram<I: Into<DatagramTracking>>(
         &mut self,
         conn: &mut Connection,
@@ -272,7 +305,7 @@ pub(crate) trait ServerHandler {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool>;
+    ) -> Res<DatagramQueueOutcome>;
 }
 
 impl ServerHandler for Http3ServerHandler {
@@ -309,7 +342,7 @@ impl ServerHandler for Http3ServerHandler {
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool> {
+    ) -> Res<DatagramQueueOutcome> {
         self.mark_needs_processing();
         self.base_handler_mut()
             .connect_udp_send_datagram(conn, session_id, buf, id, now)
@@ -353,7 +386,7 @@ impl ServerSession {
     ///
     /// It may return `InvalidStreamId` if a stream does not exist anymore.
     pub fn response(&self, accept: &SessionAcceptAction, now: Instant) -> Res<()> {
-        qdebug!("[{self}] Set a response for a ConnectUdp session");
+        debug!("[{self}] Set a response for a ConnectUdp session");
         self.stream_handler
             .handler
             .borrow_mut()
@@ -390,17 +423,26 @@ impl ServerSession {
 
     /// Send connect-udp datagram.
     ///
+    /// # Returns
+    ///
+    /// The queue's backpressure signal (see [`DatagramQueueOutcome`]); the
+    /// sender should wait for an [`OutgoingDatagramSpaceAvailable`] event
+    /// before sending more once the outcome is no longer
+    /// [`DatagramQueueOutcome::Ok`].
+    ///
     /// # Errors
     ///
     /// It may return `InvalidStreamId` if a stream does not exist anymore.
     /// The function returns `TooMuchData` if the supply buffer is bigger than
     /// the allowed remote datagram size.
+    ///
+    /// [`OutgoingDatagramSpaceAvailable`]: crate::Http3ServerEvent::OutgoingDatagramSpaceAvailable
     pub fn send_datagram<I: Into<DatagramTracking>>(
         &self,
         buf: &[u8],
         id: I,
         now: Instant,
-    ) -> Res<bool> {
+    ) -> Res<DatagramQueueOutcome> {
         let session_id = self.stream_handler.stream_id();
         self.stream_handler
             .handler
@@ -424,10 +466,11 @@ impl ServerSession {
     /// # Errors
     ///
     /// It may return `InvalidStreamId` if a stream does not exist anymore.
+    #[doc(hidden)]
     pub fn reset_send(&self) -> Res<()> {
         self.stream_handler.handler.borrow_mut().stream_reset_send(
             self.stream_id(),
-            0,
+            Error::HttpNone.code(),
             &mut self.stream_handler.conn.borrow_mut(),
         )
     }

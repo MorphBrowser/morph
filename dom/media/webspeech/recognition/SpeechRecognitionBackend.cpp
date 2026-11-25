@@ -202,7 +202,7 @@ SpeechRecognitionBackend::SpeechRecognitionBackend(
     : mParent(aParent),
       mLanguage(NS_ConvertUTF16toUTF8(aLanguage)),
       mPhrases(aPhrases.Clone()),
-      mRingBuffer(MakeUnique<SPSCQueue<float>>(
+      mRingBuffer(std::make_unique<SPSCQueue<float>>(
           AssertedCast<int>(aGraphRate * RING_BUFFER_SIZE_S))),
       mResamplingThread(aResamplingThread),
       mResamplingCapability(aResamplingThread),
@@ -225,7 +225,7 @@ void SpeechRecognitionBackend::Start() {
   }
 #endif
 
-  mAudibilityMonitor = MakeUnique<AudibilityMonitor>(mGraphRate, 0.5f);
+  mAudibilityMonitor = std::make_unique<AudibilityMonitor>(mGraphRate, 0.5f);
 
   CreateSession(
       [self = RefPtr{this}](hwinference::SpeechRecognitionChild* aChild) {
@@ -495,7 +495,7 @@ TimeStamp SpeechRecognitionBackend::CaptureTimeForTrackPosition(
     return TimeStamp();
   }
   TimeStamp refTimeStamp = TimeStamp::ProcessCreation() +
-                           TimeDuration::FromMicroseconds(double(ref.mTimeUs));
+                           TimeDuration::FromMicroseconds(ref.mTimeUs);
   return EstimateSampleTimeStamp(ref.mPosition, refTimeStamp, aPosition,
                                  mGraphRate);
 }
@@ -517,8 +517,8 @@ void SpeechRecognitionBackend::ProcessAudioChunk() {
     AudioConfig inputConfig(1, mGraphRate, AudioConfig::FORMAT_FLT);
     AudioConfig outputConfig(1, SPEECH_RECOGNITION_TARGET_RATE,
                              AudioConfig::FORMAT_FLT);
-    mAudioConverter = MakeUnique<AudioConverter>(inputConfig, outputConfig,
-                                                 SPEEX_RESAMPLER_QUALITY_MIN);
+    mAudioConverter = std::make_unique<AudioConverter>(
+        inputConfig, outputConfig, SPEEX_RESAMPLER_QUALITY_MIN);
   }
 
   int available = mRingBuffer->AvailableRead();

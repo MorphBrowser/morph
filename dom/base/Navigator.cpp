@@ -18,6 +18,7 @@
 #include "mozilla/dom/File.h"
 #include "mozilla/dom/Serial.h"
 #include "mozilla/glean/DomMediaMetrics.h"
+#include "mozilla/glean/DomMetrics.h"
 #include "nsCharSeparatedTokenizer.h"
 #include "nsContentPolicyUtils.h"
 #include "nsContentUtils.h"
@@ -25,6 +26,7 @@
 #include "nsIContentPolicy.h"
 #include "nsIHttpProtocolHandler.h"
 #include "nsISupportsPriority.h"
+#include "nsITimedChannel.h"
 #include "nsIWebProtocolHandlerRegistrar.h"
 #include "nsIXULAppInfo.h"
 #include "nsMimeTypeArray.h"
@@ -64,9 +66,9 @@
 #include "mozilla/dom/URLSearchParams.h"
 #include "mozilla/dom/UserActivation.h"
 #include "mozilla/dom/VRDisplay.h"
-#include "mozilla/dom/VRDisplayEvent.h"
 #include "mozilla/dom/VRServiceTest.h"
 #include "mozilla/dom/WakeLockJS.h"
+#include "mozilla/dom/WindowContext.h"
 #include "mozilla/dom/XRSystem.h"
 #include "mozilla/dom/power/PowerManagerService.h"
 #include "mozilla/dom/workerinternals/RuntimeService.h"
@@ -1102,6 +1104,19 @@ void Navigator::RegisterProtocolHandler(const nsAString& aScheme,
     return;
   }
 
+  if (WindowContext* wc = mWindow->GetWindowContext()) {
+    nsLiteralCString frame =
+        wc->IsTop() ? "top_level"_ns
+        : CredentialsContainer::IsSameOriginWithAncestors(mWindow)
+            ? "same_origin_iframe"_ns
+            : "cross_origin_iframe"_ns;
+    glean::dom::register_protocol_handler_calls
+        .Get(frame, wc->HasValidTransientUserGestureActivation()
+                        ? "activated"_ns
+                        : "not_activated"_ns)
+        .Add(1);
+  }
+
   // Determine a title from the document URI.
   nsAutoCString docDisplayHostPort;
   docURI->GetDisplayHostPort(docDisplayHostPort);
@@ -1362,6 +1377,10 @@ bool Navigator::SendBeaconInternal(const nsAString& aUrl,
     cos->AddClassFlags(nsIClassOfService::Background);
   }
 
+  if (nsCOMPtr<nsITimedChannel> timedChannel = do_QueryInterface(channel)) {
+    timedChannel->SetInitiatorType(u"beacon"_ns);
+  }
+
   // The channel needs to have a loadgroup associated with it, so that we can
   // cancel the channel and any redirected channels it may create.
   nsCOMPtr<nsILoadGroup> loadGroup = do_CreateInstance(NS_LOADGROUP_CONTRACTID);
@@ -1566,13 +1585,18 @@ already_AddRefed<Promise> Navigator::Share(const ShareData& aData,
       GetCurrentSerialEventTarget(), __func__,
       [self = RefPtr{this}](
           PWindowGlobalChild::SharePromise::ResolveOrRejectValue&& aResult) {
+        if (!self->mSharePromise) {
+          // Navigator is deactivated, no one to report to.
+          return;
+        }
         if (aResult.IsResolve()) {
           if (NS_SUCCEEDED(aResult.ResolveValue())) {
             self->mSharePromise->MaybeResolveWithUndefined();
           } else {
             self->mSharePromise->MaybeReject(aResult.ResolveValue());
           }
-        } else if (self->mSharePromise) {
+        }
+        {
           // IPC died
           self->mSharePromise->MaybeReject(NS_BINDING_ABORTED);
         }
@@ -1902,12 +1926,6 @@ bool Navigator::IsWebVRContentDetected() const {
 bool Navigator::IsWebVRContentPresenting() const {
   nsGlobalWindowInner* win = nsGlobalWindowInner::Cast(mWindow);
   return win->IsVRContentPresenting();
-}
-
-void Navigator::RequestVRPresentation(VRDisplay& aDisplay) {
-  nsGlobalWindowInner* win = nsGlobalWindowInner::Cast(mWindow);
-  win->DispatchVRDisplayActivate(aDisplay.DisplayId(),
-                                 VRDisplayEventReason::Requested);
 }
 
 already_AddRefed<Promise> Navigator::RequestMIDIAccess(

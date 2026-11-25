@@ -20,6 +20,7 @@
 #include "mozilla/RecursiveMutex.h"
 #include "mozilla/Result.h"
 #include "mozilla/StaticPtr.h"
+#include "mozilla/Tainting.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/dom/AudioSessionBinding.h"
@@ -73,6 +74,9 @@ class CrashReporterInitArgs;
 
 namespace mozilla {
 class PClipboardWriteRequestParent;
+#ifdef MOZ_WIDGET_ANDROID
+class ProcInfoParent;
+#endif
 class PRemoteSpellcheckEngineParent;
 
 #if defined(XP_LINUX) && defined(MOZ_SANDBOX)
@@ -183,6 +187,14 @@ class ContentParent final : public PContentParent,
   static mozilla::ipc::IPCResult PrincipalValidationIpcFail(
       nsIPrincipal* aPrincipal, mozilla::ipc::IProtocol* aActor,
       const char* aMethod);
+
+  template <typename T>
+  static mozilla::ipc::IPCResult PrincipalValidationIpcFail(
+      const Tainted<T>& aPrincipal, mozilla::ipc::IProtocol* aActor,
+      const char* aMethod) {
+    T principal = MOZ_NO_VALIDATE(aPrincipal, "Only used for error reporting");
+    return PrincipalValidationIpcFail(principal, aActor, aMethod);
+  }
 
   /**
    * Picks a random content parent from |aContentParents| respecting the index
@@ -566,10 +578,10 @@ class ContentParent final : public PContentParent,
       const bool& aForWindowDotPrint, const bool& aTopLevelCreatedByWebContent,
       nsIURI* aURIToLoad, const nsACString& aFeatures,
       const UserActivation::Modifiers& aModifiers,
-      nsIPrincipal* aTriggeringPrincipal, nsIPolicyContainer* aPolicyContainer,
-      nsIReferrerInfo* aReferrerInfo, const OriginAttributes& aOriginAttributes,
-      bool aUserActivation, bool aTextDirectiveUserActivation,
-      CreateWindowResolver&& aResolve);
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& aTriggeringPrincipal,
+      nsIPolicyContainer* aPolicyContainer, nsIReferrerInfo* aReferrerInfo,
+      const OriginAttributes& aOriginAttributes, bool aUserActivation,
+      bool aTextDirectiveUserActivation, CreateWindowResolver&& aResolve);
 
   static void BroadcastBlobURLRegistration(
       const nsACString& aURI, BlobImpl* aBlobImpl, nsIPrincipal* aPrincipal,
@@ -580,7 +592,8 @@ class ContentParent final : public PContentParent,
       ContentParent* aIgnoreThisCP = nullptr);
 
   mozilla::ipc::IPCResult RecvStoreAndBroadcastBlobURLRegistration(
-      const nsACString& aURI, const IPCBlob& aBlob, nsIPrincipal* aPrincipal,
+      const nsACString& aURI, const IPCBlob& aBlob,
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& aPrincipal,
       const nsCString& aPartitionKey);
 
   mozilla::ipc::IPCResult RecvUnstoreAndBroadcastBlobURLUnregistration(
@@ -589,10 +602,11 @@ class ContentParent final : public PContentParent,
   virtual int32_t Pid() const override;
 
   // PURLClassifierParent.
-  PURLClassifierParent* AllocPURLClassifierParent(nsIPrincipal* aPrincipal,
-                                                  bool* aSuccess);
+  PURLClassifierParent* AllocPURLClassifierParent(
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>& aPrincipal, bool* aSuccess);
   virtual mozilla::ipc::IPCResult RecvPURLClassifierConstructor(
-      PURLClassifierParent* aActor, nsIPrincipal* aPrincipal,
+      PURLClassifierParent* aActor,
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& aPrincipal,
       bool* aSuccess) override;
 
   // PURLClassifierLocalParent.
@@ -663,6 +677,17 @@ class ContentParent final : public PContentParent,
   bool ValidatePrincipal(
       nsIPrincipal* aPrincipal,
       const EnumSet<ValidatePrincipalOptions>& aOptions = {});
+
+  // Validates a tainted principal received over IPC. Returns a reference to
+  // the untainted principal on success, or Nothing() if validation failed, in
+  // which case aPrincipal can still be passed to PrincipalValidationIpcFail.
+  template <typename T>
+  Maybe<T&> ValidatePrincipal(
+      Tainted<T>& aPrincipal,
+      const EnumSet<ValidatePrincipalOptions>& aOptions = {}) {
+    return aPrincipal.ValidateRef(
+        [&](const T& aValue) { return ValidatePrincipal(aValue, aOptions); });
+  }
 
   nsIDOMProcessParent* ProcessParent() override { return this; }
 
@@ -992,7 +1017,7 @@ class ContentParent final : public PContentParent,
       nsTArray<nsCString>&& aTypes,
       const nsIClipboard::ClipboardType& aWhichClipboard,
       const MaybeDiscarded<WindowContext>& aRequestingWindowContext,
-      mozilla::NotNull<nsIPrincipal*> aRequestingPrincipal,
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& aRequestingPrincipal,
       GetClipboardDataSnapshotResolver&& aResolver);
 
   mozilla::ipc::IPCResult RecvGetClipboardDataSnapshotSync(
@@ -1016,8 +1041,9 @@ class ContentParent final : public PContentParent,
   mozilla::ipc::IPCResult RecvSetURITitle(nsIURI* uri, const nsAString& title);
 
   mozilla::ipc::IPCResult RecvLoadURIExternal(
-      NotNull<nsIURI*> uri, NotNull<nsIPrincipal*> triggeringPrincipal,
-      nsIPrincipal* redirectPrincipal,
+      NotNull<nsIURI*> uri,
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& triggeringPrincipal,
+      Tainted<RefPtr<nsIPrincipal>>&& redirectPrincipal,
       const MaybeDiscarded<BrowsingContext>& aContext,
       bool aWasExternallyTriggered, bool aHasValidUserGestureActivation,
       bool aNewWindowTarget);
@@ -1071,6 +1097,13 @@ class ContentParent final : public PContentParent,
       StructuredCloneData* aStack = nullptr);
 
  public:
+  /**
+   * Returns the canonical browsing context for `aContext` if it's managed by
+   * this ContentParent and is current, otherwise null.
+   */
+  CanonicalBrowsingContext* GetBrowsingContextIfCurrent(
+      const MaybeDiscardedWindowContext& aContext);
+
   mozilla::ipc::IPCResult RecvCommitBrowsingContextTransaction(
       const MaybeDiscarded<BrowsingContext>& aContext,
       BrowsingContext::BaseTransaction&& aTransaction, uint64_t aEpoch);
@@ -1078,9 +1111,6 @@ class ContentParent final : public PContentParent,
   mozilla::ipc::IPCResult RecvCommitWindowContextTransaction(
       const MaybeDiscarded<WindowContext>& aContext,
       WindowContext::BaseTransaction&& aTransaction, uint64_t aEpoch);
-
-  mozilla::ipc::IPCResult RecvAddSecurityState(
-      const MaybeDiscarded<WindowContext>& aContext, uint32_t aStateFlags);
 
   mozilla::ipc::IPCResult RecvFirstIdle();
 
@@ -1124,8 +1154,10 @@ class ContentParent final : public PContentParent,
 
   mozilla::ipc::IPCResult RecvAcquireHWInferenceProcess();
 
+#  ifdef MOZ_WEBSPEECH
   mozilla::ipc::IPCResult RecvCreateSpeechRecognition(
       Endpoint<hwinference::PSpeechRecognitionParent>&& aEndpoint);
+#  endif
 
   mozilla::ipc::IPCResult RecvReleaseHWInferenceConnection();
 #endif  // !ANDROID
@@ -1202,7 +1234,7 @@ class ContentParent final : public PContentParent,
   mozilla::ipc::IPCResult RecvBHRThreadHang(const HangDetails& aHangDetails);
 
   mozilla::ipc::IPCResult RecvAutomaticStorageAccessPermissionCanBeGranted(
-      nsIPrincipal* aPrincipal,
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& aPrincipal,
       AutomaticStorageAccessPermissionCanBeGrantedResolver&& aResolver);
 
   mozilla::ipc::IPCResult RecvStorageAccessPermissionGrantedForOrigin(
@@ -1226,7 +1258,7 @@ class ContentParent final : public PContentParent,
       CompleteAllowAccessForResolver&& aResolver);
 
   mozilla::ipc::IPCResult RecvStoreUserInteractionAsPermission(
-      nsIPrincipal* aPrincipal);
+      Tainted<NotNull<RefPtr<nsIPrincipal>>>&& aPrincipal);
 
   mozilla::ipc::IPCResult RecvTestCookiePermissionDecided(
       const MaybeDiscarded<BrowsingContext>& aContext, nsIPrincipal* aPrincipal,
@@ -1351,13 +1383,14 @@ class ContentParent final : public PContentParent,
       const MaybeDiscarded<BrowsingContext>& aContext);
 
   mozilla::ipc::IPCResult RecvSetActiveSessionHistoryEntry(
-      const MaybeDiscarded<BrowsingContext>& aContext,
+      const MaybeDiscarded<WindowContext>& aContext,
       const Maybe<nsPoint>& aPreviousScrollPos, SessionHistoryInfo&& aInfo,
-      uint32_t aLoadType, uint32_t aUpdatedCacheKey, const nsID& aChangeID);
+      uint32_t aLoadType, uint32_t aUpdatedCacheKey, const nsID& aChangeID,
+      const Maybe<NewSessionHistorySharedState>& aNewSharedState);
 
   mozilla::ipc::IPCResult RecvReplaceActiveSessionHistoryEntry(
-      const MaybeDiscarded<BrowsingContext>& aContext,
-      SessionHistoryInfo&& aInfo);
+      const MaybeDiscarded<WindowContext>& aContext, SessionHistoryInfo&& aInfo,
+      const Maybe<NewSessionHistorySharedState>& aNewSharedState);
 
   mozilla::ipc::IPCResult RecvRemoveDynEntriesFromActiveSessionHistoryEntry(
       const MaybeDiscarded<BrowsingContext>& aContext);
@@ -1494,7 +1527,7 @@ class ContentParent final : public PContentParent,
   // release these objects in ShutDownProcess.  See the comment there for more
   // details.
 
-  GeckoChildProcessHost* mSubprocess;
+  RefPtr<GeckoChildProcessHost> mSubprocess;
   const TimeStamp mLaunchTS;  // used to calculate time to start content process
   TimeStamp mLaunchYieldTS;   // used to calculate async launch main thread time
 
@@ -1588,6 +1621,10 @@ class ContentParent final : public PContentParent,
   // Dup of child's X socket, used to scope its resources to this
   // object instead of the child process's lifetime.
   UniqueFileHandle mChildXSocketFdDup;
+#endif
+
+#ifdef MOZ_WIDGET_ANDROID
+  RefPtr<ProcInfoParent> mProcInfoParent;
 #endif
 
   RefPtr<PProcessHangMonitorParent> mHangMonitorActor;

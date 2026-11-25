@@ -267,3 +267,78 @@ add_task(async function test_reselect_button_clears_the_selection() {
     }
   );
 });
+
+add_task(async function test_dragging_to_the_edge_does_not_scroll() {
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: TEST_PAGE },
+    async browser => {
+      let helper = new ScreenshotsHelper(browser);
+      triggerMiniWindowEntryPoint(browser);
+      await waitForOverlayMode(helper, browser, SELECTION_MODES.MINI_WINDOW);
+
+      let { clientWidth, clientHeight } = await helper.getContentDimensions();
+      await helper.dragOverlay(10, 10, clientWidth - 10, clientHeight - 10);
+
+      let { scrollX, scrollY } = await helper.getContentDimensions();
+      is(scrollX, 0, "the page did not scroll horizontally");
+      is(scrollY, 0, "the page did not scroll vertically");
+
+      ScreenshotsUtils.exit(browser);
+      await TestUtils.waitForCondition(
+        async () => !(await helper.isOverlayInitialized()),
+        "Waiting for the overlay to be torn down"
+      );
+    }
+  );
+});
+
+add_task(async function test_mini_window_header_ignores_page_font_size() {
+  await BrowserTestUtils.withNewTab(
+    {
+      gBrowser,
+      url: TEST_PAGE,
+    },
+    async browser => {
+      let helper = new ScreenshotsHelper(browser);
+
+      async function getHeaderSize() {
+        ScreenshotsUtils.start(browser, "MiniWindowTest", {
+          mode: SELECTION_MODES.MINI_WINDOW,
+        });
+        await waitForOverlayMode(helper, browser, SELECTION_MODES.MINI_WINDOW);
+
+        let size = await SpecialPowers.spawn(browser, [], () => {
+          let screenshotsChild = content.windowGlobalChild.getActor(
+            "ScreenshotsComponent"
+          );
+          let header =
+            screenshotsChild.overlay.content.root.querySelector(
+              ".preview-header"
+            );
+          let style = content.getComputedStyle(header);
+          return { fontSize: style.fontSize, paddingTop: style.paddingTop };
+        });
+
+        ScreenshotsUtils.exit(browser);
+        await TestUtils.waitForCondition(
+          async () => !(await helper.isOverlayInitialized()),
+          "Waiting for the overlay to be torn down"
+        );
+        return size;
+      }
+
+      let before = await getHeaderSize();
+
+      await SpecialPowers.spawn(browser, [], () => {
+        content.document.documentElement.style.fontSize = "40px";
+      });
+
+      let after = await getHeaderSize();
+      Assert.deepEqual(
+        after,
+        before,
+        "the header size doesn't follow the page's root font size"
+      );
+    }
+  );
+});

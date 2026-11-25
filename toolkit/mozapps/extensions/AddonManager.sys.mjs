@@ -4443,6 +4443,7 @@ export var AddonManager = {
    * id exists).
    *
    * NOTE:
+   *
    * - This method is limited to built-in add-ons
    *   auto-installed in the "app-builtin-addons" location
    *   based on the list bundled in Firefox Desktop builds as
@@ -4874,7 +4875,7 @@ export class EnvironmentAddonBuilder {
     this._submitGleanPingAddonsUpdatedTask = null;
 
     this._log = console.createInstance({
-      prefix: "EnvironmentAddonBuilder",
+      logModule: "EnvironmentAddonBuilder",
       maxLogLevel: Services.prefs.getBoolPref(PREF_LOGGING_ENABLED, false)
         ? "Debug"
         : "Warn",
@@ -6004,7 +6005,7 @@ AMBrowserExtensionsImport = {
       importedAddons
         // Do not import add-ons already installed.
         .filter(({ id }) => !alreadyInstalledIDs.includes(id))
-        .map(async ({ id, sourceURI, name, version, icons }) => {
+        .map(async ({ id, sourceURI, name, version, icons, type }) => {
           let addonInstall;
 
           try {
@@ -6014,6 +6015,8 @@ AMBrowserExtensionsImport = {
               icons,
               telemetryInfo: { source: this.TELEMETRY_SOURCE },
               promptHandler: this._installPromptHandler,
+              id,
+              type,
             });
           } catch (err) {
             return Promise.reject(err);

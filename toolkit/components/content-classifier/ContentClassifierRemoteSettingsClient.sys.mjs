@@ -12,7 +12,7 @@ ChromeUtils.defineLazyGetter(lazy, "log", () => {
   return console.createInstance({
     maxLogLevelPref:
       "privacy.trackingprotection.content.remote_settings.loglevel",
-    prefix: "ContentClassifier",
+    logModule: "ContentClassifier",
   });
 });
 
@@ -34,6 +34,7 @@ export class ContentClassifierRemoteSettingsClient {
   #onSyncCallback = null;
   #service = null;
   #initialized = false;
+  #pendingGetPromise = null;
 
   constructor() {
     this.#rs = lazy.RemoteSettings(COLLECTION_NAME);
@@ -95,8 +96,7 @@ export class ContentClassifierRemoteSettingsClient {
    * @param {Array} event.data.deleted  Removed records.
    */
   async onSync({ data: { created = [], updated = [], deleted = [] } }) {
-    let service = this.#service;
-    if (!service) {
+    if (!this.#service) {
       return;
     }
 
@@ -117,30 +117,38 @@ export class ContentClassifierRemoteSettingsClient {
       ...created.map(r => r.Name),
     ];
     let removedNames = deleted.map(r => r.Name);
-    service.onListsChanged(updatedNames, removedNames);
+    this.#service?.onListsChanged(updatedNames, removedNames);
   }
 
   /**
    * Fetch all records from the collection and notify the service.
    */
   async importAllLists() {
-    let service = this.#service;
-    if (!service) {
+    if (!this.#service) {
       return;
     }
 
     let records = [];
     try {
-      records = await this.#rs.get();
+      records = await this.#getRecords();
       lazy.log.debug(`importAllLists: got ${records.length} records`);
     } catch (error) {
       lazy.log.error(`Error importing lists:`, error);
     }
 
-    service.onListsChanged(
+    this.#service?.onListsChanged(
       records.map(r => r.Name),
       []
     );
+  }
+
+  #getRecords() {
+    if (!this.#pendingGetPromise) {
+      this.#pendingGetPromise = this.#rs.get().finally(() => {
+        this.#pendingGetPromise = null;
+      });
+    }
+    return this.#pendingGetPromise;
   }
 
   /**
@@ -152,7 +160,7 @@ export class ContentClassifierRemoteSettingsClient {
    * @returns {Promise<Uint8Array>}
    */
   async getListBytes(name) {
-    let records = await this.#rs.get();
+    let records = await this.#getRecords();
     let record = records.find(r => r.Name === name);
     if (!record) {
       throw new Error(`No record with name "${name}"`);

@@ -350,13 +350,24 @@ struct ResumeFromException {
   uint8_t* stackPointer;
   uint8_t* target;
 #ifdef JS_HW_SHADOW_STACK
-  // Tracks the shadow stack pointer throughout the frame iteration and
-  // unwinding process. Initialized by the JIT before entering HandleException,
-  // and on exit back to the JIT, contains the new desired shadow stack pointer
-  // before jumping to target.
-  // If the shadow stack is disabled for this thread/process at runtime, then
-  // this field is nullptr.
+  // These fields are used to communicate the shadow stack pointer between the
+  // JIT and exception handling / frame unwinding logic in both directions. If
+  // the shadow stack is disabled for this thread/process at runtime, then they
+  // are both nullptr.
+  //
+  // Just before calling HandleException, the JIT reads the shadow stack pointer
+  // into this field, which is where frame iteration begins. On returning back
+  // to the JIT, it contains the new desired shadow stack pointer before jumping
+  // to target. While the initial value is always on the main stack's shadow
+  // stack, the final value may be on a continuation stack's shadow stack.
   uintptr_t* shadowStackPointer = nullptr;
+  // When we're resuming in a catch handler on a continuation stack, we must
+  // first switch to its shadow stack before unwinding to |shadowStackPointer|.
+  // With CET, this switch requires a valid restore token. This field holds the
+  // shadow stack pointer where that stack was last switched away from, below
+  // which a restore token was left. If we're resuming on the main stack, it is
+  // nullptr.
+  uintptr_t* shadowStackSwitchPointer = nullptr;
 #endif
   ExceptionResumeKind kind;
   wasm::Instance* instance;
@@ -386,6 +397,9 @@ struct ResumeFromException {
 #ifdef JS_HW_SHADOW_STACK
   static size_t offsetOfShadowStackPointer() {
     return offsetof(ResumeFromException, shadowStackPointer);
+  }
+  static size_t offsetOfShadowStackSwitchPointer() {
+    return offsetof(ResumeFromException, shadowStackSwitchPointer);
   }
 #endif
 
@@ -684,6 +698,11 @@ class NativeExitFrameLayout {
   ExitFrameLayout exit_;
   uintptr_t argc_;
 
+  // The callee. Unlike the Value below, this isn't overwritten by the return
+  // value. This ensures the callee's realm is kept alive on GC.
+  // See bug 2078837.
+  JSObject* savedCallee_;
+
   // We need to split the Value into 2 fields of 32 bits, otherwise the C++
   // compiler may add some padding between the fields.
   uint32_t loCalleeResult_;
@@ -699,6 +718,7 @@ class NativeExitFrameLayout {
     return reinterpret_cast<JS::Value*>(&loCalleeResult_);
   }
   inline uintptr_t argc() const { return argc_; }
+  inline JSObject** savedCallee() { return &savedCallee_; }
 };
 
 class CallNativeExitFrameLayout : public NativeExitFrameLayout {
@@ -726,6 +746,9 @@ class IonOOLNativeExitFrameLayout {
   JitCode* stubCode_;
 
   uintptr_t argc_;
+
+  // See NativeExitFrameLayout::savedCallee_.
+  JSObject* savedCallee_;
 
   // We need to split the Value into 2 fields of 32 bits, otherwise the C++
   // compiler may add some padding between the fields.
@@ -755,6 +778,7 @@ class IonOOLNativeExitFrameLayout {
   }
   inline JS::Value* thisp() { return reinterpret_cast<JS::Value*>(&loThis_); }
   inline uintptr_t argc() const { return argc_; }
+  inline JSObject** savedCallee() { return &savedCallee_; }
 };
 
 // ProxyGetProperty(JSContext* cx, HandleObject proxy, HandleId id,

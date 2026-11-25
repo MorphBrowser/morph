@@ -33,6 +33,20 @@ export const FeatureManifest: {
             };
         };
     };
+    testPlatformExposureFeature: {
+        description: string;
+        owner: string;
+        applications: string[];
+        hasExposure: boolean;
+        exposureDescription: string;
+        isEarlyStartup: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                description: string;
+            };
+        };
+    };
     "nimbus-qa-1": {
         description: string;
         owner: string;
@@ -114,6 +128,30 @@ export const FeatureManifest: {
                 description: string;
             };
             visualSearchEnabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            highlightToSearchEnabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            highlightToSearchIgnoredSites: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            highlightToSearchDetectPageMenus: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -213,6 +251,22 @@ export const FeatureManifest: {
                 type: string;
                 description: string;
             };
+            autoFillAdaptiveHistoryUrlMinPicks: {
+                type: string;
+                setPref: {
+                    pref: string;
+                    branch: string;
+                };
+                description: string;
+            };
+            autoFillAdaptiveHistoryUrlPicksAgeDays: {
+                type: string;
+                setPref: {
+                    pref: string;
+                    branch: string;
+                };
+                description: string;
+            };
             autoFillBackspaceBlockDurationMs: {
                 type: string;
                 setPref: {
@@ -235,6 +289,11 @@ export const FeatureManifest: {
                     pref: string;
                     branch: string;
                 };
+                description: string;
+            };
+            contextMenuFeatureGate: {
+                type: string;
+                fallbackPref: string;
                 description: string;
             };
             deduplicationEnabled: {
@@ -311,6 +370,21 @@ export const FeatureManifest: {
                 fallbackPref: string;
                 description: string;
             };
+            newtabFeatureGate: {
+                type: string;
+                fallbackPref: string;
+                description: string;
+            };
+            newtabVariantA: {
+                type: string;
+                fallbackPref: string;
+                description: string;
+            };
+            newtabVariantB: {
+                type: string;
+                fallbackPref: string;
+                description: string;
+            };
             exposureResults: {
                 type: string;
                 setPref: {
@@ -332,52 +406,7 @@ export const FeatureManifest: {
                 fallbackPref: string;
                 description: string;
             };
-            quickSuggestAmpTopPickUseNovaIconSize: {
-                type: string;
-                fallbackPref: string;
-                description: string;
-            };
-            quickSuggestContextualOptInEnabled: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            quickSuggestContextualOptInFirstReshowAfterPeriodDays: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            quickSuggestContextualOptInSecondReshowAfterPeriodDays: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            quickSuggestContextualOptInThirdReshowAfterPeriodDays: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            quickSuggestContextualOptInImpressionLimit: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            quickSuggestContextualOptInImpressionDaysLimit: {
+            quickSuggestAmpTopPickScoreForLargeIcon: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -490,15 +519,12 @@ export const FeatureManifest: {
                 fallbackPref: string;
                 description: string;
             };
-            semanticHistoryEnable: {
+            resultTargetMenuFeatureGate: {
                 type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
+                fallbackPref: string;
                 description: string;
             };
-            semanticHistoryCompletionThreshold: {
+            semanticHistoryEnable: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -514,7 +540,39 @@ export const FeatureManifest: {
                 };
                 description: string;
             };
+            semanticHistoryMaxChunkTimeMs: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            semanticHistoryMaxChunkTimeMsFailsafe: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            semanticHistoryMinEntriesBeforeThrottle: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
             semanticHistoryDistanceThreshold: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            semanticHistorySmartwindowDistanceThreshold: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -531,6 +589,30 @@ export const FeatureManifest: {
                 description: string;
             };
             semanticHistoryEmbeddingType: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            semanticHistoryMultilingualEmbeddingRegions: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            semanticHistoryDomainScopedSearch: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            semanticHistoryInSeparateGroup: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -565,6 +647,19 @@ export const FeatureManifest: {
                     branch: string;
                     pref: string;
                 };
+                description: string;
+            };
+            temporalFeatureGate: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            trackerCountFeatureGate: {
+                type: string;
+                fallbackPref: string;
                 description: string;
             };
             unitConversionEnabled: {
@@ -829,7 +924,6 @@ export const FeatureManifest: {
         description: string;
         owner: string;
         hasExposure: boolean;
-        exposureDescription: string;
         variables: {
             enabled: {
                 type: string;
@@ -850,6 +944,22 @@ export const FeatureManifest: {
         exposureDescription: string;
         variables: {
             enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    pushNotificationHelper: {
+        description: string;
+        owner: string;
+        applications: string[];
+        hasExposure: boolean;
+        variables: {
+            available: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -880,6 +990,29 @@ export const FeatureManifest: {
         hasExposure: boolean;
         variables: {
             enabled: {
+                type: string;
+                description: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
+    diskCache: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            diskCacheEnabled: {
+                type: string;
+                description: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            diskCacheEncryptionEnabled: {
                 type: string;
                 description: string;
                 setPref: {
@@ -988,6 +1121,14 @@ export const FeatureManifest: {
         hasExposure: boolean;
         variables: {
             reportAdsEnabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            reportAdsNewReasonsEnabled: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -1195,14 +1336,6 @@ export const FeatureManifest: {
                 };
                 description: string;
             };
-            redactNewtabPing: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
             includeInferredInterests: {
                 type: string;
                 setPref: {
@@ -1212,6 +1345,30 @@ export const FeatureManifest: {
                 description: string;
             };
             maxSubmissionDelayMs: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            minSubmissionDelayMs: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            dwellTimeEnabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            dwellTimeNoiseScale: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -1575,10 +1732,11 @@ export const FeatureManifest: {
             };
         };
     };
-    newtabTrainhopAddon: {
+    newtabTrainhopAddonDeployment: {
         description: string;
         owner: string;
         hasExposure: boolean;
+        allowCoenrollment: boolean;
         exposureDescription: string;
         variables: {
             xpi_download_path: {
@@ -1588,10 +1746,6 @@ export const FeatureManifest: {
             addon_version: {
                 type: string;
                 description: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
             };
         };
     };
@@ -1940,11 +2094,6 @@ export const FeatureManifest: {
                 type: string;
                 fallbackPref: string;
             };
-            localeListConfig: {
-                description: string;
-                type: string;
-                fallbackPref: string;
-            };
             regionSpocsConfig: {
                 description: string;
                 type: string;
@@ -2004,6 +2153,30 @@ export const FeatureManifest: {
             };
         };
     };
+    sessionRestoreNewTab: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        exposureDescription: string;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            showSetting: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
     screenshots: {
         description: string;
         owner: string;
@@ -2030,7 +2203,6 @@ export const FeatureManifest: {
         description: string;
         owner: string;
         hasExposure: boolean;
-        exposureDescription: string;
         variables: {
             status: {
                 type: string;
@@ -2048,6 +2220,143 @@ export const FeatureManifest: {
         hasExposure: boolean;
         variables: {
             creditcardsSupported: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
+    "creditcards-cvv-capture": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            cvvSupported: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
+    "autofill-ml": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            twoHeadEnabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            engineTimeoutMS: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            features: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            modelVersion: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
+    "autofill-ml-ignore-field-types": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            ignoreFieldTypes: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    "autofill-suppress-unrecognized-autocomplete": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    "autocomplete-remove-records": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    "autofill-addresses-rust-storage": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
+    "autofill-credit-cards-rust-storage": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
                 description: string;
                 type: string;
                 setPref: {
@@ -2113,6 +2422,15 @@ export const FeatureManifest: {
                 };
                 type: string;
             };
+            displayKitImageBehindSetDefaultBrowserButton: {
+                description: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                type: string;
+                enum: string[];
+            };
         };
     };
     upgradeDialog: {
@@ -2148,6 +2466,13 @@ export const FeatureManifest: {
             uri: string;
             path: string;
         };
+        variables: {};
+    };
+    includeForWebPush: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        allowCoenrollment: boolean;
         variables: {};
     };
     infobar: {
@@ -2306,6 +2631,14 @@ export const FeatureManifest: {
                 };
             };
             enableSignatureEditor: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            enableSignatureVerification: {
                 description: string;
                 type: string;
                 setPref: {
@@ -2653,6 +2986,38 @@ export const FeatureManifest: {
         };
         variables: {};
     };
+    privateWindowRedesign: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        exposureDescription: string;
+        variables: {
+            pbwRedesignGate: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    protectionsPanelRedesign: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        exposureDescription: string;
+        variables: {
+            protectionsPanelRedesignGate: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
     backgroundTaskMessage: {
         description: string;
         owner: string;
@@ -2761,6 +3126,14 @@ export const FeatureManifest: {
                 description: string;
             };
             gleanMaxPingsPerMinute: {
+                type: string;
+                description: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            enableFOGTransport: {
                 type: string;
                 description: string;
                 setPref: {
@@ -3007,38 +3380,6 @@ export const FeatureManifest: {
                     pref: string;
                 };
             };
-            http3CCalgorithm: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-            http3SlowStartAlgorithm: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-            http3HyStartAlternativeCssBaseline: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-            http3SpuriousRecovery: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
             enableOffMainThreadStreamDecompression: {
                 description: string;
                 type: string;
@@ -3048,14 +3389,6 @@ export const FeatureManifest: {
                 };
             };
             offMainThreadStreamDecompressionThreshold: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-            dnsGracePeriod: {
                 description: string;
                 type: string;
                 setPref: {
@@ -3126,6 +3459,77 @@ export const FeatureManifest: {
                 };
             };
             maxDnsCacheEntries: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            dnsGracePeriod: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            dnsNegativeCacheExpiration: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
+    networkingCongestionControl: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            http3CCalgorithm: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            http3SlowStartAlgorithm: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            http3HyStartAlternativeCssBaseline: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            http3SpuriousRecovery: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            http3Abe: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            http3EcnMark: {
                 description: string;
                 type: string;
                 setPref: {
@@ -3289,6 +3693,14 @@ export const FeatureManifest: {
                     pref: string;
                 };
             };
+            blockInsecureContexts: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
         };
     };
     essentialFallbackDomains: {
@@ -3327,6 +3739,14 @@ export const FeatureManifest: {
         hasExposure: boolean;
         variables: {
             priorityHeader: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            h3SendInitialPriorityUpdate: {
                 description: string;
                 type: string;
                 setPref: {
@@ -3374,15 +3794,7 @@ export const FeatureManifest: {
                     pref: string;
                 };
             };
-            documentPriorityIncremental: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-            imagePriorityIncremental: {
+            priorityIncrementalByDefault: {
                 description: string;
                 type: string;
                 setPref: {
@@ -3789,6 +4201,21 @@ export const FeatureManifest: {
             };
         };
     };
+    streamingUpload: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enableFetchStreamingUpload: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
     pingsender: {
         description: string;
         owner: string;
@@ -3958,21 +4385,6 @@ export const FeatureManifest: {
                 };
             };
             enabledPBM: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-        };
-    };
-    thirdPartyTrackerCookieBlocking: {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        variables: {
-            enabled: {
                 description: string;
                 type: string;
                 setPref: {
@@ -4161,45 +4573,6 @@ export const FeatureManifest: {
         variables: {
             survey: {
                 type: string;
-                description: string;
-            };
-        };
-    };
-    queryStripping: {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        variables: {
-            enabledNormalBrowsing: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            enabledPrivateBrowsing: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            allowList: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            stripList: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
                 description: string;
             };
         };
@@ -4810,11 +5183,35 @@ export const FeatureManifest: {
             };
         };
     };
+    speculationRulesPrefetch: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            dryRun: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
     opaqueResponseBlocking: {
         description: string;
         owner: string;
         hasExposure: boolean;
         exposureDescription: string;
+        isEarlyStartup: boolean;
         variables: {
             enabled: {
                 description: string;
@@ -4945,69 +5342,6 @@ export const FeatureManifest: {
             };
         };
     };
-    cookieBannerHandling: {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        variables: {
-            modeNormalBrowsing: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            modePrivateBrowsing: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            enableGlobalRules: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            enableGlobalRulesSubFrames: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            enableDetectOnly: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            enablePromo: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            enableDesktopFeatureCallout: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-        };
-    };
     backgroundThreads: {
         description: string;
         owner: string;
@@ -5028,61 +5362,6 @@ export const FeatureManifest: {
                     branch: string;
                     pref: string;
                 };
-            };
-        };
-    };
-    reportBrokenSite: {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        variables: {
-            enabled: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            sendMoreInfo: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            reasonDropdown: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-        };
-    };
-    feltPrivacy: {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        exposureDescription: string;
-        variables: {
-            feltPrivacy: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
-            };
-            resetPBMAction: {
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-                description: string;
             };
         };
     };
@@ -5191,6 +5470,10 @@ export const FeatureManifest: {
                 description: string;
                 fallbackPref: string;
             };
+            dialog: {
+                type: string;
+                description: string;
+            };
         };
     };
     nimbusIsReady: {
@@ -5216,6 +5499,10 @@ export const FeatureManifest: {
                 type: string;
             };
             nimbusTargetingEnvironment: {
+                description: string;
+                type: string;
+            };
+            reducedEnrollmentStatusTelemetryEnabled: {
                 description: string;
                 type: string;
             };
@@ -5255,6 +5542,21 @@ export const FeatureManifest: {
                 };
             };
             backgroundTimerMs: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
+    netErrorSearchCTA: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
                 description: string;
                 type: string;
                 setPref: {
@@ -5567,6 +5869,36 @@ export const FeatureManifest: {
             };
         };
     };
+    generatedWidgets: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    resourceMonitor: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
     sidebar: {
         description: string;
         owner: string;
@@ -5601,21 +5933,6 @@ export const FeatureManifest: {
         };
         variables: {};
     };
-    contentProcessSandbox: {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        variables: {
-            Level: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-        };
-    };
     certificateTransparency: {
         description: string;
         owner: string;
@@ -5642,6 +5959,10 @@ export const FeatureManifest: {
                 type: string;
             };
             message: {
+                description: string;
+                type: string;
+            };
+            disablePrompt: {
                 description: string;
                 type: string;
             };
@@ -5732,6 +6053,21 @@ export const FeatureManifest: {
             };
         };
     };
+    tabContextMenu: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            altStructureEnabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
     externalLinkHandling: {
         description: string;
         owner: string;
@@ -5757,17 +6093,6 @@ export const FeatureManifest: {
                     branch: string;
                     pref: string;
                 };
-                description: string;
-            };
-        };
-    };
-    selectableProfiles: {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        variables: {
-            enabled: {
-                type: string;
                 description: string;
             };
         };
@@ -5889,6 +6214,77 @@ export const FeatureManifest: {
             };
         };
     };
+    contentClassifier: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            protectionEnabled: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            protectionEngines: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            protectionEnginesPbmode: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            annotationEnabled: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            annotationEngines: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            annotationEnginesPbmode: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            mirrorMode: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+            skipURLClassifier: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+            };
+        };
+    };
     "auto-pip": {
         description: string;
         owner: string;
@@ -5935,21 +6331,6 @@ export const FeatureManifest: {
         };
     };
     "jpeg-xl": {
-        description: string;
-        owner: string;
-        hasExposure: boolean;
-        variables: {
-            enabled: {
-                type: string;
-                description: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
-        };
-    };
-    "css-masonry": {
         description: string;
         owner: string;
         hasExposure: boolean;
@@ -6029,6 +6410,28 @@ export const FeatureManifest: {
             };
         };
     };
+    fireButton: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        exposureDescription: string;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            flow: {
+                type: string;
+                enum: string[];
+                fallbackPref: string;
+                description: string;
+            };
+        };
+    };
     ipProtection: {
         description: string;
         owner: string;
@@ -6043,6 +6446,14 @@ export const FeatureManifest: {
                 description: string;
             };
             bandwidthMax: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            upgradeNotAvailable: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -6071,10 +6482,13 @@ export const FeatureManifest: {
         description: string;
         owner: string;
         hasExposure: boolean;
-        exposureDescription: string;
         variables: {
             enabled: {
                 type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
                 description: string;
             };
         };
@@ -6092,6 +6506,21 @@ export const FeatureManifest: {
                     pref: string;
                 };
                 description: string;
+            };
+        };
+    };
+    "logins-rust-storage": {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                description: string;
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
             };
         };
     };
@@ -6266,14 +6695,6 @@ export const FeatureManifest: {
                     pref: string;
                 };
             };
-            preallocated_lowmem_mb: {
-                description: string;
-                type: string;
-                setPref: {
-                    branch: string;
-                    pref: string;
-                };
-            };
             priority_manager_enabled: {
                 description: string;
                 type: string;
@@ -6376,6 +6797,10 @@ export const FeatureManifest: {
         variables: {
             shown: {
                 type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
                 description: string;
             };
         };
@@ -6385,7 +6810,175 @@ export const FeatureManifest: {
         owner: string;
         hasExposure: boolean;
         variables: {
+            enabled: {
+                type: string;
+                description: string;
+            };
             isDefault: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            hiddenOnboardingScreenIds: {
+                type: string;
+                fallbackPref: string;
+                description: string;
+            };
+            resumeActivity: {
+                type: string;
+                fallbackPref: string;
+                description: string;
+            };
+            aiTabEnabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            aiTabMenus: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            authImpl: {
+                type: string;
+                enum: string[];
+                description: string;
+            };
+            guestMode: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                enum: string[];
+                description: string;
+            };
+            smartbarIntent: {
+                type: string;
+                fallbackPref: string;
+                enum: string[];
+                description: string;
+            };
+        };
+    };
+    smartWindowAgentWatch: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            monitorAnnouncement: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    autoTabGrouping: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            minCandidateTabs: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            maxCandidateTabs: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            minTabsPerGroup: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            maxGroups: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            minCohesion: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            timeoutMs: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            preloadModels: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            supportedLocales: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            thresholdInt: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+            nonEnglishThresholdInt: {
                 type: string;
                 setPref: {
                     branch: string;
@@ -6409,6 +7002,141 @@ export const FeatureManifest: {
                 description: string;
             };
             serverUrl: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    urlbarShareButton: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    referrals: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    webNotificationsPermissionUi: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        exposureDescription: string;
+        variables: {
+            headline: {
+                type: string;
+                description: string;
+            };
+            body: {
+                type: string;
+                description: string;
+            };
+            primaryCtaLabel: {
+                type: string;
+                description: string;
+            };
+            primaryCtaAccessKey: {
+                type: string;
+                description: string;
+            };
+            secondaryCtaLabel: {
+                type: string;
+                description: string;
+            };
+            secondaryCtaAccessKey: {
+                type: string;
+                description: string;
+            };
+            logoUrl: {
+                type: string;
+                description: string;
+            };
+            useSiteFavicon: {
+                type: string;
+                description: string;
+            };
+            activationTargeting: {
+                type: string;
+                description: string;
+            };
+            headlineL10nId: {
+                type: string;
+                description: string;
+            };
+            bodyL10nId: {
+                type: string;
+                description: string;
+            };
+            primaryCtaLabelL10nId: {
+                type: string;
+                description: string;
+            };
+            secondaryCtaLabelL10nId: {
+                type: string;
+                description: string;
+            };
+        };
+    };
+    editContext: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    nova: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
+                type: string;
+                setPref: {
+                    branch: string;
+                    pref: string;
+                };
+                description: string;
+            };
+        };
+    };
+    trustedTypesReadinessTelemetry: {
+        description: string;
+        owner: string;
+        hasExposure: boolean;
+        variables: {
+            enabled: {
                 type: string;
                 setPref: {
                     branch: string;

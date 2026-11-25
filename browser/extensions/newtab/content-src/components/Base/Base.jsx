@@ -10,7 +10,10 @@ import { DiscoveryStreamBase } from "content-src/components/DiscoveryStreamBase/
 import { ErrorBoundary } from "content-src/components/ErrorBoundary/ErrorBoundary";
 import { CustomizeMenu } from "content-src/components/CustomizeMenu/CustomizeMenu";
 import { BaseContext } from "content-src/lib/BaseContext";
-import { CUSTOMIZE_SUBPANELS } from "content-src/lib/constants";
+import {
+  CUSTOMIZE_PANEL_SOURCES,
+  CUSTOMIZE_SUBPANELS,
+} from "content-src/lib/constants";
 import React, { useState, useEffect } from "react";
 import { Search } from "content-src/components/Search/Search";
 import { TopSites } from "content-src/components/TopSites/TopSites";
@@ -135,6 +138,7 @@ export class BaseContent extends React.PureComponent {
     super(props);
     this.openPreferences = this.openPreferences.bind(this);
     this.openCustomizationMenu = this.openCustomizationMenu.bind(this);
+    this.openFromCustomizeButton = this.openFromCustomizeButton.bind(this);
     this.closeCustomizationMenu = this.closeCustomizationMenu.bind(this);
     this.onWindowScroll = debounce(this.onWindowScroll.bind(this), 5);
     this.setPref = this.setPref.bind(this);
@@ -309,14 +313,47 @@ export class BaseContent extends React.PureComponent {
 
     this._onHashChange = () => {
       const hash = globalThis.location?.hash || "";
-      if (hash === "#customize" || hash === "#customize-topics") {
-        this.openCustomizationMenu();
+      const [route, query] = hash.split("?");
+      const hasMarker =
+        query !== undefined &&
+        (route === "#customize" ||
+          route === "#customize-topics" ||
+          route === "#customize-widgets");
+      const source =
+        new URLSearchParams(query).get("source") ===
+        CUSTOMIZE_PANEL_SOURCES.SETTINGS
+          ? CUSTOMIZE_PANEL_SOURCES.SETTINGS
+          : CUSTOMIZE_PANEL_SOURCES.EXTERNAL_LINK;
 
-        if (hash === "#customize-topics") {
+      if (route === "#customize" || route === "#customize-topics") {
+        this.openCustomizationMenu(source);
+
+        if (route === "#customize-topics") {
           this.toggleSectionsMgmtPanel();
+        }
+      } else if (route === "#customize-widgets") {
+        const currentPrefs = this.props.Prefs.values;
+        // The widgets subpanel only exists with Nova and a visible widgets
+        // container. Opening it in any other state leaves the main view
+        // unscrollable, so open the main view, where the widget toggles are
+        // without Nova.
+        // @nova-cleanup(remove-conditional): Remove the novaEnabled check; keep the isWidgetsContainerVisible check and both branches
+        if (
+          currentPrefs[PREF_NOVA_ENABLED] &&
+          isWidgetsContainerVisible(currentPrefs)
+        ) {
+          this.openWidgetsPanel(source);
+        } else {
+          this.openCustomizationMenu(source);
         }
       } else if (this.props.App.customizeMenuVisible) {
         this.closeCustomizationMenu();
+      }
+
+      if (hasMarker) {
+        // Drop the query once read, so going back to this page or opening a
+        // bookmark of it isn't recorded as another Settings open.
+        globalThis.history.replaceState(globalThis.history.state, "", route);
       }
     };
 
@@ -579,8 +616,12 @@ export class BaseContent extends React.PureComponent {
     this.props.dispatch(ac.UserEvent({ event: "OPEN_NEWTAB_PREFS" }));
   }
 
-  openCustomizationMenu() {
-    this.props.dispatch({ type: at.SHOW_PERSONALIZE });
+  openCustomizationMenu(source) {
+    this.props.dispatch({ type: at.SHOW_PERSONALIZE, data: { source } });
+  }
+
+  openFromCustomizeButton() {
+    this.openCustomizationMenu(CUSTOMIZE_PANEL_SOURCES.CUSTOMIZE_BUTTON);
   }
 
   closeCustomizationMenu() {
@@ -696,7 +737,10 @@ export class BaseContent extends React.PureComponent {
       global.document?.body.style.removeProperty(
         "--newtab-wallpaper-backgroundPosition"
       );
-      global.document?.body.classList.remove("lightWallpaper", "darkWallpaper");
+      global.document?.documentElement.classList.remove(
+        "lightWallpaper",
+        "darkWallpaper"
+      );
       return;
     }
 
@@ -765,8 +809,11 @@ export class BaseContent extends React.PureComponent {
       color || "transparent"
     );
 
-    global.document?.body.classList.remove("lightWallpaper", "darkWallpaper");
-    global.document?.body.classList.add(
+    global.document?.documentElement.classList.remove(
+      "lightWallpaper",
+      "darkWallpaper"
+    );
+    global.document?.documentElement.classList.add(
       newTheme === "dark" ? "darkWallpaper" : "lightWallpaper"
     );
   }
@@ -876,8 +923,8 @@ export class BaseContent extends React.PureComponent {
     this.setState(CLOSED_SUBPANELS);
   }
 
-  openWidgetsPanel() {
-    this.openCustomizationMenu();
+  openWidgetsPanel(source) {
+    this.openCustomizationMenu(source);
     this.setState({ activeSubpanel: CUSTOMIZE_SUBPANELS.WIDGETS });
   }
 
@@ -1006,7 +1053,6 @@ export class BaseContent extends React.PureComponent {
     const mayHaveClocksWidget = widgetVisibleById("clocks");
     const mayHavePrivacyWidget = widgetVisibleById("privacy");
     const mayHaveCrosswordWidget = widgetVisibleById("crossword");
-    const mayHaveStocksWidget = widgetVisibleById("stocks");
     const mayHavePictureOfTheDayWidget = widgetVisibleById("pictureOfTheDay");
     const mayHaveRecentSearchesWidget = widgetVisibleById("recentSearches");
 
@@ -1024,7 +1070,6 @@ export class BaseContent extends React.PureComponent {
         : prefs.showWeather,
       privacyEnabled: prefs["widgets.privacy.enabled"],
       crosswordEnabled: prefs["widgets.crossword.enabled"],
-      stocksEnabled: prefs["widgets.stocks.enabled"],
       pictureOfTheDayEnabled: prefs["widgets.pictureOfTheDay.enabled"],
       recentSearchesEnabled: prefs["widgets.recentSearches.enabled"],
       widgetsMaximized: prefs["widgets.maximized"],
@@ -1146,6 +1191,12 @@ export class BaseContent extends React.PureComponent {
         !topSitesEnabled && !pocketEnabled && !highlightsEnabled;
       const isPageEmpty =
         noContentSectionsEnabled && !prefs.showSearch && !hasAnyEnabledWidget;
+      const topSitesOnly =
+        topSitesEnabled &&
+        !pocketEnabled &&
+        !highlightsEnabled &&
+        !prefs.showSearch &&
+        !hasAnyEnabledWidget;
       const hasManyTopSitesRows = topSitesEnabled && prefs.topSitesRows > 2;
       // Recent activity is then alone in the band, and the logo leaves the sidebar.
       const noFeedOrContentWidgets = !pocketEnabled && !hasContentWidgets;
@@ -1177,8 +1228,14 @@ export class BaseContent extends React.PureComponent {
           (this.props.ExternalComponents.components.find(
             c => c.type === "SEARCH"
           )?.attributes ?? {});
-      const logoShouldBeCentered =
-        noFeedOrContentWidgets && !hasManyTopSitesRows && !searchHasOwnRow;
+      const hasMultistageMessage = shouldShowOMCHighlight(
+        this.props.Messages,
+        "ASRouterMultistageMessage"
+      );
+      const contentShouldBeLowered =
+        noFeedOrContentWidgets && !hasManyTopSitesRows && !hasMultistageMessage;
+      const logoShouldBeCentered = contentShouldBeLowered && !searchHasOwnRow;
+      const searchShouldBeLowered = contentShouldBeLowered && searchHasOwnRow;
       // The 5-column story grid is driven by the layout data alone: the content
       // band only widens when every section has a columnCount: 5 entry. Sections
       // share one subgrid track count, so a layout set where only some sections
@@ -1246,7 +1303,7 @@ export class BaseContent extends React.PureComponent {
             className={`nova-outer-wrapper${this.state.fixedSearch ? " stuck-search" : ""}${searchHasOwnRow ? " search-has-own-row" : ""}`}
           >
             <div
-              className={`container nova-enabled${logoShouldBeCentered ? " logo-in-content" : ""}${searchHasOwnRow ? " search-has-own-row" : ""}${hasFiveColumnLayout ? " sections-5-col" : ""}`}
+              className={`container nova-enabled${logoShouldBeCentered ? " logo-in-content" : ""}${searchHasOwnRow ? " search-has-own-row" : ""}${searchShouldBeLowered ? " search-lowered" : ""}${hasFiveColumnLayout ? " sections-5-col" : ""}${topSitesOnly ? " top-sites-only" : ""}`}
             >
               <aside className="sidebar-inline-start">
                 {!prefs.hideLogo && !logoShouldBeCentered && !isPageEmpty && (
@@ -1365,7 +1422,7 @@ export class BaseContent extends React.PureComponent {
             <menu className="personalizeButtonWrapper nova-enabled">
               <CustomizeMenu
                 onClose={this.closeCustomizationMenu}
-                onOpen={this.openCustomizationMenu}
+                onOpen={this.openFromCustomizeButton}
                 openPreferences={this.openPreferences}
                 setPref={this.setPref}
                 enabledSections={enabledSections}
@@ -1390,7 +1447,6 @@ export class BaseContent extends React.PureComponent {
                 mayHaveClocksWidget={mayHaveClocksWidget}
                 mayHavePrivacyWidget={mayHavePrivacyWidget}
                 mayHaveCrosswordWidget={mayHaveCrosswordWidget}
-                mayHaveStocksWidget={mayHaveStocksWidget}
                 mayHavePictureOfTheDayWidget={mayHavePictureOfTheDayWidget}
                 mayHaveRecentSearchesWidget={mayHaveRecentSearchesWidget}
                 mayHaveWeatherForecast={
@@ -1409,18 +1465,10 @@ export class BaseContent extends React.PureComponent {
                 widgetsEnabled={widgetsEnabled}
                 dispatch={this.props.dispatch}
               />
-              {(shouldShowOMCHighlight(
+              {shouldShowOMCHighlight(
                 this.props.Messages,
                 "CustomWallpaperHighlight"
-              ) ||
-                shouldShowOMCHighlight(
-                  this.props.Messages,
-                  "WorldCupWallpaperHighlight"
-                ) ||
-                shouldShowOMCHighlight(
-                  this.props.Messages,
-                  "WorldCupSemiFinalWallpaperHighlight"
-                )) && (
+              ) && (
                 <MessageWrapper dispatch={this.props.dispatch}>
                   <WallpaperFeatureHighlight
                     position="inset-block-start inset-inline-start"
@@ -1550,7 +1598,7 @@ export class BaseContent extends React.PureComponent {
           <menu className="personalizeButtonWrapper">
             <CustomizeMenu
               onClose={this.closeCustomizationMenu}
-              onOpen={this.openCustomizationMenu}
+              onOpen={this.openFromCustomizeButton}
               openPreferences={this.openPreferences}
               setPref={this.setPref}
               enabledSections={enabledSections}
@@ -1569,7 +1617,6 @@ export class BaseContent extends React.PureComponent {
               mayHaveClocksWidget={mayHaveClocksWidget}
               mayHavePrivacyWidget={mayHavePrivacyWidget}
               mayHaveCrosswordWidget={mayHaveCrosswordWidget}
-              mayHaveStocksWidget={mayHaveStocksWidget}
               mayHavePictureOfTheDayWidget={mayHavePictureOfTheDayWidget}
               mayHaveRecentSearchesWidget={mayHaveRecentSearchesWidget}
               mayHaveWeatherForecast={

@@ -20,6 +20,7 @@ const { IPPChannelFilter } = ChromeUtils.importESModule(
 const TIMEOUT_PREF = "browser.ipProtection.guardian.timeout";
 const RETRY_AFTER_PREF = "browser.ipProtection.guardian.retryAfter";
 const ATTEMPT_TIMEOUT_PREF = "browser.ipProtection.guardian.attemptTimeout";
+const MODE_PREF = "browser.ipProtection.mode";
 
 /**
  * Returns a promise that never resolves and rejects with the signal's reason
@@ -516,9 +517,9 @@ add_task(async function test_IPPProxyManager_catastrophic_on_500() {
 });
 
 /**
- * Tests that activation failures reset the proxy state to the previous state.
+ * Starts the service with a proxy pass request that fails.
  */
-add_task(async function test_IPPProxyManager_activation_failure() {
+async function initServiceWithFailingPass() {
   IPPDummyAuthProvider.simulateSignIn(true);
   IPPDummyAuthProvider.setGetEntitlementResponse({
     entitlement: createTestEntitlement(),
@@ -536,15 +537,195 @@ add_task(async function test_IPPProxyManager_activation_failure() {
     IPProtectionStates.READY,
     "IP Protection service should be ready"
   );
+}
 
-  await IPPProxyManager.start(false);
+/**
+ * Tests that a user activation that fails returns to the previous state.
+ */
+add_task(async function test_IPPProxyManager_user_activation_failure() {
+  await initServiceWithFailingPass();
+
+  await IPPProxyManager.start(true);
 
   Assert.equal(
     IPPProxyManager.state,
     IPPProxyStates.READY,
     "Proxy should return to READY state after activation failure"
   );
+  Assert.ok(
+    !IPPProxyManager.channelFilter(),
+    "The channel filter should be gone"
+  );
 
+  IPProtectionService.uninit();
+});
+
+/**
+ * Tests that a system activation that fails stays in ERROR, holding traffic,
+ * until it is stopped.
+ */
+add_task(async function test_IPPProxyManager_system_activation_failure() {
+  await initServiceWithFailingPass();
+
+  await IPPProxyManager.start(false);
+
+  Assert.equal(
+    IPPProxyManager.state,
+    IPPProxyStates.ERROR,
+    "Proxy should be in ERROR after a system activation failure"
+  );
+  Assert.ok(
+    IPPProxyManager.channelFilter()?.active,
+    "The channel filter should still hold traffic"
+  );
+
+  IPPProxyManager.updateState();
+  Assert.equal(
+    IPPProxyManager.state,
+    IPPProxyStates.ERROR,
+    "Recomputing the state should not leave ERROR"
+  );
+
+  await IPPProxyManager.stop(false);
+  Assert.equal(
+    IPPProxyManager.state,
+    IPPProxyStates.READY,
+    "Stopping should leave ERROR"
+  );
+  Assert.ok(
+    !IPPProxyManager.channelFilter(),
+    "Stopping should remove the channel filter"
+  );
+
+  IPProtectionService.uninit();
+});
+
+/**
+ * Tests that a user start retries out of ERROR, going straight to ACTIVATING
+ * without announcing READY in between.
+ */
+add_task(async function test_IPPProxyManager_user_start_retries_error() {
+  await initServiceWithFailingPass();
+  await IPPProxyManager.start(false, false, undefined, IPPMode.MODE_INCLUSION);
+  Assert.equal(IPPProxyManager.state, IPPProxyStates.ERROR);
+
+  IPPDummyAuthProvider.setProxyPass({
+    status: 200,
+    error: undefined,
+    pass: new ProxyPass(createProxyPassToken()),
+  });
+  const states = [];
+  const record = () => states.push(IPPProxyManager.state);
+  IPPProxyManager.addEventListener("IPPProxyManager:StateChanged", record);
+
+  const { started } = await IPPProxyManager.start(true);
+
+  IPPProxyManager.removeEventListener("IPPProxyManager:StateChanged", record);
+  Assert.ok(started, "The user start should succeed");
+  Assert.deepEqual(
+    states,
+    [IPPProxyStates.ACTIVATING, IPPProxyStates.ACTIVE],
+    "The retry should not pass through READY"
+  );
+  Assert.equal(
+    IPPProxyManager.mode,
+    IPPMode.getDefault(),
+    "The retry should use the default mode"
+  );
+
+  await IPPProxyManager.stop(false);
+  IPProtectionService.uninit();
+});
+
+/**
+ * Tests that a system start does not retry out of ERROR.
+ */
+add_task(async function test_IPPProxyManager_system_start_keeps_error() {
+  await initServiceWithFailingPass();
+  await IPPProxyManager.start(false);
+
+  const { started, error } = await IPPProxyManager.start(false);
+
+  Assert.ok(!started, "The system start should be refused");
+  Assert.ok(error, "The refusal should carry the error");
+  Assert.equal(IPPProxyManager.state, IPPProxyStates.ERROR);
+
+  await IPPProxyManager.stop(false);
+  IPProtectionService.uninit();
+});
+
+/**
+ * Tests that a user retry out of ERROR that fails stays in ERROR, holding
+ * traffic, rather than releasing it.
+ */
+add_task(async function test_IPPProxyManager_failed_retry_keeps_error() {
+  await initServiceWithFailingPass();
+  await IPPProxyManager.start(false);
+  Assert.equal(IPPProxyManager.state, IPPProxyStates.ERROR);
+
+  const { started } = await IPPProxyManager.start(true);
+
+  Assert.ok(!started, "The retry should fail");
+  Assert.equal(
+    IPPProxyManager.state,
+    IPPProxyStates.ERROR,
+    "A failed retry should stay in ERROR"
+  );
+  const later = makeDocumentChannel("https://example.com/");
+  applyFilter(IPPProxyManager.channelFilter(), later);
+  Assert.equal(
+    later.cancelStatus,
+    Cr.NS_ERROR_PROXY_CONNECTION_REFUSED,
+    "A new load should still be cancelled with a proxy error"
+  );
+
+  await IPPProxyManager.stop(false);
+  IPProtectionService.uninit();
+});
+
+/**
+ * Tests that a load held by a user activation that fails is cancelled with a
+ * proxy error rather than aborted.
+ */
+add_task(
+  async function test_IPPProxyManager_user_activation_failure_fails_held_load() {
+    await initServiceWithFailingPass();
+
+    const started = IPPProxyManager.start(true);
+    const channel = makeDocumentChannel("https://example.com/");
+    applyFilter(IPPProxyManager.channelFilter(), channel);
+    await started;
+
+    Assert.equal(
+      channel.cancelStatus,
+      Cr.NS_ERROR_PROXY_CONNECTION_REFUSED,
+      "The held load should be cancelled with a proxy error"
+    );
+
+    IPProtectionService.uninit();
+  }
+);
+
+/**
+ * Tests that in ERROR, new loads are cancelled with a proxy error.
+ */
+add_task(async function test_IPPProxyManager_error_fails_proxied_loads() {
+  await initServiceWithFailingPass();
+  await IPPProxyManager.start(false);
+
+  const later = makeDocumentChannel("https://example.com/");
+  Assert.strictEqual(
+    applyFilter(IPPProxyManager.channelFilter(), later),
+    null,
+    "A new load should not get a connection"
+  );
+  Assert.equal(
+    later.cancelStatus,
+    Cr.NS_ERROR_PROXY_CONNECTION_REFUSED,
+    "A new load should be cancelled with a proxy error"
+  );
+
+  await IPPProxyManager.stop(false);
   IPProtectionService.uninit();
 });
 
@@ -1239,49 +1420,106 @@ add_task(
   }
 );
 
-add_task(async function test_IPPProxyManager_rotation_retries_offline_errors() {
-  const { IPPNetworkUtils } = ChromeUtils.importESModule(
-    "moz-src:///toolkit/components/ipprotection/IPPNetworkUtils.sys.mjs"
-  );
+/**
+ * Wake recovery retries through network errors and recovers to ACTIVE once
+ * the request reaches Guardian. retryAfter is 0 so the retry loop is driven by
+ * promise resolution rather than wall-clock timers.
+ */
+add_task(async function test_wake_rotation_retries_network_errors() {
   let sandbox = sinon.createSandbox();
   setupStubs({ validProxyPass: true });
   try {
     await initServiceToReady();
     await IPPProxyManager.start();
 
-    Services.prefs.setIntPref(RETRY_AFTER_PREF, 5);
-    Services.prefs.setIntPref(TIMEOUT_PREF, 100);
+    Services.prefs.setIntPref(RETRY_AFTER_PREF, 0);
 
-    sandbox.stub(IPPNetworkUtils, "isOffline").get(() => true);
-    const fetchSpy = sandbox.spy(IPPDummyAuthProvider, "fetchProxyPass");
-    IPPDummyAuthProvider.setProxyPassError(new Error("network down"));
+    const validPass = new ProxyPass(createProxyPassToken());
+    const fetchStub = sandbox.stub(IPPDummyAuthProvider, "fetchProxyPass");
+    const networkError = { error: AUTH_ERRORS.NETWORK_ERROR, usage: null };
+    fetchStub.onCall(0).resolves(networkError);
+    fetchStub.onCall(1).resolves(networkError);
+    fetchStub.resolves({ status: 200, pass: validPass });
 
-    const errorEvent = waitForProxyState(IPPProxyStates.ERROR);
-    const result = await IPPProxyManager.rotateProxyPass();
-    await errorEvent;
+    const newPass = await IPPProxyManager.rotateProxyPass({
+      abortOnNetworkError: false,
+    });
 
     Assert.equal(
-      result,
-      null,
-      "Rotation should not surface an offline error directly"
+      newPass?.token,
+      validPass.token,
+      "Recovers with the pass fetched after retrying past the failures"
     );
-    Assert.greater(
-      fetchSpy.callCount,
-      1,
-      "An offline failure should be retried rather than thrown"
-    );
-    Assert.equal(
-      IPPProxyManager.state,
-      IPPProxyStates.ERROR,
-      "Proxy should move to ERROR when offline retries time out"
-    );
+    Assert.equal(IPPProxyManager.state, IPPProxyStates.ACTIVE, "Stays ACTIVE");
   } finally {
-    IPPDummyAuthProvider.setProxyPassError(null);
     sandbox.restore();
     await IPPProxyManager.stop(false).catch(() => {});
     IPProtectionService.uninit();
     Services.prefs.clearUserPref(RETRY_AFTER_PREF);
-    Services.prefs.clearUserPref(TIMEOUT_PREF);
+  }
+});
+
+/**
+ * In-session (default) rotation treats a network error as a real disconnect:
+ * it fails fast with a network error instead of retrying.
+ */
+add_task(async function test_insession_rotation_network_error_is_fatal() {
+  let sandbox = sinon.createSandbox();
+  setupStubs({ validProxyPass: true });
+  try {
+    await initServiceToReady();
+    await IPPProxyManager.start();
+
+    const fetchSpy = sandbox
+      .stub(IPPDummyAuthProvider, "fetchProxyPass")
+      .resolves({ error: AUTH_ERRORS.NETWORK_ERROR, usage: null });
+
+    const errorEvent = waitForProxyState(IPPProxyStates.ERROR);
+    await IPPProxyManager.rotateProxyPass();
+    await errorEvent;
+
+    Assert.equal(fetchSpy.callCount, 1, "Fatal in-session, not retried");
+    Assert.equal(
+      IPPProxyManager.errorType,
+      ERRORS.NETWORK,
+      "Surfaces a network error"
+    );
+  } finally {
+    sandbox.restore();
+    await IPPProxyManager.stop(false).catch(() => {});
+    IPProtectionService.uninit();
+  }
+});
+
+/**
+ * A thrown provider error is an auth failure, not a network error, so wake
+ * recovery fails fast with it instead of retrying.
+ */
+add_task(async function test_wake_rotation_thrown_error_is_fatal() {
+  let sandbox = sinon.createSandbox();
+  setupStubs({ validProxyPass: true });
+  try {
+    await initServiceToReady();
+    await IPPProxyManager.start();
+
+    const fetchStub = sandbox
+      .stub(IPPDummyAuthProvider, "fetchProxyPass")
+      .callsFake(() => Promise.reject(AUTH_ERRORS.LOGIN_NEEDED));
+
+    const errorEvent = waitForProxyState(IPPProxyStates.ERROR);
+    await IPPProxyManager.rotateProxyPass({ abortOnNetworkError: false });
+    await errorEvent;
+
+    Assert.equal(fetchStub.callCount, 1, "Fatal on wake, not retried");
+    Assert.equal(
+      IPPProxyManager.errorType,
+      AUTH_ERRORS.LOGIN_NEEDED,
+      "Surfaces the thrown error"
+    );
+  } finally {
+    sandbox.restore();
+    await IPPProxyManager.stop(false).catch(() => {});
+    IPProtectionService.uninit();
   }
 });
 
@@ -2068,7 +2306,20 @@ add_task(async function test_IPPProxyManager_switch_from_active() {
     "suspend must be called before the re-initialize"
   );
 
+  Assert.deepEqual(
+    IPPProxyManager.location,
+    IPProtectionServerlist.getLocation("US"),
+    "location should follow the switch"
+  );
+
   await IPPProxyManager.stop();
+
+  Assert.equal(
+    IPPProxyManager.location,
+    null,
+    "location should be cleared when the proxy stops"
+  );
+
   IPProtectionService.uninit();
   sandbox.restore();
 });
@@ -2202,6 +2453,223 @@ add_task(async function test_IPPProxyManager_switch_no_server_found() {
   );
 
   await IPPProxyManager.stop();
+  IPProtectionService.uninit();
+  sandbox.restore();
+});
+
+/**
+ * A start() issued while an activation is running must join it rather than
+ * open a second one racing for the same channel filter.
+ */
+add_task(
+  async function test_IPPProxyManager_start_joins_activation_in_flight() {
+    await IPPProxyManager.reset();
+    await putServerInRemoteSettings();
+    setupStubs();
+    await initServiceToReady();
+    await IPProtectionServerlist.maybeFetchList();
+
+    const sandbox = sinon.createSandbox();
+    const fetching = Promise.withResolvers();
+    const fetchingList = Promise.withResolvers();
+    const fetchList = sandbox
+      .stub(IPProtectionServerlist, "maybeFetchList")
+      .callsFake(() => {
+        fetching.resolve();
+        return fetchingList.promise;
+      });
+
+    const first = IPPProxyManager.start(true, false);
+    await fetching.promise;
+
+    const second = IPPProxyManager.start(false, false);
+    Assert.equal(
+      fetchList.callCount,
+      1,
+      "the second start() joins the activation instead of opening another"
+    );
+
+    const active = waitForProxyState(IPPProxyStates.ACTIVE);
+    fetchingList.resolve();
+    Assert.deepEqual(
+      await Promise.all([first, second]),
+      [{ started: true }, { started: true }],
+      "both callers get the result of the one activation"
+    );
+    await active;
+
+    await IPPProxyManager.stop();
+    IPProtectionService.uninit();
+    sandbox.restore();
+  }
+);
+
+add_task(async function test_IPPProxyManager_modes() {
+  await IPPProxyManager.reset();
+  await putServerInRemoteSettings();
+  setupStubs();
+  await initServiceToReady();
+  registerCleanupFunction(() => Services.prefs.clearUserPref(MODE_PREF));
+
+  const connect = async mode => {
+    const activeEvent = waitForProxyState(IPPProxyStates.ACTIVE);
+    await IPPProxyManager.start(true, false, undefined, mode);
+    await activeEvent;
+  };
+
+  Assert.deepEqual(
+    IPPProxyManager.setMode(IPPMode.MODE_TRACKER),
+    { changed: false, error: ERRORS.NOT_READY },
+    "setMode should refuse while the proxy is not active"
+  );
+
+  Services.prefs.setIntPref(MODE_PREF, IPPMode.MODE_INCLUSION);
+  await connect();
+
+  Assert.equal(
+    IPPProxyManager.mode,
+    IPPMode.MODE_INCLUSION,
+    "the mode pref should seed a connection"
+  );
+  Assert.equal(
+    IPPProxyManager.channelFilter().mode,
+    IPPMode.MODE_INCLUSION,
+    "the channel filter should be routing in the seeded mode"
+  );
+
+  await IPPProxyManager.stop();
+
+  Assert.equal(
+    IPPProxyManager.mode,
+    null,
+    "a stopped proxy should have no mode"
+  );
+
+  await connect(IPPMode.MODE_TRACKER);
+
+  Assert.equal(
+    IPPProxyManager.mode,
+    IPPMode.MODE_TRACKER,
+    "a mode passed to start() should beat the pref"
+  );
+
+  const sandbox = sinon.createSandbox();
+  const suspendSpy = sandbox.spy(IPPChannelFilter.prototype, "suspend");
+  const initSpy = sandbox.spy(IPPChannelFilter.prototype, "initialize");
+  const modeEvent = waitForEvent(
+    IPPProxyManager,
+    "IPPProxyManager:ModeChanged"
+  );
+
+  Assert.deepEqual(
+    IPPProxyManager.setMode(42),
+    { changed: true },
+    "setMode should report success"
+  );
+  const { detail } = await modeEvent;
+
+  Assert.equal(
+    detail.mode,
+    IPPMode.MODE_FULL,
+    "an unknown mode should fall back to MODE_FULL and be announced as such"
+  );
+  Assert.equal(
+    IPPProxyManager.channelFilter().mode,
+    IPPMode.MODE_FULL,
+    "the live channel filter should have the new mode"
+  );
+  Assert.ok(
+    suspendSpy.notCalled && initSpy.notCalled,
+    "a mode change should not re-point the connection"
+  );
+
+  await IPPProxyManager.stop();
+  IPProtectionService.uninit();
+  sandbox.restore();
+});
+
+/**
+ * Tests that start() before the service is READY holds traffic in the asked
+ * mode and consults nothing until the service arrives, then completes the
+ * activation on its own. It starts before the service init, as a helper does,
+ * so the cached non-READY state the init publishes lands on the wait.
+ */
+add_task(async function test_IPPProxyManager_start_waits_for_the_service() {
+  await IPPProxyManager.reset();
+  setupStubs({ signedIn: false });
+  // Reopens the startup cache window the manifest closes for every test. Both
+  // getters are shadowed: the real `state` throws once startup has completed.
+  Object.defineProperty(IPPStartupCache, "isStartupCompleted", {
+    get: () => false,
+    configurable: true,
+  });
+  Object.defineProperty(IPPStartupCache, "state", {
+    get: () => IPProtectionStates.UNAUTHENTICATED,
+    configurable: true,
+  });
+  const sandbox = sinon.createSandbox();
+  const fetchList = sandbox.spy(IPProtectionServerlist, "maybeFetchList");
+  const aboutToStart = sandbox.spy(IPPDummyAuthProvider, "aboutToStart");
+
+  const states = [];
+  const record = () =>
+    states.push({
+      state: IPPProxyManager.state,
+      connected: !!IPPProxyManager.channelFilter()?.proxyInfo,
+    });
+  IPPProxyManager.addEventListener("IPPProxyManager:StateChanged", record);
+
+  const startPromise = IPPProxyManager.start(
+    false,
+    false,
+    undefined,
+    IPPMode.MODE_INCLUSION
+  );
+  IPProtectionService.init();
+
+  Assert.equal(
+    IPPProxyManager.state,
+    IPPProxyStates.ACTIVATING,
+    "The wait should read as activating"
+  );
+  Assert.ok(
+    IPPProxyManager.channelFilter()?.active,
+    "The filter should hold traffic while the service is not ready"
+  );
+  Assert.equal(
+    IPPProxyManager.channelFilter().mode,
+    IPPMode.MODE_INCLUSION,
+    "The filter should hold traffic for the mode this activation asked for"
+  );
+  Assert.ok(
+    !fetchList.called && !aboutToStart.called,
+    "Neither the server list nor the auth provider should be consulted yet"
+  );
+
+  setupStubs({ signedIn: true });
+  delete IPPStartupCache.isStartupCompleted;
+  delete IPPStartupCache.state;
+  IPProtectionService.updateState();
+  await IPProtectionService.initOnStartupCompleted();
+  const result = await startPromise;
+
+  Assert.ok(result.started, "The activation should complete on its own");
+  Assert.ok(
+    fetchList.called && aboutToStart.called,
+    "The server list and the auth provider should be consulted once ready"
+  );
+  Assert.ok(IPPProxyManager.hasValidProxyPass, "A pass should be fetched");
+  IPPProxyManager.removeEventListener("IPPProxyManager:StateChanged", record);
+  Assert.deepEqual(
+    states,
+    [
+      { state: IPPProxyStates.ACTIVATING, connected: false },
+      { state: IPPProxyStates.ACTIVE, connected: true },
+    ],
+    "The activation should own the state from the ask to the connection"
+  );
+
+  await IPPProxyManager.stop(false);
   IPProtectionService.uninit();
   sandbox.restore();
 });

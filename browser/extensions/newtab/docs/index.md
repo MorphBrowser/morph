@@ -19,7 +19,7 @@ You will need the following:
 - Node.js 10+ (On Mac, the best way to install Node.js is to use the install link on the [Node.js homepage])
 - npm (packaged with Node.js)
 
-To install node dependencies, run the following from the root of the mozilla-central repository.
+To install node dependencies, run the following from the root of the Firefox repository.
 (This command uses `mach` to call `npm` and `node` commands to ensure the correct versions of Node and npm are being referenced.)
 
 ```shell
@@ -40,11 +40,27 @@ in `browser/extensions/newtab/content-src` directory. These files will be compil
 
 ## Building assets and running Firefox
 
-To build assets and run Firefox, run the following from the root of the mozilla-central repository:
+The build generates the bundles and CSS into the objdir, so to build assets and run Firefox, run the following from the root of the Firefox repository:
 
 ```shell
-./mach newtab bundle && ./mach build && ./mach run
+./mach build faster && ./mach run
 ```
+
+Use `./mach build` instead of `./mach build faster` if you haven't built Firefox in this checkout yet, or if your change also touches compiled code.
+
+## Bundles left in the source tree
+
+`./mach newtab bundle` and `./mach newtab watch` write the bundles and CSS into the source tree (`data/content/*.bundle.js` and `css/`), not the objdir. While these copies exist, the build packages them in place of the ones it generates. They go stale with the next change to `content-src/`, and Firefox keeps running the old code. `git status browser/extensions/newtab` lists them as untracked files.
+
+To go back to the copies the build generates, delete them and rebuild:
+
+```shell
+rm -r browser/extensions/newtab/data/content/*.bundle.js browser/extensions/newtab/css
+touch browser/extensions/newtab/addon-jar.mn
+./mach build faster
+```
+
+Touching `addon-jar.mn` makes the build look up the source of each packaged file again. Without it, the build still points at the deleted copies.
 
 ## Continuous development / debugging
 
@@ -58,7 +74,7 @@ For near real-time reloading, run the following commands in **two separate termi
 ./mach run
 ```
 
-**IMPORTANT NOTE**: This task will add inline source maps to help with debugging, which changes the memory footprint. Do not use the `watch` task for profiling or performance testing! After finishing your work, **be sure to stop the watch process**. When stopped, it will automatically run a final bundle step to remove the temporary inline source maps.
+**IMPORTANT NOTE**: This task will add inline source maps to help with debugging, which changes the memory footprint. Do not use the `watch` task for profiling or performance testing! After finishing your work, **be sure to stop the watch process**. When stopped, it will automatically run a final bundle step to remove the temporary inline source maps. That step leaves bundles in the source tree; see "Bundles left in the source tree" above to remove them.
 
 ## Pre-commit git hook
 
@@ -68,11 +84,11 @@ it runs the following checks in order, stopping at the first failure:
 1. **Bundle** — if newtab source or bundle output files are staged, runs
    `./mach newtab bundle` and blocks the commit if the output files differ
    from what is staged.
-2. **Lint** — runs [mozlint](https://firefox-source-docs.mozilla.org/code-quality/lint/usage.html)
+2. **Lint** — runs {doc}`mozlint </code-quality/lint/usage>`
    on staged files and blocks the commit if there are errors.
 3. **Tests** — optionally runs unit tests (configurable, disabled by default).
 
-To install the hook, run the following from the root of the mozilla-central repository:
+To install the hook, run the following from the root of the Firefox repository:
 
 ```shell
 ln -sf "$(git rev-parse --show-toplevel)/tools/lint/hooks_newtab.py" \

@@ -47,6 +47,8 @@ const std::string TlsAgent::kServerDsa = "dsa";
 const std::string TlsAgent::kServerMlDsa44 = "mldsa44";
 const std::string TlsAgent::kServerMlDsa65 = "mldsa65";
 const std::string TlsAgent::kServerMlDsa87 = "mldsa87";
+const std::string TlsAgent::kServerUnknownExt = "unknown_ext";
+const std::string TlsAgent::kServerUnknownCriticalExt = "unknown_critical_ext";
 const std::string TlsAgent::kDelegatorEcdsa256 = "delegator_ecdsa256";
 const std::string TlsAgent::kDelegatorRsae2048 = "delegator_rsae2048";
 const std::string TlsAgent::kDelegatorRsaPss2048 = "delegator_rsa_pss2048";
@@ -448,22 +450,21 @@ bool TlsAgent::CheckClientAuthCallbacksCompleted(uint8_t expected) {
 }
 
 bool TlsAgent::GetPeerChainLength(size_t* count) {
-  SECItemArray* chain = nullptr;
-  SECStatus rv = SSL_PeerCertificateChainDER(ssl_fd(), &chain);
+  SECItemArray* rawChain = nullptr;
+  SECStatus rv = SSL_PeerCertificateChainDER(ssl_fd(), &rawChain);
+  ScopedSECItemArray chain(rawChain);
   if (rv != SECSuccess) return false;
 
   *count = chain->len;
-
-  SECITEM_FreeArray(chain, true);
-
   return true;
 }
 
 void TlsAgent::CheckPeerChainFunctionConsistency() {
-  SECItemArray* derChain = nullptr;
-  SECStatus rv = SSL_PeerCertificateChainDER(ssl_fd(), &derChain);
+  SECItemArray* rawDerChain = nullptr;
+  SECStatus rv = SSL_PeerCertificateChainDER(ssl_fd(), &rawDerChain);
+  ScopedSECItemArray derChain(rawDerChain);
   PRErrorCode err1 = PR_GetError();
-  CERTCertList* chain = SSL_PeerCertificateChain(ssl_fd());
+  ScopedCERTCertList chain(SSL_PeerCertificateChain(ssl_fd()));
   PRErrorCode err2 = PR_GetError();
   if (rv != SECSuccess) {
     ASSERT_EQ(nullptr, chain);
@@ -485,9 +486,6 @@ void TlsAgent::CheckPeerChainFunctionConsistency() {
     ++count;
   }
   ASSERT_EQ(count, derChain->len);
-
-  SECITEM_FreeArray(derChain, true);
-  CERT_DestroyCertList(chain);
 }
 
 void TlsAgent::CheckCipherSuite(uint16_t suite) {
@@ -1032,14 +1030,14 @@ void TlsAgent::ValidateCipherSpecs() {
   // We use one ciphersuite in each direction.
   PRInt32 expected = 2;
   if (variant_ == ssl_variant_datagram) {
-    // For DTLS 1.3, the client retains the cipher spec for early data and the
-    // handshake so that it can retransmit EndOfEarlyData and its final flight.
-    // It also retains the handshake read cipher spec so that it can read ACKs
-    // from the server. The server retains the handshake read cipher spec so it
-    // can read the client's retransmitted Finished.
+    // For DTLS 1.3, the client retains the cipher spec for the handshake so
+    // that it can retransmit its final flight. It also retains the handshake
+    // read cipher spec so that it can read ACKs from the server. The server
+    // retains the handshake read cipher spec so it can read the client's
+    // retransmitted Finished.
     if (expected_version_ >= SSL_LIBRARY_VERSION_TLS_1_3) {
       if (role_ == CLIENT) {
-        expected = info_.earlyDataAccepted ? 5 : 4;
+        expected = 4;
       } else {
         expected = 3;
       }

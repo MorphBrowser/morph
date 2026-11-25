@@ -138,6 +138,10 @@ NS_IMETHODIMP GeckoViewStreamListener::OnDataAvailable(
   nsresult rv =
       aInputStream->ReadSegments(WriteSegment, this, aCount, &countRead);
   NS_ENSURE_SUCCESS(rv, rv);
+
+  if (mStream->ShouldSuspend()) {
+    aRequest->Suspend();
+  }
   return rv;
 }
 
@@ -260,6 +264,8 @@ nsresult GeckoViewStreamListener::HandleWebResponse(nsIRequest* aRequest) {
     }
   }
 
+  AmendWebResponse(builder);
+
   java::WebResponse::GlobalRef response = builder->Build();
 
   SendWebResponse(response);
@@ -271,7 +277,7 @@ void GeckoViewStreamListener::InitializeStreamSupport(nsIRequest* aRequest) {
 
   mSupport = java::GeckoInputStream::Support::New();
   StreamSupport::AttachNative(
-      mSupport, mozilla::MakeUnique<StreamSupport>(mSupport, aRequest));
+      mSupport, std::make_unique<StreamSupport>(mSupport, aRequest));
 }
 
 std::tuple<jni::ByteArray::LocalRef, bool>

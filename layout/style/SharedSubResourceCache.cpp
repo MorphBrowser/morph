@@ -4,6 +4,7 @@
 
 #include "SharedSubResourceCache.h"
 
+#include "mozilla/Preferences.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/Services.h"
 #include "mozilla/UniquePtr.h"
@@ -29,33 +30,35 @@ namespace mozilla {
 
 namespace SharedSubResourceCacheUtils {
 
-void AddMemoryPressureObserver(nsIObserver* aObserver) {
+void AddMemoryPressureAndSafeBrowsingObserver(nsIObserver* aObserver) {
   nsCOMPtr<nsIObserverService> obsService = services::GetObserverService();
   if (!obsService) {
     return;
   }
   obsService->AddObserver(aObserver, "memory-pressure", false);
   obsService->AddObserver(aObserver, "memory-pressure-stop", false);
+  if (XRE_IsParentProcess()) {
+    obsService->AddObserver(aObserver, "safebrowsing-update-finished", false);
+  }
 }
 
-void RemoveMemoryPressureObserver(nsIObserver* aObserver) {
+void RemoveMemoryPressureAndSafeBrowsingObserver(nsIObserver* aObserver) {
   nsCOMPtr<nsIObserverService> obsService = services::GetObserverService();
   if (!obsService) {
     return;
   }
   obsService->RemoveObserver(aObserver, "memory-pressure");
   obsService->RemoveObserver(aObserver, "memory-pressure-stop");
+  if (XRE_IsParentProcess()) {
+    obsService->RemoveObserver(aObserver, "safebrowsing-update-finished");
+  }
 }
 
 void AddPerformanceEntryForCache(
     const nsString& aEntryName, const nsString& aInitiatorType,
-    const SubResourceNetworkMetadataHolder* aNetworkMetadata,
-    TimeStamp aStartTime, TimeStamp aEndTime, dom::Document* aDocument) {
+    const dom::CacheablePerformanceTimingData& aPerfData, TimeStamp aStartTime,
+    TimeStamp aEndTime, dom::Document* aDocument) {
   MOZ_ASSERT(aDocument);
-
-  if (!aNetworkMetadata || !aNetworkMetadata->GetPerfData()) {
-    return;
-  }
 
   nsPIDOMWindowInner* win = aDocument->GetInnerWindow();
   if (!win) {
@@ -69,9 +72,8 @@ void AddPerformanceEntryForCache(
   // TODO: Bug 1751383.
   auto renderBlocking = dom::RenderBlockingStatusType::Non_blocking;
 
-  UniquePtr<dom::PerformanceTimingData> data(
-      dom::PerformanceTimingData::Create(*aNetworkMetadata->GetPerfData(), 0,
-                                         aStartTime, aEndTime, renderBlocking));
+  UniquePtr<dom::PerformanceTimingData> data(dom::PerformanceTimingData::Create(
+      aPerfData, 0, aStartTime, aEndTime, renderBlocking));
   if (!data) {
     return;
   }

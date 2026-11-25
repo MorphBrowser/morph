@@ -106,7 +106,7 @@ const statsExpectedByType = {
       "retransmittedBytesSent",
       "transportId",
     ],
-    optional: ["nackCount", "qpSum", "rid", "rtxSsrc"],
+    optional: ["nackCount", "qpSum", "rid", "rtxSsrc", "targetBitrate"],
     localAudioOnly: [],
     localVideoOnly: [
       "framesEncoded",
@@ -119,9 +119,8 @@ const statsExpectedByType = {
       "framesSent",
       "hugeFramesSent",
       "totalEncodeTime",
-      "totalEncodedBytesTarget",
     ],
-    unimplemented: ["mediaTrackId", "sliCount", "targetBitrate"],
+    unimplemented: ["mediaTrackId", "sliCount"],
     deprecated: ["isRemote"],
   },
   "remote-inbound-rtp": {
@@ -178,9 +177,6 @@ const statsExpectedByType = {
   "media-source": {
     expected: ["id", "timestamp", "type", "trackIdentifier", "kind"],
     unimplemented: [
-      "audioLevel",
-      "totalAudioEnergy",
-      "totalSamplesDuration",
       "echoReturnLoss",
       "echoReturnLossEnhancement",
       "droppedSamplesDuration",
@@ -188,7 +184,7 @@ const statsExpectedByType = {
       "totalCaptureDelay",
       "totalSamplesCaptured",
     ],
-    localAudioOnly: [],
+    localAudioOnly: ["audioLevel", "totalAudioEnergy", "totalSamplesDuration"],
     localVideoOnly: ["frames", "framesPerSecond", "width", "height"],
     optional: [],
     deprecated: [],
@@ -969,10 +965,10 @@ function pedanticChecks(report) {
         // framesAssembledFromMultiplePackets
         ok(
           stat.framesAssembledFromMultiplePackets >= 0 &&
-            stat.framesAssembledFromMultiplePackets < 200,
-          `${stat.type}.framesAssembledFromMultiplePackets is a sane number ` +
-            `for a short ${stat.kind} test.` +
-            `value=${stat.framesAssembledFromMultiplePackets}`
+            stat.framesAssembledFromMultiplePackets <= stat.framesDecoded,
+          `${stat.type}.framesAssembledFromMultiplePackets is at most ` +
+            `framesDecoded. value=${stat.framesAssembledFromMultiplePackets}, ` +
+            `framesDecoded=${stat.framesDecoded}`
         );
 
         // totalAssemblyTime
@@ -1154,6 +1150,16 @@ function pedanticChecks(report) {
         }
       }
 
+      // targetBitrate is only present once the bitrate allocator has told the
+      // encoder what to aim for, so it may be absent early in a call.
+      if (stat.targetBitrate !== undefined) {
+        ok(
+          stat.targetBitrate > 0,
+          `${stat.type}.targetBitrate is a sane number for a short ` +
+            `${stat.kind} test. value=${stat.targetBitrate}`
+        );
+      }
+
       // qpSum
       // This is supported for all of our vpx codecs and AV1 (on the encode
       // side, see bug 1519590)
@@ -1264,13 +1270,6 @@ function pedanticChecks(report) {
           `${stat.type}.totalEncodeTime is a sane number for a short ` +
             `${stat.kind} test. value=${stat.totalEncodeTime}`
         );
-
-        // totalEncodedBytesTarget
-        ok(
-          stat.totalEncodedBytesTarget > 1000,
-          `${stat.type}.totalEncodedBytesTarget is a sane number for a short ` +
-            `${stat.kind} test. value=${stat.totalEncodedBytesTarget}`
-        );
       }
     } else if (stat.type == "remote-outbound-rtp") {
       //
@@ -1364,6 +1363,44 @@ function pedanticChecks(report) {
             stat[field] === undefined,
             `${stat.type} does not have field ` +
               `${field} when kind is not 'video'`
+          );
+        });
+      }
+      if (stat.inner.kind == "audio") {
+        expectations.localAudioOnly.forEach(field => {
+          ok(
+            stat.inner[field] !== undefined,
+            `${stat.type} has field ${field} when kind is audio`
+          );
+        });
+
+        // audioLevel
+        ok(
+          stat.audioLevel >= 0 && stat.audioLevel <= 1,
+          `${stat.type}.audioLevel is a sane number for a ` +
+            `${stat.kind} test. value=${stat.audioLevel}`
+        );
+
+        // totalSamplesDuration
+        ok(
+          stat.totalSamplesDuration >= 0 && stat.totalSamplesDuration < 300,
+          `${stat.type}.totalSamplesDuration is a sane number for a short ` +
+            `${stat.kind} test. value=${stat.totalSamplesDuration}`
+        );
+
+        // totalAudioEnergy
+        ok(
+          stat.totalAudioEnergy >= 0 &&
+            stat.totalAudioEnergy <= stat.totalSamplesDuration,
+          `${stat.type}.totalAudioEnergy is a sane number for a short ` +
+            `${stat.kind} test. value=${stat.totalAudioEnergy}`
+        );
+      } else {
+        expectations.localAudioOnly.forEach(field => {
+          ok(
+            stat[field] === undefined,
+            `${stat.type} does not have field ` +
+              `${field} when kind is not 'audio'`
           );
         });
       }

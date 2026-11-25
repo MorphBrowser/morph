@@ -83,9 +83,11 @@ class GLContextEGL final : public GLContext {
 
   virtual bool IsANGLE() const override { return mEgl->mLib->IsANGLE(); }
   virtual bool IsWARP() const override { return mEgl->mIsWARP; }
-  virtual bool IsD3DANGLE() const override { return mEgl->mLib->IsD3DANGLE(); }
+  virtual bool IsD3DANGLE() const override {
+    return mEgl->IsExtensionSupported(EGLDeviceExtension::ANGLE_device_d3d);
+  }
   virtual bool IsMetalANGLE() const override {
-    return mEgl->mLib->IsMetalANGLE();
+    return mEgl->IsExtensionSupported(EGLDeviceExtension::ANGLE_device_metal);
   }
 
   virtual bool BindTexImage() override;
@@ -138,7 +140,7 @@ class GLContextEGL final : public GLContext {
       const std::shared_ptr<EglDisplay> display,
       const GLContextCreateDesc& desc, nsACString* const out_failureId);
 
-  static EGLSurface CreateEGLSurfaceForCompositorWidget(
+  EGLSurface CreateEGLSurfaceForCompositorWidget(
       widget::CompositorWidget* aCompositorWidget, const EGLConfig aConfig);
 
   static void DestroySurface(EglDisplay&, const EGLSurface aSurface);

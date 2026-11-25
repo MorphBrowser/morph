@@ -928,8 +928,9 @@ class MarionetteProtocol(Protocol):
         return True
 
     def on_environment_change(self, old_environment, new_environment):
-        # Unset all the old prefs
-        for name in old_environment.get("prefs", {}).keys():
+        # Unset all the old prefs, in the reverse of the order they were set, so
+        # that prefs which depend on earlier ones are restored first.
+        for name in reversed(old_environment.get("prefs", {}).keys()):
             value = self.executor.original_pref_values[name]
             if value is None:
                 self.prefs.clear(name)
@@ -1208,7 +1209,8 @@ class MarionetteRefTestExecutor(RefTestExecutor):
                 self.has_window = False
 
             if not self.has_window:
-                self.protocol.base.create_window(type="window")
+                test_window = self.protocol.base.create_window(type="window")
+                self.protocol.base.set_window(test_window)
                 # Resize the browser window so that its inner dimensions have
                 # exactly a size of 800x600 pixels, which means ignoring all
                 # visible toolbars and sidebars.
@@ -1262,7 +1264,10 @@ class MarionetteRefTestExecutor(RefTestExecutor):
     def _screenshot(self, protocol, url, timeout):
         protocol.testdriver.run(url, self.wait_script)
 
-        screenshot = protocol.marionette.screenshot(full=False)
+        # Capture via drawWindow (compositor readback) rather than drawSnapshot
+        # so the screenshot reflects what is actually composited on screen,
+        # e.g. an in-progress view transition (bug 2008054).
+        screenshot = protocol.marionette.screenshot(full=False, readback=True)
         # strip off the data:img/png, part of the url
         if screenshot.startswith("data:image/png;base64,"):
             screenshot = screenshot.split(",", 1)[1]
@@ -1498,3 +1503,13 @@ class MarionettePytestExecutor(PytestExecutor):
         for option in ["androidPackage", "androidDeviceSerial", "env"]:
             if hasattr(browser, option):
                 self.capabilities["moz:firefoxOptions"][option] = getattr(browser, option)
+
+    @property
+    def session_config(self):
+        config = super().session_config
+        if hasattr(self.browser, "adb_binary"):
+            config["android"] = {
+                "adb_binary": self.browser.adb_binary,
+                "device_serial": self.browser.androidDeviceSerial,
+            }
+        return config

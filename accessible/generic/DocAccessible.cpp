@@ -10,6 +10,7 @@
 #include "DocAccessible-inl.h"
 #include "EventTree.h"
 #include "HTMLImageMapAccessible.h"
+#include "HTMLSelectAccessible.h"
 #include "LocalAccessible-inl.h"
 #include "Relation.h"
 #include "TreeWalker.h"
@@ -34,7 +35,6 @@
 #include "mozilla/dom/HTMLSelectElement.h"
 #include "mozilla/dom/UserActivation.h"
 #include "mozilla/dom/WindowGlobalChild.h"
-#include "mozilla/ipc/ProtocolUtils.h"
 #include "nsAccUtils.h"
 #include "nsAccessibilityService.h"
 #include "nsEventShell.h"
@@ -545,12 +545,20 @@ void DocAccessible::Init() {
   // that one down now so we don't end up with two DocAccessibles alive for the
   // same WindowGlobal.
   if (dom::WindowGlobalChild* wgc = mDocumentNode->GetWindowGlobalChild()) {
-    if (auto* actor =
-            LoneManagedOrNullAsserts(wgc->ManagedPDocAccessibleChild())) {
-      if (DocAccessible* prevDocAcc =
+    DocAccessible* prevDocAcc = nullptr;
+    for (auto* actor : wgc->ManagedPDocAccessibleChild()) {
+      // DocAccessibleChild::GetDocAccessible returns null if the child actor
+      // has been shut down but the parent process hasn't deleted it yet. We
+      // just ignore those, even if there are several.
+      if (DocAccessible* docAcc =
               static_cast<DocAccessibleChild*>(actor)->GetDocAccessible()) {
-        prevDocAcc->Shutdown();
+        MOZ_ASSERT(!prevDocAcc,
+                   "More than one live PDocAccessible for a WindowGlobal");
+        prevDocAcc = docAcc;
       }
+    }
+    if (prevDocAcc) {
+      prevDocAcc->Shutdown();
     }
   }
 
@@ -761,7 +769,7 @@ nsresult DocAccessible::RemoveEventListeners() {
   return NS_OK;
 }
 
-void DocAccessible::ScrollTimerCallback(nsITimer* aTimer, void* aClosure) {
+void DocAccessible::ScrollTimerCallback(nsITimer* /*aTimer*/, void* aClosure) {
   DocAccessible* docAcc = reinterpret_cast<DocAccessible*>(aClosure);
 
   if (docAcc) {
@@ -868,7 +876,7 @@ std::pair<nsPoint, nsRect> DocAccessible::ComputeScrollData(
 static bool sIsAttrElementChanging = false;
 
 void DocAccessible::AttributeWillChange(dom::Element* aElement,
-                                        int32_t aNameSpaceID,
+                                        int32_t /*aNameSpaceID*/,
                                         nsAtom* aAttribute,
                                         AttrModType aModType) {
   if (sIsAttrElementChanging) {
@@ -969,6 +977,17 @@ void DocAccessible::AttributeChanged(dom::Element* aElement,
 
   LocalAccessible* accessible = GetAccessibleOrDocument(aElement);
   if (!accessible) {
+    if (aAttribute == nsGkAtoms::label) {
+      HTMLComboboxAccessible::SelectedOptionLabelMaybeChanged(this, aElement);
+      return;
+    }
+
+    // An element that isn't rendered can't get an Accessible; frame
+    // construction will notify us if it becomes rendered later.
+    if (!aElement->GetPrimaryFrame() &&
+        !nsCoreUtils::CanCreateAccessibleWithoutFrame(aElement)) {
+      return;
+    }
     if (aModType == AttrModType::Addition &&
         aria::AttrCharacteristicsFor(aAttribute) & ATTR_GLOBAL) {
       // The element doesn't have an Accessible, but a global ARIA attribute
@@ -982,6 +1001,7 @@ void DocAccessible::AttributeChanged(dom::Element* aElement,
       ContentInserted(aElement, aElement->GetNextSibling());
       return;
     }
+
     // The element doesn't have an Accessible, so ignore the attribute
     // change.
     return;
@@ -1102,7 +1122,7 @@ void DocAccessible::ARIAActiveDescendantChanged(LocalAccessible* aAccessible) {
   }
 }
 
-void DocAccessible::ElementStateChanged(dom::Document* aDocument,
+void DocAccessible::ElementStateChanged(dom::Document* /*aDocument*/,
                                         dom::Element* aElement,
                                         dom::ElementState aStateMask) {
   const bool isEditable =
@@ -1232,6 +1252,12 @@ void DocAccessible::ElementStateChanged(dom::Document* aDocument,
     FireDelayedEvent(event);
     // This likely changes focusability as well.
     event = MakeRefPtr<AccStateChangeEvent>(accessible, states::FOCUSABLE);
+    FireDelayedEvent(event);
+  }
+
+  if (aStateMask.HasState(dom::ElementState::OPEN) &&
+      accessible->IsHTMLCombobox()) {
+    auto event = MakeRefPtr<AccStateChangeEvent>(accessible, states::EXPANDED);
     FireDelayedEvent(event);
   }
 
@@ -1380,8 +1406,8 @@ void DocAccessible::BindToDocument(LocalAccessible* aAccessible,
     }
   }
 
-  if (mIPCDoc && HasLoadState(eTreeConstructed)) {
-    // Child process and not in initial tree construction phase.
+  if (HasLoadState(eTreeConstructed)) {
+    // Not in initial tree construction phase.
     // We need to track inserted accessibles so we don't mark them as moved
     // before their initial show event.
     // If this is the initial tree construction, we will push the tree to the
@@ -1493,32 +1519,38 @@ bool DocAccessible::PruneOrInsertSubtree(nsIContent* aRoot,
 
   bool insert = false;
 
-  // In the case that we are, or are in, a shadow host, we need to assure
-  // some accessibles are removed if they are not rendered anymore.
-  nsIContent* shadowHost =
-      aRoot->GetShadowRoot() ? aRoot : aRoot->GetContainingShadowHost();
-  if (shadowHost) {
-    // Check all explicit children in the host, if they are not slotted
-    // then remove their accessibles and subtrees.
-    for (nsIContent* childNode = shadowHost->GetFirstChild(); childNode;
+  auto removeUnrenderedChildren = [this](nsIContent* aParent) {
+    for (nsIContent* childNode = aParent->GetFirstChild(); childNode;
          childNode = childNode->GetNextSibling()) {
       if (!childNode->GetPrimaryFrame() &&
           !nsCoreUtils::CanCreateAccessibleWithoutFrame(childNode)) {
         ContentRemoved(childNode);
       }
     }
+  };
+
+  // In the case that we are, or are in, a shadow host, we need to assure
+  // some accessibles are removed if they are not rendered anymore: check all
+  // explicit children in the host, if they are not slotted then remove their
+  // accessibles and subtrees. When descending, we only do this where the walk
+  // enters a shadow tree: at the host, at the insert root, or at a slot (where
+  // we enter the shadow tree containing its assigned nodes, if any).
+  nsIContent* containingShadowHost = aRoot->GetContainingShadowHost();
+  if (aRoot->GetShadowRoot()) {
+    removeUnrenderedChildren(aRoot);
+  } else if (aIsInsertRoot && containingShadowHost) {
+    removeUnrenderedChildren(containingShadowHost);
+  }
+
+  if (containingShadowHost && aRoot->IsHTMLElement(nsGkAtoms::slot)) {
+    if (nsIContent* assignedNodesHost =
+            containingShadowHost->GetContainingShadowHost()) {
+      removeUnrenderedChildren(assignedNodesHost);
+    }
 
     // If this is a slot, check to see if its fallback content is rendered,
     // if not - remove it.
-    if (aRoot->IsHTMLElement(nsGkAtoms::slot)) {
-      for (nsIContent* childNode = aRoot->GetFirstChild(); childNode;
-           childNode = childNode->GetNextSibling()) {
-        if (!childNode->GetPrimaryFrame() &&
-            !nsCoreUtils::CanCreateAccessibleWithoutFrame(childNode)) {
-          ContentRemoved(childNode);
-        }
-      }
-    }
+    removeUnrenderedChildren(aRoot);
   }
 
   // If we already have an accessible, check if we need to remove it, recreate
@@ -1807,8 +1839,10 @@ LocalAccessible* DocAccessible::GetAccessibleEvenIfNotInMap(
     return GetAccessible(aNode);
   }
 
-  // XXX Bug 135040, incorrect when multiple images use the same map.
-  nsIFrame* frame = aNode->AsContent()->GetPrimaryFrame();
+  // XXX Incorrect when multiple images use the same map; the area only tracks
+  // the image frame that last set up the map.
+  nsIFrame* frame =
+      nsLayoutUtils::GetPrimaryOrAreaImageFrame(aNode->AsContent());
   nsImageFrame* imageFrame = do_QueryFrame(frame);
   if (imageFrame) {
     LocalAccessible* parent = GetAccessible(imageFrame->GetContent());
@@ -2627,6 +2661,15 @@ void DocAccessible::ContentRemoved(LocalAccessible* aChild) {
                     aChild, nullptr);
 #endif
 
+  if (aChild->IsRelocated()) {
+    nsTArray<RefPtr<LocalAccessible>>* owned = mARIAOwnsHash.Get(parent);
+    MOZ_ASSERT(owned, "IsRelocated flag is out of sync with mARIAOwnsHash");
+    owned->RemoveElement(aChild);
+    if (owned->Length() == 0) {
+      mARIAOwnsHash.Remove(parent);
+    }
+  }
+
   // XXX: event coalescence may kill us
   RefPtr<LocalAccessible> kungFuDeathGripChild(aChild);
 
@@ -2639,17 +2682,7 @@ void DocAccessible::ContentRemoved(LocalAccessible* aChild) {
     return;
   }
 
-  MOZ_DIAGNOSTIC_ASSERT(aChild->LocalParent(), "Alive but unparented #1");
-
-  if (aChild->IsRelocated()) {
-    nsTArray<RefPtr<LocalAccessible>>* owned = mARIAOwnsHash.Get(parent);
-    MOZ_ASSERT(owned, "IsRelocated flag is out of sync with mARIAOwnsHash");
-    owned->RemoveElement(aChild);
-    if (owned->Length() == 0) {
-      mARIAOwnsHash.Remove(parent);
-    }
-  }
-  MOZ_DIAGNOSTIC_ASSERT(aChild->LocalParent(), "Unparented #2");
+  MOZ_DIAGNOSTIC_ASSERT(aChild->LocalParent(), "Alive but unparented");
   UncacheChildrenInSubtree(aChild);
   parent->RemoveChild(aChild);
 
@@ -2958,7 +2991,6 @@ void DocAccessible::PutChildrenBack(
 }
 
 void DocAccessible::TrackMovedAccessible(LocalAccessible* aAcc) {
-  MOZ_ASSERT(mIPCDoc);
   if (!HasLoadState(eTreeConstructed)) {
     // We're still building the initial tree, so it hasn't been sent over IPC
     // yet. Any move at this point is thus an insertion from the perspective of
@@ -3018,9 +3050,7 @@ bool DocAccessible::MoveChild(LocalAccessible* aChild,
   if (curParent == aNewParent) {
     MOZ_ASSERT(aChild->IndexInParent() != aIdxInParent, "No move case");
     curParent->RelocateChild(aIdxInParent, aChild);
-    if (mIPCDoc) {
-      TrackMovedAccessible(aChild);
-    }
+    TrackMovedAccessible(aChild);
 
 #ifdef A11Y_LOG
     logging::TreeInfo("move child: parent tree after", logging::eVerbose,
@@ -3047,9 +3077,7 @@ bool DocAccessible::MoveChild(LocalAccessible* aChild,
 
   TreeMutation imut(aNewParent);
   aNewParent->InsertChildAt(aIdxInParent, aChild);
-  if (mIPCDoc) {
-    TrackMovedAccessible(aChild);
-  }
+  TrackMovedAccessible(aChild);
   imut.AfterInsertion(aChild);
   imut.Done();
 

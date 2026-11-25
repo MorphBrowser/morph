@@ -134,7 +134,7 @@ const nsTArray<SharedMap::Entry*>& SharedMap::EntryArray() const {
     mEntryArray.emplace(mEntries.Count());
     auto& array = mEntryArray.ref();
     for (auto& entry : mEntries) {
-      array.AppendElement(entry.GetWeak());
+      array.AppendElement(entry.GetRawPtr());
     }
   }
 
@@ -217,7 +217,7 @@ Result<Ok, nsresult> SharedMap::MaybeRebuild() {
   MOZ_ASSERT(mEntries.IsEmpty());
   MOZ_ASSERT(mEntryArray.isNothing());
   for (uint32_t i = 0; i < count; i++) {
-    auto entry = MakeUnique<Entry>(*this);
+    auto entry = std::make_unique<Entry>(*this);
     entry->Code(buffer);
 
     // This buffer was created at runtime, during this session, so any errors

@@ -18,9 +18,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -55,17 +55,19 @@ class QRCodeDialogFragment : DialogFragment() {
         val qrCodeUri = arguments?.getString(QR_CODE_URI_KEY)?.toUri()
         FirefoxTheme {
             qrCodeUri?.let { uri ->
-                QRCodeDisplayScreen(
-                    qrCodeUri = uri,
-                    onDownloadClick = {
-                        downloader.saveQRCodeToDownloads(
-                            qrCodeUri = uri,
-                            contentResolver = requireActivity().contentResolver,
-                            context = requireContext(),
-                        )
-                    },
-                    onClose = { dismiss() },
-                )
+                Surface {
+                    QRCodeDisplayScreen(
+                        qrCodeUri = uri,
+                        onDownloadClick = {
+                            downloader.saveQRCodeToDownloads(
+                                qrCodeUri = uri,
+                                contentResolver = requireActivity().contentResolver,
+                                context = requireContext(),
+                            )
+                        },
+                        onClose = { dismiss() },
+                    )
+                }
             }
         }
     }
@@ -96,7 +98,6 @@ class QRCodeDialogFragment : DialogFragment() {
  * @param onDownloadClick Callback invoked when the download option is clicked.
  * @param onClose Callback invoked when the close button is clicked.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QRCodeDisplayScreen(
     qrCodeUri: Uri,

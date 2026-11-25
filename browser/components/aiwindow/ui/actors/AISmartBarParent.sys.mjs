@@ -4,8 +4,8 @@
 
 /**
  * @import { SapLocation, ContextWebsite } from "chrome://browser/content/urlbar/SmartbarInput.mjs"
- * @import { SmartbarAction } from "chrome://browser/content/aiwindow/components/input-cta/input-cta.mjs"
- * @import { ChatSubmitType } from "chrome://browser/content/aiwindow/components/ai-window/ai-window.mjs"
+ * @import { SmartbarAction } from "chrome://browser/content/aiwindow/components/input-cta.mjs"
+ * @import { ChatSubmitType } from "chrome://browser/content/aiwindow/components/ai-window.mjs"
  */
 
 /**
@@ -13,7 +13,8 @@
  * @property {string} value - The query string
  * @property {SapLocation} location - The location of the input
  * @property {ContextWebsite[]} [contextMentions] - Context mentions
- * @property {URL} [contextPageUrl] - The current page URL context
+ * @property {?string} [contextPageUrl] - The current page URL context, as a
+ *   string because URL objects can't be sent in actor messages
  * @property {SmartbarAction} [detectedIntent] - The detected intent
  * @property {ChatSubmitType} [submitType] - How the submit was triggered
  */

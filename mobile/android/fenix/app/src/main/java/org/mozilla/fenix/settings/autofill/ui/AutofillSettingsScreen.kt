@@ -10,7 +10,8 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
@@ -79,9 +80,10 @@ internal fun AutofillSettingsScreen(
     Scaffold(
         topBar = {
             AutofillSettingsTopBar(store)
-        }
+        },
+        contentWindowInsets = WindowInsets(0.dp),
     ) { paddingValues ->
-        Column(modifier = Modifier.padding(paddingValues).fillMaxWidth()) {
+        Column(modifier = Modifier.padding(paddingValues).fillMaxWidth().verticalScroll(rememberScrollState())) {
             Spacer(modifier = Modifier.height(FirefoxTheme.layout.space.static100))
 
             AutofillSettingsAddressSection(store, isAddressSyncEnabled)
@@ -97,7 +99,6 @@ internal fun AutofillSettingsScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AutofillSettingsTopBar(store: AutofillSettingsStore) {
     TopAppBar(
@@ -236,9 +237,10 @@ private fun AutofillSettingsCreditCardSection(store: AutofillSettingsStore) {
             onClick = { store.dispatch(AddCardClicked) },
         )
     } else {
-        TextListItem(label = stringResource(id = R.string.preferences_credit_cards_manage_saved_cards_2)) {
-            store.dispatch(ManageCreditCardsClicked)
-        }
+        TextListItem(
+            label = stringResource(id = R.string.preferences_credit_cards_manage_saved_cards_2),
+            onClick = { store.dispatch(ManageCreditCardsClicked) },
+        )
     }
 }
 

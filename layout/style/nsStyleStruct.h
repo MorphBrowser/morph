@@ -598,7 +598,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleBorder {
         return true;
       }
     }
-    return !mBorderImageSource.IsNone();
+    return !mBorderImageSource.IsNone() || !mBorderShape.IsNone();
   }
 
   // Get the actual border width for a particular side, in appunits.  Note that
@@ -635,6 +635,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleBorder {
  public:
   mozilla::StyleBorderRadius mBorderRadius;  // coord, percent
   mozilla::StyleCornerShapeRect mCornerShape;
+  mozilla::StyleBorderShape mBorderShape;
   mozilla::StyleImage mBorderImageSource;
   mozilla::StyleBorderImageWidth mBorderImageWidth;
   mozilla::StyleNonNegativeLengthOrNumberRect mBorderImageOutset;
@@ -1248,6 +1249,7 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleText {
   mozilla::StyleOverflowWrap mOverflowWrap = mozilla::StyleOverflowWrap::Normal;
   mozilla::StyleTextAutospace mTextAutospace =
       mozilla::StyleTextAutospace::NO_AUTOSPACE;
+  float mTextAutospaceSize = 0.125;
 
  public:
   mozilla::StyleHyphens mHyphens;
@@ -1324,6 +1326,13 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleText {
       return mozilla::StyleTextAutospace::NO_AUTOSPACE;
     }
     return mTextAutospace;
+  }
+
+  float EffectiveTextAutospaceSize() const {
+    if (!mozilla::StaticPrefs::layout_css_text_autospace_size_enabled()) {
+      return 0.125;
+    }
+    return mTextAutospaceSize;
   }
 
   bool WhiteSpaceIsSignificant() const {
@@ -1706,6 +1715,10 @@ struct MOZ_NEEDS_MEMMOVABLE_MEMBERS nsStyleDisplay {
 
   // The margin around a shape-outside: <image>.
   mozilla::NonNegativeLengthPercentage mShapeMargin;
+
+  // TODO: This is a grid-lanes container property, so it belongs in
+  // nsStylePosition, but that struct is at its size limit.
+  mozilla::StyleFitTolerance mFitTolerance;
 
   mozilla::StyleShapeOutside mShapeOutside;
 

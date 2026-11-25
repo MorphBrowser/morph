@@ -78,16 +78,6 @@ bool LoadOSClientCertsModule();
  */
 bool LoadRemoteCertsModule();
 
-/**
- * Loads the IPC client certs module.
- *
- * @param dir
- *        The path to the directory containing the module. This should be the
- *        same as where all of the other gecko libraries live.
- * @return true if the module was successfully loaded, false otherwise.
- */
-bool LoadIPCClientCertsModule();
-
 nsresult DefaultServerNicknameForCert(const CERTCertificate* cert,
                                       /*out*/ nsCString& nickname);
 
@@ -179,6 +169,15 @@ class NSSCertDBTrustDomain : public mozilla::pkix::TrustDomain {
 
   virtual Result VerifyECDSASignedData(
       mozilla::pkix::Input data, mozilla::pkix::DigestAlgorithm digestAlgorithm,
+      mozilla::pkix::Input signature,
+      mozilla::pkix::Input subjectPublicKeyInfo) override;
+
+  virtual Result CheckMLDSAParameterSetIsAcceptable(
+      mozilla::pkix::EndEntityOrCA endEntityOrCA,
+      mozilla::pkix::MLDSAParameterSet parameterSet) override;
+
+  virtual Result VerifyMLDSASignedData(
+      mozilla::pkix::Input data, mozilla::pkix::MLDSAParameterSet parameterSet,
       mozilla::pkix::Input signature,
       mozilla::pkix::Input subjectPublicKeyInfo) override;
 

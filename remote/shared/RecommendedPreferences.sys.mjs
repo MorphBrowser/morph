@@ -82,9 +82,6 @@ if (Services.appinfo.processType != Ci.nsIXULRuntime.PROCESS_TYPE_DEFAULT) {
 // - If a `user.js` file in `/testing/profiles` disables recommended preferences,
 //   identify affected test suites and set the new preference where needed.
 const COMMON_PREFERENCES = new Map([
-  // Make sure Shield doesn't hit the network.
-  ["app.normandy.api_url", ""],
-
   // Disable automatically upgrading Firefox
   //
   // Note: This preference should have already been set by the client when
@@ -113,11 +110,6 @@ const COMMON_PREFERENCES = new Map([
 
   // Disable the profile backup service.
   ["browser.backup.enabled", false],
-
-  // Don't show the content blocking introduction panel.
-  // We use a larger number than the default 22 to have some buffer
-  // This can be removed once Firefox 69 and 68 ESR and are no longer supported.
-  ["browser.contentblocking.introCount", 99],
 
   // Disable extension discovery
   ["browser.discovery.enabled", false],
@@ -150,6 +142,9 @@ const COMMON_PREFERENCES = new Map([
 
   // Make sure Topsites doesn't hit the network to retrieve sponsored tiles.
   ["browser.newtabpage.activity-stream.showSponsoredTopSites", false],
+
+  // Do not render or load any New Tab widget
+  ["browser.newtabpage.activity-stream.widgets.enabled", false],
 
   // Background thumbnails in particular cause grief, and disabling
   // thumbnails in general cannot hurt
@@ -214,9 +209,6 @@ const COMMON_PREFERENCES = new Map([
 
   // Disable translations
   ["browser.translations.enable", false],
-
-  // Disable first run splash page on Windows 10
-  ["browser.usedOnWindows10.introURL", ""],
 
   // Turn off Merino suggestions in the location bar so as not to trigger
   // network connections.

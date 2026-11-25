@@ -253,8 +253,6 @@ support-files = [
 ]
 prefs = [
   "security.mixed_content.upgrade_display_content=false",
-  # Bug 2077709
-  "dom.navigation.navigationRateLimit.count=0",
 ]
 
 ["include:mochitest-xslt.toml"]
@@ -301,7 +299,6 @@ skip-if = [
 
 ["test_blob_uri_blocks_modals.html"]
 skip-if = [
-  "asan", # alert should be blocked by CSP - got false, expected true
   "http2",
   "http3",
   "xorigin",
@@ -384,9 +381,6 @@ skip-if = [
 ["test_bug1452037.html"]
 
 ["test_bug1505412.html"]
-skip-if = [
-  "opt",
-]
 
 ["test_bug1579094.html"]
 
@@ -577,6 +571,8 @@ support-files = ["file_link_rel_preload.html"]
 ["test_meta_element.html"]
 
 ["test_meta_header_dual.html"]
+
+["test_meta_report_only_console.html"]
 
 ["test_meta_whitespace_skipping.html"]
 

@@ -4,15 +4,20 @@
 
 package org.mozilla.fenix
 
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.UserManager
 import androidx.test.core.app.ApplicationProvider
+import androidx.work.testing.WorkManagerTestInitHelper
 import io.mockk.Runs
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlinx.coroutines.runBlocking
 import mozilla.components.browser.state.state.BrowserState
@@ -32,6 +37,7 @@ import mozilla.components.support.utils.BrowsersCache
 import mozilla.components.support.utils.ext.packageManagerWrapper
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -57,6 +63,7 @@ import org.mozilla.fenix.settings.ShortcutType
 import org.mozilla.fenix.settings.doh.DohSettingsProvider
 import org.mozilla.fenix.settings.doh.ProtectionLevel
 import org.mozilla.fenix.utils.Settings
+import org.mozilla.gecko.search.SearchWidgetProvider
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
@@ -157,6 +164,8 @@ class FenixApplicationTest {
         every { settings.adjustNetwork } returns "network"
         // Testing [settings.migrateSearchWidgetInstalledPrefIfNeeded]
         settings.preferences.edit().putInt("pref_key_search_widget_installed", 5).apply()
+        shadowOf(AppWidgetManager.getInstance(testContext))
+            .bindAppWidgetId(1, ComponentName(testContext, SearchWidgetProvider::class.java))
         settings.preferences.edit().putString("pref_key_current_wallpaper", "default").apply()
         every { settings.openTabsCount } returns 1
         every { settings.topSitesSize } returns 2
@@ -341,16 +350,44 @@ class FenixApplicationTest {
     fun `WHEN the search configuration is updated in remote settings THEN set a new search configuration being available`() {
         val browserStore = BrowserStore(BrowserState(search = SearchState(isNewSearchConfigurationAvailable = false)))
 
-        application.setupRefreshingSearchEngines(listOf("search-config-v2"), browserStore)
+        application.setupRefreshingSearchEngines(listOf("search-config-v2"), browserStore = browserStore)
 
         assertTrue(browserStore.state.search.isNewSearchConfigurationAvailable)
+    }
+
+    @Test
+    fun `GIVEN search config v3 is enabled WHEN the search engines are refreshed THEN set a new search configuration being available`() {
+        val settings: Settings =
+            mockk(relaxed = true) {
+                every { useSearchConfigV3 } returns true
+            }
+
+        val browserStore = BrowserStore(BrowserState(search = SearchState(isNewSearchConfigurationAvailable = false)))
+
+        application.setupRefreshingSearchEngines(listOf("search-config-v3"), settings, browserStore)
+
+        assertTrue(browserStore.state.search.isNewSearchConfigurationAvailable)
+    }
+
+    @Test
+    fun `GIVEN search config v3 is disabled WHEN the search engines are refreshed THEN do not set a new search configuration being available`() {
+        val settings: Settings =
+            mockk(relaxed = true) {
+                every { useSearchConfigV3 } returns false
+            }
+
+        val browserStore = BrowserStore(BrowserState(search = SearchState(isNewSearchConfigurationAvailable = false)))
+
+        application.setupRefreshingSearchEngines(listOf("search-config-v3"), settings, browserStore)
+
+        assertFalse(browserStore.state.search.isNewSearchConfigurationAvailable)
     }
 
     @Test
     fun `WHEN the search configuration overrides are updated in remote settings THEN set a new search configuration being available`() {
         val browserStore = BrowserStore(BrowserState(search = SearchState(isNewSearchConfigurationAvailable = false)))
 
-        application.setupRefreshingSearchEngines(listOf("search-config-overrides-v2"), browserStore)
+        application.setupRefreshingSearchEngines(listOf("search-config-overrides-v2"), browserStore = browserStore)
 
         assertTrue(browserStore.state.search.isNewSearchConfigurationAvailable)
     }
@@ -359,8 +396,23 @@ class FenixApplicationTest {
     fun `WHEN the search engine icons are updated in remote settings THEN set a new search configuration being available`() {
         val browserStore = BrowserStore(BrowserState(search = SearchState(isNewSearchConfigurationAvailable = false)))
 
-        application.setupRefreshingSearchEngines(listOf("search-config-icons"), browserStore)
+        application.setupRefreshingSearchEngines(listOf("search-config-icons"), browserStore = browserStore)
 
         assertTrue(browserStore.state.search.isNewSearchConfigurationAvailable)
+    }
+
+    @Test
+    fun `GIVEN the user is locked WHEN WorkManager initializes THEN it does not throw`() {
+        shadowOf(testContext.getSystemService(UserManager::class.java)).setUserUnlocked(false)
+        WorkManagerTestInitHelper.closeWorkDatabase()
+
+        WorkManagerTestInitHelper.initializeTestWorkManager(testContext, application.workManagerConfiguration)
+    }
+
+    @Test
+    fun `GIVEN the user is unlocked WHEN WorkManager fails to initialize THEN the error is rethrown`() {
+        val handler = application.workManagerConfiguration.initializationExceptionHandler!!
+
+        assertThrows(IllegalStateException::class.java) { handler.accept(IllegalStateException()) }
     }
 }

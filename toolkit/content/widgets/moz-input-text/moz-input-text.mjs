@@ -11,33 +11,41 @@ import { MozBaseInputElement } from "../lit-utils.mjs";
  * A text input custom element.
  *
  * @tagname moz-input-text
- * @property {string} label - The text of the label element
- * @property {string} name - The name of the input control
- * @property {string} value - The value of the input control
- * @property {boolean} disabled - The disabled state of the input control
- * @property {boolean} readonly - The readonly state of the input control
- * @property {boolean} required - The required state of the input control
- * @property {string} iconSrc - The src for an optional icon
- * @property {string} description - The text for the description element that helps describe the input control
- * @property {string} supportPage - Name of the SUMO support page to link to.
- * @property {string} placeholder - Text to display when the input has no value.
- * @property {string} ariaLabel - The aria-label text when there is no visible label.
- * @property {string} ariaDescription - The aria-description text when there is no visible description.
- * @property {string} title - The title attribute, mapped onto the inner input.
  */
 export class MozInputText extends MozBaseInputElement {
   static properties = {
     placeholder: { type: String, fluent: true },
     readonly: { type: Boolean, reflect: true },
     required: { type: Boolean, reflect: true },
+    maxLength: { type: Number },
   };
   static inputLayout = "block";
 
   constructor() {
     super();
-    this.value = "";
+
+    /**
+     * Text to display when the input has no value.
+     *
+     * @type {string | undefined}
+     */
+    this.placeholder = undefined;
+
+    /**
+     * The readonly state of the input control.
+     *
+     * @type {boolean}
+     */
     this.readonly = false;
+
+    /**
+     * The required state of the input control.
+     *
+     * @type {boolean}
+     */
     this.required = false;
+
+    this.value = "";
   }
 
   inputStylesTemplate() {
@@ -67,6 +75,7 @@ export class MozInputText extends MozBaseInputElement {
         ?required=${this.required}
         accesskey=${ifDefined(this.accessKey)}
         placeholder=${ifDefined(this.placeholder)}
+        maxlength=${ifDefined(this.maxLength)}
         aria-label=${ifDefined(this.ariaLabel ?? undefined)}
         aria-describedby="description"
         aria-description=${ifDefined(

@@ -8,14 +8,15 @@ export class SettingChangedEvent extends Event {
 
   /**
    * @param {object} details
-   * @param {boolean} [details.updateToolboxButtonsVisibility]
+   * @param {string} details.action
+   * @param {string} details.pref
    */
-  constructor({ updateToolboxButtonsVisibility }) {
+  constructor({ action, pref }) {
     super(SettingChangedEvent.eventName, {
       bubbles: true,
       composed: true,
     });
-    this.updateToolboxButtonsVisibility =
-      updateToolboxButtonsVisibility ?? false;
+    this.action = action;
+    this.pref = pref;
   }
 }

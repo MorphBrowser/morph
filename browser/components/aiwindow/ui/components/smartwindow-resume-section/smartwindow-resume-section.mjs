@@ -4,9 +4,9 @@
 
 import { html, nothing } from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-button.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/smartwindow-resume-card.mjs";
 
 const COLLAPSED_CARD_COUNT = 2;
@@ -16,29 +16,223 @@ export const RESUME_SECTION_EMPTY_REASON = {
   ALL_DISMISSED: "all-dismissed",
 };
 
+const TELEMETRY_EMPTY_STATE = {
+  [RESUME_SECTION_EMPTY_REASON.NO_SUGGESTIONS]: "empty_no_suggestions",
+  [RESUME_SECTION_EMPTY_REASON.ALL_DISMISSED]: "empty_all_dismissed",
+};
+
 /**
  * A collapsible grid of resume cards. Card events bubble to the caller.
  *
- * @property {Array<{content: object, memory: object}>} cards - Journeys to render as cards
+ * @property {Array<{content: object, memory: object, rank: number, telemetryData: object}>} cards
+ *   - Journeys to render as cards. `rank` is the card's load-time index and
+ *   `telemetryData` holds the raw values behind its Glean extras.
  * @property {string} emptyReason - Why `cards` is empty (a
  *   RESUME_SECTION_EMPTY_REASON value), or null/undefined to render nothing
  *   while empty
  * @property {boolean} loading - Whether resume content is still being generated
+ * @property {() => {chat_id: string, location: string, message_seq: number}} getTelemetryContext
+ *   - Returns the values recorded with every Glean event from the section
  */
 export class SmartwindowResumeSection extends MozLitElement {
   static properties = {
     cards: { type: Array },
     emptyReason: { type: String },
     loading: { type: Boolean },
+    getTelemetryContext: { attribute: false },
     expanded: { type: Boolean, state: true },
   };
+
+  #visibilityHandler = null;
+  #displayedFrame = 0;
+  #hasRecordedDisplayed = false;
+  #impressedIds = new Set();
 
   constructor() {
     super();
     this.cards = [];
     this.emptyReason = null;
     this.loading = false;
+    this.getTelemetryContext = () => ({});
     this.expanded = false;
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.#cancelPendingDisplayed();
+  }
+
+  updated(changedProperties) {
+    super.updated(changedProperties);
+    // Fast lookups can resolve before the loading delay, so watch content too.
+    if (
+      !this.loading &&
+      (changedProperties.has("loading") ||
+        changedProperties.has("cards") ||
+        changedProperties.has("emptyReason"))
+    ) {
+      this.#recordDisplayedWhenSeen();
+    }
+    // Cards become visible after load via "Show more", or by moving into the
+    // collapsed slots when a visible card is removed.
+    if (
+      this.#hasRecordedDisplayed &&
+      (changedProperties.has("cards") || changedProperties.has("expanded"))
+    ) {
+      this.#recordImpressions();
+    }
+  }
+
+  /**
+   * How many cards the user can see right now. Before "Show more" is
+   * clicked, this is at most two, even if there are more cards.
+   *
+   * @returns {number}
+   */
+  get #visibleCardCount() {
+    return this.expanded
+      ? this.cards.length
+      : Math.min(this.cards.length, COLLAPSED_CARD_COUNT);
+  }
+
+  /**
+   * Records the displayed event once the section is ready and visible.
+   */
+  #recordDisplayedWhenSeen() {
+    if (this.#hasRecordedDisplayed) {
+      return;
+    }
+    this.#cancelPendingDisplayed();
+    if (this.ownerDocument.hidden) {
+      this.#visibilityHandler = () => this.#recordDisplayedWhenSeen();
+      this.ownerDocument.addEventListener(
+        "visibilitychange",
+        this.#visibilityHandler,
+        { once: true }
+      );
+      return;
+    }
+
+    this.#displayedFrame = requestAnimationFrame(() => {
+      this.#displayedFrame = 0;
+      if (
+        (!this.cards.length && !this.emptyReason) ||
+        !this.checkVisibility()
+      ) {
+        return;
+      }
+      Glean.smartWindow.resumeCardsDisplayed.record({
+        ...this.getTelemetryContext(),
+        state: this.cards.length
+          ? "cards"
+          : TELEMETRY_EMPTY_STATE[this.emptyReason],
+        cards: this.#visibleCardCount,
+        total_cards: this.cards.length,
+      });
+      this.#hasRecordedDisplayed = true;
+      this.#recordImpressions();
+    });
+  }
+
+  /**
+   * Returns the Glean extras that describe a card's suggestion.
+   *
+   * @param {{rank: number, telemetryData: object}} card
+   * @returns {{rank: number, memory_strength: ?string, memory_age: ?number, last_visit_age: ?number, component_summaries: ?number}}
+   */
+  #cardFeatures({ rank, telemetryData = {} }) {
+    const msSince = ms => (Number.isFinite(ms) ? Date.now() - ms : undefined);
+    return {
+      rank,
+      memory_strength: telemetryData.memoryStrength?.toString(),
+      memory_age: msSince(telemetryData.memoryCreatedAt),
+      last_visit_age: msSince(telemetryData.lastVisitDate),
+      component_summaries: telemetryData.componentSummaryCount,
+    };
+  }
+
+  /**
+   * Records Glean event "resume_card_impression" once for each card the
+   * first time it is visible.
+   */
+  #recordImpressions() {
+    if (this.ownerDocument.hidden || !this.checkVisibility()) {
+      return;
+    }
+    this.cards.slice(0, this.#visibleCardCount).forEach((card, position) => {
+      if (this.#impressedIds.has(card.memory.id)) {
+        return;
+      }
+      this.#impressedIds.add(card.memory.id);
+      Glean.smartWindow.resumeCardImpression.record({
+        ...this.getTelemetryContext(),
+        position,
+        ...this.#cardFeatures(card),
+      });
+    });
+  }
+
+  #cancelPendingDisplayed() {
+    if (this.#visibilityHandler) {
+      this.ownerDocument.removeEventListener(
+        "visibilitychange",
+        this.#visibilityHandler
+      );
+      this.#visibilityHandler = null;
+    }
+    if (this.#displayedFrame) {
+      cancelAnimationFrame(this.#displayedFrame);
+      this.#displayedFrame = 0;
+    }
+  }
+
+  /**
+   * Records Glean event "resume_card_action". Card events reach the section
+   * before ai-window acts on them, so the card is still in `cards`.
+   *
+   * @param {"resume"|"card_click"|"open_tabs"|"snooze"|"dismiss"} action - The
+   *   action the user took.
+   * @param {string} journeyId - The card the user clicked.
+   */
+  #recordCardAction(action, journeyId) {
+    const position = this.cards.findIndex(
+      ({ memory }) => memory.id === journeyId
+    );
+    const card = this.cards[position];
+    Glean.smartWindow.resumeCardAction.record({
+      ...this.getTelemetryContext(),
+      action,
+      position,
+      ...(card && this.#cardFeatures(card)),
+    });
+  }
+
+  #onCardResume = ({ detail }) => {
+    this.#recordCardAction(
+      detail.source === "resume_button" ? "resume" : "card_click",
+      detail.journeyId
+    );
+  };
+
+  #onCardDismiss = ({ detail }) => {
+    this.#recordCardAction("dismiss", detail.journeyId);
+  };
+
+  #onCardMenuItemSelected = ({ detail }) => {
+    this.#recordCardAction(detail.itemId, detail.journeyId);
+  };
+
+  /**
+   * Records Glean event "resume_section_action".
+   *
+   * @param {"show_more"|"show_less"|"hide_section"} action - The action the
+   *   user took.
+   */
+  #recordSectionAction(action) {
+    Glean.smartWindow.resumeSectionAction.record({
+      ...this.getTelemetryContext(),
+      action,
+    });
   }
 
   #dispatch(type, detail) {
@@ -52,10 +246,12 @@ export class SmartwindowResumeSection extends MozLitElement {
   }
 
   #onToggleClick = () => {
+    this.#recordSectionAction(this.expanded ? "show_less" : "show_more");
     this.expanded = !this.expanded;
   };
 
   #onHideClick = () => {
+    this.#recordSectionAction("hide_section");
     this.#dispatch("hide", { reason: this.emptyReason });
   };
 
@@ -193,7 +389,13 @@ export class SmartwindowResumeSection extends MozLitElement {
             `
           : nothing}
       </div>
-      <div class="resume-section-grid">
+      <div
+        class="resume-section-grid"
+        @smartwindow-resume-card:resume=${this.#onCardResume}
+        @smartwindow-resume-card:dismiss=${this.#onCardDismiss}
+        @smartwindow-resume-card:menu-item-selected=${this
+          .#onCardMenuItemSelected}
+      >
         ${visibleCards.map(
           ({ content, memory }) => html`
             <smartwindow-resume-card

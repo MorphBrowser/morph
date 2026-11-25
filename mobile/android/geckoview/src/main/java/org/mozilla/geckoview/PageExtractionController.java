@@ -11,6 +11,8 @@ import org.mozilla.gecko.util.ThreadUtils;
 /** Manges the page content extraction */
 @ExperimentalGeckoViewApi
 public class PageExtractionController {
+  /** Public constructor for PageExtractionController. */
+  public PageExtractionController() {}
 
   /** Metadata about a page extracted by {@link SessionPageExtractor#getPageMetadata()} */
   public static class PageMetadata {
@@ -198,6 +200,7 @@ public class PageExtractionController {
 
   /** The exception thrown when a page extraction fails */
   public static class PageExtractionException extends Exception {
+    private static final long serialVersionUID = 1L;
 
     /** An error identifier for when the result is unexpectedly null */
     public static final String ERROR_NULL_RESULT = "NULL_RESULT";

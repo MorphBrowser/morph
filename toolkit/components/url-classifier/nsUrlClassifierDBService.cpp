@@ -144,9 +144,8 @@ class nsUrlClassifierDBService::FeatureHolder final {
       }
 
       for (const nsCString& table : tables) {
-        TableData* tableData = holder->GetOrCreateTableData(table);
+        RefPtr<TableData> tableData = holder->GetOrCreateTableData(table);
         MOZ_ASSERT(tableData);
-
         featureData->mTables.AppendElement(tableData);
       }
     }
@@ -210,7 +209,7 @@ class nsUrlClassifierDBService::FeatureHolder final {
 
   mozilla::UniquePtr<LookupResultArray> GetTableResults() const {
     mozilla::UniquePtr<LookupResultArray> results =
-        mozilla::MakeUnique<LookupResultArray>();
+        std::make_unique<LookupResultArray>();
     if (NS_WARN_IF(!results)) {
       return nullptr;
     }
@@ -276,16 +275,15 @@ class nsUrlClassifierDBService::FeatureHolder final {
     NS_DispatchToMainThread(runnable.forget());
   }
 
-  TableData* GetOrCreateTableData(const nsACString& aTable) {
+  already_AddRefed<TableData> GetOrCreateTableData(const nsACString& aTable) {
     for (TableData* tableData : mTableData) {
       if (tableData->mTable == aTable) {
-        return tableData;
+        return do_AddRef(tableData);
       }
     }
 
-    RefPtr<TableData> tableData = new TableData(aTable);
-    mTableData.AppendElement(tableData);
-    return tableData;
+    mTableData.AppendElement(new TableData(aTable));
+    return do_AddRef(mTableData.LastElement());
   }
 
   nsCOMPtr<nsIURI> mURI;
@@ -1071,11 +1069,16 @@ nsresult nsUrlClassifierDBServiceWorker::CacheCompletions(
     }
     if (activeTable) {
       UniquePtr<ProtocolParser> pParse;
+      // ~ProtocolParserProtobuf() is private and required for
+      // std::make_unique<ProtocolParserProtobuf>(...)
+      // see https://github.com/llvm/llvm-project/pull/229802
+      // NOLINTBEGIN(modernize-make-unique)
       if (result->Ver() == CacheResult::V2) {
         pParse.reset(new ProtocolParserV2());
       } else {
         pParse.reset(new ProtocolParserProtobuf());
       }
+      // NOLINTEND(modernize-make-unique)
 
       RefPtr<TableUpdate> tu = pParse->GetTableUpdate(result->table);
 
@@ -1296,7 +1299,7 @@ nsresult nsUrlClassifierHashCompleterBase::RequestHashCompletions(
         // Bug 1323953 - Send the first 4 bytes for completion no matter how
         // long we matched the prefix.
         rv = completer->Complete(result->PartialHash(), gethashUrl,
-                                 result->mTableName, this);
+                                 result->mTableName, false, this);
         if (NS_SUCCEEDED(rv)) {
           mPendingCompletions++;
         }
@@ -2123,11 +2126,12 @@ nsUrlClassifierDBService::Classify(nsIPrincipal* aPrincipal,
     ContentChild* content = ContentChild::GetSingleton();
     MOZ_ASSERT(content);
 
+    auto principal = WrapNotNull(aPrincipal);
     auto actor = static_cast<URLClassifierChild*>(
-        content->AllocPURLClassifierChild(aPrincipal, aResult));
+        content->AllocPURLClassifierChild(principal, aResult));
     MOZ_ASSERT(actor);
 
-    if (!content->SendPURLClassifierConstructor(actor, aPrincipal, aResult)) {
+    if (!content->SendPURLClassifierConstructor(actor, principal, aResult)) {
       *aResult = false;
       return NS_ERROR_FAILURE;
     }

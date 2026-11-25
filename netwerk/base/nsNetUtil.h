@@ -948,6 +948,12 @@ bool NS_IsAboutBlankAllowQueryAndFragment(nsIURI* uri);
 bool NS_IsAboutSrcdoc(nsIURI* uri);
 
 /**
+ * Test whether a URI is "about:blank" or "about:srcdoc", possibly with fragment
+ * or query.  |uri| must not be null
+ */
+bool NS_IsAboutBlankOrSrcdoc(nsIURI* uri);
+
+/**
  * Test whether a URI has an "about", "blob", "data", "file", or an HTTP(S)
  * scheme.
  */
@@ -1035,6 +1041,13 @@ nsresult NS_ShouldSecureUpgrade(
     std::function<void(bool, nsresult)>&& aResultCallback, bool& aWillCallback);
 
 /**
+ * Return true if NS_ShouldSecureUpgrade will upgrade |aURI| to https because
+ * of upgrade-insecure-requests or the mixed content auto-upgrade. Unlike
+ * NS_ShouldSecureUpgrade, this has no side effects and works in any process.
+ */
+bool NS_WillUpgradeInsecureRequest(nsIURI* aURI, nsILoadInfo* aLoadInfo);
+
+/**
  * Returns an https URI for channels that need to go through secure upgrades.
  */
 nsresult NS_GetSecureUpgradedURI(nsIURI* aURI, nsIURI** aUpgradedURI);
@@ -1108,9 +1121,10 @@ nsresult GetParameterHTTP(const nsACString& aHeaderVal, const char* aParamName,
 bool ChannelIsPost(nsIChannel* aChannel);
 
 /**
- * Convenience function for verifying nsIURI scheme is either HTTP or HTTPS.
+ * Convenience functions for checking whether the scheme is HTTP or HTTPS.
  */
 bool SchemeIsHttpOrHttps(nsIURI* aURI);
+bool SchemeIsHttpOrHttps(nsIPrincipal* aPrincipal);
 
 // Helper functions for SetProtocol methods to follow
 // step 2.1 in https://url.spec.whatwg.org/#scheme-state

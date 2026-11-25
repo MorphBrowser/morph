@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/base/nullability.h"
 #include "absl/functional/any_invocable.h"
 #include "api/crypto/frame_decryptor_interface.h"
 #include "api/dtls_transport_interface.h"
@@ -34,10 +35,12 @@
 #include "api/sequence_checker.h"
 #include "api/sframe/sframe_decryptor_interface.h"
 #include "api/sframe/sframe_types.h"
+#include "api/task_queue/pending_task_safety_flag.h"
 #include "api/transport/rtp/rtp_source.h"
 #include "api/units/timestamp.h"
 #include "media/base/media_channel.h"
 #include "modules/rtp_rtcp/source/source_tracker.h"
+#include "modules/sframe/sframe_decryption_config.h"
 #include "rtc_base/system/no_unique_address.h"
 #include "rtc_base/thread.h"
 #include "rtc_base/thread_annotations.h"
@@ -55,7 +58,7 @@ class RtpReceiverInternal : public RtpReceiverInterface {
 
   // Returns the underlying MediaEngine channel associated with this receiver.
   // May return nullptr if no channel is set.
-  // Must be invoked on the worker thread.
+  // Must be invoked on the network thread.
   virtual MediaReceiveChannelInterface* media_channel() const = 0;
 
   // Sets the underlying MediaEngine channel associated with this RtpSender.
@@ -64,33 +67,41 @@ class RtpReceiverInternal : public RtpReceiverInterface {
   // NOTE:
   // * SetMediaChannel(nullptr) must be called before the media channel is
   //   destroyed.
-  // * This method must be invoked on the worker thread.
+  // * This method must be invoked on the network thread.
   virtual void SetMediaChannel(MediaReceiveChannelInterface* media_channel) = 0;
 
   // Configures the RtpReceiver with the underlying media channel, with the
   // given SSRC as the stream identifier.
-  // This function returns a callable object that must be invoked on the worker
-  // thread by the caller to complete the operation. This is done to allow the
-  // caller to batch up tasks for the worker thread.
+  // This function returns a callable object that must be invoked on the
+  // network thread by the caller to complete the operation. This is done to
+  // allow the caller to batch up tasks for the network thread.
   [[nodiscard]] virtual absl::AnyInvocable<void() &&> GetSetupForMediaChannel(
       uint32_t ssrc) = 0;
 
   // Configures the RtpReceiver with the underlying media channel to receive an
   // unsignaled receive stream.
-  // This function returns a callable object that must be invoked on the worker
-  // thread by the caller to complete the operation. This is done to allow the
-  // caller to batch up tasks for the worker thread.
+  // This function returns a callable object that must be invoked on the
+  // network thread by the caller to complete the operation. This is done to
+  // allow the caller to batch up tasks for the network thread.
   [[nodiscard]] virtual absl::AnyInvocable<void() &&>
   GetSetupForUnsignaledMediaChannel() = 0;
 
   virtual void set_transport(
       scoped_refptr<DtlsTransportInterface> dtls_transport) = 0;
-  // Worker-thread getter for the current SSRC.
+  // Network thread getter for the current SSRC.
   virtual std::optional<uint32_t> ssrc() const = 0;
   // Signaling-thread accessors for the SSRC. Used by RtpTransceiver on the
   // signaling thread to track and bind SSRCs without cross-thread hops.
+  // Like `ssrc()`, `ssrc_s()` returns the signaled SSRC if there is one and
+  // otherwise the SSRC of the most recent unsignaled stream.
   virtual std::optional<uint32_t> ssrc_s() const = 0;
-  virtual void SetSsrc_s(uint32_t ssrc) = 0;
+  // Returns true if the receiver has been configured with a signaled SSRC via
+  // `GetSetupForMediaChannel()`.
+  virtual bool has_signaled_ssrc_s() const = 0;
+  // Binds the receiver to the SSRC of a new unsignaled stream, replacing a
+  // previously bound unsignaled SSRC. Must only be called when
+  // `has_signaled_ssrc_s()` returns false.
+  virtual void SetUnsignaledSsrc_s(uint32_t ssrc) = 0;
 
   // Call this to notify the RtpReceiver when the first packet has been received
   // on the corresponding channel.
@@ -126,11 +137,14 @@ class RtpReceiverInternal : public RtpReceiverInterface {
 class RtpReceiverBase : public RtpReceiverInternal {
  public:
   RTCErrorOr<scoped_refptr<SframeDecryptorInterface>>
-  CreateSframeDecryptorOrError(SframeCipherSuite cipher_suite) override;
+  CreateSframeDecryptorOrError(SframeCipherSuite cipher_suite,
+                               absl_nonnull SframeDecryptErrorCallback
+                                   error_callback) override;
 
   std::optional<uint32_t> ssrc() const override;
   std::optional<uint32_t> ssrc_s() const override;
-  void SetSsrc_s(uint32_t ssrc) override;
+  bool has_signaled_ssrc_s() const override;
+  void SetUnsignaledSsrc_s(uint32_t ssrc) override;
   void OnFrameDelivered(const RtpPacketInfos& infos,
                         Timestamp delivery_time) override;
 
@@ -148,26 +162,54 @@ class RtpReceiverBase : public RtpReceiverInternal {
   void SetFrameTransformer(
       scoped_refptr<FrameTransformerInterface> frame_transformer) override;
 
+  MediaReceiveChannelInterface* media_channel() const override;
+
+  // Subclasses must call this from their override.
+  void Stop() override;
+
  protected:
-  RtpReceiverBase(Thread* worker_thread,
+  RtpReceiverBase(Thread* network_thread,
                   absl::AnyInvocable<RTCError()> enable_sframe_at_owner,
+                  MediaReceiveChannelInterface* media_channel,
                   Clock* clock = Clock::GetRealTimeClock());
+  ~RtpReceiverBase() override;
+
+  void set_media_channel(MediaReceiveChannelInterface* media_channel)
+      RTC_RUN_ON(network_thread_);
+
+  // Alive only while a media channel is set.
+  const scoped_refptr<PendingTaskSafetyFlag>& network_thread_safety() const {
+    return network_thread_safety_;
+  }
 
   RTC_NO_UNIQUE_ADDRESS SequenceChecker signaling_thread_checker_;
-  Thread* const worker_thread_;
+  Thread* const network_thread_;
   SourceTracker source_tracker_ RTC_GUARDED_BY(signaling_thread_checker_);
-  std::optional<uint32_t> signaled_ssrc_ RTC_GUARDED_BY(worker_thread_);
-  std::optional<uint32_t> ssrc_s_ RTC_GUARDED_BY(signaling_thread_checker_);
+  std::optional<uint32_t> signaled_ssrc_ RTC_GUARDED_BY(network_thread_);
+  // Signaling thread copy of `signaled_ssrc_`.
+  std::optional<uint32_t> signaled_ssrc_s_
+      RTC_GUARDED_BY(signaling_thread_checker_);
   scoped_refptr<FrameDecryptorInterface> frame_decryptor_
-      RTC_GUARDED_BY(worker_thread_);
+      RTC_GUARDED_BY(network_thread_);
   scoped_refptr<FrameTransformerInterface> frame_transformer_
-      RTC_GUARDED_BY(worker_thread_);
+      RTC_GUARDED_BY(network_thread_);
 
  private:
+  const scoped_refptr<PendingTaskSafetyFlag> network_thread_safety_;
+  // SSRC of the most recent unsignaled stream that the receiver was bound to.
+  // Not cleared when the receiver is set up again, since the media channel may
+  // keep an existing unsignaled stream across renegotiation, in which case no
+  // new first packet notification is issued for it.
+  std::optional<uint32_t> unsignaled_ssrc_s_
+      RTC_GUARDED_BY(signaling_thread_checker_);
+  MediaReceiveChannelInterface* media_channel_ RTC_GUARDED_BY(network_thread_);
+  std::optional<SframeDecryptionConfig> sframe_decryption_config_
+      RTC_GUARDED_BY(network_thread_);
   RtpReceiverObserverInterface* observer_
       RTC_GUARDED_BY(&signaling_thread_checker_) = nullptr;
   bool received_first_packet_ RTC_GUARDED_BY(&signaling_thread_checker_) =
       false;
+  bool stopped_ RTC_GUARDED_BY(&signaling_thread_checker_) = false;
   absl::AnyInvocable<RTCError()> enable_sframe_at_owner_
       RTC_GUARDED_BY(signaling_thread_checker_);
 };

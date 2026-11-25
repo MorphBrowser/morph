@@ -13,9 +13,10 @@ kind-dependencies:
     - release-generate-checksums-beetmover
     - beetmover-android-app
     - post-update-verify-dummy
+    - release-partner-repack-beetmover
+    - release-partner-attribution-beetmover
 
 task-defaults:
-    run-on-repo-type: [hg]
     run-on-projects: []
     shipping-phase: push
 

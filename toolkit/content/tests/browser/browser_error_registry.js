@@ -703,7 +703,6 @@ add_task(async function test_resolve_error_id_nss_fallthrough() {
       errorCodeString: "SSL_ERROR_RX_CERTIFICATE_REQUIRED_ALERT",
       gErrorCode: "nssFailure2",
       noConnectivity: false,
-      vpnActive: false,
     }),
     "nssFailure2",
     "Unrecognized errorCodeString with gErrorCode=nssFailure2 should fall through to nssFailure2"
@@ -714,7 +713,6 @@ add_task(async function test_resolve_error_id_nss_fallthrough() {
       errorCodeString: "SSL_ERROR_RX_CERTIFICATE_REQUIRED_ALERT",
       gErrorCode: "dnsNotFound",
       noConnectivity: false,
-      vpnActive: false,
     }),
     null,
     "Unrecognized errorCodeString with gErrorCode other than nssFailure2 should return null"
@@ -783,4 +781,90 @@ add_task(async function test_sec_error_ca_cert_invalid_registered() {
   );
 
   _testOnlyClearRegistry();
+});
+
+add_task(async function test_connection_failure_loopback_hints() {
+  const { getResolvedErrorConfig } = ChromeUtils.importESModule(LOOKUP_URL);
+  const { initializeRegistry } = ChromeUtils.importESModule(
+    "chrome://global/content/errors/error-registry.mjs"
+  );
+  initializeRegistry();
+
+  const literal = getResolvedErrorConfig("connectionFailure", {
+    loopback: { port: "5000", isIPLiteral: true },
+  });
+  Assert.deepEqual(
+    literal.descriptionParts.map(p => p.dataL10nId),
+    [
+      "neterror-loopback-refused-not-running",
+      "neterror-loopback-refused-wrong-port",
+      "neterror-loopback-refused-address",
+    ],
+    "An IP literal should get all of the loopback hints"
+  );
+  Assert.equal(
+    literal.descriptionParts[0].dataL10nArgs.port,
+    "5000",
+    "Loopback hints should include the port"
+  );
+  Assert.equal(
+    literal.customNetError.whatCanYouDoItems[0].args.port,
+    "5000",
+    "Card items should include the port"
+  );
+  Assert.equal(
+    literal.customNetError.whatCanYouDoItems.length,
+    3,
+    "Card items for an IP literal should include the address hint"
+  );
+
+  const named = getResolvedErrorConfig("connectionFailure", {
+    loopback: { port: "3000", isIPLiteral: false },
+  });
+  Assert.deepEqual(
+    named.descriptionParts.map(p => p.dataL10nId),
+    [
+      "neterror-loopback-refused-not-running",
+      "neterror-loopback-refused-wrong-port",
+    ],
+    "A loopback name should not get the address hint"
+  );
+  Assert.equal(
+    named.customNetError.whatCanYouDoItems.length,
+    2,
+    "Card items for a loopback name should not include the address hint"
+  );
+
+  const regular = getResolvedErrorConfig("connectionFailure", {
+    loopback: null,
+  });
+  Assert.ok(
+    regular.descriptionParts.every(
+      p => !p.dataL10nId.startsWith("neterror-loopback-")
+    ),
+    "Non-loopback refusal should keep the generic hints"
+  );
+});
+
+add_task(async function test_resolve_error_id_vpn_error() {
+  const { initializeRegistry } = ChromeUtils.importESModule(REGISTRY_URL);
+  const { resolveErrorID } = ChromeUtils.importESModule(LOOKUP_URL);
+  initializeRegistry();
+
+  const signals = {
+    errorCodeString: "",
+    gErrorCode: "proxyConnectFailure",
+    noConnectivity: false,
+  };
+
+  Assert.equal(
+    resolveErrorID(signals),
+    "proxyConnectFailure",
+    "A proxy failure that is not the VPN's stays a proxy failure"
+  );
+  Assert.equal(
+    resolveErrorID({ ...signals, vpnError: true }),
+    "vpnFailure",
+    "A proxy failure that is the VPN's resolves to the VPN failure"
+  );
 });

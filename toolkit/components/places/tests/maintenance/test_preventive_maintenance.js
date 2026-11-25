@@ -456,6 +456,7 @@ tests.push({
   async setup() {
     // Add a place to ensure place_id = 1 is valid
     this._placeId = await addPlace();
+    await addBookmark(this._placeId, PlacesUtils.bookmarks.TYPE_BOOKMARK);
     // Create a tag
     this._tagId = await addBookmark(
       null,
@@ -508,6 +509,112 @@ tests.push({
 // ------------------------------------------------------------------------------
 
 tests.push({
+  name: "D.1.1",
+  desc: "Remove tag entries for urls that are not bookmarked",
+
+  _bookmarkedUrl: "http://bookmarked.mozilla.org/",
+  _unbookmarkedUrl: "http://unbookmarked.mozilla.org/",
+
+  async setup() {
+    let bookmarkedPlaceId = await addPlace(this._bookmarkedUrl);
+    let unbookmarkedPlaceId = await addPlace(this._unbookmarkedUrl);
+    let orphanPlaceId = await addPlace();
+    await addBookmark(bookmarkedPlaceId, PlacesUtils.bookmarks.TYPE_BOOKMARK);
+    // A bookmark with an invalid parent is still a bookmark.
+    await addBookmark(orphanPlaceId, PlacesUtils.bookmarks.TYPE_BOOKMARK, 8888);
+
+    this._sharedTagId = await addBookmark(
+      null,
+      PlacesUtils.bookmarks.TYPE_FOLDER,
+      PlacesUtils.bookmarks.tagsGuid,
+      null,
+      "shared"
+    );
+    let sharedTagGuid = await PlacesTestUtils.promiseItemGuid(
+      this._sharedTagId
+    );
+    this._bookmarkedEntryId = await addBookmark(
+      bookmarkedPlaceId,
+      PlacesUtils.bookmarks.TYPE_BOOKMARK,
+      sharedTagGuid
+    );
+    this._unbookmarkedEntryId = await addBookmark(
+      unbookmarkedPlaceId,
+      PlacesUtils.bookmarks.TYPE_BOOKMARK,
+      sharedTagGuid
+    );
+
+    this._unbookmarkedTagId = await addBookmark(
+      null,
+      PlacesUtils.bookmarks.TYPE_FOLDER,
+      PlacesUtils.bookmarks.tagsGuid,
+      null,
+      "unbookmarked"
+    );
+    this._otherUnbookmarkedEntryId = await addBookmark(
+      unbookmarkedPlaceId,
+      PlacesUtils.bookmarks.TYPE_BOOKMARK,
+      await PlacesTestUtils.promiseItemGuid(this._unbookmarkedTagId)
+    );
+
+    this._orphanTagId = await addBookmark(
+      null,
+      PlacesUtils.bookmarks.TYPE_FOLDER,
+      PlacesUtils.bookmarks.tagsGuid,
+      null,
+      "orphan"
+    );
+    this._orphanEntryId = await addBookmark(
+      orphanPlaceId,
+      PlacesUtils.bookmarks.TYPE_BOOKMARK,
+      await PlacesTestUtils.promiseItemGuid(this._orphanTagId)
+    );
+
+    // Ensure the tagging service caches the tag folders created above.
+    PlacesObservers.notifyListeners([new PlacesPurgeCaches()]);
+    Assert.deepEqual(
+      PlacesUtils.tagging.getTagsForURI(uri(this._unbookmarkedUrl)),
+      ["shared", "unbookmarked"]
+    );
+  },
+
+  async check() {
+    for (let id of [
+      this._sharedTagId,
+      this._bookmarkedEntryId,
+      this._orphanTagId,
+      this._orphanEntryId,
+    ]) {
+      Assert.notStrictEqual(
+        await PlacesTestUtils.getDatabaseValue("moz_bookmarks", "id", { id }),
+        undefined,
+        `Item ${id} should still exist`
+      );
+    }
+    for (let id of [
+      this._unbookmarkedEntryId,
+      this._otherUnbookmarkedEntryId,
+      this._unbookmarkedTagId,
+    ]) {
+      Assert.strictEqual(
+        await PlacesTestUtils.getDatabaseValue("moz_bookmarks", "id", { id }),
+        undefined,
+        `Item ${id} should have been removed`
+      );
+    }
+
+    info("Check the tagging service is not using the removed tag folder");
+    PlacesUtils.tagging.tagURI(uri(this._bookmarkedUrl), ["unbookmarked"]);
+    Assert.deepEqual(
+      PlacesUtils.tagging.getTagsForURI(uri(this._bookmarkedUrl)),
+      ["shared", "unbookmarked"]
+    );
+  },
+});
+
+// ------------------------------------------------------------------------------
+
+tests.push({
   name: "D.2",
   desc: "Remove empty tags",
 
@@ -519,6 +626,7 @@ tests.push({
   async setup() {
     // Add a place to ensure place_id = 1 is valid
     this._placeId = await addPlace();
+    await addBookmark(this._placeId, PlacesUtils.bookmarks.TYPE_BOOKMARK);
     // Create a tag
     this._tagId = await addBookmark(
       null,
@@ -1322,7 +1430,23 @@ tests.push({
               url: "http://www3.mozilla.org/favicon.ico",
               root: 1,
             },
+            {
+              favicon_id: 4,
+              url: "http://kept.mozilla.org/favicon.ico",
+              root: 1,
+            },
+            {
+              favicon_id: 5,
+              url: "http://nopages.mozilla.org/favicon.ico",
+              root: 1,
+            },
           ]
+        );
+
+        // An origin without pages doesn't keep its root icon.
+        await db.executeCached(
+          `INSERT INTO moz_origins (prefix, host, frecency)
+           VALUES ('http://', 'nopages.mozilla.org', 0)`
         );
 
         // Insert orphan page.
@@ -1336,6 +1460,8 @@ tests.push({
 
     // Insert a place using the existing favicon entry
     this._placeId = await addPlace("http://www.mozilla.org", 1);
+    // The www. origin has pages, so it keeps the root icon of its host.
+    await addPlace("http://www.kept.mozilla.org/page");
   },
 
   async check() {
@@ -1352,6 +1478,16 @@ tests.push({
     // Check that unused icon has been removed
     value = await PlacesTestUtils.getDatabaseValue("moz_icons", "id", {
       id: 3,
+    });
+    Assert.strictEqual(value, undefined);
+    // Check that the root icon of an origin with pages is still there
+    value = await PlacesTestUtils.getDatabaseValue("moz_icons", "id", {
+      id: 4,
+    });
+    Assert.notStrictEqual(value, undefined);
+    // Check that the root icon of an origin without pages has been removed
+    value = await PlacesTestUtils.getDatabaseValue("moz_icons", "id", {
+      id: 5,
     });
     Assert.strictEqual(value, undefined);
     // Check that the orphan page is gone.

@@ -15,9 +15,9 @@ ChromeUtils.defineESModuleGetters(lazy, {
 
 /**
  * This file manages a MigrationWizard embedded in a dialog that runs
- * in a top-level dialog window. It's main responsibility is to listen
- * for dialog-specific events from the embedded MigrationWizard and to
- * respond appropriately to them.
+ * in a top-level dialog window or in a tab modal dialog. It's main
+ * responsibility is to listen for dialog-specific events from the
+ * embedded MigrationWizard and to respond appropriately to them.
  *
  * A single object argument is expected to be passed when opening
  * this dialog.
@@ -50,8 +50,16 @@ const MigrationDialog = {
       args = args.wrappedJSObject;
     }
 
+    if (args.options?.entrypoint) {
+      this._wiz.setAttribute("entrypoint", args.options.entrypoint);
+    }
+
     let observer = new ResizeObserver(() => {
-      window.sizeToContent();
+      if (window.resizeDialog) {
+        window.resizeDialog();
+      } else {
+        window.sizeToContent();
+      }
     });
     observer.observe(this._wiz);
 
@@ -102,15 +110,20 @@ const MigrationDialog = {
     }
 
     this._wiz.doAutoImport(migratorKey, profile, resourceTypeStrs);
-    this._wiz.addEventListener(
-      "MigrationWizard:DoneMigration",
-      () => {
-        setTimeout(() => {
-          window.close();
-        }, 5000);
-      },
-      { once: true }
-    );
+
+    // Startup waits for this dialog to close. Nobody can click "Done" in
+    // headless mode or while Marionette drives the browser, so close it once
+    // the import is done.
+    if (
+      Services.env.get("MOZ_HEADLESS") ||
+      Services.env.get("MOZ_MARIONETTE")
+    ) {
+      this._wiz.addEventListener(
+        "MigrationWizard:DoneMigration",
+        () => window.close(),
+        { once: true }
+      );
+    }
   },
 };
 

@@ -40,6 +40,7 @@
 #include "vm/AsyncFunction.h"
 #include "vm/AsyncIteration.h"
 #include "vm/BigIntType.h"
+#include "vm/BoundFunctionObject.h"
 #include "vm/BytecodeUtil.h"  // JSDVG_SEARCH_STACK
 #include "vm/ConstantCompareOperand.h"
 #include "vm/EqualityOperations.h"  // js::StrictlyEqual
@@ -387,31 +388,19 @@ static MOZ_ALWAYS_INLINE bool MaybeEnterInterpreterTrampoline(JSContext* cx,
   if (jit::JitOptions.emitInterpreterEntryTrampoline &&
       cx->runtime()->hasJitRuntime()) {
     JSScript* script = state.script();
-    Zone* zone = script->zone();
-    jit::JitZone* jitZone = zone->getOrCreateJitZone(cx);
+    jit::JitZone* jitZone = script->zone()->getOrCreateJitZone(cx);
     if (!jitZone) {
       return false;
     }
 
-    jit::EntryTrampolineMap* map =
-        jitZone->getOrCreateInterpreterEntryMap(zone);
-    if (!map) {
-      ReportOutOfMemory(cx);
+    jit::JitCode* code =
+        jitZone->getOrCreateInterpreterEntryTrampoline(cx, script);
+    if (!code) {
       return false;
     }
 
     jit::JitRuntime* jitRuntime = cx->runtime()->jitRuntime();
-    auto ptr = map->lookupForAdd(script);
-    if (!ptr) {
-      jit::JitCode* code =
-          jitRuntime->generateEntryTrampolineForScript(cx, script);
-      if (!code || !map->relookupOrAdd(ptr, script, code)) {
-        ReportOutOfMemory(cx);
-        return false;
-      }
-    }
-
-    uint8_t* codeRaw = ptr->value()->raw();
+    uint8_t* codeRaw = code->raw();
     MOZ_ASSERT(codeRaw, "Should have a valid trampoline here.");
     // The C++ entry thunk is located at the vmInterpreterEntryOffset offset.
     codeRaw += jitRuntime->vmInterpreterEntryOffset();
@@ -454,6 +443,9 @@ bool js::RunScript(JSContext* cx, RunState& state) {
   MOZ_ASSERT(!cx->suppressGC);
 
   MOZ_ASSERT(cx->realm() == state.script()->realm());
+
+  // Interrupt handlers must not run script in the current realm.
+  MOZ_RELEASE_ASSERT(!cx->realm()->handlingInterrupt());
 
   MOZ_DIAGNOSTIC_ASSERT(cx->realm()->isSystem() ||
                         cx->runtime()->allowContentJS());
@@ -509,7 +501,8 @@ bool js::RunScript(JSContext* cx, RunState& state) {
 
 STATIC_PRECONDITION_ASSUME(ubound(args.argv_) >= argc)
 MOZ_ALWAYS_INLINE bool CallJSNative(JSContext* cx, Native native,
-                                    CallReason reason, const CallArgs& args) {
+                                    CallReason reason, const CallArgs& args,
+                                    bool switchToCalleeRealm = true) {
   AutoCheckRecursionLimit recursion(cx);
   if (!recursion.check(cx)) {
     return false;
@@ -526,7 +519,14 @@ MOZ_ALWAYS_INLINE bool CallJSNative(JSContext* cx, Native native,
   cx->check(args);
   MOZ_ASSERT(!args.callee().is<ProxyObject>());
 
-  AutoRealm ar(cx, &args.callee());
+  // Switch to the callee's realm. Assert we don't do this for bound functions
+  // because they don't have an associated realm in the spec.
+  mozilla::Maybe<AutoRealm> ar;
+  if (switchToCalleeRealm) {
+    MOZ_ASSERT(!args.callee().is<BoundFunctionObject>());
+    ar.emplace(cx, &args.callee());
+  }
+
   bool ok = native(cx, args.length(), args.base());
   if (ok) {
     cx->check(args.rval());
@@ -538,14 +538,15 @@ MOZ_ALWAYS_INLINE bool CallJSNative(JSContext* cx, Native native,
 }
 
 STATIC_PRECONDITION(ubound(args.argv_) >= argc)
-MOZ_ALWAYS_INLINE bool CallJSNativeConstructor(JSContext* cx, Native native,
-                                               const CallArgs& args) {
+MOZ_ALWAYS_INLINE bool CallJSNativeConstructor(
+    JSContext* cx, Native native, const CallArgs& args,
+    bool switchToCalleeRealm = true) {
 #ifdef DEBUG
   RootedObject callee(cx, &args.callee());
 #endif
 
   MOZ_ASSERT(args.thisv().isMagic());
-  if (!CallJSNative(cx, native, CallReason::Call, args)) {
+  if (!CallJSNative(cx, native, CallReason::Call, args, switchToCalleeRealm)) {
     return false;
   }
 
@@ -609,7 +610,8 @@ bool js::InternalCallOrConstruct(JSContext* cx, const CallArgs& args,
     JSNative call = args.callee().callHook();
     MOZ_ASSERT(call, "isCallable without a callHook?");
 
-    return CallJSNative(cx, call, reason, args);
+    bool switchToCalleeRealm = (call != BoundFunctionObject::call);
+    return CallJSNative(cx, call, reason, args, switchToCalleeRealm);
   }
 
   /* Invoke native functions. */
@@ -770,7 +772,8 @@ static bool InternalConstruct(JSContext* cx, const AnyConstructArgs& args,
   JSNative construct = callee.constructHook();
   MOZ_ASSERT(construct != nullptr, "IsConstructor without a construct hook?");
 
-  return CallJSNativeConstructor(cx, construct, args);
+  bool switchToCalleeRealm = (construct != BoundFunctionObject::construct);
+  return CallJSNativeConstructor(cx, construct, args, switchToCalleeRealm);
 }
 
 // Check that |callee|, the callee in a |new| expression, is a constructor.
@@ -4520,7 +4523,7 @@ error:
       goto successful_return_continuation;
 
     case ErrorReturnContinuation:
-      CheckForOOMStackTraceInterrupt(cx);
+      MaybeCaptureOOMStackTrace(cx);
       interpReturnOK = false;
       goto return_continuation;
 

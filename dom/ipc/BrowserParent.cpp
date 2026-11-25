@@ -140,10 +140,6 @@
 #include "nsSubDocumentFrame.h"
 #include "nsThreadUtils.h"
 
-#ifdef XP_WIN
-#  include "FxRWindowManager.h"
-#endif
-
 #if defined(XP_WIN) && defined(ACCESSIBILITY)
 #  include "mozilla/a11y/AccessibleWrap.h"
 #  include "mozilla/a11y/Compatibility.h"
@@ -267,7 +263,7 @@ NS_INTERFACE_MAP_END
 NS_IMPL_CYCLE_COLLECTION_CLASS(BrowserParent)
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(BrowserParent)
-  NS_IMPL_CYCLE_COLLECTION_UNLINK(mFrameLoader)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mDestroyingFrameLoader)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mBrowsingContext)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mFrameElement)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mBrowserDOMWindow)
@@ -277,7 +273,7 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(BrowserParent)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(BrowserParent)
-  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mFrameLoader)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mDestroyingFrameLoader)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mBrowsingContext)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mFrameElement)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mBrowserDOMWindow)
@@ -299,7 +295,7 @@ BrowserParent::BrowserParent(ContentParent* aManager, const TabId& aTabId,
       mBrowsingContext(aBrowsingContext),
       mFrameElement(nullptr),
       mBrowserDOMWindow(nullptr),
-      mFrameLoader(nullptr),
+      mDestroyingFrameLoader(nullptr),
       mChromeFlags(aChromeFlags),
       mContentCache(*this),
       mRect(0, 0, 0, 0),
@@ -685,7 +681,17 @@ void BrowserParent::SetOwnerElement(Element* aElement) {
 }
 
 void BrowserParent::CacheFrameLoader(nsFrameLoader* aFrameLoader) {
-  mFrameLoader = aFrameLoader;
+  mDestroyingFrameLoader = aFrameLoader;
+}
+
+void BrowserParent::SetOwnerFrameLoader(nsFrameLoader* aFrameLoader) {
+  mOwnerFrameLoader = aFrameLoader;
+
+  VisitChildren([aFrameLoader](BrowserBridgeParent* aBrowser) {
+    if (auto* browserParent = aBrowser->GetBrowserParent()) {
+      browserParent->SetOwnerFrameLoader(aFrameLoader);
+    }
+  });
 }
 
 void BrowserParent::AddWindowListeners() {
@@ -781,7 +787,7 @@ void BrowserParent::Destroy() {
   }
 }
 
-mozilla::ipc::IPCResult BrowserParent::RecvDidUnsuppressPainting() {
+mozilla::ipc::IPCResult BrowserParent::RecvReadyToReplaceRetainedPaint() {
   if (!mFrameElement) {
     return IPC_OK();
   }
@@ -791,6 +797,24 @@ mozilla::ipc::IPCResult BrowserParent::RecvDidUnsuppressPainting() {
     subdocFrame->ClearRetainedPaintData();
   }
   return IPC_OK();
+}
+
+mozilla::ipc::IPCResult
+BrowserParent::RecvReadyToReplaceRetainedPaintNormalPriority() {
+  // Only an initial about:blank document sends this. The frame retains the
+  // paint of the previous document only while a BFCache swap waits for a
+  // document that has been loaded or restored, so the initial document must not
+  // replace it. If that document never comes, for example because the load
+  // fails after the swap, the previous document stays visible until this
+  // BrowserParent is destroyed.
+  if (mFrameElement) {
+    nsSubDocumentFrame* subdocFrame =
+        do_QueryFrame(mFrameElement->GetPrimaryFrame());
+    if (subdocFrame && subdocFrame->HasRetainedPaintData()) {
+      return IPC_OK();
+    }
+  }
+  return RecvReadyToReplaceRetainedPaint();
 }
 
 mozilla::ipc::IPCResult BrowserParent::RecvEnsureLayersConnected(
@@ -891,7 +915,7 @@ void BrowserParent::ActorDestroy(ActorDestroyReason why) {
     }
   }
 
-  mFrameLoader = nullptr;
+  mDestroyingFrameLoader = nullptr;
 
   // If we were destroyed due to our ManagedEndpoints being dropped, make a
   // point of showing the subframe crashed UI. We don't fire the full
@@ -1129,9 +1153,7 @@ mozilla::ipc::IPCResult BrowserParent::RecvSetDimensions(
   // Nothing further down keeps the size near the size of the screen that the
   // window is on, so do it here. We allow twice the screen size because the
   // size we get for a screen is not always accurate, on Wayland in particular,
-  // and all we need is to keep the size in a range the window can be given. For
-  // a request that carries inner dimensions this is a looser bound than it
-  // looks, since the outer size is larger.
+  // and all we need is to keep the size in a range the window can be given.
   nsCOMPtr<nsIWidget> mainWidget;
   treeOwnerAsWin->GetMainWidget(getter_AddRefs(mainWidget));
   if (mainWidget) {
@@ -1147,10 +1169,7 @@ mozilla::ipc::IPCResult BrowserParent::RecvSetDimensions(
     }
   }
 
-  // treeOwner is the chrome tree owner, but we wan't the content tree owner.
-  nsCOMPtr<nsIWebBrowserChrome> webBrowserChrome = do_GetInterface(treeOwner);
-  NS_ENSURE_TRUE(webBrowserChrome, IPC_OK());
-  webBrowserChrome->SetDimensions(std::move(aRequest));
+  treeOwnerAsWin->SetDimensions(std::move(aRequest));
   return IPC_OK();
 }
 
@@ -1335,27 +1354,15 @@ IPCResult BrowserParent::RecvNewWindowGlobal(
     return IPC_FAIL(this, "Cannot create without valid documentURI");
   }
 
-  nsCOMPtr<nsIURI> docURI = aInit.documentURI();
-
   // Ensure we never load a document with a content principal in
   // the wrong type of webIsolated process
   // NOTE: Keep the AllowSystem condition in sync with the similar check in
   // DocumentLoadListener::TriggerRedirectToRealChannel.
   EnumSet<ValidatePrincipalOptions> validationOptions = {};
-  if (xpc::IsInAutomation()) {
-    // Automation-Only: chrome://reftest/** + blank subframes
-    bool isChromeReftest = false;
-    if (docURI->SchemeIs("chrome")) {
-      nsAutoCString host;
-      docURI->GetHost(host);
-      isChromeReftest = host.EqualsLiteral("reftest");
-    }
-
-    if (isChromeReftest ||
-        (NS_IsAboutBlank(docURI) && parentWgp && parentWgp->Manager() == this &&
-         parentWgp->DocumentPrincipal()->IsSystemPrincipal())) {
-      validationOptions += ValidatePrincipalOptions::AllowSystemIfLoaded;
-    }
+  if (StaticPrefs::
+          dom_ipc_validatePrincipal_testing_allowContentSystemDocuments() &&
+      xpc::IsInAutomation()) {
+    validationOptions += ValidatePrincipalOptions::AllowSystemIfLoaded;
   }
   if (!Manager()->ValidatePrincipal(aInit.principal(), validationOptions)) {
     return ContentParent::PrincipalValidationIpcFail(aInit.principal(), this,
@@ -1431,6 +1438,11 @@ void BrowserParent::MouseEnterIntoWidget() {
   // enter event and send it to the child.
   mIsMouseEnterIntoWidgetEventSuppressed = true;
 }
+
+struct BrowserParent::SentMouseEventData {
+  nsID mUUID;
+  WidgetMouseEventCommand mCommand;
+};
 
 void BrowserParent::SendRealMouseEvent(WidgetMouseEvent& aMouseOrPointerEvent) {
   if (mIsDestroyed) {
@@ -1588,17 +1600,31 @@ void BrowserParent::SendRealMouseEvent(WidgetMouseEvent& aMouseOrPointerEvent) {
     return;
   }
 
+  nsID uuid = {};
+  if (aMouseOrPointerEvent.mCommand &&
+      StaticPrefs::dom_event_mouse_xbuttons_enabled()) {
+    MOZ_ASSERT(aMouseOrPointerEvent.mMessage == eMouseUp,
+               "mCommand should only be set for eMouseUp.");
+    MOZ_ASSERT(aMouseOrPointerEvent.mButton == MouseButton::eX1 ||
+                   aMouseOrPointerEvent.mButton == MouseButton::eX2,
+               "mCommand should only be set for X1/X2 button presses.");
+    uuid = nsID::GenerateUUID();
+    SentMouseEventData data{uuid, aMouseOrPointerEvent.mCommand};
+    mWaitingReplyMouseEvents.AppendElement(data);
+  }
+
   DebugOnly<bool> ret =
       isInputPriorityEventEnabled
           ? aMouseOrPointerEvent.mClass == ePointerEventClass
                 ? SendRealPointerButtonEvent(
                       *aMouseOrPointerEvent.AsPointerEvent(), guid, blockId)
-                : SendRealMouseButtonEvent(aMouseOrPointerEvent, guid, blockId)
+                : SendRealMouseButtonEvent(aMouseOrPointerEvent, guid, blockId,
+                                           uuid)
       : aMouseOrPointerEvent.mClass == ePointerEventClass
           ? SendNormalPriorityRealPointerButtonEvent(
                 *aMouseOrPointerEvent.AsPointerEvent(), guid, blockId)
           : SendNormalPriorityRealMouseButtonEvent(aMouseOrPointerEvent, guid,
-                                                   blockId);
+                                                   blockId, uuid);
   NS_WARNING_ASSERTION(ret, "SendRealMouseButtonEvent() failed");
   MOZ_ASSERT(!ret || aMouseOrPointerEvent.HasBeenPostedToRemoteProcess());
 }
@@ -2004,14 +2030,14 @@ mozilla::ipc::IPCResult BrowserParent::RecvSynthesizeNativeTouchPoint(
   return IPC_OK();
 }
 
-mozilla::ipc::IPCResult BrowserParent::RecvSynthesizeNativeTouchPadPinch(
+mozilla::ipc::IPCResult BrowserParent::RecvSynthesizeNativeTouchpadPinch(
     const TouchpadGesturePhase& aEventPhase, const float& aScale,
     const LayoutDeviceIntPoint& aPoint, const int32_t& aModifierFlags) {
   NS_ENSURE_TRUE(xpc::IsInAutomation(), IPC_FAIL(this, "Unexpected event"));
 
   nsCOMPtr<nsIWidget> widget = GetWidget();
   if (widget) {
-    widget->SynthesizeNativeTouchPadPinch(aEventPhase, aScale, aPoint,
+    widget->SynthesizeNativeTouchpadPinch(aEventPhase, aScale, aPoint,
                                           aModifierFlags);
   }
   return IPC_OK();
@@ -2125,7 +2151,11 @@ void BrowserParent::SendRealKeyEvent(WidgetKeyboardEvent& aEvent) {
   NS_WARNING_ASSERTION(ok, "PBrowserParent::SendRealKeyEvent() failed");
   MOZ_ASSERT(!ok || aEvent.HasBeenPostedToRemoteProcess());
   if (ok && aEvent.IsWaitingReplyFromRemoteProcess()) {
-    mWaitingReplyKeyboardEvents.AppendElement(sendKeyEventData);
+    // Although mAlternativeCharCodes contains only 3 items at most and each
+    // item is small, but let's assign it only when we actually store the data
+    // for avoiding unnecessary allocation.
+    sendKeyEventData.mAlternativeCharCodes = aEvent.mAlternativeCharCodes;
+    mWaitingReplyKeyboardEvents.AppendElement(std::move(sendKeyEventData));
   }
 }
 
@@ -2789,7 +2819,11 @@ mozilla::ipc::IPCResult BrowserParent::RecvReplyKeyEvent(
             NS_WARN_IF(data.mModifiers != aEvent.mModifiers) ||
             // The child process should've already cleared the editor commands
             // because we don't use them.
-            NS_WARN_IF(aEvent.HasEditCommands())) {
+            NS_WARN_IF(aEvent.HasEditCommands()) ||
+            // Let's avoid triggering unintended keyboard shortcuts or access
+            // keys.
+            NS_WARN_IF(data.mAlternativeCharCodes !=
+                       aEvent.mAlternativeCharCodes)) {
           // Got different event data from what we stored before dispatching an
           // event with the ID.
           return Nothing();
@@ -2840,12 +2874,21 @@ mozilla::ipc::IPCResult BrowserParent::RecvReplyKeyEvent(
     localEvent.GetAccessKeyCandidates(accessCharCodes);
     if (esm->HandleAccessKey(&localEvent, presContext, accessCharCodes)) {
       status = nsEventStatus_eConsumeNoDefault;
+      // If there is a keyboard event listener, localEvent.PreventDefault() will
+      // be called by EventListenerManager. However, otherwise, the default
+      // shortcut keys in OS may be executed later unless we explicitly consume
+      // the event itself here. To prevent to execute both access key and
+      // shortcut key in OS, we should call PreventDefault() explicitly here.
+      localEvent.PreventDefault();
     }
   }
 
-  RefPtr<Element> frameElement = mFrameElement;
-  EventDispatcher::Dispatch(frameElement, presContext, &localEvent, nullptr,
-                            &status);
+  if (const RefPtr<Element> frameElement = mFrameElement) {
+    EventDispatcher::Dispatch(frameElement, presContext, &localEvent, nullptr,
+                              &status);
+  } else {
+    MOZ_ASSERT(localEvent.DefaultPrevented());
+  }
 
   if (!localEvent.DefaultPrevented() &&
       !localEvent.mFlags.mIsSynthesizedForTests) {
@@ -2856,6 +2899,35 @@ mozilla::ipc::IPCResult BrowserParent::RecvReplyKeyEvent(
     }
   }
 
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult BrowserParent::RecvReplyMouseEvent(bool aPreventDefault,
+                                                           const nsID& aUUID) {
+  MOZ_ASSERT(aUUID != nsID{}, "This should not be sent with zeroed UUID.");
+  // First, check that we are expecting a reply with the UUID
+  // and find the command we should execute as the default action.
+  WidgetMouseEventCommand command;
+  for (const size_t i : IntegerRange(mWaitingReplyMouseEvents.Length())) {
+    const SentMouseEventData& data = mWaitingReplyMouseEvents[i];
+    if (data.mUUID.Equals(aUUID)) {
+      command = data.mCommand;
+      mWaitingReplyMouseEvents.RemoveElementAt(i);
+      break;
+    }
+  }
+  if (NS_WARN_IF(!command)) {
+    return IPC_FAIL(this, "Didn't find mouse event.");
+  }
+  if (aPreventDefault) {
+    // Don't perform default action.
+    return IPC_OK();
+  }
+  RefPtr<nsIWidget> widget = GetWidget();
+  if (NS_WARN_IF(!widget)) {
+    return IPC_OK();
+  }
+  command.Run(widget);
   return IPC_OK();
 }
 
@@ -3542,13 +3614,8 @@ already_AddRefed<nsFrameLoader> BrowserParent::GetFrameLoader(
     return nullptr;
   }
 
-  if (mFrameLoader) {
-    RefPtr<nsFrameLoader> fl = mFrameLoader;
-    return fl.forget();
-  }
-  RefPtr<Element> frameElement(mFrameElement);
-  RefPtr<nsFrameLoaderOwner> frameLoaderOwner = do_QueryObject(frameElement);
-  return frameLoaderOwner ? frameLoaderOwner->GetFrameLoader() : nullptr;
+  RefPtr<nsFrameLoader> fl = mOwnerFrameLoader.get();
+  return fl.forget();
 }
 
 void BrowserParent::TryCacheDPIAndScale() {
@@ -3664,7 +3731,7 @@ void BrowserParent::SetRenderLayers(bool aEnabled) {
 }
 
 void BrowserParent::SetRenderLayersInternal(bool aEnabled) {
-  (void)SendRenderLayers(aEnabled);
+  (void)SendRenderLayers(aEnabled, NextRenderLayersEpoch());
 
   // Ask the child to repaint/unload layers using the PHangMonitor
   // channel/thread (which may be less congested).
@@ -3921,7 +3988,8 @@ mozilla::ipc::IPCResult BrowserParent::RecvInvokeDragSession(
     nsTArray<IPCTransferableData>&& aTransferables, const uint32_t& aAction,
     Maybe<BigBuffer>&& aVisualDnDData, const uint32_t& aStride,
     const gfx::SurfaceFormat& aFormat, const LayoutDeviceIntRect& aDragRect,
-    nsIPrincipal* aPrincipal, nsIPolicyContainer* aPolicyContainer,
+    Tainted<RefPtr<nsIPrincipal>>&& aPrincipal,
+    nsIPolicyContainer* aPolicyContainer,
     const CookieJarSettingsArgs& aCookieJarSettingsArgs,
     const MaybeDiscarded<WindowContext>& aSourceWindowContext,
     const MaybeDiscarded<WindowContext>& aSourceTopWindowContext) {
@@ -3956,7 +4024,8 @@ mozilla::ipc::IPCResult BrowserParent::RecvInvokeDragSession(
     return IPC_OK();
   }
 
-  if (!Manager()->ValidatePrincipal(aPrincipal, {})) {
+  auto principal = Manager()->ValidatePrincipal(aPrincipal);
+  if (!principal) {
     return ContentParent::PrincipalValidationIpcFail(aPrincipal, this,
                                                      __func__);
   }
@@ -3966,7 +4035,7 @@ mozilla::ipc::IPCResult BrowserParent::RecvInvokeDragSession(
                                       getter_AddRefs(cookieJarSettings));
 
   RefPtr<RemoteDragStartData> dragStartData = new RemoteDragStartData(
-      this, std::move(aTransferables), aDragRect, aPrincipal, aPolicyContainer,
+      this, std::move(aTransferables), aDragRect, *principal, aPolicyContainer,
       cookieJarSettings, aSourceWindowContext.GetMaybeDiscarded(),
       aSourceTopWindowContext.GetMaybeDiscarded());
 
@@ -4155,7 +4224,10 @@ mozilla::ipc::IPCResult BrowserParent::RecvVisitURI(
   }
   nsCOMPtr<IHistory> history = components::History::Service();
   if (history) {
-    (void)history->VisitURI(widget, aURI, aLastVisitedURI, aFlags, aBrowserId);
+    // The container isn't sent by the content process, so it can't be forged.
+    (void)history->VisitURI(
+        widget, aURI, aLastVisitedURI, aFlags, aBrowserId,
+        mBrowsingContext->OriginAttributesRef().mUserContextId);
   }
   return IPC_OK();
 }
@@ -4261,12 +4333,9 @@ mozilla::ipc::IPCResult BrowserParent::RecvScrollForKeyboard(
 }
 
 mozilla::ipc::IPCResult BrowserParent::RecvIsWindowSupportingProtectedMedia(
-    const uint64_t& aOuterWindowID,
-    IsWindowSupportingProtectedMediaResolver&& aResolve) {
+    const uint64_t&, IsWindowSupportingProtectedMediaResolver&& aResolve) {
 #ifdef XP_WIN
-  bool isFxrWindow =
-      FxRWindowManager::GetInstance()->IsFxRWindow(aOuterWindowID);
-  aResolve(!isFxrWindow);
+  aResolve(true);
 #else
 #  ifdef FUZZING_SNAPSHOT
   return IPC_FAIL(this, "Should only be called on Windows");
@@ -4278,15 +4347,8 @@ mozilla::ipc::IPCResult BrowserParent::RecvIsWindowSupportingProtectedMedia(
 }
 
 mozilla::ipc::IPCResult BrowserParent::RecvIsWindowSupportingWebVR(
-    const uint64_t& aOuterWindowID,
-    IsWindowSupportingWebVRResolver&& aResolve) {
-#ifdef XP_WIN
-  bool isFxrWindow =
-      FxRWindowManager::GetInstance()->IsFxRWindow(aOuterWindowID);
-  aResolve(!isFxrWindow);
-#else
+    const uint64_t&, IsWindowSupportingWebVRResolver&& aResolve) {
   aResolve(true);
-#endif
 
   return IPC_OK();
 }

@@ -627,6 +627,30 @@ bool RBigIntMod::recover(JSContext* cx, SnapshotIterator& iter) const {
   return true;
 }
 
+bool MBigIntMulMod::writeRecoverData(CompactBufferWriter& writer) const {
+  MOZ_ASSERT(canRecoverOnBailout());
+  writer.writeUnsigned(uint32_t(RInstruction::Recover_BigIntMulMod));
+  return true;
+}
+
+RBigIntMulMod::RBigIntMulMod(CompactBufferReader& reader) {}
+
+bool RBigIntMulMod::recover(JSContext* cx, SnapshotIterator& iter) const {
+  Rooted<BigInt*> lhs(cx, iter.readBigInt());
+  Rooted<BigInt*> rhs(cx, iter.readBigInt());
+  Rooted<BigInt*> modulus(cx, iter.readBigInt());
+  MOZ_ASSERT(!modulus->isZero(),
+             "division by zero throws and therefore can't be recovered");
+
+  BigInt* result = BigInt::mulMod(cx, lhs, rhs, modulus);
+  if (!result) {
+    return false;
+  }
+
+  iter.storeInstructionResult(BigIntValue(result));
+  return true;
+}
+
 bool MBigIntPow::writeRecoverData(CompactBufferWriter& writer) const {
   MOZ_ASSERT(canRecoverOnBailout());
   writer.writeUnsigned(uint32_t(RInstruction::Recover_BigIntPow));
@@ -1926,7 +1950,7 @@ RTypeOfName::RTypeOfName(CompactBufferReader& reader) {}
 bool RTypeOfName::recover(JSContext* cx, SnapshotIterator& iter) const {
   // Int32 because |type| is computed from MTypeOf.
   int32_t type = iter.readInt32();
-  MOZ_ASSERT(JSTYPE_UNDEFINED <= type && type < JSTYPE_LIMIT);
+  MOZ_RELEASE_ASSERT(JSTYPE_UNDEFINED <= type && type < JSTYPE_LIMIT);
 
   JSString* name = TypeName(JSType(type), *cx->runtime()->commonNames);
   iter.storeInstructionResult(StringValue(name));
@@ -2392,8 +2416,9 @@ RObjectState::RObjectState(CompactBufferReader& reader) {
 bool RObjectState::recover(JSContext* cx, SnapshotIterator& iter) const {
   JSObject* object = iter.readObject();
   NativeObject* nativeObject = &object->as<NativeObject>();
-  MOZ_ASSERT(!Watchtower::watchesPropertyValueChange(nativeObject));
-  MOZ_ASSERT(nativeObject->slotSpan() == numSlots());
+  MOZ_RELEASE_ASSERT(!Watchtower::watchesPropertyValueChange(nativeObject));
+  MOZ_RELEASE_ASSERT(!nativeObject->inDictionaryMode());
+  MOZ_RELEASE_ASSERT(nativeObject->slotSpan() == numSlots());
 
   for (size_t i = 0; i < numSlots(); i++) {
     Value val = iter.read();
@@ -2421,8 +2446,9 @@ bool RArrayState::recover(JSContext* cx, SnapshotIterator& iter) const {
   // Int32 because |initLength| is computed from MConstant.
   uint32_t initLength = iter.readInt32();
 
-  MOZ_ASSERT(object->getDenseInitializedLength() == 0,
-             "initDenseElement call below relies on this");
+  MOZ_RELEASE_ASSERT(object->getDenseInitializedLength() == 0,
+                     "initDenseElement call below relies on this");
+  MOZ_RELEASE_ASSERT(initLength <= object->getDenseCapacity());
   object->setDenseInitializedLength(initLength);
 
   for (size_t index = 0; index < numElements(); index++) {
@@ -2512,6 +2538,10 @@ bool RSubstr::recover(JSContext* cx, SnapshotIterator& iter) const {
   // sequence, so instead use |readNumber| here and then release-assert the
   // number is exactly representable as an Int32.
   int32_t length = mozilla::ReleaseAssertedCast<int32_t>(iter.readNumber());
+
+  MOZ_RELEASE_ASSERT(0 <= begin && uint32_t(begin) <= str->length());
+  MOZ_RELEASE_ASSERT(0 <= length &&
+                     uint32_t(length) <= str->length() - uint32_t(begin));
 
   JSString* result = SubstringKernel(cx, str, begin, length);
   if (!result) {
@@ -2657,6 +2687,8 @@ bool RCreateInlinedArgumentsObject::recover(JSContext* cx,
   RootedObject callObject(cx, iter.readObject());
   RootedFunction callee(cx, &iter.readObject()->as<JSFunction>());
 
+  MOZ_RELEASE_ASSERT(numActuals_ <= ArgumentsObject::MaxInlinedArgs);
+
   JS::RootedValueArray<ArgumentsObject::MaxInlinedArgs> argsArray(cx);
   for (uint32_t i = 0; i < numActuals_; i++) {
     argsArray[i].set(iter.read());
@@ -2688,7 +2720,7 @@ bool RRest::recover(JSContext* cx, SnapshotIterator& iter) const {
 
   // Int32 because |numActuals| is computed from MArgumentsLength.
   uint32_t numActuals = iter.readInt32();
-  MOZ_ASSERT(numActuals == frame->numActualArgs());
+  MOZ_RELEASE_ASSERT(numActuals == frame->numActualArgs());
 
   uint32_t numFormals = numFormals_;
 

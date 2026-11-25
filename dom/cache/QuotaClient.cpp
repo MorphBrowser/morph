@@ -151,9 +151,6 @@ Result<int64_t, nsresult> GetTotalDiskUsageFromDB(
 
 }  // namespace
 
-const nsLiteralString kCachesSQLiteFilename = u"caches.sqlite"_ns;
-const nsLiteralString kMorgueDirectoryFilename = u"morgue"_ns;
-
 CacheQuotaClient::CacheQuotaClient() {
   AssertIsOnBackgroundThread();
   MOZ_DIAGNOSTIC_ASSERT(!sInstance);
@@ -212,7 +209,7 @@ Result<UsageInfo, nsresult> CacheQuotaClient::InitOrigin(
               *dir, DirPaddingFile::FILE)));
 
           QM_TRY_INSPECT(const auto& morgueDir,
-                         CloneFileAndAppend(*dir, kMorgueDirectoryFilename));
+                         CloneFileAndAppend(*dir, kMorgueDirectory));
 
           QM_TRY(MOZ_TO_RESULT(mozilla::dom::cache::RemoveNsIFileRecursively(
               Nothing(), *morgueDir,
@@ -233,14 +230,17 @@ Result<UsageInfo, nsresult> CacheQuotaClient::InitOrigin(
   // XXX Ensure the -wel file is removed if the caches.sqlite doesn't exist.
   QM_TRY(OkIf(!!cachesSQLiteFile), UsageInfo{});
 
-  const auto maybeCipherKey = [this, &aOriginMetadata] {
-    Maybe<CipherKey> maybeCipherKey;
-    auto cipherKeyManager = GetOrCreateCipherKeyManager(aOriginMetadata);
-    if (cipherKeyManager) {
-      maybeCipherKey = Some(cipherKeyManager->Ensure());
-    }
-    return maybeCipherKey;
-  }();
+  QM_TRY_UNWRAP(
+      const auto maybeCipherKey,
+      ([this, &aOriginMetadata]() -> Result<Maybe<CipherKey>, nsresult> {
+        QM_TRY_UNWRAP(auto cipherKeyManager,
+                      GetOrCreateCipherKeyManager(aOriginMetadata));
+        if (cipherKeyManager) {
+          QM_TRY_UNWRAP(auto key, cipherKeyManager->Ensure("db"_ns));
+          return Some(key);
+        }
+        return Maybe<CipherKey>{};
+      }()));
 
   QM_TRY_INSPECT(
       const auto& paddingSize,
@@ -278,7 +278,7 @@ Result<UsageInfo, nsresult> CacheQuotaClient::InitOrigin(
 
             switch (dirEntryKind) {
               case nsIFileKind::ExistsAsDirectory:
-                if (!leafName.EqualsLiteral("morgue")) {
+                if (!leafName.Equals(kMorgueDirectory)) {
                   NS_WARNING("Unknown Cache directory found!");
                 }
 
@@ -304,8 +304,8 @@ Result<UsageInfo, nsresult> CacheQuotaClient::InitOrigin(
                 }
 
                 // Ignore directory padding file
-                if (leafName.EqualsLiteral(PADDING_FILE_NAME) ||
-                    leafName.EqualsLiteral(PADDING_TMP_FILE_NAME)) {
+                if (leafName.Equals(kPaddingFilename) ||
+                    leafName.Equals(kPaddingTmpFilename)) {
                   break;
                 }
 
@@ -513,18 +513,32 @@ nsresult CacheQuotaClient::WipePaddingFileInternal(
   return NS_OK;
 }
 
-RefPtr<CipherKeyManager> CacheQuotaClient::GetOrCreateCipherKeyManager(
+Result<RefPtr<CipherKeyManager>, nsresult>
+CacheQuotaClient::GetOrCreateCipherKeyManager(
     const PrincipalMetadata& aMetadata) {
   AssertIsOnIOThread();
 
-  auto privateOrigin = aMetadata.mIsPrivate;
-  if (!privateOrigin) {
-    return nullptr;
+  const auto& origin = aMetadata.mOrigin;
+  if (aMetadata.mIsPrivate) {
+    return RefPtr<CipherKeyManager>(
+        mCipherKeyManagers.LookupOrInsertWith(origin, [&] {
+          return CipherKeyManager::CreateEphemeral("CacheCipherKeyManager");
+        }));
   }
 
-  const auto& origin = aMetadata.mOrigin;
-  return mCipherKeyManagers.LookupOrInsertWith(
-      origin, [] { return new CipherKeyManager("CacheCipherKeyManager"); });
+  if (!aMetadata.mIsEncrypted) {
+    return RefPtr<CipherKeyManager>(nullptr);
+  }
+
+  if (auto entry = mCipherKeyManagers.Lookup(origin)) {
+    return RefPtr<CipherKeyManager>(entry.Data());
+  }
+
+  QM_TRY_UNWRAP(auto cipherKeyManager,
+                quota::QuotaManager::Get()->GetOrCreateCipherKeyManager(
+                    origin, quota::Client::DOMCACHE));
+  mCipherKeyManagers.InsertOrUpdate(origin, cipherKeyManager);
+  return cipherKeyManager;
 }
 
 CacheQuotaClient::~CacheQuotaClient() {

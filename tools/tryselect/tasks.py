@@ -3,18 +3,22 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 
+import gc
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 
 import mozpack.path as mozpath
 import taskgraph
 from mach.util import get_state_dir
 from mozbuild.base import MozbuildObject
+from mozbuild.util import construct_log_filename
 from mozpack.files import FileFinder
+from mozsystemmonitor.resourcemonitor import SystemResourceMonitor
 from moztest.resolve import TestManifestLoader, TestResolver, get_suite_definition
 from taskgraph.generator import TaskGraphGenerator, load_graph_config
 from taskgraph.parameters import ParameterMismatch, parameters_loader
@@ -90,17 +94,9 @@ after pulling firefox-main or switching branches). watchman can rebuild the
 taskgraph cache in the background so `mach try` stays fast. Since watchman is
 already watching this checkout, enable it with:
 
-    watchman -j < {watchman_json}
-{powershell}
+    {command}
+
 See https://firefox-source-docs.mozilla.org/tools/try/tasks.html for details.
-"""
-
-WATCHMAN_HINT_POWERSHELL = """\
-
-PowerShell on Windows does not support the `<` redirection operator. Run it
-through cmd instead:
-
-    cmd /d /c "watchman -j < {watchman_json}"
 """
 
 
@@ -135,11 +131,23 @@ def suggest_watchman_setup():
     if proc.returncode != 0 or WATCHMAN_TRIGGER_NAME in proc.stdout:
         return
 
-    watchman_json = mozpath.normsep(os.path.join(here, "watchman.json"))
-    powershell = ""
-    if sys.platform == "win32":
-        powershell = WATCHMAN_HINT_POWERSHELL.format(watchman_json=watchman_json)
-    print(WATCHMAN_HINT.format(watchman_json=watchman_json, powershell=powershell))
+    watchman_json = os.path.join(here, "watchman.json")
+    # cmd and PowerShell do not set SHELL.
+    if sys.platform == "win32" and "SHELL" not in os.environ:
+        command = f'more "{watchman_json}" | watchman -j'
+    else:
+        command = f'watchman -j < "{mozpath.normsep(watchman_json)}"'
+    print(WATCHMAN_HINT.format(command=command))
+
+
+def write_profile(monitor):
+    log_subdir = os.path.join("logs", "try")
+    build._ensure_state_subdir_exists(log_subdir)
+    profile_path = build._get_state_filename(
+        construct_log_filename("profile"), subdir=log_subdir
+    )
+    with open(profile_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(monitor.as_profile(), f)
 
 
 def cache_key(attr, params, disable_target_task_filter, target_tasks_method):
@@ -256,19 +264,40 @@ def generate_tasks(
             print(PARAMETER_MISMATCH.format(e.args[0]))
             sys.exit(1)
 
+        # The generated graph is long-lived and taskgraph collects no garbage
+        # while generating it, so a collection triggered while serializing it
+        # would walk the whole heap for little gain.
+        gc.freeze()
+
         # write cache
         key = cache_key(
             attr, generator.parameters, disable_target_task_filter, target_tasks_method
         )
+        SystemResourceMonitor.begin_marker("Taskgraph", f"write {attr} cache")
         with open(os.path.join(cache_dir, key), "w") as fh:
             json.dump(tg.to_json(), fh)
+        SystemResourceMonitor.end_marker("Taskgraph", f"write {attr} cache")
         return add_chunk_patterns(tg)
 
-    # Cache both full_task_set and target_task_set regardless of whether or not
-    # --full was requested. Caching is cheap and can potentially save a lot of
-    # time.
-    tg_full = generate("full_task_set")
-    tg_target = generate("target_task_set")
+    monitor = None
+    if not SystemResourceMonitor.instance:
+        monitor = SystemResourceMonitor(poll_interval=0.1)
+        monitor.start()
+        fd, forward_path = tempfile.mkstemp(prefix="taskgraph-", suffix=".jsonl")
+        os.close(fd)
+        monitor.accept_forwarded(forward_path)
+
+    try:
+        # Cache both full_task_set and target_task_set regardless of whether or
+        # not --full was requested. Caching is cheap and can potentially save a
+        # lot of time.
+        tg_full = generate("full_task_set")
+        tg_target = generate("target_task_set")
+    finally:
+        if monitor:
+            monitor.stop()
+            os.remove(forward_path)
+            write_profile(monitor)
 
     os.chdir(cwd)
     if full:
@@ -350,3 +379,17 @@ def resolve_tests_by_suite(paths):
             remaining_paths_by_suite[key].remove(found_path)
 
     return suite_to_tests
+
+
+def unverifiable_test_paths(paths):
+    """Return the paths without a test manifest in them or in one of their
+    direct subdirectories."""
+    resolver = TestResolver.from_environment(cwd=here, loader_cls=TestManifestLoader)
+    _, tests = resolver.resolve_metadata(paths)
+    manifest_dirs = {
+        mozpath.dirname(mozpath.normpath(t["manifest_relpath"]))
+        for t in tests
+        if "manifest_relpath" in t
+    }
+    accepted = manifest_dirs | {mozpath.dirname(d) for d in manifest_dirs}
+    return sorted(p for p in paths if mozpath.normpath(p) not in accepted)

@@ -11,7 +11,6 @@ import errno
 import importlib.metadata
 import shlex
 import sys
-import types
 import uuid
 from collections.abc import Iterable
 from pathlib import Path
@@ -108,6 +107,7 @@ MACH_COMMANDS = {
     "devtools-update-compat-data": MachCommandReference("devtools/mach_commands.py"),
     "doc": MachCommandReference("tools/moztreedocs/mach_commands.py"),
     "doctor": MachCommandReference("python/mozbuild/mozbuild/mach_commands.py"),
+    "dte-ui-test": MachCommandReference("testing/dte-ui-test/mach_commands.py"),
     "environment": MachCommandReference("python/mozbuild/mozbuild/mach_commands.py"),
     "eslint": MachCommandReference("tools/lint/mach_commands.py"),
     "event-into-legacy": MachCommandReference(
@@ -120,6 +120,7 @@ MACH_COMMANDS = {
         "python/mozbuild/mozbuild/frontend/mach_commands.py"
     ),
     "firefox-devtools-mcp": MachCommandReference("tools/mach_commands.py"),
+    "firefox-mcp": MachCommandReference("tools/mach_commands.py"),
     "firefox-ui-functional": MachCommandReference(
         "testing/firefox-ui/mach_commands.py"
     ),
@@ -251,6 +252,7 @@ MACH_COMMANDS = {
     "test-interventions": MachCommandReference(
         "testing/webcompat/mach_commands.py",
     ),
+    "theme": MachCommandReference("toolkit/themes/tools/mach_commands.py"),
     "tps-build": MachCommandReference("testing/tps/mach_commands.py"),
     "tps-test": MachCommandReference("testing/tps/mach_commands.py"),
     "try": MachCommandReference("tools/tryselect/mach_commands.py"),
@@ -499,9 +501,7 @@ def load_commands_from_file(path: Union[str, Path], module_name=None):
     if module_name is None:
         # Ensure parent module is present otherwise we'll (likely) get
         # an error due to unknown parent.
-        if "mach.commands" not in sys.modules:
-            mod = types.ModuleType("mach.commands")
-            sys.modules["mach.commands"] = mod
+        importlib.import_module("mach.commands")
 
         module_name = f"mach.commands.{uuid.uuid4().hex}"
 

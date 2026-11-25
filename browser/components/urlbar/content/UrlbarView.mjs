@@ -12,14 +12,15 @@ import { UrlbarResult } from "chrome://browser/content/urlbar/UrlbarResult.mjs";
 import { UrlbarShared } from "chrome://browser/content/urlbar/UrlbarShared.mjs";
 import { L10nCache } from "chrome://browser/content/urlbar/L10nCache.mjs";
 
-const lazy = typeof ChromeUtils != "undefined" ? {} : null;
+const { XPCOMUtils } =
+  typeof ChromeUtils == "undefined"
+    ? { XPCOMUtils: null }
+    : ChromeUtils.importESModule("resource://gre/modules/XPCOMUtils.sys.mjs");
 
-if (lazy) {
-  ChromeUtils.defineESModuleGetters(lazy, {
-    UrlbarSearchOneOffs:
-      "moz-src:///browser/components/urlbar/UrlbarSearchOneOffs.sys.mjs",
-  });
-}
+const lazy = XPCOMUtils?.declareLazy({
+  UrlbarSearchOneOffs:
+    "moz-src:///browser/components/urlbar/UrlbarSearchOneOffs.sys.mjs",
+});
 
 // Query selector for selectable elements in results.
 const SELECTABLE_ELEMENT_SELECTOR = "[role=button], [selectable], a";
@@ -108,6 +109,7 @@ export class UrlbarView {
     // This is used by autoOpen to avoid flickering results when reopening
     // previously abandoned searches.
     this.queryContextCache = new QueryContextCache(5);
+    UrlbarPrefs.addObserver(this);
 
     // We cache l10n strings to avoid Fluent's async lookup.
     this.#l10nCache = new L10nCache();
@@ -156,6 +158,7 @@ export class UrlbarView {
    */
   #canReuseResults(queryContext) {
     return (
+      !this.#resultsInvalidated &&
       queryContext.searchString == this.input.value &&
       queryContext.currentPage == this.#currentPage
     );
@@ -737,7 +740,7 @@ export class UrlbarView {
     // focus) we should discard the telemetry event created when the view was
     // opened.
     if (!this.input.focused && !elementPicked) {
-      this.controller.engagementEvent.discard();
+      this.controller.session.discard();
     }
 
     window.removeEventListener("resize", this);
@@ -914,7 +917,7 @@ export class UrlbarView {
       }
     }
 
-    this.controller.engagementEvent.discard();
+    this.controller.session.discard();
     queryOptions.searchString = this.input.value;
     queryOptions.autofillIgnoresSelection = true;
     queryOptions.interactionType = "returned";
@@ -1038,6 +1041,7 @@ export class UrlbarView {
   onQueryResults(queryContext) {
     this.queryContextCache.put(queryContext);
     this.#queryContext = queryContext;
+    this.#resultsInvalidated = false;
 
     if (!this.isOpen) {
       this.clear();
@@ -1164,14 +1168,12 @@ export class UrlbarView {
    * and attempts to select the new result on the same row.
    *
    * @param {number} id The id of the UrlbarResult that has been removed.
-   * @param {object} [acknowledgeDismissalL10n]
-   *   The dismissal-acknowledgment l10n the dismissing provider set on the
-   *   result, supplied by the caller. It isn't read from this row's result
-   *   because the provider sets it after the results were serialized to this
-   *   process, so this row's result -- a query-time snapshot -- never received
-   *   it. Undefined when the row is removed without acknowledgment.
+   * @param {object} [options]
+   * @param {boolean} [options.acknowledgeDismissal]
+   *   Whether the result should be replaced with a dismissal-acknowledgment
+   *   tip.
    */
-  onQueryResultRemoved(id, acknowledgeDismissalL10n) {
+  onQueryResultRemoved(id, { acknowledgeDismissal = false } = {}) {
     let removedIndex = -1;
     let rowToRemove = null;
     for (let i = 0; i < this.#rows.children.length; i++) {
@@ -1188,9 +1190,10 @@ export class UrlbarView {
     }
 
     let { result } = rowToRemove;
-    if (acknowledgeDismissalL10n) {
-      // Replace the result's row with a dismissal acknowledgment tip.
-      this.#acknowledgeDismissal(result, acknowledgeDismissalL10n);
+    if (acknowledgeDismissal) {
+      this.#acknowledgeDismissal(result, {
+        id: "urlbar-feedback-acknowledgment",
+      });
       return;
     }
 
@@ -1245,6 +1248,27 @@ export class UrlbarView {
   }
 
   /**
+   * Called when a urlbar or urlbar related pref changes.
+   *
+   * @param {string} pref
+   *   The name of the pref. Relative to `browser.urlbar` for urlbar prefs.
+   */
+  onPrefChanged(pref) {
+    if (UrlbarPrefs.affectsResults(pref)) {
+      this.invalidateResults();
+    }
+  }
+
+  /**
+   * Discards the cached query contexts and marks the current results as stale,
+   * so that the view runs a new query the next time it opens.
+   */
+  invalidateResults() {
+    this.queryContextCache.clear();
+    this.#resultsInvalidated = true;
+  }
+
+  /**
    * Passes DOM events for the view to the on_<event type> methods.
    *
    * @param {Event} event
@@ -1283,6 +1307,7 @@ export class UrlbarView {
   #queryWasCancelled = false;
   /** @type {?number} */
   #removeStaleRowsTimer = null;
+  #resultsInvalidated = false;
   /** @type {?UrlbarResult} */
   #resultMenuResult = null;
   /** @type {WeakMap<UrlbarResult, UrlbarResultCommand[]>} */
@@ -1456,7 +1481,7 @@ export class UrlbarView {
 
     // Discard tentative exposures. This is analogous to marking the
     // hypothetical hidden rows of hidden-exposure results as stale.
-    this.controller.engagementEvent.discardTentativeExposures();
+    this.controller.session.discardTentativeExposures();
 
     // Walk rows and find an insertion index for results. To avoid flicker, we
     // skip rows until we find one compatible with the result we want to apply.
@@ -1496,10 +1521,7 @@ export class UrlbarView {
           if (result.isHiddenExposure) {
             // Don't increment `rowIndex` because we're not actually updating
             // the row. We'll visit it again in the next iteration.
-            this.controller.engagementEvent.addExposure(
-              result,
-              this.#queryContext
-            );
+            this.controller.session.addExposure(result, this.#queryContext);
             continue;
           }
 
@@ -1569,19 +1591,17 @@ export class UrlbarView {
           includeHiddenExposures: true,
         });
       let canBeVisible =
-        newSpanCount <= this.#queryContext.maxResults && !seenMisplacedResult;
+        newSpanCount <= this.#queryContext.maxResultsActual &&
+        !seenMisplacedResult;
       if (result.isHiddenExposure) {
         if (canBeVisible) {
-          this.controller.engagementEvent.addExposure(
-            result,
-            this.#queryContext
-          );
+          this.controller.session.addExposure(result, this.#queryContext);
         } else {
           // Add a tentative exposure: The hypothetical row for this
           // hidden-exposure result can't be visible now, but as long as it were
           // not marked stale in a later update, it would be shown when stale
           // rows are removed.
-          this.controller.engagementEvent.addTentativeExposure(
+          this.controller.session.addTentativeExposure(
             result,
             this.#queryContext
           );
@@ -2458,6 +2478,10 @@ export class UrlbarView {
     return newResult.testForceNewContent;
   }
 
+  /**
+   * @param {ResultRow} item
+   * @param {UrlbarResult} result
+   */
   // eslint-disable-next-line complexity
   #updateRow(item, result) {
     let oldResult = item.result;
@@ -2468,8 +2492,8 @@ export class UrlbarView {
     if (this.#needsNewContent(item, oldResult, result)) {
       // Recreate the row content except the buttons, which we'll reuse below.
       let buttons = item._elements.get("buttons");
-      while (item.lastChild) {
-        item.lastChild.remove();
+      while (item.lastElementChild) {
+        item.lastElementChild.remove();
       }
       item._elements.clear();
 
@@ -2513,7 +2537,11 @@ export class UrlbarView {
 
     item._content.id = item.id + "-inner";
 
-    item.toggleAttribute("is-top-pick", !!result.isBestMatch);
+    if (result.bestMatchType) {
+      item.setAttribute("top-pick-type", result.bestMatchType);
+    } else {
+      item.removeAttribute("top-pick-type");
+    }
 
     if (result.isBottomUrlSuggestion) {
       this.#updateRowContentForBottomUrl(item, result);
@@ -2528,7 +2556,9 @@ export class UrlbarView {
       item.appendChild(this.#createSecondaryAction(secAction, isFirstChild));
     } else if (
       secAction &&
-      secAction.key != actionsContainer.firstChild.dataset.action
+      secAction.key !=
+        /** @type {HTMLElement} */ (actionsContainer.firstElementChild).dataset
+          .action
     ) {
       item.replaceChild(
         this.#createSecondaryAction(secAction, isFirstChild),
@@ -2544,7 +2574,8 @@ export class UrlbarView {
       result.type == UrlbarShared.RESULT_TYPE.SEARCH &&
       !result.payload.providesSearchMode &&
       !result.payload.inPrivateWindow &&
-      result.providerName != "UrlbarProviderQuickSuggest"
+      (result.providerName != "UrlbarProviderQuickSuggest" ||
+        result.payload.suggestionObject?.suggestionType == "temporal")
     ) {
       item.setAttribute(
         "type",
@@ -2605,7 +2636,9 @@ export class UrlbarView {
       );
     }
 
-    let favicon = item._elements.get("favicon");
+    let favicon = /** @type {HTMLImageElement} */ (
+      item._elements.get("favicon")
+    );
     favicon.src = this.#iconForResult(result);
 
     let title = item._elements.get("title");
@@ -2737,12 +2770,12 @@ export class UrlbarView {
         break;
       case UrlbarShared.RESULT_TYPE.URL:
         if (result.providerName == "UrlbarProviderClipboard") {
+          isVisitAction = true;
           actionSetter = () => {
             this.#l10nCache.setElementL10n(action, {
               id: "urlbar-result-action-visit-from-clipboard",
             });
           };
-          title.toggleAttribute("is-url", true);
 
           let label = { id: "urlbar-result-action-visit-from-clipboard" };
           this.#l10nCache.ensure(label).then(() => {
@@ -2827,7 +2860,7 @@ export class UrlbarView {
     this.#updateExplanation(item, result, setURL);
 
     title.toggleAttribute("is-url", isVisitAction);
-    if (isVisitAction) {
+    if (isVisitAction && !actionSetter) {
       actionSetter = () => {
         this.#l10nCache.setElementL10n(action, {
           id: "urlbar-result-action-visit",
@@ -2836,7 +2869,7 @@ export class UrlbarView {
     }
 
     if (this.#showsActionLabels) {
-      item.toggleAttribute("has-action", actionSetter);
+      item.toggleAttribute("has-action", !!actionSetter);
       if (actionSetter) {
         actionSetter();
         item._originalActionSetter = actionSetter;
@@ -3128,10 +3161,7 @@ export class UrlbarView {
           (result.type == UrlbarShared.RESULT_TYPE.SEARCH &&
             result.payload.suggestion);
         if (result.exposureTelemetry) {
-          this.controller.engagementEvent.addExposure(
-            result,
-            this.#queryContext
-          );
+          this.controller.session.addExposure(result, this.#queryContext);
         }
 
         for (let target of item.querySelectorAll(
@@ -3190,9 +3220,11 @@ export class UrlbarView {
       isItemVisible &&
       // Show the search suggestions label only if there are other visible
       // results before this one that aren't the heuristic or suggestions.
+      // Also show the label for atypical search results that define their own.
       !(
         item.result.type == UrlbarShared.RESULT_TYPE.SEARCH &&
         item.result.payload.suggestion &&
+        !item.result.rowLabel &&
         seenOnlyHeuristicOrSearchSuggestions
       )
     ) {
@@ -3280,10 +3312,6 @@ export class UrlbarView {
       return row.result.isBestMatch
         ? null
         : { id: "urlbar-group-firefox-suggest" };
-    }
-
-    if (row.result.isBestMatch) {
-      return { id: "urlbar-group-best-match" };
     }
 
     // Show "Shortcuts" if there's another result before that group.
@@ -3377,7 +3405,7 @@ export class UrlbarView {
 
     // Accept tentative exposures. This is analogous to unhiding the
     // hypothetical non-stale hidden rows of hidden-exposure results.
-    this.controller.engagementEvent.acceptTentativeExposures();
+    this.controller.session.acceptTentativeExposures();
   }
 
   #startRemoveStaleRowsTimer() {
@@ -3433,7 +3461,7 @@ export class UrlbarView {
 
     let result = row?.result;
     if (result) {
-      this.controller.parentController.onBeforeSelection(result, element);
+      this.controller.parentController.onBeforeSelection(result);
     }
 
     this.#setAccessibleFocus(setAccessibleFocus && element);
@@ -4205,7 +4233,6 @@ export class UrlbarView {
 
     if (UrlbarPrefs.get("groupLabels.enabled")) {
       idArgs.push({ id: "urlbar-group-firefox-suggest" });
-      idArgs.push({ id: "urlbar-group-best-match" });
     }
 
     let suggestSponsoredEnabled =
@@ -4267,16 +4294,23 @@ export class UrlbarView {
 
   /**
    * The commands that open a result in a new tab or window. They're offered
-   * alongside a result's own menu commands, gated on `contextMenu.featureGate`.
+   * alongside a result's own menu commands, gated on
+   * `resultTargetMenuFeatureGate`.
    *
+   * @param {UrlbarResult} result
    * @returns {UrlbarResultCommand[]}
    */
-  get #openInCommands() {
+  #getOpenInCommands(result) {
+    let isSearch = result.type == UrlbarShared.RESULT_TYPE.SEARCH;
     /** @type {UrlbarResultCommand[]} */
     let commands = [
       {
         openIn: "tab",
-        l10n: { id: "urlbar-view-context-menu-open-in-tab2" },
+        l10n: {
+          id: isSearch
+            ? "urlbar-view-context-menu-search-in-tab"
+            : "urlbar-view-context-menu-open-in-tab2",
+        },
       },
     ];
     if (
@@ -4286,17 +4320,29 @@ export class UrlbarView {
       commands.push({
         openIn: "container-tab",
         submenu: true,
-        l10n: { id: "urlbar-view-context-menu-open-in-container-tab2" },
+        l10n: {
+          id: isSearch
+            ? "urlbar-view-context-menu-search-in-container-tab"
+            : "urlbar-view-context-menu-open-in-container-tab2",
+        },
       });
     }
     commands.push(
       {
         openIn: "window",
-        l10n: { id: "urlbar-view-context-menu-open-in-window2" },
+        l10n: {
+          id: isSearch
+            ? "urlbar-view-context-menu-search-in-window"
+            : "urlbar-view-context-menu-open-in-window2",
+        },
       },
       {
         openIn: "private-window",
-        l10n: { id: "urlbar-view-context-menu-open-in-private-window2" },
+        l10n: {
+          id: isSearch
+            ? "urlbar-view-context-menu-search-in-private-window"
+            : "urlbar-view-context-menu-open-in-private-window2",
+        },
       }
     );
     return commands;
@@ -4339,7 +4385,7 @@ export class UrlbarView {
    */
   #canOpenInNewTarget(result) {
     return (
-      UrlbarPrefs.get("contextMenu.featureGate") &&
+      UrlbarPrefs.get("resultTargetMenuFeatureGate") &&
       this.input.handlesOpenInCommands &&
       result.type != UrlbarShared.RESULT_TYPE.TAB_SWITCH &&
       !!UrlbarShared.getLoadRequestFromResult(result)
@@ -4349,6 +4395,9 @@ export class UrlbarView {
   /**
    * @param {UrlbarResult} result
    *   The result to get menu commands for.
+   * @param {object} [options]
+   * @param {boolean} [options.showSkipMenuWithTabItem]
+   *   If true, the "Skip this menu when using the tab key" checkbox is shown.
    * @returns {?UrlbarResultCommand[]}
    *   Everything the result's menu shows, null if it has nothing to show. The
    *   three-dot button and a right-click both open this menu, so it combines
@@ -4356,16 +4405,16 @@ export class UrlbarView {
    *   window, and closes with the checkbox that skips the menu button when
    *   tabbing through the results.
    */
-  #getMenuCommands(result) {
+  #getMenuCommands(result, { showSkipMenuWithTabItem = false } = {}) {
     let commands = this.#getResultMenuCommands(result);
     if (this.#canOpenInNewTarget(result)) {
-      let openInCommands = this.#openInCommands;
+      let openInCommands = this.#getOpenInCommands(result);
       commands = commands
         ? [...openInCommands, { name: "separator" }, ...commands]
         : openInCommands;
     }
-    if (!commands) {
-      return null;
+    if (!commands || !showSkipMenuWithTabItem) {
+      return commands;
     }
     return [
       ...commands,
@@ -4476,6 +4525,8 @@ export class UrlbarView {
       if (data.type == "checkbox") {
         menuitem.type = "checkbox";
         menuitem.checked = data.checked;
+      } else {
+        menuitem.toggleAttribute("no-icon", true);
       }
       panel.appendChild(menuitem);
     }
@@ -4538,6 +4589,7 @@ export class UrlbarView {
   #createContainerMenuItem(l10nId, onPick) {
     let menuitem = document.createElement("panel-item");
     document.l10n.setAttributes(menuitem, l10nId);
+    menuitem.toggleAttribute("no-icon", true);
     menuitem.addEventListener("click", onPick);
     return menuitem;
   }
@@ -4876,7 +4928,12 @@ export class UrlbarView {
           b => b.name == buttonName
         ).menu;
       } else {
-        commands = this.#getMenuCommands(this.#resultMenuResult);
+        commands = this.#getMenuCommands(this.#resultMenuResult, {
+          showSkipMenuWithTabItem:
+            triggeringEvent.type == "ResultMenuTriggered" &&
+            (!UrlbarPrefs.get("resultMenu.keyboardAccessible") ||
+              triggeringEvent.detail.target == this.selectedElement),
+        });
       }
 
       this.#populateResultMenu({ commands });
@@ -4887,11 +4944,18 @@ export class UrlbarView {
 
   on_hidden(event) {
     if (event.target != event.currentTarget) {
+      // Ignore submenus.
       return;
     }
-    event.currentTarget.lastAnchorNode
-      ?.closest(".urlbarView-row")
-      ?.toggleAttribute("menu-trigger", false);
+
+    let row = event.detail.anchorNode?.closest(".urlbarView-row");
+    // If the row isn't still the menu trigger, remove the attribute.
+    if (
+      !this.resultMenu.open ||
+      row != this.resultMenu.lastAnchorNode?.closest(".urlbarView-row")
+    ) {
+      row?.toggleAttribute("menu-trigger", false);
+    }
   }
 
   on_contextmenu(event) {
@@ -4905,7 +4969,7 @@ export class UrlbarView {
 
     event.preventDefault();
 
-    if (!UrlbarPrefs.get("contextMenu.featureGate")) {
+    if (!UrlbarPrefs.get("contextMenuFeatureGate")) {
       return;
     }
 
@@ -5001,15 +5065,9 @@ class QueryContextCache {
       // doesn't necessarily imply top sites since there are other queries that
       // use it too, like search mode. If any result is from the top-sites
       // provider, assume the context is top sites.
-      // However, if contextual opt-in message is shown, disable the cache. The
-      // message might hide when beginning of query, this cache will be shown
-      // for a moment.
       if (
         queryContext.results?.some(
           r => r.providerName == "UrlbarProviderTopSites"
-        ) &&
-        !queryContext.results.some(
-          r => r.providerName == "UrlbarProviderQuickSuggestContextualOptIn"
         )
       ) {
         this.#topSitesContext = queryContext;

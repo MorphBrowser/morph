@@ -608,7 +608,7 @@ typedef struct VP9_COMP {
   YV12_BUFFER_CONFIG scaled_source;
   YV12_BUFFER_CONFIG *unscaled_last_source;
   YV12_BUFFER_CONFIG scaled_last_source;
-#ifdef ENABLE_KF_DENOISE
+#if defined(ENABLE_KF_DENOISE) || CONFIG_VP9_TEMPORAL_DENOISING
   YV12_BUFFER_CONFIG raw_unscaled_source;
   YV12_BUFFER_CONFIG raw_scaled_source;
 #endif
@@ -668,6 +668,8 @@ typedef struct VP9_COMP {
   int mi_ssim_rdmult_scaling_factors_cols;
 
   int64_t *sb_mul_scale;
+  int sb_mul_scale_rows;
+  int sb_mul_scale_cols;
 
   YV12_BUFFER_CONFIG last_frame_uf;
 

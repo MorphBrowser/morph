@@ -149,10 +149,10 @@ MockDragServiceController::SendEvent(
   EventMessage eventType = MockEventTypeToEventMessage(aEventType);
   UniquePtr<WidgetInputEvent> widgetEvent;
   if (IsMouseEvent(aEventType)) {
-    widgetEvent = MakeUnique<WidgetMouseEvent>(true, eventType, widget,
-                                               WidgetMouseEvent::Reason::eReal);
+    widgetEvent = std::make_unique<WidgetMouseEvent>(
+        true, eventType, widget, WidgetMouseEvent::Reason::eReal);
   } else {
-    widgetEvent = MakeUnique<WidgetDragEvent>(true, eventType, widget);
+    widgetEvent = std::make_unique<WidgetDragEvent>(true, eventType, widget);
   }
 
   widgetEvent->mWidget = widget;
@@ -202,8 +202,8 @@ MockDragServiceController::SendEvent(
     } break;
     case EventType::eDragOver:
       NS_ENSURE_TRUE(currentDragSession, NS_ERROR_UNEXPECTED);
-      rv = currentDragSession->FireDragEventAtSource(EventMessage::eDrag,
-                                                     aKeyModifiers);
+      rv = currentDragSession->FireDragEventAtSource(
+          EventMessage::eDrag, aKeyModifiers, widgetEvent->mRefPoint);
       NS_ENSURE_SUCCESS(rv, rv);
       currentDragSession->SetDragAction(nsIDragService::DRAGDROP_ACTION_MOVE);
       widget->DispatchInputEvent(widgetEvent.get());

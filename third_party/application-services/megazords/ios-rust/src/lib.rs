@@ -29,4 +29,5 @@ pub use sync_manager;
 pub use tabs;
 pub use tracing_support;
 pub use viaduct;
-pub use viaduct_hyper;
+#[cfg(target_vendor = "apple")]
+pub use viaduct_backend_rust;

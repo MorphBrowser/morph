@@ -20,8 +20,12 @@ ChromeUtils.defineESModuleGetters(this, {
   Screenshots: "resource://newtab/lib/Screenshots.sys.mjs",
   Sampling: "resource://gre/modules/components-utils/Sampling.sys.mjs",
   SearchService: "moz-src:///toolkit/components/search/SearchService.sys.mjs",
-  TOP_SITES_DEFAULT_ROWS: "resource:///modules/topsites/constants.mjs",
-  TOP_SITES_MAX_SITES_PER_ROW: "resource:///modules/topsites/constants.mjs",
+  SponsoredTopSitesScoreProvider:
+    "resource://newtab/lib/SponsoredTopSitesScoreProvider/SponsoredTopSitesScoreProvider.mjs",
+  TOP_SITES_DEFAULT_ROWS:
+    "moz-src:///browser/components/topsites/constants.mjs",
+  TOP_SITES_MAX_SITES_PER_ROW:
+    "moz-src:///browser/components/topsites/constants.mjs",
   TopSitesFeed: "resource://newtab/lib/TopSitesFeed.sys.mjs",
 });
 
@@ -350,6 +354,183 @@ add_task(async function test_getLinksWithDefaults_remote_false_skips_ranking() {
   sandbox.restore();
 });
 
+add_task(async function test_ranker_receives_refresh_reasons() {
+  let sandbox = sinon.createSandbox();
+  let feed = getTopSitesFeedForTest(sandbox);
+  feed._startedUp = true;
+  feed._tippyTopProvider.initialized = true;
+  feed.store.state.Prefs.values[PREF_SYSTEM_SHORTCUTS_PERSONALIZATION] = true;
+  sandbox.stub(feed._contile, "periodicUpdate");
+  sandbox.stub(feed, "updateFrecencyBoostedSpocs").resolves();
+  let rank = sandbox
+    .stub(feed.ranker, "rankTopSites")
+    .callsFake(async sites => sites);
+
+  try {
+    for (let reason of [
+      actionTypes.SYSTEM_TICK,
+      actionTypes.DISCOVERY_STREAM_DEV_SYSTEM_TICK,
+      actionTypes.DISCOVERY_STREAM_DEV_EXPIRE_CACHE,
+    ]) {
+      rank.resetHistory();
+      feed.onAction({ type: reason });
+      await feed._latestRefreshPromise;
+
+      Assert.ok(rank.calledOnce, `${reason} refresh reaches the ranker`);
+      Assert.equal(
+        rank.firstCall.args[2].reason,
+        reason,
+        "the original action type reaches the rerank gate"
+      );
+    }
+  } finally {
+    sandbox.restore();
+  }
+});
+
+add_task(async function test_sponsored_refresh_reason_reaches_ranker() {
+  let sandbox = sinon.createSandbox();
+  let feed = getTopSitesFeedForTest(sandbox);
+  feed._startedUp = true;
+  feed._tippyTopProvider.initialized = true;
+  feed.store.state.Prefs.values[PREF_SYSTEM_SHORTCUTS_PERSONALIZATION] = true;
+  sandbox.stub(feed._contile, "_fetchSites").resolves(true);
+  sandbox.stub(feed, "allocatePositions").resolves();
+  let rank = sandbox
+    .stub(feed.ranker, "rankTopSites")
+    .callsFake(async sites => sites);
+  let remotePref = "browser.topsites.useRemoteSetting";
+  let hadRemotePref = Services.prefs.prefHasUserValue(remotePref);
+  let originalRemotePref = Services.prefs.getBoolPref(remotePref);
+  let originalDefaults = [...DEFAULT_TOP_SITES];
+
+  try {
+    for (let useRemoteSettings of [false, true]) {
+      Services.prefs.setBoolPref(remotePref, useRemoteSettings);
+      rank.resetHistory();
+      await feed._contile.refresh();
+      await feed._latestRefreshPromise;
+
+      Assert.ok(
+        rank.calledOnce,
+        `sponsored refresh reaches the ranker with remote settings ${useRemoteSettings}`
+      );
+      Assert.equal(
+        rank.firstCall.args[2].reason,
+        "SPONSORED_TILES_UPDATED",
+        "the sponsored reason survives default-site loading"
+      );
+    }
+  } finally {
+    if (hadRemotePref) {
+      Services.prefs.setBoolPref(remotePref, originalRemotePref);
+    } else {
+      Services.prefs.clearUserPref(remotePref);
+    }
+    DEFAULT_TOP_SITES.splice(0, DEFAULT_TOP_SITES.length, ...originalDefaults);
+    sandbox.restore();
+  }
+});
+
+add_task(async function test_ranker_visible_slots_exclude_pins_and_sponsored() {
+  let sandbox = sinon.createSandbox();
+  let feed = getTopSitesFeedForTest(sandbox);
+  feed.store.state.Prefs.values[PREF_SYSTEM_SHORTCUTS_PERSONALIZATION] = true;
+  let rank = sandbox
+    .stub(feed.ranker, "rankTopSites")
+    .callsFake(async sites => sites);
+  let pins = [];
+  let sponsored = [];
+  sandbox.stub(feed.pinnedCache, "request").callsFake(async () => pins);
+  sandbox.stub(feed, "_mergeSponsoredLinks").callsFake(() => sponsored);
+  sandbox.stub(feed, "_maybeCapSponsoredLinks");
+  let slots = 2 * TOP_SITES_MAX_SITES_PER_ROW;
+  let pin = { url: "https://pinned.example.com", favicon: FAKE_FAVICON };
+  let sparsePins = Array(slots + 2).fill(null);
+  sparsePins[0] = pin;
+  sparsePins[slots - 1] = { ...pin, url: "https://last-visible.example.com" };
+  sparsePins[slots] = { ...pin, url: "https://offscreen.example.com" };
+
+  try {
+    for (let testCase of [
+      { pins: [], expected: slots, description: "no pins" },
+      { pins: sparsePins, expected: slots - 2, description: "sparse pins" },
+      {
+        pins: Array.from({ length: slots }, (_, i) => ({
+          ...pin,
+          url: `https://pinned${i}.example.com`,
+        })),
+        expected: 0,
+        description: "all slots pinned",
+      },
+    ]) {
+      pins = testCase.pins;
+      for (let sponsoredCount of [0, 2]) {
+        sponsored = Array.from({ length: sponsoredCount }, (_, i) => ({
+          url: `https://sponsor${i}.example.com`,
+          sponsored_position: i + 1,
+        }));
+        rank.resetHistory();
+        await feed.getLinksWithDefaults();
+
+        Assert.ok(rank.calledOnce, "ranking is requested");
+        Assert.equal(
+          rank.firstCall.args[2].numItems,
+          Math.max(0, testCase.expected - sponsoredCount),
+          `${testCase.description}, ${sponsoredCount} sponsored tiles: visible pins and sponsored tiles reduce the frozen prefix`
+        );
+      }
+    }
+  } finally {
+    sandbox.restore();
+  }
+});
+
+add_task(async function test_ranker_visible_slots_count_sponsored_positions() {
+  let sandbox = sinon.createSandbox();
+  let feed = getTopSitesFeedForTest(sandbox);
+  feed.store.state.Prefs.values[PREF_SYSTEM_SHORTCUTS_PERSONALIZATION] = true;
+  let rank = sandbox
+    .stub(feed.ranker, "rankTopSites")
+    .callsFake(async sites => sites);
+  let sponsored = [];
+  sandbox.stub(feed.pinnedCache, "request").resolves([]);
+  sandbox.stub(feed, "_mergeSponsoredLinks").callsFake(() => sponsored);
+  sandbox.stub(feed, "_maybeCapSponsoredLinks");
+  let slots = 2 * TOP_SITES_MAX_SITES_PER_ROW;
+  let tile = position => ({
+    url: `https://sponsor-${position}-${Math.random()}.example.com`,
+    sponsored_position: position,
+  });
+
+  try {
+    for (let testCase of [
+      {
+        sponsored: [tile(1), tile(1), tile(3)],
+        expected: slots - 2,
+        description: "tiles sharing a position take one slot",
+      },
+      {
+        sponsored: [tile(2), tile(slots + 1)],
+        expected: slots - 1,
+        description: "tiles past the last slot take none",
+      },
+    ]) {
+      sponsored = testCase.sponsored;
+      rank.resetHistory();
+      await feed.getLinksWithDefaults();
+
+      Assert.equal(
+        rank.firstCall.args[2].numItems,
+        testCase.expected,
+        testCase.description
+      );
+    }
+  } finally {
+    sandbox.restore();
+  }
+});
+
 add_task(async function test_refresh_discards_stale_results() {
   let sandbox = sinon.createSandbox();
   let feed = getTopSitesFeedForTest(sandbox);
@@ -485,6 +666,155 @@ add_task(async function test_refresh_discards_results_after_uninit() {
   );
   Assert.ok(feed.store.dispatch.notCalled, "and does not dispatch");
 
+  sandbox.restore();
+});
+
+/**
+ * Stubs getLinksWithDefaults so each call proposes snapshot `{ id: name }`
+ * right away and resolves with that call's links only when the test says so.
+ *
+ * @param {object} sandbox
+ * @param {object} feed
+ * @param {string[]} names One per expected refresh, in call order.
+ * @returns {object} name -> function resolving that refresh's links.
+ */
+function stubDeferredRankedLinks(sandbox, feed, names) {
+  const finish = {};
+  const stub = sandbox.stub(feed, "getLinksWithDefaults");
+  names.forEach((name, i) => {
+    const { promise, resolve } = Promise.withResolvers();
+    finish[name] = () => resolve([{ url: `https://${name}.example` }]);
+    stub
+      .onCall(i)
+      .callsFake((isStartup, refreshId, reason, onRankedSnapshot) => {
+        onRankedSnapshot({ id: name });
+        return promise;
+      });
+  });
+  return finish;
+}
+
+add_task(async function test_refresh_commits_only_newest_snapshot() {
+  let sandbox = sinon.createSandbox();
+  let feed = getTopSitesFeedForTest(sandbox);
+  feed._startedUp = true;
+  feed._tippyTopProvider.initialized = true;
+  sandbox.stub(feed.ranker, "commitSnapshot").resolves();
+  const finish = stubDeferredRankedLinks(sandbox, feed, ["a", "b"]);
+
+  let refreshA = feed.refresh({ broadcast: false });
+  let refreshB = feed.refresh({ broadcast: false });
+
+  finish.b();
+  await refreshB;
+  finish.a();
+  await refreshA;
+
+  Assert.equal(feed.store.dispatch.callCount, 1, "only one refresh dispatched");
+  Assert.deepEqual(
+    feed.store.dispatch.firstCall.args[0].data.links,
+    [{ url: "https://b.example" }],
+    "the newest refresh dispatched its links"
+  );
+  Assert.ok(
+    feed.ranker.commitSnapshot.calledOnceWithExactly({ id: "b" }),
+    "only the newest refresh's snapshot is committed"
+  );
+
+  sandbox.restore();
+});
+
+add_task(
+  async function test_refresh_superseded_first_finisher_does_not_commit() {
+    let sandbox = sinon.createSandbox();
+    let feed = getTopSitesFeedForTest(sandbox);
+    feed._startedUp = true;
+    feed._tippyTopProvider.initialized = true;
+    sandbox.stub(feed.ranker, "commitSnapshot").resolves();
+    const finish = stubDeferredRankedLinks(sandbox, feed, ["a", "b"]);
+
+    let refreshA = feed.refresh({ broadcast: false });
+    let refreshB = feed.refresh({ broadcast: false });
+
+    finish.a();
+    await refreshA;
+
+    Assert.ok(
+      feed.store.dispatch.notCalled,
+      "a refresh superseded before it finished does not dispatch"
+    );
+    Assert.ok(
+      feed.ranker.commitSnapshot.notCalled,
+      "and does not commit its snapshot"
+    );
+
+    finish.b();
+    await refreshB;
+
+    Assert.equal(
+      feed.store.dispatch.callCount,
+      1,
+      "the newest refresh dispatched"
+    );
+    Assert.ok(
+      feed.ranker.commitSnapshot.calledOnceWithExactly({ id: "b" }),
+      "the newest refresh's snapshot is committed"
+    );
+
+    sandbox.restore();
+  }
+);
+
+add_task(async function test_refresh_does_not_commit_after_uninit() {
+  let sandbox = sinon.createSandbox();
+  sandbox.stub(NimbusFeatures.newtab, "onUpdate");
+  let feed = getTopSitesFeedForTest(sandbox);
+  sandbox.stub(feed, "_readDefaults");
+  sandbox.stub(feed._contile, "refresh");
+  feed.init();
+  feed._startedUp = true;
+  feed._tippyTopProvider.initialized = true;
+  sandbox.stub(feed.ranker, "commitSnapshot").resolves();
+  const finish = stubDeferredRankedLinks(sandbox, feed, ["stale"]);
+
+  let refreshPromise = feed.refresh({ broadcast: true });
+
+  feed.uninit();
+  finish.stale();
+  await refreshPromise;
+
+  Assert.ok(
+    feed.store.dispatch.notCalled,
+    "the pending refresh does not dispatch"
+  );
+  Assert.ok(
+    feed.ranker.commitSnapshot.notCalled,
+    "a snapshot proposed before uninit() is not committed"
+  );
+
+  sandbox.restore();
+});
+
+add_task(async function test_refresh_passes_isStartup_as_boolean() {
+  let sandbox = sinon.createSandbox();
+  sandbox.stub(NimbusFeatures.newtab, "onUpdate");
+  let feed = getTopSitesFeedForTest(sandbox);
+  sandbox.stub(feed, "_readDefaults");
+  sandbox.stub(feed._contile, "refresh");
+  feed.init();
+  feed._startedUp = true;
+  feed._tippyTopProvider.initialized = true;
+  sandbox.stub(feed, "getLinksWithDefaults").resolves([]);
+
+  await feed.refresh({ broadcast: true, isStartup: false });
+
+  Assert.strictEqual(
+    feed.getLinksWithDefaults.firstCall.args[0],
+    false,
+    "getLinksWithDefaults gets the isStartup boolean, not an object that is always truthy"
+  );
+
+  feed.uninit();
   sandbox.restore();
 });
 
@@ -1197,6 +1527,7 @@ add_task(async function test_init() {
     feed.refresh.calledWithExactly({
       broadcast: true,
       isStartup: true,
+      reason: undefined,
     })
   );
 
@@ -1673,7 +2004,12 @@ add_task(async function test_onAction_part_1() {
   feed.onAction({ type: actionTypes.SYSTEM_TICK });
 
   Assert.ok(feed.refresh.calledOnce, "feed.refresh called once");
-  Assert.ok(feed.refresh.calledWithExactly({ broadcast: false }));
+  Assert.ok(
+    feed.refresh.calledWithExactly({
+      broadcast: false,
+      reason: actionTypes.SYSTEM_TICK,
+    })
+  );
 
   info(
     "TopSitesFeed.onAction should call with correct parameters on TOP_SITES_PIN"
@@ -1938,6 +2274,75 @@ add_task(async function test_onAction_part_3() {
   Assert.ok(
     !Services.prefs.prefHasUserValue(CONTILE_CACHE_VALID_FOR_SECONDS_PREF)
   );
+
+  sandbox.restore();
+});
+
+add_task(async function test_sponsored_scoring_follows_prefs() {
+  let sandbox = sinon.createSandbox();
+  sandbox.stub(NimbusFeatures.newtab, "onUpdate");
+  let feed = getTopSitesFeedForTest(sandbox);
+  sandbox.stub(feed, "_readDefaults");
+  sandbox.stub(feed, "refresh");
+  sandbox.stub(feed._contile, "refresh");
+  sandbox.stub(feed._contile, "_resetContileCache");
+  sandbox.stub(NimbusFeatures.newtab, "getVariable").returns(false);
+  sandbox.stub(SponsoredTopSitesScoreProvider, "init");
+  sandbox.stub(SponsoredTopSitesScoreProvider, "uninit");
+  sandbox.stub(SponsoredTopSitesScoreProvider, "clearData").resolves();
+  const { values } = feed.store.state.Prefs;
+  values[SHOWN_ON_NEWTAB_PREF] = true;
+  values[SHOW_SPONSORED_PREF] = true;
+
+  // The store updates the pref values before feeds see PREF_CHANGED.
+  function assertAfterPrefChange(name, value, running) {
+    sandbox.resetHistory();
+    values[name] = value;
+    feed.onAction({ type: actionTypes.PREF_CHANGED, data: { name, value } });
+    Assert.equal(
+      SponsoredTopSitesScoreProvider.init.called,
+      running,
+      `Setting ${name} to ${value} ${running ? "starts" : "does not start"} the scoring`
+    );
+    Assert.equal(
+      SponsoredTopSitesScoreProvider.clearData.called &&
+        SponsoredTopSitesScoreProvider.uninit.called,
+      !running,
+      `Setting ${name} to ${value} ${running ? "keeps" : "clears"} the scoring data`
+    );
+  }
+
+  feed.init();
+  Assert.ok(
+    SponsoredTopSitesScoreProvider.init.calledOnce,
+    "The scoring starts with shortcuts and sponsored shortcuts on"
+  );
+  feed.uninit();
+
+  assertAfterPrefChange(SHOW_SPONSORED_PREF, false, false);
+  assertAfterPrefChange(SHOW_SPONSORED_PREF, true, true);
+  assertAfterPrefChange(SHOWN_ON_NEWTAB_PREF, false, false);
+  assertAfterPrefChange(SHOWN_ON_NEWTAB_PREF, true, true);
+
+  sandbox.resetHistory();
+  feed.onAction({
+    type: actionTypes.PREF_CHANGED,
+    data: { name: "unifiedAds.tiles.enabled", value: false },
+  });
+  Assert.ok(
+    SponsoredTopSitesScoreProvider.clearData.notCalled &&
+      SponsoredTopSitesScoreProvider.uninit.notCalled,
+    "Switching sponsored tiles away from MARS keeps the scoring"
+  );
+
+  sandbox.resetHistory();
+  values[SHOW_SPONSORED_PREF] = false;
+  feed.init();
+  Assert.ok(
+    SponsoredTopSitesScoreProvider.init.notCalled,
+    "The scoring does not start with sponsored shortcuts off"
+  );
+  feed.uninit();
 
   sandbox.restore();
 });
@@ -4058,6 +4463,321 @@ add_task(async function test_ContileIntegration() {
     sandbox.restore();
   }
 
+  {
+    info(
+      "TopSitesFeed._fetchSites should send relevance scores without the context_id"
+    );
+    let { feed, fetchStub } = prepFeed(getTopSitesFeedForTest(sandbox));
+    const contextIdStub = sandbox
+      .stub(ContextId, "request")
+      .returns("ContextId");
+    const RELEVANCE = { t1: 0.3, t2: 0.1 };
+    sandbox
+      .stub(SponsoredTopSitesScoreProvider, "getScores")
+      .resolves(RELEVANCE);
+
+    Services.prefs.setStringPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL",
+      "https://relay.url"
+    );
+    Services.prefs.setStringPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL",
+      "https://config.url"
+    );
+    Services.prefs.setBoolPref(
+      "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled",
+      true
+    );
+    feed.store.state.Prefs.values["unifiedAds.tiles.enabled"] = true;
+    feed.store.state.Prefs.values["unifiedAds.adsFeed.enabled"] = false;
+    feed.store.state.Prefs.values["unifiedAds.endpoint"] =
+      "https://test.endpoint/";
+    feed.store.state.Prefs.values["discoverystream.placements.tiles"] = "1";
+    feed.store.state.Prefs.values["discoverystream.placements.tiles.counts"] =
+      "1";
+    feed.store.state.Prefs.values["unifiedAds.blockedAds"] = "";
+
+    fetchStub.resolves({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({}),
+    });
+    sandbox
+      .stub(ObliviousHTTP, "getOHTTPConfig")
+      .resolves({ config: "config" });
+    const ohttpRequestStub = sandbox
+      .stub(ObliviousHTTP, "ohttpRequest")
+      .resolves({
+        ok: true,
+        status: 200,
+        headers: new Map(),
+        json: () => Promise.resolve({ 1: [] }),
+      });
+
+    await feed._contile._fetchSites();
+
+    Services.prefs.clearUserPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL"
+    );
+    Services.prefs.clearUserPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL"
+    );
+    Services.prefs.clearUserPref(
+      "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled"
+    );
+
+    Assert.ok(
+      ohttpRequestStub.calledOnce,
+      "ohttpRequest should be called once"
+    );
+    Assert.ok(contextIdStub.notCalled, "The context_id was not requested");
+    Assert.equal(
+      ohttpRequestStub.getCall(0).args[3].body,
+      JSON.stringify({
+        flags: {},
+        placements: [
+          {
+            placement: "1",
+            count: 1,
+          },
+        ],
+        blocks: ["duckduckgo"],
+        relevance: RELEVANCE,
+      }),
+      "The body should include the relevance scores and no context_id"
+    );
+    sandbox.restore();
+  }
+
+  {
+    info(
+      "TopSitesFeed._fetchSites should not send relevance scores without OHTTP"
+    );
+    let { feed, fetchStub } = prepFeed(getTopSitesFeedForTest(sandbox));
+    const CONTEXT_ID = "ContextId";
+    sandbox.stub(ContextId, "request").returns(CONTEXT_ID);
+    const getScoresStub = sandbox
+      .stub(SponsoredTopSitesScoreProvider, "getScores")
+      .resolves({ t1: 0.3 });
+
+    Services.prefs.setBoolPref(
+      "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled",
+      false
+    );
+    feed.store.state.Prefs.values["unifiedAds.tiles.enabled"] = true;
+    feed.store.state.Prefs.values["unifiedAds.adsFeed.enabled"] = false;
+    feed.store.state.Prefs.values["unifiedAds.endpoint"] =
+      "https://test.endpoint/";
+    feed.store.state.Prefs.values["discoverystream.placements.tiles"] = "1";
+    feed.store.state.Prefs.values["discoverystream.placements.tiles.counts"] =
+      "1";
+    feed.store.state.Prefs.values["unifiedAds.blockedAds"] = "";
+
+    fetchStub.resolves({
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      json: () => Promise.resolve({ 1: [] }),
+    });
+
+    await feed._contile._fetchSites();
+
+    Services.prefs.clearUserPref(
+      "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled"
+    );
+
+    Assert.ok(fetchStub.calledOnce, "The tiles were requested without OHTTP");
+    Assert.ok(getScoresStub.notCalled, "The scores were not read");
+    Assert.equal(
+      fetchStub.getCall(0).args[1].body,
+      JSON.stringify({
+        context_id: CONTEXT_ID,
+        flags: {},
+        placements: [
+          {
+            placement: "1",
+            count: 1,
+          },
+        ],
+        blocks: ["duckduckgo"],
+      }),
+      "The body should include the context_id and no relevance scores"
+    );
+    sandbox.restore();
+  }
+
+  {
+    info("TopSitesFeed._fetchSites handles mismatched tile counts");
+    let { feed, fetchStub } = prepFeed(getTopSitesFeedForTest(sandbox));
+    const CONTEXT_ID = "ContextId";
+    sandbox.stub(ContextId, "request").returns(CONTEXT_ID);
+
+    Services.prefs.setStringPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL",
+      "https://relay.url"
+    );
+    Services.prefs.setStringPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL",
+      "https://config.url"
+    );
+    Services.prefs.setBoolPref(
+      "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled",
+      true
+    );
+    feed.store.state.Prefs.values["unifiedAds.tiles.enabled"] = true;
+    feed.store.state.Prefs.values["unifiedAds.adsFeed.enabled"] = false;
+    feed.store.state.Prefs.values["unifiedAds.endpoint"] =
+      "https://test.endpoint/";
+    feed.store.state.Prefs.values["discoverystream.placements.tiles"] =
+      "1, foo";
+    feed.store.state.Prefs.values["discoverystream.placements.tiles.counts"] =
+      "1";
+    feed.store.state.Prefs.values["unifiedAds.blockedAds"] = "";
+    feed.store.state.Prefs.values.adsBackendConfig = {
+      feature1: true,
+      feature2: false,
+    };
+
+    const TEST_PREFLIGHT_UA_STRING = "Some test UA";
+    const TEST_PREFLIGHT_GEONAME_ID = "Some geo name";
+    const TEST_PREFLIGHT_GEO_LOCATION = "Some geo location";
+
+    fetchStub.resolves({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          normalized_ua: TEST_PREFLIGHT_UA_STRING,
+          geoname_id: TEST_PREFLIGHT_GEONAME_ID,
+          geo_location: TEST_PREFLIGHT_GEO_LOCATION,
+        }),
+    });
+
+    const fakeOhttpConfig = { config: "config" };
+    sandbox.stub(ObliviousHTTP, "getOHTTPConfig").resolves(fakeOhttpConfig);
+
+    const ohttpRequestStub = sandbox
+      .stub(ObliviousHTTP, "ohttpRequest")
+      .resolves({
+        ok: true,
+        status: 200,
+        headers: new Map([
+          ["cache-control", "private, max-age=859, stale-if-error=10463"],
+        ]),
+        json: () =>
+          Promise.resolve({
+            1: [
+              {
+                block_key: 12345,
+                name: "test 1",
+                url: "https://www.test.com",
+                image_url: "images/test-com.png",
+                callbacks: {
+                  click: "https://www.test-click.com",
+                  impression: "https://www.test-impression.com",
+                },
+              },
+            ],
+            foo: [
+              {
+                block_key: 54321,
+                name: "test foo",
+                url: "https://www.test.com",
+                image_url: "images/test-com.png",
+                callbacks: {
+                  click: "https://www.test-click.com",
+                  impression: "https://www.test-impression.com",
+                },
+              },
+            ],
+          }),
+      });
+
+    let fetched = await feed._contile._fetchSites();
+
+    Assert.ok(fetchStub.calledOnce, "The preflight request was made.");
+
+    Assert.ok(fetched);
+    Assert.ok(
+      ohttpRequestStub.calledOnce,
+      "ohttpRequest should be called once"
+    );
+    const callArgs = ohttpRequestStub.getCall(0).args;
+    Assert.equal(callArgs[0], "https://relay.url", "relay URL should match");
+    Assert.deepEqual(
+      callArgs[1],
+      fakeOhttpConfig,
+      "config should be passed through"
+    );
+
+    const sentHeaders = callArgs[3].headers;
+    Assert.equal(
+      typeof sentHeaders,
+      "object",
+      "headers should be a plain object"
+    );
+    Assert.ok(
+      // We use instanceof here since isInstance isn't available for
+      // Headers, it seems.
+      // eslint-disable-next-line mozilla/use-isInstance
+      !(sentHeaders instanceof Headers),
+      "headers should not be a Headers instance"
+    );
+
+    Assert.equal(
+      sentHeaders["x-user-agent"],
+      TEST_PREFLIGHT_UA_STRING,
+      "Sent the x-user-agent header from preflight"
+    );
+    Assert.equal(
+      sentHeaders["x-geoname-id"],
+      TEST_PREFLIGHT_GEONAME_ID,
+      "Sent the x-geoname-id header from preflight"
+    );
+    Assert.equal(
+      sentHeaders["x-geo-location"],
+      TEST_PREFLIGHT_GEO_LOCATION,
+      "Sent the x-geo-location header from preflight"
+    );
+
+    info("TopSitesFeed._fetchSites should not send cookies via OHTTP");
+    Assert.equal(callArgs[3].credentials, "omit", "should not send cookies");
+
+    Services.prefs.clearUserPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL"
+    );
+    Services.prefs.clearUserPref(
+      "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL"
+    );
+    Services.prefs.clearUserPref(
+      "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled"
+    );
+
+    info("TopSitesFeed._fetchSites should include correct body");
+    Assert.equal(
+      callArgs[3].body,
+      JSON.stringify({
+        context_id: CONTEXT_ID,
+        flags: {
+          feature1: true,
+          feature2: false,
+        },
+        placements: [
+          {
+            placement: "1",
+            count: 1,
+          },
+          {
+            placement: "foo",
+            count: 1,
+          },
+        ],
+        blocks: ["duckduckgo"],
+      })
+    );
+    sandbox.restore();
+  }
+
   Services.prefs.clearUserPref(TOP_SITES_BLOCKED_SPONSORS_PREF);
 });
 
@@ -4307,6 +5027,51 @@ add_task(async function test_pinSiteAtGrouped_clears_stale_custom_screenshot() {
   sandbox.restore();
 });
 
+// Editing a grouped pin's URL must replace that pin in place rather than
+// appending a second tile and leaving the original behind (bug 2073040).
+add_task(async function test_pin_grouped_edit_changed_url_replaces_pin() {
+  let sandbox = sinon.createSandbox();
+  let feed = getTopSitesFeedForTest(sandbox);
+  feed.store.state.Prefs.values = {
+    topSitesRows: 1,
+    topSitesMaxSitesPerRow: 8,
+    topSitesGroupedPins: true,
+  };
+  sandbox.stub(feed, "_broadcastPinnedSitesUpdated");
+  let pinnedLinks = [];
+  sandbox.stub(NewTabUtils.pinnedLinks, "links").get(() => pinnedLinks);
+  sandbox.stub(NewTabUtils.pinnedLinks, "save");
+  let saved;
+  sandbox.stub(feed, "_saveGroupedPins").callsFake(pins => (saved = pins));
+
+  const A = { url: "https://a.com" };
+  const B = { url: "https://b.com" };
+  const C = { url: "https://c.com" };
+  const B2 = { url: "https://b2.com" };
+  const S = { url: "https://search.com", searchTopSite: true };
+  const setPins = (links, rows) => {
+    pinnedLinks = links;
+    feed._linksWithDefaults = rows.map(link => ({ ...link, isPinned: true }));
+  };
+
+  info("changing a pin's URL replaces it at the same group position");
+  setPins([A, B, C], [A, B, C]);
+  await feed.pin({ data: { site: B2, index: 1 } });
+  Assert.deepEqual(saved, [A, B2, C]);
+
+  info("a hidden pin ahead of the edited one doesn't shift the target");
+  setPins([S, A, B], [A, B]);
+  await feed.pin({ data: { site: B2, index: 1 } });
+  Assert.deepEqual(saved, [S, A, B2]);
+
+  info("editing to a URL that's already pinned leaves one copy");
+  setPins([A, B, C], [A, B, C]);
+  await feed.pin({ data: { site: C, index: 1 } });
+  Assert.deepEqual(saved, [A, C]);
+
+  sandbox.restore();
+});
+
 add_task(async function test_fetchSites_callsAdsClientWhenEnabled() {
   let sandbox = sinon.createSandbox();
 
@@ -4341,6 +5106,22 @@ add_task(async function test_fetchSites_callsAdsClientWhenEnabled() {
     ohttp: true,
   };
   sandbox.stub(AdsClient, "requestOptions").returns(REQUEST_OPTIONS);
+  const RELEVANCE = { t1: 0.3 };
+  const getScoresStub = sandbox
+    .stub(SponsoredTopSitesScoreProvider, "getScores")
+    .resolves(RELEVANCE);
+  Services.prefs.setBoolPref(
+    "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled",
+    true
+  );
+  Services.prefs.setStringPref(
+    "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL",
+    "https://relay.url"
+  );
+  Services.prefs.setStringPref(
+    "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL",
+    "https://config.url"
+  );
 
   sandbox.stub(TopSitesFeed.prototype, "_readDefaults").returns();
   sandbox.stub(NimbusFeatures.newtab, "getVariable").returns(true);
@@ -4367,9 +5148,12 @@ add_task(async function test_fetchSites_callsAdsClientWhenEnabled() {
   Assert.ok(
     AdsClient.requestOptions.calledOnceWithExactly(
       feed.store.getState().Prefs.values,
-      "duckduckgo"
-    )
+      "duckduckgo",
+      RELEVANCE
+    ),
+    "The prefs, blocks, and relevance scores were passed to requestOptions"
   );
+  Assert.ok(getScoresStub.calledOnce, "The scores were read once");
   Assert.ok(
     ADS_CLIENT.requestTileAds.calledOnceWithExactly(
       sinon.match.any,
@@ -4377,6 +5161,15 @@ add_task(async function test_fetchSites_callsAdsClientWhenEnabled() {
     )
   );
 
+  Services.prefs.clearUserPref(
+    "browser.newtabpage.activity-stream.unifiedAds.ohttp.enabled"
+  );
+  Services.prefs.clearUserPref(
+    "browser.newtabpage.activity-stream.discoverystream.ohttp.relayURL"
+  );
+  Services.prefs.clearUserPref(
+    "browser.newtabpage.activity-stream.discoverystream.ohttp.configURL"
+  );
   sandbox.restore();
 });
 

@@ -4,11 +4,13 @@
 
 /// This shader repeats an image pattern.
 
+#define WR_QUAD_ROUNDED_CLIP
+
 #include ps_quad
 
 varying highp vec2 v_uv;
-flat varying mediump vec4 v_uv_sample_bounds;
-flat varying mediump vec4 v_uv_bounds;
+flat varying highp vec4 v_uv_sample_bounds;
+flat varying highp vec4 v_uv_bounds;
 flat varying highp vec4 v_repetitions_and_spacing_threshold;
 #define v_repetitions v_repetitions_and_spacing_threshold.xy
 #define v_spacing_threshold v_repetitions_and_spacing_threshold.zw
@@ -113,6 +115,11 @@ vec4 pattern_fragment(vec4 color) {
 
 #if defined(SWGL_DRAW_SPAN)
 void swgl_drawSpanRGBA8() {
+    if (!rounded_clip_span_is_supported()) {
+        return;
+    }
+    vec4 clip_rect = rounded_clip_span_rect();
+
     if (!swgl_isTextureRGBA8(sColor0)) {
         return;
     }
@@ -123,9 +130,9 @@ void swgl_drawSpanRGBA8() {
     }
 
     if (v_color != vec4(1.0)) {
-        swgl_commitTextureRepeatColorRGBA8(sColor0, v_uv, v_repetitions, v_uv_bounds, v_uv_sample_bounds, v_color);
+        swgl_commitTextureRepeatColorRGBA8(sColor0, v_uv, v_repetitions, v_uv_bounds, v_uv_sample_bounds, v_color, clip_rect);
     } else {
-        swgl_commitTextureRepeatRGBA8(sColor0, v_uv, v_repetitions, v_uv_bounds, v_uv_sample_bounds);
+        swgl_commitTextureRepeatRGBA8(sColor0, v_uv, v_repetitions, v_uv_bounds, v_uv_sample_bounds, clip_rect);
     }
 }
 #endif

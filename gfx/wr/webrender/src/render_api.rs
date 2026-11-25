@@ -9,13 +9,14 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
+use derive_more::AddAssign;
 use api::{MinimapData, SnapshotImageKey};
-use crate::api::channel::{Sender, single_msg_channel, unbounded_channel};
+use crate::api::channel::{Sender, SyncSender, single_msg_channel, unbounded_channel};
 use crate::api::{BuiltDisplayList, IdNamespace, ExternalScrollId, Parameter, BoolParameter};
 use crate::api::{FontKey, FontInstanceKey, NativeFontHandle};
 use crate::api::{BlobImageData, BlobImageKey, ImageData, ImageDescriptor, ImageKey, Epoch, QualitySettings};
 use crate::api::{BlobImageParams, BlobImageRequest, BlobImageResult, AsyncBlobImageRasterizer, BlobImageHandler};
-use crate::api::{DocumentId, PipelineId, PropertyBindingId, PropertyBindingKey, ExternalEvent};
+use crate::api::{DocumentId, EmbedPolicy, PipelineId, PropertyBindingId, PropertyBindingKey, ExternalEvent};
 use crate::api::{HitTestResult, HitTesterRequest, ApiHitTester, PropertyValue, DynamicProperties};
 use crate::api::{SampledScrollOffset, TileSize, NotificationRequest, DebugFlags};
 use crate::api::{GlyphDimensionRequest, GlyphIndexRequest, GlyphIndex, GlyphDimensions};
@@ -72,6 +73,10 @@ pub enum ResourceUpdate {
     AddSnapshotImage(AddSnapshotImage),
     /// See `AddSnapshotImage`.
     DeleteSnapshotImage(SnapshotImageKey),
+    /// Move a snapshot image, and the pixels already rendered into it, from the
+    /// first key to the second. The keys can belong to different id namespaces.
+    /// After this, only the second key names the image.
+    AdoptSnapshotImage(SnapshotImageKey, SnapshotImageKey),
     /// See `AddFont`.
     AddFont(AddFont),
     /// Deletes an already existing font resource.
@@ -114,6 +119,7 @@ impl fmt::Debug for ResourceUpdate {
             ResourceUpdate::SetBlobImageVisibleArea(..) => f.write_str("ResourceUpdate::SetBlobImageVisibleArea"),
             ResourceUpdate::AddSnapshotImage(..) => f.write_str("ResourceUpdate::AddSnapshotImage"),
             ResourceUpdate::DeleteSnapshotImage(..) => f.write_str("ResourceUpdate::DeleteSnapshotImage"),
+            ResourceUpdate::AdoptSnapshotImage(..) => f.write_str("ResourceUpdate::AdoptSnapshotImage"),
             ResourceUpdate::AddFont(..) => f.write_str("ResourceUpdate::AddFont"),
             ResourceUpdate::DeleteFont(..) => f.write_str("ResourceUpdate::DeleteFont"),
             ResourceUpdate::AddFontInstance(..) => f.write_str("ResourceUpdate::AddFontInstance"),
@@ -302,6 +308,21 @@ impl Transaction {
     /// is reset back to `None`.
     pub fn remove_pipeline(&mut self, pipeline_id: PipelineId) {
         self.scene_ops.push(SceneMsg::RemovePipeline(pipeline_id));
+    }
+
+    /// Sets the pipelines that `pipeline_id` may embed with iframe items.
+    ///
+    /// The policy must come from trusted code, not from the producer of the
+    /// pipeline's display list. It is kept until the pipeline is removed or
+    /// the policy is replaced, and it applies to the next scene build.
+    pub fn set_embed_policy(&mut self, pipeline_id: PipelineId, policy: EmbedPolicy) {
+        self.scene_ops.push(SceneMsg::SetEmbedPolicy { pipeline_id, policy });
+    }
+
+    /// Enables or disables the enforcement of embed policies in the document.
+    /// While enabled, a pipeline without an embed policy may not embed anything.
+    pub fn set_embed_policy_enforcement(&mut self, enabled: bool) {
+        self.scene_ops.push(SceneMsg::SetEmbedPolicyEnforcement(enabled));
     }
 
     /// Supplies a new frame to WebRender.
@@ -567,6 +588,11 @@ impl Transaction {
     /// See `ResourceUpdate::DeleteSnapshotImage`.
     pub fn delete_snapshot_image(&mut self, key: SnapshotImageKey) {
         self.resource_updates.push(ResourceUpdate::DeleteSnapshotImage(key));
+    }
+
+    /// See `ResourceUpdate::AdoptSnapshotImage`.
+    pub fn adopt_snapshot_image(&mut self, from: SnapshotImageKey, to: SnapshotImageKey) {
+        self.resource_updates.push(ResourceUpdate::AdoptSnapshotImage(from, to));
     }
 
     /// See `ResourceUpdate::AddFont`.
@@ -859,6 +885,15 @@ pub enum SceneMsg {
         /// The id namespace owning the resources this display list may reference.
         namespace: IdNamespace,
     },
+    ///
+    SetEmbedPolicy {
+        ///
+        pipeline_id: PipelineId,
+        ///
+        policy: EmbedPolicy,
+    },
+    ///
+    SetEmbedPolicyEnforcement(bool),
     /// Build a scene without affecting any retained state.
     ///
     /// Useful to render an offscreen scene in the background without affecting
@@ -881,9 +916,9 @@ pub enum FrameMsg {
     ///
     UpdateEpoch(PipelineId, Epoch),
     ///
-    HitTest(WorldPoint, Sender<HitTestResult>),
+    HitTest(WorldPoint, SyncSender<HitTestResult>),
     ///
-    RequestHitTester(Sender<Arc<dyn ApiHitTester>>),
+    RequestHitTester(SyncSender<Arc<dyn ApiHitTester>>),
     ///
     SetScrollOffsets(ExternalScrollId, Vec<SampledScrollOffset>),
     ///
@@ -906,6 +941,8 @@ impl fmt::Debug for SceneMsg {
             SceneMsg::RemovePipeline(..) => "SceneMsg::RemovePipeline",
             SceneMsg::SetDocumentView { .. } => "SceneMsg::SetDocumentView",
             SceneMsg::SetRootPipeline(..) => "SceneMsg::SetRootPipeline",
+            SceneMsg::SetEmbedPolicy { .. } => "SceneMsg::SetEmbedPolicy",
+            SceneMsg::SetEmbedPolicyEnforcement(..) => "SceneMsg::SetEmbedPolicyEnforcement",
             SceneMsg::SetQualitySettings { .. } => "SceneMsg::SetQualitySettings",
             SceneMsg::RenderOffscreen(..) => "SceneMsg::BuildOffscreen",
         })
@@ -1086,7 +1123,7 @@ pub struct ResourceCacheInit {
 /// Message sent by the `RenderApi` to the render backend thread.
 pub enum ApiMsg {
     /// Adds a new document namespace.
-    CloneApi(Sender<IdNamespace>),
+    CloneApi(SyncSender<IdNamespace>),
     /// Adds a new document namespace.
     CloneApiByClient(IdNamespace),
     /// Register a new window on this backend thread. Sent once per window,
@@ -1097,7 +1134,7 @@ pub enum ApiMsg {
     /// If a channel is passed via the second argument, an empty message will
     /// be sent on it after the window is unregistered. It can be used for
     /// synchronzation.
-    UnregisterWindow(RenderBackendId, Option<Sender<()>>),
+    UnregisterWindow(RenderBackendId, Option<SyncSender<()>>),
     /// Adds a new document with given initial size, owned by the given window.
     AddDocument(DocumentId, DeviceIntSize, RenderBackendId),
     /// A message targeted at a particular document.
@@ -1113,7 +1150,7 @@ pub enum ApiMsg {
     /// Flush from the caches anything that isn't necessary, to free some memory.
     MemoryPressure,
     /// Collects a memory report.
-    ReportMemory(Sender<Box<MemoryReport>>),
+    ReportMemory(SyncSender<Box<MemoryReport>>),
     /// Change debugging options, scoped to a specific window. The command
     /// only affects documents that belong to the given `RenderBackendId`,
     /// so callers can target one window in a shared backend pool without

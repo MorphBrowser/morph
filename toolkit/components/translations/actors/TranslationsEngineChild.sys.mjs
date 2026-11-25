@@ -7,7 +7,7 @@ const lazy = {};
 ChromeUtils.defineLazyGetter(lazy, "console", () => {
   return console.createInstance({
     maxLogLevelPref: "browser.translations.logLevel",
-    prefix: "Translations",
+    logModule: "Translations",
   });
 });
 
@@ -40,7 +40,6 @@ async function decompressFromZstdBlob(blob, isMocked) {
     return new ArrayBuffer();
   }
 
-  /* global DecompressionStream */
   const decompressionStream = new DecompressionStream("zstd");
   const buffer = await new Response(
     blob.stream().pipeThrough(decompressionStream)

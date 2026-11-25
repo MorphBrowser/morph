@@ -5,7 +5,6 @@
 package org.mozilla.fenix.onboarding
 
 import android.annotation.SuppressLint
-import android.appwidget.AppWidgetManager
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -15,10 +14,8 @@ import android.os.StrictMode
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import androidx.annotation.RequiresApi
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.toMutableStateList
-import androidx.core.app.NotificationManagerCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.compose.content
 import androidx.lifecycle.lifecycleScope
@@ -27,14 +24,14 @@ import kotlinx.coroutines.launch
 import mozilla.components.browser.state.action.WebExtensionAction
 import mozilla.components.browser.state.state.extension.WebExtensionPromptRequest
 import mozilla.components.concept.engine.webextension.InstallationMethod
-import mozilla.components.lib.state.helpers.StoreProvider.Companion.fragmentStore
+import mozilla.components.service.fxa.FxaService
+import mozilla.components.service.fxa.manager.SCOPE_PROFILE
+import mozilla.components.service.fxa.manager.SCOPE_SYNC
 import mozilla.components.service.nimbus.evalJexlSafe
 import mozilla.components.service.nimbus.messaging.use
-import mozilla.components.support.base.ext.areNotificationsEnabledSafe
 import mozilla.components.support.base.feature.ViewBoundFeatureWrapper
 import mozilla.components.support.base.log.logger.Logger
 import mozilla.components.support.utils.Browsers
-import mozilla.components.support.utils.BuildManufacturerChecker
 import org.mozilla.fenix.GleanMetrics.Pings
 import org.mozilla.fenix.R
 import org.mozilla.fenix.components.accounts.FenixFxAEntryPoint
@@ -53,10 +50,6 @@ import org.mozilla.fenix.ext.nav
 import org.mozilla.fenix.ext.openSetDefaultBrowserOption
 import org.mozilla.fenix.ext.requireComponents
 import org.mozilla.fenix.nimbus.FxNimbus
-import org.mozilla.fenix.onboarding.store.DefaultOnboardingPreferencesRepository
-import org.mozilla.fenix.onboarding.store.OnboardingPreferencesMiddleware
-import org.mozilla.fenix.onboarding.store.OnboardingState
-import org.mozilla.fenix.onboarding.store.OnboardingStore
 import org.mozilla.fenix.onboarding.view.ManagePrivacyPreferencesDialogFragment
 import org.mozilla.fenix.onboarding.view.OnboardingPageUiData
 import org.mozilla.fenix.onboarding.view.OnboardingScreen
@@ -65,15 +58,13 @@ import org.mozilla.fenix.onboarding.view.telemetrySequenceId
 import org.mozilla.fenix.onboarding.view.toPageUiData
 import org.mozilla.fenix.settings.SupportUtils
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.utils.canShowAddSearchWidgetPrompt
-import org.mozilla.fenix.utils.maybeShowAddSearchWidgetPrompt
 
 /** Fragment displaying the onboarding flow. */
 class OnboardingFragment : Fragment() {
     private val logger = Logger("OnboardingFragment")
 
     private val addMarketingFeature = ViewBoundFeatureWrapper<OnboardingPageAdditionSupport>()
-    private val addPairingSyncSignInFeature = ViewBoundFeatureWrapper<OnboardingPageAdditionSupport>()
+    private val addPairingSyncFeature = ViewBoundFeatureWrapper<OnboardingPageAdditionSupport>()
 
     private val rtamoAttributionHandler by lazy {
         RtamoAttributionHandler(
@@ -95,15 +86,7 @@ class OnboardingFragment : Fragment() {
     }
 
     private val allOnboardingPages by lazy {
-        with(requireContext()) {
-            val appWidgetManager = AppWidgetManager.getInstance(this)
-            pagesToDisplay(
-                showDefaultBrowserPage = displayDefaultBrowserPage(this),
-                showNotificationPage = canShowNotificationPage(this),
-                showAddWidgetPage =
-                    !BuildManufacturerChecker().isXiaomi() && canShowAddSearchWidgetPrompt(appWidgetManager),
-            )
-        }
+        pagesToDisplay(showDefaultBrowserPage = displayDefaultBrowserPage(requireContext()))
     }
 
     private val marketingPage by lazy {
@@ -111,14 +94,14 @@ class OnboardingFragment : Fragment() {
     }
 
     /**
-     * The Sync sign-in page available for pairing campaigns.
+     * The pairing sync page available for pairing campaigns.
      *
-     * Null if the page is absent or the prompt is disabled via Nimbus, preventing [addPairingSyncSignInFeature] from
-     * adding it when attribution resolves later.
+     * Null if the page is absent or the prompt is disabled via Nimbus, preventing [addPairingSyncFeature] from adding
+     * it when attribution resolves later.
      */
-    private val pairingSyncSignInPage by lazy {
+    private val pairingSyncPage by lazy {
         allOnboardingPages
-            .find { it.type == OnboardingPageUiData.Type.SYNC_SIGN_IN }
+            .find { it.type == OnboardingPageUiData.Type.SYNC_PAIRING }
             ?.takeIf { requireComponents.settings.isPairingSignInPromptEnabled }
     }
 
@@ -129,8 +112,8 @@ class OnboardingFragment : Fragment() {
             .filter { page ->
                 when (page.type) {
                     OnboardingPageUiData.Type.MARKETING_DATA -> settings.shouldShowMarketingOnboarding
-                    OnboardingPageUiData.Type.SYNC_SIGN_IN ->
-                        pairingSyncSignInPage != null && settings.isUserPairingCampaignAttributed
+                    OnboardingPageUiData.Type.SYNC_PAIRING ->
+                        pairingSyncPage != null && settings.isUserPairingCampaignAttributed
 
                     else -> true
                 }
@@ -156,23 +139,6 @@ class OnboardingFragment : Fragment() {
                 ),
         )
     }
-
-    private val onboardingStore by
-        fragmentStore(OnboardingState()) {
-            OnboardingStore(
-                initialState = it,
-                middleware =
-                    listOf(
-                        OnboardingPreferencesMiddleware(
-                            repository =
-                                DefaultOnboardingPreferencesRepository(
-                                    context = requireContext(),
-                                    lifecycleOwner = viewLifecycleOwner,
-                                )
-                        )
-                    ),
-            )
-        }
 
     private val defaultBrowserPromptStorage by lazy { DefaultDefaultBrowserPromptStorage(requireContext()) }
     private val defaultBrowserPromptManager by lazy {
@@ -207,7 +173,6 @@ class OnboardingFragment : Fragment() {
         telemetryRecorder.onOnboardingStarted()
     }
 
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -231,13 +196,13 @@ class OnboardingFragment : Fragment() {
             owner = this,
             view = view,
         )
-        addPairingSyncSignInFeature.set(
+        addPairingSyncFeature.set(
             feature =
                 OnboardingPageAdditionSupport(
                     prefKey = requireContext().getString(R.string.pref_key_is_user_pairing_campaign_attributed),
                     pagesToDisplay = pagesToDisplay,
                     settings = requireComponents.settings,
-                    page = pairingSyncSignInPage,
+                    page = pairingSyncPage,
                     lifecycleOwner = viewLifecycleOwner,
                 ),
             owner = this,
@@ -268,7 +233,6 @@ class OnboardingFragment : Fragment() {
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     @Composable
     @Suppress("LongMethod")
     private fun ScreenContent() {
@@ -304,32 +268,36 @@ class OnboardingFragment : Fragment() {
                     pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.SYNC_SIGN_IN),
                 )
             },
-            onNotificationPermissionButtonClick = {
-                requireComponents.notificationsDelegate.requestNotificationPermission()
-                telemetryRecorder.onNotificationPermissionClick(
-                    sequenceId = pagesToDisplay.telemetrySequenceId(),
-                    sequencePosition =
-                        pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.NOTIFICATION_PERMISSION),
-                )
-            },
-            onSkipNotificationClick = {
-                telemetryRecorder.onSkipTurnOnNotificationsClick(
-                    sequenceId = pagesToDisplay.telemetrySequenceId(),
-                    sequencePosition =
-                        pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.NOTIFICATION_PERMISSION),
-                )
-            },
-            onAddFirefoxWidgetClick = {
-                telemetryRecorder.onAddSearchWidgetClick(
+            onSyncPairingScanClick = {
+                telemetryRecorder.onSyncPairingScanClick(
                     pagesToDisplay.telemetrySequenceId(),
-                    pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.ADD_SEARCH_WIDGET),
+                    pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.SYNC_PAIRING),
                 )
-                maybeShowAddSearchWidgetPrompt(requireActivity())
+                findNavController()
+                    .nav(
+                        id = R.id.onboardingFragment,
+                        directions =
+                            OnboardingFragmentDirections.actionGlobalPairFragment(
+                                entrypoint = FenixFxAEntryPoint.OnboardingPairing
+                            ),
+                    )
             },
-            onSkipFirefoxWidgetClick = {
-                telemetryRecorder.onSkipAddWidgetClick(
+            onSyncPairingEmailClick = {
+                telemetryRecorder.onSyncPairingEmailClick(
                     pagesToDisplay.telemetrySequenceId(),
-                    pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.ADD_SEARCH_WIDGET),
+                    pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.SYNC_PAIRING),
+                )
+                requireComponents.services.accountsAuthFeature.beginAuthentication(
+                    context = requireContext(),
+                    entrypoint = FenixFxAEntryPoint.OnboardingPairing,
+                    service = FxaService.Sync.identifier,
+                    scopes = setOf(SCOPE_PROFILE, SCOPE_SYNC),
+                )
+            },
+            onSyncPairingSkipClick = {
+                telemetryRecorder.onSyncPairingSkipClick(
+                    pagesToDisplay.telemetrySequenceId(),
+                    pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.SYNC_PAIRING),
                 )
             },
             onFinish = {
@@ -344,17 +312,7 @@ class OnboardingFragment : Fragment() {
 
                 defaultBrowserPromptManager.maybePromptToSetAsDefaultBrowser(it)
             },
-            onboardingStore = onboardingStore,
             termsOfServiceEventHandler = termsOfServiceEventHandler,
-            onCustomizeToolbarClick = {
-                requireComponents.settings.hasCompletedSetupStepToolbar = true
-
-                telemetryRecorder.onSelectToolbarPlacementClick(
-                    pagesToDisplay.telemetrySequenceId(),
-                    pagesToDisplay.sequencePosition(OnboardingPageUiData.Type.TOOLBAR_PLACEMENT),
-                    onboardingStore.state.toolbarOptionSelected.id,
-                )
-            },
             onMarketingDataLearnMoreClick = {
                 telemetryRecorder.onMarketingDataLearnMoreClick()
 
@@ -416,6 +374,8 @@ class OnboardingFragment : Fragment() {
     }
 
     private fun onFinish(onboardingPageUiData: OnboardingPageUiData?) {
+        if (findNavController().currentDestination?.id != R.id.onboardingFragment) return
+
         // onboarding page UI data can be null if there was no pages to display
         if (onboardingPageUiData != null) {
             val sequenceId = pagesToDisplay.telemetrySequenceId()
@@ -427,11 +387,7 @@ class OnboardingFragment : Fragment() {
             )
         }
 
-        requireComponents.fenixOnboarding.finish()
-
         val settings = requireComponents.settings
-        settings.recordOnboardingCompleted()
-        settings.onboardingCurrentPageIndex = 0
 
         // Telemetry and daily usage ping get enabled after ToU acceptance.
         startMetricsIfEnabled(
@@ -448,8 +404,16 @@ class OnboardingFragment : Fragment() {
                 directions = OnboardingFragmentDirections.actionHome(),
             )
 
+        // finish() synchronously notifies the onboarding completed listener in HomeActivity, which replays the launch
+        // intent and may navigate to the browser. Navigating home first keeps home on the back stack beneath it.
+        requireComponents.fenixOnboarding.finish()
+
+        settings.recordOnboardingCompleted()
+        settings.onboardingCurrentPageIndex = 0
+
         val downloadUrl = settings.rtamoAddonDownloadUrl
-        if (downloadUrl.isNotBlank()) {
+        val hasPendingAddonInstall = downloadUrl.isNotBlank()
+        if (hasPendingAddonInstall) {
             requireComponents.core.store.dispatch(
                 WebExtensionAction.UpdatePromptRequestWebExtensionAction(
                     WebExtensionPromptRequest.InstallationRequested(
@@ -466,28 +430,35 @@ class OnboardingFragment : Fragment() {
         settings.rtamoAddonImageUrl = ""
 
         maybeAddMenuNotification()
+
+        // Skip when an add-on install prompt is about to show so the two prompts don't compete.
+        if (!hasPendingAddonInstall) {
+            maybeRequestNotificationPermission()
+        }
+    }
+
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+
+        val notificationsDelegate = requireComponents.notificationsDelegate
+        if (notificationsDelegate.hasPostNotificationsPermission()) return
+
+        val notificationPrompt = FxNimbus.features.onboardingNotificationPrompt
+        notificationPrompt.recordExposure()
+        if (notificationPrompt.value().enabled) {
+            notificationsDelegate.requestNotificationPermission()
+        }
     }
 
     private fun isNotDefaultBrowser(context: Context) = !Browsers.isDefaultBrowser(context)
 
-    private fun canShowNotificationPage(context: Context) =
-        !NotificationManagerCompat.from(context.applicationContext).areNotificationsEnabledSafe() &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-
-    private fun pagesToDisplay(
-        showDefaultBrowserPage: Boolean,
-        showNotificationPage: Boolean,
-        showAddWidgetPage: Boolean,
-    ): List<OnboardingPageUiData> {
+    private fun pagesToDisplay(showDefaultBrowserPage: Boolean): List<OnboardingPageUiData> {
         val jexlConditions = FxNimbus.features.junoOnboarding.value().conditions
         val jexlHelper = requireContext().components.nimbus.createJexlHelper()
 
         return jexlHelper.use {
             FxNimbus.features.junoOnboarding.value().cards.values.toPageUiData(
                 showDefaultBrowserPage,
-                showNotificationPage,
-                showAddWidgetPage,
-                requireComponents.settings.isTabStripEnabled.not(),
                 jexlConditions,
             ) { condition ->
                 jexlHelper.evalJexlSafe(condition)

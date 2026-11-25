@@ -158,7 +158,7 @@ struct NoteWeakMapChildrenTracer
   bool mTracedAny;
   JSObject* mMap;
   JS::GCCellPtr mKey;
-  JSObject* mKeyDelegate;
+  JS::GCCellPtr mKeyDelegate;
 
  private:
   template <typename T>
@@ -193,13 +193,14 @@ bool NoteWeakMapChildrenTracer::onEdge(T** aThingPtr, const char* aName) {
 struct NoteWeakMapsTracer : public js::WeakMapTracer {
   NoteWeakMapsTracer(JSRuntime* aRt, nsCycleCollectionNoteRootCallback& aCccb)
       : js::WeakMapTracer(aRt), mCb(aCccb), mChildTracer(aRt, aCccb) {}
-  void trace(JSObject* aMap, JS::GCCellPtr aKey, JS::GCCellPtr aValue) override;
+  void trace(JSObject* aMap, JS::GCCellPtr aKey, JS::GCCellPtr aDelegate,
+             JS::GCCellPtr aValue) override;
   nsCycleCollectionNoteRootCallback& mCb;
   NoteWeakMapChildrenTracer mChildTracer;
 };
 
 void NoteWeakMapsTracer::trace(JSObject* aMap, JS::GCCellPtr aKey,
-                               JS::GCCellPtr aValue) {
+                               JS::GCCellPtr aDelegate, JS::GCCellPtr aValue) {
   // If nothing that could be held alive by this entry is marked gray, return.
   if ((!aKey || !JS::GCThingIsMarkedGrayInCC(aKey)) &&
       MOZ_LIKELY(!mCb.WantAllTraces())) {
@@ -211,8 +212,7 @@ void NoteWeakMapsTracer::trace(JSObject* aMap, JS::GCCellPtr aKey,
 
   // The cycle collector can only properly reason about weak maps if it can
   // reason about the liveness of their keys, which in turn requires that
-  // the key can be represented in the cycle collector graph.  All existing
-  // uses of weak maps use either objects or scripts as keys, which are okay.
+  // the key can be represented in the cycle collector graph.
   MOZ_ASSERT(JS::IsCCTraceKind(aKey.kind()));
 
   // As an emergency fallback for non-debug builds, if the key is not
@@ -223,134 +223,26 @@ void NoteWeakMapsTracer::trace(JSObject* aMap, JS::GCCellPtr aKey,
     aKey = nullptr;
   }
 
-  JSObject* kdelegate = nullptr;
-  if (aKey.is<JSObject>()) {
-    kdelegate = js::UncheckedUnwrapWithoutExpose(&aKey.as<JSObject>());
-  }
-
   if (JS::IsCCTraceKind(aValue.kind())) {
-    mCb.NoteWeakMapping(aMap, aKey, kdelegate, aValue);
+    mCb.NoteWeakMapping(aMap, aKey, aDelegate, aValue);
   } else {
     mChildTracer.mTracedAny = false;
     mChildTracer.mMap = aMap;
     mChildTracer.mKey = aKey;
-    mChildTracer.mKeyDelegate = kdelegate;
+    mChildTracer.mKeyDelegate = aDelegate;
 
-    if (!aValue.is<JSString>()) {
+    if (aValue && !aValue.is<JSString>()) {
       JS::TraceChildren(&mChildTracer, aValue);
     }
 
     // The delegate could hold alive the key, so report something to the CC
     // if we haven't already.
     if (!mChildTracer.mTracedAny && aKey && JS::GCThingIsMarkedGrayInCC(aKey) &&
-        kdelegate) {
-      mCb.NoteWeakMapping(aMap, aKey, kdelegate, nullptr);
+        aDelegate) {
+      mCb.NoteWeakMapping(aMap, aKey, aDelegate, nullptr);
     }
   }
 }
-
-// Report whether the key or value of a weak mapping entry are gray but need to
-// be marked black.
-static void ShouldWeakMappingEntryBeBlack(JSObject* aMap, JS::GCCellPtr aKey,
-                                          JS::GCCellPtr aValue,
-                                          bool* aKeyShouldBeBlack,
-                                          bool* aValueShouldBeBlack) {
-  *aKeyShouldBeBlack = false;
-  *aValueShouldBeBlack = false;
-
-  // If nothing that could be held alive by this entry is marked gray, return.
-  bool keyMightNeedMarking = aKey && JS::GCThingIsMarkedGrayInCC(aKey);
-  bool valueMightNeedMarking = aValue && JS::GCThingIsMarkedGrayInCC(aValue) &&
-                               aValue.kind() != JS::TraceKind::String;
-  if (!keyMightNeedMarking && !valueMightNeedMarking) {
-    return;
-  }
-
-  if (!JS::IsCCTraceKind(aKey.kind())) {
-    aKey = nullptr;
-  }
-
-  if (keyMightNeedMarking && aKey.is<JSObject>()) {
-    JSObject* kdelegate =
-        js::UncheckedUnwrapWithoutExpose(&aKey.as<JSObject>());
-    if (kdelegate && !JS::ObjectIsMarkedGray(kdelegate) &&
-        (!aMap || !JS::ObjectIsMarkedGray(aMap))) {
-      *aKeyShouldBeBlack = true;
-    }
-  }
-
-  if (aValue && JS::GCThingIsMarkedGrayInCC(aValue) &&
-      (!aKey || !JS::GCThingIsMarkedGrayInCC(aKey)) &&
-      (!aMap || !JS::ObjectIsMarkedGray(aMap)) &&
-      aValue.kind() != JS::TraceKind::Shape) {
-    *aValueShouldBeBlack = true;
-  }
-}
-
-struct FixWeakMappingGrayBitsTracer : public js::WeakMapTracer {
-  explicit FixWeakMappingGrayBitsTracer(JSRuntime* aRt)
-      : js::WeakMapTracer(aRt) {}
-
-  void FixAll() {
-    do {
-      mAnyMarked = false;
-      js::TraceWeakMaps(this);
-    } while (mAnyMarked);
-  }
-
-  void trace(JSObject* aMap, JS::GCCellPtr aKey,
-             JS::GCCellPtr aValue) override {
-    bool keyShouldBeBlack;
-    bool valueShouldBeBlack;
-    ShouldWeakMappingEntryBeBlack(aMap, aKey, aValue, &keyShouldBeBlack,
-                                  &valueShouldBeBlack);
-    if (keyShouldBeBlack && JS::UnmarkGrayGCThingRecursively(aKey)) {
-      mAnyMarked = true;
-    }
-
-    if (valueShouldBeBlack && JS::UnmarkGrayGCThingRecursively(aValue)) {
-      mAnyMarked = true;
-    }
-  }
-
-  bool mAnyMarked = false;
-};
-
-#ifdef DEBUG
-// Check whether weak maps are marked correctly according to the logic above.
-struct CheckWeakMappingGrayBitsTracer : public js::WeakMapTracer {
-  explicit CheckWeakMappingGrayBitsTracer(JSRuntime* aRt)
-      : js::WeakMapTracer(aRt), mFailed(false) {}
-
-  static bool Check(JSRuntime* aRt) {
-    CheckWeakMappingGrayBitsTracer tracer(aRt);
-    js::TraceWeakMaps(&tracer);
-    return !tracer.mFailed;
-  }
-
-  void trace(JSObject* aMap, JS::GCCellPtr aKey,
-             JS::GCCellPtr aValue) override {
-    bool keyShouldBeBlack;
-    bool valueShouldBeBlack;
-    ShouldWeakMappingEntryBeBlack(aMap, aKey, aValue, &keyShouldBeBlack,
-                                  &valueShouldBeBlack);
-
-    if (keyShouldBeBlack) {
-      fprintf(stderr, "Weak mapping key %p of map %p should be black\n",
-              aKey.asCell(), aMap);
-      mFailed = true;
-    }
-
-    if (valueShouldBeBlack) {
-      fprintf(stderr, "Weak mapping value %p of map %p should be black\n",
-              aValue.asCell(), aMap);
-      mFailed = true;
-    }
-  }
-
-  bool mFailed;
-};
-#endif  // DEBUG
 
 static void CheckParticipatesInCycleCollection(JS::GCCellPtr aThing,
                                                const char* aName,
@@ -652,7 +544,7 @@ void JSHolderMap::Put(void* aHolder, nsScriptObjectTracer* aTracer,
     auto ptr = mPerZoneJSHolders.lookupForAdd(aZone);
     if (!ptr) {
       MOZ_ALWAYS_TRUE(
-          mPerZoneJSHolders.add(ptr, aZone, MakeUnique<EntryVector>()));
+          mPerZoneJSHolders.add(ptr, aZone, std::make_unique<EntryVector>()));
     }
     vector = ptr->value().get();
   }
@@ -1766,19 +1658,27 @@ nsresult CycleCollectedJSRuntime::TraverseRoots(
   NoteWeakMapsTracer trc(mJSRuntime, aCb);
   js::TraceWeakMaps(&trc);
 
+  // Ensure WeakRef targets are represented in the graph so that we can check
+  // whether they are garbage with IsGCThingWhiteInCCGraph in
+  // ClearWhiteJSWeakRefTargets.
+  //
+  // Only objects are added. Symbols can be gray, but the only way they can
+  // reach anything else the CC cares about is by being a weak map key, in which
+  // case NoteWeakMapping has already added them to the graph.
+  JS::NoteWeakRefTargets(
+      mJSRuntime,
+      [](JS::GCCellPtr aTarget, void* aData) {
+        auto& cb = *static_cast<nsCycleCollectionNoteRootCallback*>(aData);
+        if (aTarget.is<JSObject>() && JS::GCThingIsMarkedGrayInCC(aTarget)) {
+          cb.NoteJSRoot(&aTarget.as<JSObject>());
+        }
+      },
+      &aCb);
+
   return NS_OK;
 }
 
 bool CycleCollectedJSRuntime::UsefulToMergeZones() const { return false; }
-
-void CycleCollectedJSRuntime::FixWeakMappingGrayBits() const {
-  MOZ_ASSERT(!JS::IsIncrementalGCInProgress(mJSRuntime),
-             "Don't call FixWeakMappingGrayBits during a GC.");
-  MOZ_ASSERT(AreGCGrayBitsValid());
-
-  FixWeakMappingGrayBitsTracer fixer(mJSRuntime);
-  fixer.FixAll();
-}
 
 void CycleCollectedJSRuntime::CheckGrayBits() const {
   MOZ_ASSERT(!JS::IsIncrementalGCInProgress(mJSRuntime),
@@ -1790,7 +1690,7 @@ void CycleCollectedJSRuntime::CheckGrayBits() const {
   // timeout.
 
   MOZ_ASSERT(js::CheckGrayMarkingState(mJSRuntime));
-  MOZ_ASSERT(CheckWeakMappingGrayBitsTracer::Check(mJSRuntime));
+  MOZ_ASSERT(js::CheckWeakMappingGrayBits(mJSRuntime));
 #endif
 }
 
@@ -2135,6 +2035,9 @@ void CycleCollectedJSRuntime::AnnotateAndSetOutOfMemory(OOMState* aStatePtr,
 
 void CycleCollectedJSRuntime::OnGC(JSContext* aContext, JSGCStatus aStatus,
                                    JS::GCReason aReason) {
+  mozilla::AutoRestore<bool> inGCCallback(mInGCCallback);
+  mInGCCallback = true;
+
   switch (aStatus) {
     case JSGC_BEGIN:
       MOZ_RELEASE_ASSERT(mTraceState.is<Nothing>());
@@ -2211,6 +2114,13 @@ void CycleCollectedJSRuntime::PrepareWaitingZonesForGC(JS::GCReason aReason) {
     }
     mZonesWaitingForGC.Clear();
   }
+}
+
+void CycleCollectedJSRuntime::ClearWhiteJSWeakReferences(
+    JS::ShouldClearWeakRefTargetCallback aCallback, void* aData) {
+  // Clear the targets of JS WeakRef objects whose target is part of a cycle
+  // that we're about to unlink.
+  JS::MaybeClearWeakRefTargets(mJSRuntime, aCallback, aData);
 }
 
 /* static */

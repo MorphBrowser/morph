@@ -111,7 +111,7 @@ void MediaControlService::Init() {
   mMediaKeysHandler = new MediaControlKeyHandler();
   mMediaControlKeyManager = new MediaControlKeyManager();
   mMediaControlKeyManager->AddListener(mMediaKeysHandler.get());
-  mControllerManager = MakeUnique<ControllerManager>(this);
+  mControllerManager = std::make_unique<ControllerManager>(this);
 
   // Initialize the fallback title
   nsTArray<nsCString> resIds{
@@ -122,7 +122,7 @@ void MediaControlService::Init() {
   {
     nsAutoCString translation;
     IgnoredErrorResult rv;
-    l10n->FormatValueSync("mediastatus-fallback-title"_ns, {}, translation, rv);
+    l10n->FormatValueSync("mediastatus-fallback-title"_ns, translation, rv);
     if (!rv.Failed()) {
       mFallbackTitle = NS_ConvertUTF8toUTF16(translation);
     }

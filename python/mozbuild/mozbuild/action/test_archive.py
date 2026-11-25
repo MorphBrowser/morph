@@ -55,7 +55,16 @@ TEST_HARNESS_BINS = [
 
 TEST_HARNESS_DLLS = ["crashinjectdll", "mozglue", "msvcp*", "vcruntime*"]
 
-TRAIN_HOP_DLLS = ["xul", "nss3", "nssutil3", "gkcodecs", "lgpllibs", "mozinference"]
+TRAIN_HOP_DLLS = [
+    "xul",
+    "nss3",
+    "nssutil3",
+    # Only exists as a separate library where MOZ_FOLD_LIBS is unset (Linux).
+    "mozsqlite3",
+    "gkcodecs",
+    "lgpllibs",
+    "mozinference",
+]
 
 GMP_TEST_PLUGIN_DIRS = ["gmp-fake/**", "gmp-fakeopenh264/**"]
 
@@ -121,6 +130,11 @@ ARCHIVE_FILES = {
             "dest": "marionette/tests",
         },
         {"source": buildconfig.topobjdir, "base": "_tests", "pattern": "mozbase/**"},
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "testing/performance",
+            "patterns": ["mozperfcommon/setup.py", "mozperfcommon/mozperfcommon/**"],
+        },
         {
             "source": buildconfig.topsrcdir,
             "base": "testing",
@@ -316,7 +330,10 @@ ARCHIVE_FILES = {
         {
             "source": buildconfig.topsrcdir,
             "base": "",
-            "pattern": "testing/performance/common/performance-artifact-schema.json",
+            "patterns": [
+                "testing/performance/common/performance-artifact-schema.json",
+                "testing/performance/common/expected_changes.yml",
+            ],
         },
         {
             "source": buildconfig.topsrcdir,
@@ -505,6 +522,11 @@ ARCHIVE_FILES = {
         {
             "source": buildconfig.topsrcdir,
             "base": "testing",
+            "pattern": "config/requirements-*.txt",
+        },
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "testing",
             "pattern": "condprofile/**",
         },
         {
@@ -530,6 +552,24 @@ ARCHIVE_FILES = {
             "base": "testing/mozbase/mozlog",
             "pattern": "**",
             "dest": "condprofile/mozlog",
+        },
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "testing/mozbase/mozversion",
+            "pattern": "**",
+            "dest": "condprofile/mozversion",
+        },
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "testing/mozbase/mozsystemmonitor",
+            "pattern": "**",
+            "dest": "condprofile/mozsystemmonitor",
+        },
+        {
+            "source": buildconfig.topsrcdir,
+            "base": "python/mozterm",
+            "pattern": "**",
+            "dest": "condprofile/mozterm",
         },
         {
             "source": buildconfig.topsrcdir,

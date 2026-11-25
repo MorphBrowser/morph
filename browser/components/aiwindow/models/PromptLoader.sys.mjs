@@ -4,6 +4,10 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
+/**
+ * @import { PipelineOptions } from "chrome://global/content/ml/EngineProcess.sys.mjs"
+ */
+
 import {
   getRemoteRecords,
   selectMainConfig,
@@ -24,10 +28,21 @@ import {
 } from "moz-src:///browser/components/aiwindow/models/ChatUtils.sys.mjs";
 import { openAIEngine } from "moz-src:///browser/components/aiwindow/models/openAIEngine.sys.mjs";
 import { Conversation } from "moz-src:///browser/components/aiwindow/models/Conversation.sys.mjs";
+import { SmartWindowLocation } from "moz-src:///browser/components/aiwindow/models/SmartWindowLocation.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 /**
  * @typedef {import("moz-src:///browser/components/aiwindow/models/Utils.sys.mjs").InferenceParams} InferenceParams
  */
+
+const lazy = XPCOMUtils.declareLazy({
+  getSmartPageName:
+    "chrome://browser/content/aiwindow/modules/TrustedInternalURLs.mjs",
+  MonitorUIUtils:
+    "moz-src:///browser/components/aiwindow/ui/modules/MonitorUIUtils.sys.mjs",
+  aitabEnabled: { pref: "browser.smartwindow.aitab.enabled" },
+  agentEnabled: { pref: "browser.smartwindow.agent.enabled" },
+});
 
 const CUSTOM_PROMPTS_PREF = "browser.smartwindow.customPrompts";
 const MODEL_CHOICE_PREF = "browser.smartwindow.firstrun.modelChoice";
@@ -36,13 +51,26 @@ const MODEL_CHOICE_PREF = "browser.smartwindow.firstrun.modelChoice";
 // buildChatSystemPrompt throws rather than serve a partial prompt. Others are
 // optional (e.g. model-details is model-specific and has no generic record).
 const REQUIRED_CHAT_MODULES = new Set(["identity", "response-rules"]);
-// Chat modules that describe a feature behind a pref. They are assembled only
-// while the pref is on, so the model is never taught about a tool that
-// filterFeatureGatedTools (Chat.sys.mjs) will not give it. Same pref string as
-// AITAB_PREF in Tools.sys.mjs, kept local to avoid an import cycle.
+// Chat modules that describe a gated feature, each with the check that says
+// whether the feature is available. They are assembled only while it is, so
+// the model is never taught about something the user cannot use: a tool that
+// filterFeatureGatedTools (Chat.sys.mjs) will not give it, or a monitor
+// follow-up that would do nothing when clicked. The pages gate is the same
+// pref as AITAB_PREF in Tools.sys.mjs, kept local to avoid an import cycle.
+// The monitor gate matches AgentUI.tryHandleCommand.
 const GATED_CHAT_MODULES = new Map([
-  ["pages", "browser.smartwindow.aitab.enabled"],
+  ["pages", () => lazy.aitabEnabled],
+  [
+    "monitor",
+    () => lazy.agentEnabled && lazy.MonitorUIUtils.isMonitorRegionSupported(),
+  ],
 ]);
+// Browser-context fragments predate its params manifest. Without one at this
+// build's major, read the legacy 1.x "tab" fragment, which builds that do not
+// render `{#key}...{/key}` sections also read.
+const LEGACY_BROWSER_CONTEXT_VERSION = "1.0";
+const LEGACY_TAB_MODULE = "tab";
+const TAB_MODULE = "tab-conditional-fields";
 
 export const DEFAULT_PURPOSE = "default";
 export const FEATURE_PURPOSES = Object.freeze({
@@ -60,6 +88,7 @@ export const FEATURE_PURPOSES = Object.freeze({
   [MODEL_FEATURES.MEMORIES_MESSAGE_CLASSIFICATION_SYSTEM]:
     PURPOSES.MEMORY_GENERATION,
   [MODEL_FEATURES.AGENT_MONITOR]: PURPOSES.MONITOR,
+  [MODEL_FEATURES.AGENT_MONITOR_SETUP]: PURPOSES.MONITOR,
   [MODEL_FEATURES.SEARCH_ANSWER_GENERATION]: PURPOSES.CHAT,
   [MODEL_FEATURES.AITAB]: PURPOSES.AITAB,
 });
@@ -69,6 +98,8 @@ function getDefaultServiceType(feature) {
     return SERVICE_TYPES.MEMORIES;
   } else if (feature.startsWith("agent")) {
     return SERVICE_TYPES.AGENT;
+  } else if (feature.startsWith("conversation-suggestions")) {
+    return SERVICE_TYPES.CONVERSATION_STARTERS;
   }
   return SERVICE_TYPES.AI;
 }
@@ -173,12 +204,21 @@ function listSkills(records, model) {
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Replaces each `{name}` placeholder that has a substitution with its value.
+ * Placeholders are replaced in a single pass, so substituted values are
+ * inserted literally and never expanded again.
+ *
+ * @param {string} rawContent - Template text.
+ * @param {object} [substitutions] - Values keyed by placeholder name.
+ * @returns {string} The rendered text.
+ */
 function renderTemplate(rawContent, substitutions = {}) {
-  let rendered = rawContent;
-  for (const [name, value] of Object.entries(substitutions)) {
-    rendered = rendered.replaceAll(`{${name}}`, value ?? "");
-  }
-  return rendered;
+  return rawContent.replace(/\{(\w+)\}/g, (placeholder, name) =>
+    Object.hasOwn(substitutions, name)
+      ? (substitutions[name] ?? "")
+      : placeholder
+  );
 }
 
 /**
@@ -227,8 +267,8 @@ export async function buildChatSystemPrompt(model) {
   // the params record. Modules are selected by the major version it names.
   const sections = [];
   for (const entry of params.modules) {
-    const gatePref = GATED_CHAT_MODULES.get(entry.name);
-    if (gatePref && !Services.prefs.getBoolPref(gatePref, false)) {
+    const isAvailable = GATED_CHAT_MODULES.get(entry.name);
+    if (isAvailable && !isAvailable()) {
       continue;
     }
     const record = findModule(records, {
@@ -254,10 +294,21 @@ export async function buildChatSystemPrompt(model) {
     )
     .join("\n");
 
+  // The location is read and fetched only when a module renders it.
+  let locationText = "Unavailable";
+  if (sections.some(section => section.includes("{location}"))) {
+    locationText = SmartWindowLocation.getCachedLocation() ?? locationText;
+    // Refreshed here as well as when a Smart Window opens, so that a long
+    // session or a feature enabled mid-session picks up the location. Not
+    // awaited so that prompt assembly never waits on the network.
+    SmartWindowLocation.refresh();
+  }
+
   const prompt = renderTemplate(sections.join("\n\n\n"), {
     skill_list: skillList,
     locale: Services.locale.appLocaleAsBCP47,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    location: locationText,
     isoTimestamp,
     todayDate: isoTimestamp.split("T")[0],
   });
@@ -315,6 +366,10 @@ function renderMentionedUrls(mentionsWithUrl) {
         `${indent}- URL: ${url}`,
         `${indent}  Title: ${sanitizeUntrustedContent(label)}`
       );
+      const pageSlug = lazy.getSmartPageName(URL.parse(url));
+      if (pageSlug) {
+        lines.push(`${indent}  Page slug: ${pageSlug}`);
+      }
       return lines.join("\n");
     })
     .join("\n");
@@ -345,18 +400,27 @@ export async function buildBrowserContextPrompt(
   }
 
   const records = await loadV2Records();
+  const paramsRecord = findParams(records, {
+    feature: MODEL_FEATURES.BROWSER_CONTEXT,
+    model,
+  });
   const findFragment = fragment =>
     findModule(records, {
-      feature: "browser-context",
+      feature: MODEL_FEATURES.BROWSER_CONTEXT,
       module: fragment,
-      options: { model },
+      options: {
+        model,
+        version:
+          paramsRecord?.modules.find(m => m.name === fragment)?.version ??
+          LEGACY_BROWSER_CONTEXT_VERSION,
+      },
     });
 
   const fragments = [];
 
   if (browserContextMapping.hasTabInfo) {
     securityProperties.setPrivateData();
-    const record = findFragment("tab");
+    const record = findFragment(paramsRecord ? TAB_MODULE : LEGACY_TAB_MODULE);
     if (record?.prompts) {
       fragments.push(record.prompts);
     }
@@ -364,6 +428,7 @@ export async function buildBrowserContextPrompt(
     delete browserContextMapping.url;
     delete browserContextMapping.title;
     delete browserContextMapping.description;
+    delete browserContextMapping.pageSlug;
   }
   delete browserContextMapping.hasTabInfo;
 
@@ -449,12 +514,46 @@ async function selectFeatureConfig(feature, opts = {}) {
   return mainConfig;
 }
 
+// Features whose generic record means "use the model of this other feature".
+const MODEL_SOURCE_FEATURES = new Map([
+  [MODEL_FEATURES.AGENT_MONITOR, MODEL_FEATURES.CHAT],
+  [MODEL_FEATURES.AGENT_MONITOR_SETUP, MODEL_FEATURES.AGENT_MONITOR],
+  [MODEL_FEATURES.AITAB, MODEL_FEATURES.CHAT],
+  [MODEL_FEATURES.RESUME_ACTIVITY_CONVERSATION, MODEL_FEATURES.CHAT],
+  [MODEL_FEATURES.RESUME_ACTIVITY_CONVERSATION_STARTER, MODEL_FEATURES.CHAT],
+]);
+
+/**
+ * Resolve the model a feature runs inference on. A generic record for a
+ * feature in MODEL_SOURCE_FEATURES takes the model its source feature resolves
+ * to.
+ *
+ * @param {string} feature
+ * @param {object} config - The feature's selected config record.
+ * @param {object} [opts]
+ * @param {string} [opts.modelChoiceIdOverride]
+ * @returns {Promise<string>}
+ */
+async function resolveInferenceModel(feature, config, opts = {}) {
+  const model = config.inference_model || config.model;
+  const sourceFeature = MODEL_SOURCE_FEATURES.get(feature);
+  if (model !== GENERIC_MODEL_NAME || !sourceFeature) {
+    return model;
+  }
+  const sourceConfig = await selectFeatureConfig(sourceFeature, {
+    modelChoiceIdOverride: opts.modelChoiceIdOverride,
+  });
+  return resolveInferenceModel(sourceFeature, sourceConfig, opts);
+}
+
 /**
  * Resolve the RS record for a feature and build a fresh openAIEngine +
  * inference parameters.
  *
  * @param {string} feature
  * @param {object} [opts]
+ * @param {Partial<PipelineOptions>} [opts.onDeviceOptions] - Runs on device
+ *   with llama.cpp instead of the cloud endpoint.
  * @returns {Promise<{engine: openAIEngine, parameters: inferenceParams}>}
  */
 export async function buildEngineForFeature(feature, opts = {}) {
@@ -478,32 +577,18 @@ export async function buildEngineForFeature(feature, opts = {}) {
     Services.prefs.getStringPref(MODEL_CHOICE_PREF, "");
   const { baseURL, apiKey } = openAIEngine.resolveEndpointConfig(modelChoiceId);
 
-  // resolve the model to use for inference, this allows specific features to default to chat model
-  let model = mainConfig.model;
-  const CHAT_MODEL_FALLBACK_FEATURES = new Set([
-    MODEL_FEATURES.AGENT_MONITOR,
-    MODEL_FEATURES.AITAB,
-    MODEL_FEATURES.RESUME_ACTIVITY_CONVERSATION,
-    MODEL_FEATURES.RESUME_ACTIVITY_CONVERSATION_STARTER,
-  ]);
-  if (
-    model === GENERIC_MODEL_NAME &&
-    CHAT_MODEL_FALLBACK_FEATURES.has(feature)
-  ) {
-    const chatConfig = await selectFeatureConfig(MODEL_FEATURES.CHAT, {
-      modelChoiceIdOverride: opts.modelChoiceIdOverride,
-    });
-    model = chatConfig.model;
-  }
+  const model = await resolveInferenceModel(feature, mainConfig, opts);
 
   const engine = await openAIEngine.build({
     model,
+    modelChoiceId,
     serviceType,
     purpose,
     flowId: opts.flowId ?? null,
     feature,
     baseURL,
     apiKey,
+    onDeviceOptions: opts.onDeviceOptions,
   });
 
   return { engine, parameters };

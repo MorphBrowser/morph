@@ -30,26 +30,47 @@ struct FrameDestroyContext;
 class PresShell;
 class FrameChildList;
 enum class FrameChildListID {
-  // The individual concrete child lists.
+  // The in-flow children in this frame.
   Principal,
-  Absolute,
-  PushedAbsolute,
+
+  // A temporary list of in-flow children that didn't fit in this frame.
   Overflow,
+
+  // A list of next-in-flows that hold overflow content. All of them should have
+  // the NS_FRAME_IS_OVERFLOW_CONTAINER bit set.
   OverflowContainers,
+
+  // A temporary list of next-in-flows of the overflow-incomplete children in
+  // this frame. It is expected to be drained by this frame's next-in-flow.
   ExcessOverflowContainers,
+
+  // The abspos and fixed-pos children.
+  Absolute,
+
+  // A temporary list of abspos children that didn't fit in the current
+  // fragmentainer, and the next-in-flows of incomplete abspos children. It is
+  // expected to be drained by the absolute containing block's continuation
+  // in the next fragmentainer.
+  PushedAbsolute,
+
   // Floats placed by the block. Their placeholders are in the block's in-flow
   // lines.
   Float,
+
   // Floats pushed to the block's next-in-flow because they didn't fit. The list
   // can hold floats' first-in-flows and next-in-flows, and it is expected to be
   // drained by the block's next-in-flow during reflow.
   PushedFloats,
+
   // Floats whose placeholders are in the overflow lines. This list collects the
   // floats' real frames so they are drained with their placeholders by the
   // block's next-in-flow.
   OverflowFloats,
+
+  // The outside ::marker frame of a list item.
   Marker,
-  // A special alias for FrameChildListID::Principal that suppress the reflow
+
+  // A special alias for FrameChildListID::Principal that suppresses the reflow
   // request that is normally done when manipulating child lists.
   NoReflowPrincipal,
 };
@@ -117,15 +138,15 @@ class nsFrameList {
   }
 
   /**
-   * Infallibly allocate a nsFrameList from the shell arena.
+   * Infallibly allocate a nsFrameList from the frame arena.
    */
-  void* operator new(size_t sz, mozilla::PresShell* aPresShell);
+  void* operator new(size_t sz);
 
   /**
-   * Deallocate this list that was allocated from the shell arena.
+   * Deallocate this list that was allocated from the frame arena.
    * The list is required to be empty.
    */
-  void Delete(mozilla::PresShell* aPresShell);
+  void Delete();
 
   /**
    * For each frame in this list: remove it from the list then call
@@ -460,20 +481,18 @@ class FrameChildList {
 };
 
 /**
- * Simple "auto_ptr" for nsFrameLists allocated from the shell arena.
+ * Simple "auto_ptr" for nsFrameLists allocated from the frame arena.
  * The frame list given to the constructor will be deallocated (if non-null)
  * in the destructor.  The frame list must then be empty.
  */
 class MOZ_RAII AutoFrameListPtr final {
  public:
-  AutoFrameListPtr(nsPresContext* aPresContext, nsFrameList* aFrameList)
-      : mPresContext(aPresContext), mFrameList(aFrameList) {}
+  explicit AutoFrameListPtr(nsFrameList* aFrameList) : mFrameList(aFrameList) {}
   ~AutoFrameListPtr();
   operator nsFrameList*() const { return mFrameList; }
   nsFrameList* operator->() const { return mFrameList; }
 
  private:
-  nsPresContext* mPresContext;
   nsFrameList* mFrameList;
 };
 

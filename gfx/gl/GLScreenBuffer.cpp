@@ -27,7 +27,7 @@ UniquePtr<SwapChainPresenter> SwapChain::Acquire(
     const auto& existingDesc = mPool.front()->mDesc;
     auto newDesc = existingDesc;
     newDesc.size = size;
-    newDesc.colorSpace = colorSpace;
+    newDesc.colorSpace = mFactory->GetFactoryCspace(colorSpace);
     newDesc.transferFunction = transferFunction;
     if (newDesc != existingDesc || !mPool.front()->IsValid()) {
       mPool = {};
@@ -52,7 +52,7 @@ UniquePtr<SwapChainPresenter> SwapChain::Acquire(
     }
   }
 
-  auto ret = MakeUnique<SwapChainPresenter>(*this);
+  auto ret = std::make_unique<SwapChainPresenter>(*this);
   const auto old = ret->SwapBackBuffer(std::move(surf));
   MOZ_ALWAYS_TRUE(!old);
   return ret;

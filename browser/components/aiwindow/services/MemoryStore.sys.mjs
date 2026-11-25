@@ -7,6 +7,7 @@
  */
 
 import { JSONFile } from "resource://gre/modules/JSONFile.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 import {
   MEMORY_FILTER_COMPARATOR,
   MEMORY_FILTER_PREDICATES,
@@ -132,22 +133,21 @@ function isComponentSummaries(v) {
 
 // Whether we've finished initial load
 let gInitialized = false;
-let lazy = {};
 let gInitPromise = null;
 let gJSONFile = null;
 
-// Where we store the file (choose something similar to sessionstore)
-ChromeUtils.defineLazyGetter(lazy, "gStorePath", () => {
-  const profD = Services.dirsvc.get("ProfD", Ci.nsIFile).path;
-  return PathUtils.join(profD, MEMORY_STORE_FILE);
+const lazy = XPCOMUtils.declareLazy({
+  // Where we store the file (choose something similar to sessionstore)
+  gStorePath() {
+    const profD = Services.dirsvc.get("ProfD", Ci.nsIFile).path;
+    return PathUtils.join(profD, MEMORY_STORE_FILE);
+  },
+  console: () =>
+    console.createInstance({
+      logModule: "MemoryStore",
+      maxLogLevelPref: "browser.smartwindow.conversation.logLevel",
+    }),
 });
-
-ChromeUtils.defineLazyGetter(lazy, "console", () =>
-  console.createInstance({
-    prefix: "MemoryStore",
-    maxLogLevelPref: "browser.smartwindow.conversation.logLevel",
-  })
-);
 
 /**
  * Migrates memories saved using the memory store v1 schema to v2
@@ -660,11 +660,13 @@ export const MemoryStore = {
    * hard delete (remove from array).
    *
    * @param {string} id
-   * @param {string} trigger
-   * @param {number|null} inUse
+   * @param {string|null} [trigger] Where the user removed the memory
+   *   (assistant, settings). Null for removals the user didn't make, which
+   *   record no memory_removed_panel event.
+   * @param {number|null} [inUse]
    * @returns {Promise<boolean>}
    */
-  async hardDeleteMemory(id, trigger = "other", inUse = null) {
+  async hardDeleteMemory(id, trigger = null, inUse = null) {
     await this.ensureInitialized();
     const idx = gState.memories.findIndex(i => i.id === id);
     if (idx === -1) {
@@ -672,11 +674,13 @@ export const MemoryStore = {
     }
     gState.memories.splice(idx, 1);
     gJSONFile?.saveSoon();
-    Glean.smartWindow.memoryRemovedPanel.record({
-      memories: gState.memories.length,
-      trigger,
-      in_use: inUse,
-    });
+    if (trigger) {
+      Glean.smartWindow.memoryRemovedPanel.record({
+        memories: gState.memories.length,
+        trigger,
+        in_use: inUse,
+      });
+    }
     Services.obs.notifyObservers(null, MEMORY_STORE_CHANGED);
     updateMemoriesCountMetric();
     return true;

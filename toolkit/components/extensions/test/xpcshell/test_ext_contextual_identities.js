@@ -1,10 +1,6 @@
 "use strict";
 
 ChromeUtils.defineESModuleGetters(this, {
-  CONTAINER_COLORS:
-    "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs",
-  CONTAINER_COLOR_ALIASES:
-    "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs",
   ContextualIdentityService:
     "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs",
   ExtensionPreferencesManager:
@@ -53,9 +49,6 @@ add_task(async function test_contextualIdentities_without_permissions() {
 });
 
 add_task(async function test_contextualIdentities_supported_colors_and_icons() {
-  // Pin the pref so the expected color codes below are deterministic.
-  Services.prefs.setBoolPref("browser.nova.enabled", false);
-
   // The API must expose exactly the palette the service considers supported,
   // in the same order, so it can't silently drift from the source of truth.
   const expectedColors = ContextualIdentityService.containerColors.map(
@@ -124,7 +117,7 @@ add_task(async function test_contextualIdentities_supported_colors_and_icons() {
     // Independent anchors with known values, so a totally broken source of
     // truth can't make the equality checks above trivially pass.
     browser.test.assertTrue(
-      colors.some(c => c.color === "blue" && c.colorCode === "#37adff"),
+      colors.some(c => c.color === "blue" && c.colorCode === "#455fe7"),
       "blue is exposed with its expected color code"
     );
     browser.test.assertTrue(
@@ -156,8 +149,6 @@ add_task(async function test_contextualIdentities_supported_colors_and_icons() {
   await extension.startup();
   await extension.awaitFinish("contextualIdentities_supported");
   await extension.unload();
-
-  Services.prefs.clearUserPref("browser.nova.enabled");
 });
 
 add_task(async function test_contextualIdentity_events() {
@@ -972,13 +963,13 @@ add_task(async function test_contextualIdentity_color_api_names() {
 
   // Forward coverage: every internal color name and alias must be listed
   // above, so this test has to be updated whenever the set of names changes.
-  for (let { name } of CONTAINER_COLORS) {
+  for (let name of ContextualIdentityService.containerColors) {
     ok(
       inputColors.includes(name),
       `internal color "${name}" is covered by the API test`
     );
   }
-  for (let legacy of Object.keys(CONTAINER_COLOR_ALIASES)) {
+  for (let legacy of ContextualIdentityService.containerColorAliases.keys()) {
     ok(
       inputColors.includes(legacy),
       `internal alias "${legacy}" is covered by the API test`
@@ -1034,21 +1025,7 @@ add_task(async function test_contextualIdentity_color_api_names() {
 });
 
 add_task(async function test_contextualIdentity_color_aliases_api() {
-  Services.prefs.setBoolPref("browser.nova.enabled", false);
-
   async function background() {
-    function setNova(value) {
-      return new Promise(resolve => {
-        browser.test.onMessage.addListener(function listener(msg) {
-          if (msg === "nova-updated") {
-            browser.test.onMessage.removeListener(listener);
-            resolve();
-          }
-        });
-        browser.test.sendMessage("set-nova", value);
-      });
-    }
-
     let cyan = await browser.contextualIdentities.create({
       name: "alias-cyan",
       color: "turquoise",
@@ -1056,9 +1033,9 @@ add_task(async function test_contextualIdentity_color_aliases_api() {
     });
     browser.test.assertEq("cyan", cyan.color, "turquoise is returned as cyan");
     browser.test.assertEq(
-      "#00c79a",
+      "#10a4ca",
       cyan.colorCode,
-      "nova off: cyan returns the legacy code"
+      "cyan returns the refreshed code"
     );
 
     let gray = await browser.contextualIdentities.create({
@@ -1072,16 +1049,6 @@ add_task(async function test_contextualIdentity_color_aliases_api() {
       icon: "circle",
     });
     browser.test.assertEq("gray", gray.color, "toolbar is returned as gray");
-
-    await setNova(true);
-
-    cyan = await browser.contextualIdentities.get(cyan.cookieStoreId);
-    browser.test.assertEq("cyan", cyan.color, "name stays cyan with nova on");
-    browser.test.assertEq(
-      "#10a4ca",
-      cyan.colorCode,
-      "nova on: the same container returns the refreshed code"
-    );
 
     await browser.contextualIdentities.remove(cyan.cookieStoreId);
     await browser.contextualIdentities.remove(gray.cookieStoreId);
@@ -1098,14 +1065,7 @@ add_task(async function test_contextualIdentity_color_aliases_api() {
     },
   });
 
-  extension.onMessage("set-nova", value => {
-    Services.prefs.setBoolPref("browser.nova.enabled", value);
-    extension.sendMessage("nova-updated");
-  });
-
   await extension.startup();
   await extension.awaitFinish("color-aliases");
   await extension.unload();
-
-  Services.prefs.clearUserPref("browser.nova.enabled");
 });

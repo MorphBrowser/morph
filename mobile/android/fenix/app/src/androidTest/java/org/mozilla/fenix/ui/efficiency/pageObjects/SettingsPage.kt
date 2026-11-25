@@ -111,6 +111,8 @@ class SettingsPage(composeRule: AndroidComposeTestRule<HomeActivityIntentTestRul
             from = pageName,
             to = "SettingsTabsPage",
             steps = listOf(NavigationStep.Click(SettingsSelectors.TABS_BUTTON)),
+            // Entered from Settings, so back returns here: clear any tray-entry marker.
+            invalidates = setOf(NavigationFacts.TAB_SETTINGS_FROM_TRAY),
         )
         builder.register(
             from = pageName,
@@ -138,6 +140,15 @@ class SettingsPage(composeRule: AndroidComposeTestRule<HomeActivityIntentTestRul
                     // "Page summaries" sits below the fold in the General section, so scroll it into view first.
                     NavigationStep.Swipe(SettingsSelectors.PAGE_SUMMARIES_BUTTON),
                     NavigationStep.Click(SettingsSelectors.PAGE_SUMMARIES_BUTTON),
+                ),
+        )
+        builder.register(
+            from = pageName,
+            to = "SettingsAiControlsPage",
+            steps =
+                listOf(
+                    NavigationStep.Swipe(SettingsSelectors.AI_CONTROLS_BUTTON),
+                    NavigationStep.Click(SettingsSelectors.AI_CONTROLS_BUTTON),
                 ),
         )
         builder.register(

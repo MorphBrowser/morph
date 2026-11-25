@@ -15,6 +15,7 @@
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_general.h"
 #include "nsXULAppAPI.h"
+#include "prenv.h"
 
 #if defined(XP_MACOSX) && defined(MOZ_SANDBOX)
 #  include "mozilla/Sandbox.h"
@@ -60,7 +61,6 @@ UtilityProcessHost::UtilityProcessHost(SandboxingKind aSandbox,
                                        RefPtr<Listener> aListener)
     : GeckoChildProcessHost(GeckoProcessType_Utility),
       mListener(std::move(aListener)),
-      mLiveToken(new media::Refcountable<bool>(true)),
       mLaunchPromise(MakeRefPtr<LaunchPromiseType::Private>(__func__)) {
   MOZ_COUNT_CTOR(UtilityProcessHost);
   LOGD("[%p] UtilityProcessHost::UtilityProcessHost sandboxingKind=%" PRIu64,
@@ -83,8 +83,6 @@ UtilityProcessHost::~UtilityProcessHost() {
   LOGD("[%p] UtilityProcessHost::~UtilityProcessHost", this);
 #endif
 
-  // DestroyProcess is in charge of both of these: by the time we get here we
-  // are already doomed on the IPC background thread, so it would be too late.
   MOZ_ASSERT(!mForceKillTimer);
   MOZ_ASSERT(mShutdownPromise.IsEmpty());
 }
@@ -97,7 +95,7 @@ bool UtilityProcessHost::Launch(geckoargs::ChildProcessArgs aExtraOpts) {
 
   LOGD("[%p] UtilityProcessHost::Launch", this);
 
-  mPrefSerializer = MakeUnique<ipc::SharedPreferenceSerializer>();
+  mPrefSerializer = std::make_unique<ipc::SharedPreferenceSerializer>();
   if (!mPrefSerializer->SerializeToSharedMemory(GeckoProcessType_Utility,
                                                 /* remoteType */ {})) {
     return false;
@@ -116,56 +114,45 @@ bool UtilityProcessHost::Launch(geckoargs::ChildProcessArgs aExtraOpts) {
     mPrefSerializer = nullptr;
     return false;
   }
-  LOGD("[%p] UtilityProcessHost::Launch launching async", this);
-  return true;
-}
-
-RefPtr<UtilityProcessHost::LaunchPromiseType>
-UtilityProcessHost::LaunchPromise() {
-  MOZ_ASSERT(NS_IsMainThread());
-
-  if (mLaunchPromiseLaunched) {
-    return mLaunchPromise;
-  }
 
   WhenProcessHandleReady()->Then(
-      GetCurrentSerialEventTarget(), __func__,
-      [this, liveToken = mLiveToken](
+      GetMainThreadSerialEventTarget(), __func__,
+      [self = RefPtr{this}](
           const ipc::ProcessHandlePromise::ResolveOrRejectValue& aResult) {
-        if (!*liveToken) {
-          // The UtilityProcessHost got deleted. Abort. The promise would have
-          // already been rejected.
-          return;
+        if (!self->mShutdownRequested &&
+            self->mLaunchPhase == LaunchPhase::Waiting) {
+          // FIXME: It would be better if we could pass the reject through
+          // InitAfterConnect.
+          if (aResult.IsResolve()) {
+            self->InitAfterConnect(true);
+          } else {
+            self->RejectPromise(aResult.RejectValue());
+          }
         }
-        if (mLaunchCompleted) {
-          return;
-        }
-        mLaunchCompleted = true;
-        if (aResult.IsReject()) {
-          RejectPromise(aResult.RejectValue());
-        }
-        // If aResult.IsResolve() then we have succeeded in launching the
-        // Utility process. The promise will be resolved once the channel has
-        // connected (or failed to) later.
       });
 
-  mLaunchPromiseLaunched = true;
-  return mLaunchPromise;
-}
+  uint32_t timeoutMs = StaticPrefs::dom_ipc_utilityProcess_startup_timeout_ms();
+  if (PR_GetEnv("MOZ_DEBUG_CHILD_PROCESS") ||
+      PR_GetEnv("MOZ_DEBUG_CHILD_PAUSE")) {
+    timeoutMs = 0;
+  }
+  if (timeoutMs) {
+    NS_NewTimerWithCallback(
+        getter_AddRefs(mLaunchTimeoutTimer),
+        [this, self = RefPtr{this}](nsITimer*) {
+          LOGD("[%p] UtilityProcessHost launch timed out", this);
+          NS_WARNING("Utility process launch timed out, abandoning it.");
+          RejectPromise(LaunchError("UtilityProcessHost::LaunchTimeout"));
+          if (mListener) {
+            mListener->OnProcessUnexpectedShutdown(this);
+          }
+        },
+        timeoutMs, nsITimer::TYPE_ONE_SHOT,
+        "ipc::UtilityProcessHost::LaunchTimeout"_ns);
+  }
 
-void UtilityProcessHost::OnChannelConnected(base::ProcessId peer_pid) {
-  MOZ_ASSERT(!NS_IsMainThread());
-  LOGD("[%p] UtilityProcessHost::OnChannelConnected", this);
-
-  GeckoChildProcessHost::OnChannelConnected(peer_pid);
-
-  NS_DispatchToMainThread(NS_NewRunnableFunction(
-      "UtilityProcessHost::OnChannelConnected",
-      [this, liveToken = mLiveToken]() {
-        if (*liveToken && mLaunchPhase == LaunchPhase::Waiting) {
-          InitAfterConnect(true);
-        }
-      }));
+  LOGD("[%p] UtilityProcessHost::Launch launching async", this);
+  return true;
 }
 
 void UtilityProcessHost::InitAfterConnect(bool aSucceeded) {
@@ -251,14 +238,10 @@ RefPtr<UtilityProcessHost::ShutdownPromiseType> UtilityProcessHost::Shutdown() {
       mShutdownPromise.Ensure(__func__);
 
   RejectPromise(LaunchError("aborted by UtilityProcessHost::Shutdown"));
+  mShutdownRequested = true;
 
   if (mUtilityProcessParent) {
-    LOGD("[%p] UtilityProcessHost::Shutdown not destroying utility process.",
-         this);
-
-    // OnChannelClosed uses this to check if the shutdown was expected or
-    // unexpected.
-    mShutdownRequested = true;
+    LOGD("[%p] UtilityProcessHost::Shutdown calling Close.", this);
 
     // The channel might already be closed if we got here unexpectedly.
     if (mUtilityProcessParent->CanSend()) {
@@ -277,7 +260,7 @@ RefPtr<UtilityProcessHost::ShutdownPromiseType> UtilityProcessHost::Shutdown() {
     return shutdownPromise;
   }
 
-  DestroyProcess();
+  mShutdownPromise.ResolveIfExists(Ok{}, __func__);
   return shutdownPromise;
 }
 
@@ -296,11 +279,7 @@ void UtilityProcessHost::StartForceKillTimer() {
 
   NS_NewTimerWithCallback(
       getter_AddRefs(mForceKillTimer),
-      [this, liveToken = mLiveToken](nsITimer*) {
-        if (!*liveToken) {
-          // The UtilityProcessHost got deleted. Abort.
-          return;
-        }
+      [this, self = RefPtr{this}](nsITimer*) {
         LOGD("[%p] UtilityProcessHost force kill timer fired", this);
         NS_WARNING(
             "Utility process did not acknowledge shutdown in time, killing.");
@@ -325,7 +304,12 @@ void UtilityProcessHost::OnChannelClosed(
     mListener->OnProcessUnexpectedShutdown(this);
   }
 
-  DestroyProcess();
+  if (mForceKillTimer) {
+    mForceKillTimer->Cancel();
+    mForceKillTimer = nullptr;
+  }
+
+  mShutdownPromise.ResolveIfExists(Ok{}, __func__);
 
   // Release the actor.
   UtilityProcessParent::Destroy(std::move(mUtilityProcessParent));
@@ -368,27 +352,6 @@ void UtilityProcessHost::KillHard(const char* aReason) {
   }
 }
 
-void UtilityProcessHost::DestroyProcess() {
-  MOZ_ASSERT(NS_IsMainThread());
-  LOGD("[%p] UtilityProcessHost::DestroyProcess", this);
-
-  RejectPromise(LaunchError("UtilityProcessHost::DestroyProcess"));
-
-  if (mForceKillTimer) {
-    mForceKillTimer->Cancel();
-    mForceKillTimer = nullptr;
-  }
-
-  // The shutdown sequence is over, graceful or not.
-  mShutdownPromise.ResolveIfExists(Ok{}, __func__);
-
-  // Any pending tasks will be cancelled from now on.
-  *mLiveToken = false;
-
-  NS_DispatchToMainThread(
-      NS_NewRunnableFunction("DestroyProcessRunnable", [this] { Destroy(); }));
-}
-
 void UtilityProcessHost::ResolvePromise() {
   MOZ_ASSERT(NS_IsMainThread());
   LOGD("[%p] UtilityProcessHost connected - resolving launch promise", this);
@@ -396,6 +359,11 @@ void UtilityProcessHost::ResolvePromise() {
   if (!mLaunchPromiseSettled) {
     mLaunchPromise->Resolve(Ok{}, __func__);
     mLaunchPromiseSettled = true;
+  }
+
+  if (mLaunchTimeoutTimer) {
+    mLaunchTimeoutTimer->Cancel();
+    mLaunchTimeoutTimer = nullptr;
   }
 
   mLaunchCompleted = true;
@@ -409,6 +377,11 @@ void UtilityProcessHost::RejectPromise(LaunchError err) {
   if (!mLaunchPromiseSettled) {
     mLaunchPromise->Reject(std::move(err), __func__);
     mLaunchPromiseSettled = true;
+  }
+
+  if (mLaunchTimeoutTimer) {
+    mLaunchTimeoutTimer->Cancel();
+    mLaunchTimeoutTimer = nullptr;
   }
 
   mLaunchCompleted = true;

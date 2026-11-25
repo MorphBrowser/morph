@@ -239,6 +239,21 @@ add_task(async function suggest() {
         },
       ]),
   });
+  await SpecialPowers.popPrefEnv();
+});
+
+add_task(async function temporal() {
+  await doTemporalTest({
+    trigger: () => doEnter(),
+    assert: () =>
+      assertEngagementTelemetry([
+        {
+          groups: "temporal",
+          results: "rust_temporal",
+          n_results: 1,
+        },
+      ]),
+  });
 });
 
 add_task(async function about_page() {
@@ -290,13 +305,15 @@ add_task(async function always_empty_if_drop_go() {
 
   await doTest(async () => {
     // Open the results view once.
-    await addTopSites("https://example.com/");
+    let cleanupTopSites = await addTopSites("https://example.com/");
     await showResultByArrowDown();
     await UrlbarTestUtils.promisePopupClose(window);
 
     await doDropAndGo("example.com");
 
     await assertEngagementTelemetry(expected);
+
+    await cleanupTopSites();
   });
 });
 
@@ -318,13 +335,15 @@ add_task(async function always_empty_if_paste_go() {
 
   await doTest(async () => {
     // Open the results view once.
-    await addTopSites("https://example.com/");
+    let cleanupTopSites = await addTopSites("https://example.com/");
     await showResultByArrowDown();
     await UrlbarTestUtils.promisePopupClose(window);
 
     await doPasteAndGo("example.com");
 
     await assertEngagementTelemetry(expected);
+
+    await cleanupTopSites();
   });
 });
 
@@ -351,6 +370,7 @@ add_task(async function actions_search_mode() {
 
     await assertEngagementTelemetry(expected);
   });
+  await SpecialPowers.popPrefEnv();
 });
 
 add_task(async function history_semantic() {
@@ -361,6 +381,7 @@ add_task(async function history_semantic() {
         {
           groups: "heuristic,general",
           results: "search_engine,history_semantic",
+          semantic_distances: ",25",
           n_results: 2,
           selected_result: "history_semantic",
         },

@@ -4,22 +4,17 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-import { createEngine } from "chrome://global/content/ml/EngineProcess.sys.mjs";
-import {
-  OAUTH_CLIENT_ID,
-  SCOPE_PROFILE_UID,
-  SCOPE_SMART_WINDOW,
-} from "resource://gre/modules/FxAccountsCommon.sys.mjs";
-import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+/**
+ * @import { PipelineOptions } from "chrome://global/content/ml/EngineProcess.sys.mjs"
+ */
 
-const lazy = XPCOMUtils.declareLazy({
-  getFxAccountsSingleton: "resource://gre/modules/FxAccounts.sys.mjs",
-});
+import { AuthProvider } from "moz-src:///browser/components/aiwindow/models/AuthProvider.sys.mjs";
+import { createEngine } from "chrome://global/content/ml/EngineProcess.sys.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 const APIKEY_PREF = "browser.smartwindow.apiKey";
 const ENDPOINT_PREF = "browser.smartwindow.endpoint";
 const CUSTOM_ENDPOINT_PREF = "browser.smartwindow.customEndpoint";
-const MODEL_CHOICE_PREF = "browser.smartwindow.firstrun.modelChoice";
 const CUSTOM_MODEL_CHOICE_ID = "0";
 const DEFAULT_ENGINE_ID = "smart-openai";
 
@@ -52,6 +47,13 @@ export class openAIEngine {
    * @type {string | null}
    */
   model = null;
+
+  /**
+   * Model choice the engine was built for.
+   *
+   * @type {string | null}
+   */
+  modelChoiceId = null;
 
   /**
    * Engine ID used for creating the engine instance
@@ -97,6 +99,13 @@ export class openAIEngine {
   #apiKey = null;
 
   /**
+   * Whether the engine runs on device, where the token retry doesn't apply.
+   *
+   * @type {boolean}
+   */
+  #onDevice = false;
+
+  /**
    * Checks whether a custom endpoint is configured via pref.
    *
    * @returns {boolean} True if the endpoint pref has a user-set value.
@@ -115,21 +124,12 @@ export class openAIEngine {
   }
 
   /**
-   * Whether this profile's requests are pointed somewhere other than Mozilla's
-   * default endpoint: either the custom model choice is selected, or the
-   * endpoint pref itself was overridden.
-   *
-   * Unlike `isCustomEndpoint` this is a profile-wide question, answerable
-   * without building an engine, so callers can withhold a feature that depends
-   * on a service only Mozilla's endpoint provides.
+   * Whether this engine instance sends requests to Mozilla's default endpoint.
    *
    * @returns {boolean}
    */
-  static usesCustomEndpoint() {
-    return (
-      Services.prefs.getStringPref(MODEL_CHOICE_PREF, "") ===
-        CUSTOM_MODEL_CHOICE_ID || openAIEngine.endpoint !== DEFAULT_ENDPOINT
-    );
+  get isDefaultEndpoint() {
+    return this.#baseURL === DEFAULT_ENDPOINT;
   }
 
   /**
@@ -158,62 +158,59 @@ export class openAIEngine {
    *
    * @param {object} options
    * @param {string} options.model
+   * @param {string|null} [options.modelChoiceId]
    * @param {string} options.serviceType
    * @param {string} options.purpose
    * @param {string|null} [options.flowId]
    * @param {string} options.feature
    * @param {string} [options.baseURL] - Endpoint base URL
    * @param {string} [options.apiKey] - API key for the endpoint
+   * @param {Partial<PipelineOptions>} [options.onDeviceOptions] - Runs on device
+   *   with llama.cpp instead of the cloud endpoint. The caller terminates
+   *   `engineInstance` when finished.
    * @returns {Promise<openAIEngine>}
    */
   static async build({
     model,
+    modelChoiceId = null,
     serviceType,
     purpose,
     flowId,
     feature,
     baseURL = openAIEngine.endpoint,
     apiKey = "",
+    onDeviceOptions,
   }) {
     const engine = new openAIEngine();
-    const engineId = `${DEFAULT_ENGINE_ID}-${feature}-${model}`;
+    const engineId = `${DEFAULT_ENGINE_ID}-${feature}-${onDeviceOptions?.modelId ?? model}`;
     engine.#engineId = engineId;
     engine.feature = feature;
     engine.model = model;
+    engine.modelChoiceId = modelChoiceId;
     engine.#serviceType = serviceType;
     engine.#purpose = purpose;
     engine.#flowId = flowId;
     engine.#baseURL = baseURL;
     engine.#apiKey = apiKey;
-    engine.engineInstance = await openAIEngine.#createOpenAIEngine(
-      engineId,
-      serviceType,
-      purpose,
-      model,
-      flowId,
-      feature,
-      baseURL,
-      apiKey
-    );
+    engine.#onDevice = !!onDeviceOptions;
+    engine.engineInstance = onDeviceOptions
+      ? await openAIEngine._createEngine({
+          engineId,
+          featureId: feature,
+          flowId,
+          ...onDeviceOptions,
+        })
+      : await openAIEngine.#createOpenAIEngine(
+          engineId,
+          serviceType,
+          purpose,
+          model,
+          flowId,
+          feature,
+          baseURL,
+          apiKey
+        );
     return engine;
-  }
-
-  /**
-   * Retrieves the Firefox account token
-   *
-   * @returns {Promise<string|null>}   The Firefox account token (string) or null
-   */
-  static async getFxAccountToken() {
-    try {
-      const fxAccounts = lazy.getFxAccountsSingleton();
-      return await fxAccounts.getOAuthToken({
-        scope: [SCOPE_SMART_WINDOW, SCOPE_PROFILE_UID],
-        client_id: OAUTH_CLIENT_ID,
-      });
-    } catch (error) {
-      console.warn("Error obtaining FxA token:", error);
-      return null;
-    }
   }
 
   /**
@@ -339,12 +336,13 @@ export class openAIEngine {
    * @returns {object}                  LLM response
    */
   async _runWithAuth(content) {
+    const { signal, ...engineContent } = content;
     try {
-      return await this.engineInstance.run(content);
+      return await this.engineInstance.run(engineContent, { signal });
     } catch (ex) {
-      // Skip the token retry flow when using a custom endpoint,
-      // as the retry logic only applies to FxAccounts tokens.
-      if (!this._is401Error(ex) || this.isCustomEndpoint) {
+      // Skip the token retry flow on device or with a custom endpoint,
+      // as the retry logic only applies to AuthProvider tokens.
+      if (!this._is401Error(ex) || this.isCustomEndpoint || this.#onDevice) {
         throw ex;
       }
 
@@ -352,21 +350,17 @@ export class openAIEngine {
         "LLM request returned a 401 - revoking our token and retrying"
       );
 
-      const fxAccounts = lazy.getFxAccountsSingleton();
-      const oldToken = content.fxAccountToken;
-      if (oldToken) {
-        await fxAccounts.removeCachedOAuthToken({ token: oldToken });
-      }
+      await AuthProvider.invalidateToken(content.token);
 
       await this._recreateEngine();
 
-      const newToken = await openAIEngine.getFxAccountToken();
-      const updatedContent = { ...content, fxAccountToken: newToken };
+      const newToken = await AuthProvider.getToken();
+      const updatedContent = { ...engineContent, token: newToken };
 
       try {
-        return await this.engineInstance.run(updatedContent);
+        return await this.engineInstance.run(updatedContent, { signal });
       } catch (retryEx) {
-        if (!this._is401Error(retryEx)) {
+        if (signal?.aborted || !this._is401Error(retryEx)) {
           throw retryEx;
         }
 
@@ -374,9 +368,7 @@ export class openAIEngine {
           "Retry LLM request still returned a 401 - revoking our token and failing"
         );
 
-        if (newToken) {
-          await fxAccounts.removeCachedOAuthToken({ token: newToken });
-        }
+        await AuthProvider.invalidateToken(newToken);
 
         throw retryEx;
       }
@@ -432,17 +424,14 @@ export class openAIEngine {
     // AbortSignal cannot be cloned via postMessage (structured clone algorithm).
     const { signal, ...engineOptions } = options;
     try {
-      const generator = this.engineInstance.runWithGenerator(engineOptions);
-      for await (const chunk of generator) {
-        if (signal?.aborted) {
-          return;
-        }
-        yield chunk;
-      }
+      yield* yieldUntilAborted(
+        this.engineInstance.runWithGenerator(engineOptions),
+        signal
+      );
     } catch (ex) {
-      // Skip the token retry flow when using a custom endpoint,
-      // as the retry logic only applies to FxAccounts tokens.
-      if (!this._is401Error(ex) || this.isCustomEndpoint) {
+      // Skip the token retry flow on device or with a custom endpoint,
+      // as the retry logic only applies to AuthProvider tokens.
+      if (!this._is401Error(ex) || this.isCustomEndpoint || this.#onDevice) {
         throw ex;
       }
 
@@ -450,25 +439,18 @@ export class openAIEngine {
         "LLM streaming request returned a 401 - revoking our token and retrying"
       );
 
-      const fxAccounts = lazy.getFxAccountsSingleton();
-      const oldToken = options.fxAccountToken;
-      if (oldToken) {
-        await fxAccounts.removeCachedOAuthToken({ token: oldToken });
-      }
+      await AuthProvider.invalidateToken(options.token);
 
       await this._recreateEngine();
 
-      const newToken = await openAIEngine.getFxAccountToken();
-      const updatedOptions = { ...engineOptions, fxAccountToken: newToken };
+      const newToken = await AuthProvider.getToken();
+      const updatedOptions = { ...engineOptions, token: newToken };
 
       try {
-        const generator = this.engineInstance.runWithGenerator(updatedOptions);
-        for await (const chunk of generator) {
-          if (signal?.aborted) {
-            return;
-          }
-          yield chunk;
-        }
+        yield* yieldUntilAborted(
+          this.engineInstance.runWithGenerator(updatedOptions),
+          signal
+        );
       } catch (retryEx) {
         if (!this._is401Error(retryEx)) {
           throw retryEx;
@@ -478,9 +460,7 @@ export class openAIEngine {
           "Retry LLM streaming request still returned a 401 - revoking our token and failing"
         );
 
-        if (newToken) {
-          await fxAccounts.removeCachedOAuthToken({ token: newToken });
-        }
+        await AuthProvider.invalidateToken(newToken);
 
         throw retryEx;
       }
@@ -499,11 +479,49 @@ export class openAIEngine {
   }
 }
 
-XPCOMUtils.defineLazyPreferenceGetter(
-  openAIEngine,
-  "endpoint",
-  ENDPOINT_PREF,
-  DEFAULT_ENDPOINT
-);
+/**
+ * Yields the chunks of `generator` until `signal` aborts. An abort ends this
+ * without waiting for the next chunk, which may never come, so the caller isn't
+ * kept alive by a request it gave up on.
+ *
+ * @param {AsyncGenerator} generator
+ * @param {AbortSignal} [signal]
+ * @yields {object} The chunks of `generator`.
+ */
+async function* yieldUntilAborted(generator, signal) {
+  if (!signal) {
+    yield* generator;
+    return;
+  }
+  try {
+    while (true) {
+      // A fresh promise per chunk, so a long stream doesn't pile up reactions
+      // on one that only settles on abort.
+      const { promise: aborted, resolve } = Promise.withResolvers();
+      // Resolve without the abort event: it belongs to the caller's window.
+      const onAbort = () => resolve();
+      signal.addEventListener("abort", onAbort, { once: true });
+      // An abort before this point fires no event. The request is still sent,
+      // since next() is called first, but its chunks aren't waited for.
+      if (signal.aborted) {
+        resolve();
+      }
+      let result;
+      try {
+        result = await Promise.race([generator.next(), aborted]);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+      if (signal.aborted || result.done) {
+        return;
+      }
+      yield result.value;
+    }
+  } finally {
+    generator.return();
+  }
+}
 
-XPCOMUtils.defineLazyPreferenceGetter(openAIEngine, "apiKey", APIKEY_PREF, "");
+XPCOMUtils.defineLazyPreferenceGetter(openAIEngine, "endpoint", ENDPOINT_PREF);
+
+XPCOMUtils.defineLazyPreferenceGetter(openAIEngine, "apiKey", APIKEY_PREF);

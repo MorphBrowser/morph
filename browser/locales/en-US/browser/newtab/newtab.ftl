@@ -239,10 +239,11 @@ newtab-empty-section-topstories-generic = You’ve caught up. Check back later f
 
 newtab-discovery-empty-section-topstories-header = You are caught up!
 newtab-discovery-empty-section-topstories-content = Check back later for more stories.
-newtab-discovery-empty-section-topstories-try-again-button = Try Again
+newtab-discovery-empty-section-topstories-try-again-button = Try again
 newtab-discovery-empty-section-topstories-loading = Loading…
-# Displays when a layout in a section took too long to fetch articles.
-newtab-discovery-empty-section-topstories-timed-out = Oops! We almost loaded this section, but not quite.
+# Headline and body shown when stories fail to load, for example when offline or the server can’t be reached.
+newtab-discovery-empty-section-topstories-unavailable-header = Stories aren’t available right now
+newtab-discovery-empty-section-topstories-unavailable-body = Check your connection or try again later.
 
 ## Strings for the story cards carousel
 
@@ -327,15 +328,21 @@ newtab-custom-widget-privacy-toggle =
 # Crossword is a widget on New Tab that shows a daily crossword puzzle.
 newtab-custom-widget-crossword-toggle =
   .label = Crossword
-# Finance is a widget on New Tab that shows stock ticker prices.
-newtab-custom-widget-stocks-toggle2 =
-  .label = Finance
 newtab-custom-widget-picture-toggle =
   .label = Picture of the day
 newtab-custom-widget-search-toggle =
   .label = Search
 newtab-custom-widget-horoscopes-toggle =
   .label = Horoscopes
+# Travel (noun) is a widget on New Tab for searching hotels, flights
+# and car rentals.
+newtab-custom-widget-travel-toggle =
+  .label = Travel
+# Solitaire is a widget on New Tab where you can play solitaire, a card game
+# for one player, also known as patience.
+# Game displays within an iframe with name “Yahoo Solitaire”
+newtab-custom-widget-solitaire-toggle =
+  .label = Solitaire
 newtab-custom-widget-section-title = Widgets
 newtab-custom-widget-section-toggle =
     .label = Widgets
@@ -534,6 +541,10 @@ newtab-wallpaper-firefox-peak-dark = A fox’s face at the left edge, on a dark 
 newtab-wallpaper-firefox-peak-light = A fox’s face at the left edge, on a light background
 newtab-wallpaper-firefox-sky-dark = Dark purple hills under a night sky
 newtab-wallpaper-firefox-sky-light = Light hills under a soft sky
+# “Wrexham AFC” is the name of a football club. Use the name the club is known
+# by in your language, if it has one: in Welsh, “CPD Wrecsam”.
+# "crest" refers to the football club's logo (team badge).
+newtab-wallpaper-firefox-wrexham = The Wrexham AFC crest on a red background
 
 # Variables
 #   $author_string (String) - The name of the creator of the photo.
@@ -565,33 +576,38 @@ newtab-weather-sponsored = { $provider } ∙ Sponsored
 newtab-weather-widget-open-menu-button =
     .title = Open weather menu
     .aria-label = Open weather menu
-newtab-weather-menu-change-location = Change location
+newtab-weather-menu-change-location = Change Location
 newtab-weather-change-location-search-input-placeholder =
     .placeholder = Search location
     .aria-label = Search location
-newtab-weather-cancel-input =
-    .title = Cancel
-    .aria-label = Cancel
+# "Back" is an icon-only button next to the location search field that returns to the widget.
+newtab-weather-search-back-button =
+    .title = Back
+    .aria-label = Back
+# Screen reader label for the dropdown below the location search field that
+# lists matching locations as the user types.
+newtab-weather-location-search-results =
+    .aria-label = Location suggestions
 # "Current" refers to the user's physical/geographic location detected via geolocation.
 newtab-weather-change-location-search-use-current =
     .label = Use current location
-newtab-weather-menu-weather-display = Weather display
+newtab-weather-menu-weather-display = Weather Display
 newtab-weather-todays-forecast = Today’s forecast
 newtab-weather-see-full-forecast = See full forecast
 # Display options are:
 # - Simple: Displays a current weather condition icon and the current temperature
 # - Detailed: Include simple information plus a short text summary: e.g. "Mostly cloudy"
 newtab-weather-menu-weather-display-option-simple = Simple
-newtab-weather-menu-change-weather-display-simple = Switch to simple view
+newtab-weather-menu-change-weather-display-simple = Switch to Simple View
 newtab-weather-menu-weather-display-option-detailed = Detailed
-newtab-weather-menu-change-weather-display-detailed = Switch to detailed view
-newtab-weather-menu-temperature-units = Temperature units
+newtab-weather-menu-change-weather-display-detailed = Switch to Detailed View
+newtab-weather-menu-temperature-units = Temperature Units
 newtab-weather-menu-temperature-option-fahrenheit = Fahrenheit
 newtab-weather-menu-temperature-option-celsius = Celsius
 newtab-weather-menu-change-temperature-units-fahrenheit = Switch to Fahrenheit
 newtab-weather-menu-change-temperature-units-celsius = Switch to Celsius
-newtab-weather-menu-learn-more = Learn more
-newtab-weather-menu-detect-my-location = Detect my location
+newtab-weather-menu-learn-more = Learn More
+newtab-weather-menu-detect-my-location = Detect My Location
 # This message is shown if user is working offline
 newtab-weather-error-not-available = Weather data is not available right now.
 newtab-weather-opt-in-see-weather = Do you want to see the weather for your location?
@@ -754,6 +770,7 @@ newtab-download-mobile-highlight-image =
     .aria-label = QR code to download { -brand-product-name } for mobile
 
 ## Strings for reporting issues with ads and content
+## Preceded by "Why are you reporting this?"
 
 newtab-report-content-why-reporting-this =
   .label = Why are you reporting this?
@@ -763,6 +780,12 @@ newtab-report-ads-reason-inappropriate =
   .label = It’s inappropriate
 newtab-report-ads-reason-seen-it-too-many-times =
   .label = I’ve seen it too many times
+newtab-report-ads-reason-scam =
+  .label = Scam or fraudulent
+newtab-report-ads-reason-misleading =
+  .label = Misleading or false claims
+newtab-report-ads-reason-offensive =
+  .label = Offensive or inappropriate
 newtab-report-content-wrong-category =
   .label = Wrong category
 newtab-report-content-outdated =
@@ -796,8 +819,8 @@ newtab-section-toast-block =
 ## Strings for task / to-do list productivity widget
 
 newtab-widget-section-title = Widgets
-newtab-widget-menu-hide = Hide widget
-newtab-widget-menu-change-size = Change size
+newtab-widget-menu-hide = Hide Widget
+newtab-widget-menu-change-size = Change Size
 # Parent label for a submenu in the widget menu that reorders the widget
 # among its siblings. "Left" and "Right" appear as items inside this submenu.
 newtab-widget-menu-move = Move
@@ -807,6 +830,12 @@ newtab-widget-menu-move-left = Left
 # Submenu item under "Move"; moves the widget one position to the right.
 # RTL locales should translate this as "Left".
 newtab-widget-menu-move-right = Right
+# Submenu item under "Move"; pins the widget to Home, the New Tab space the
+# page opens on.
+newtab-widget-menu-move-to-home = Home
+# Submenu item under "Move"; moves the widget from Home back to the Widgets
+# space, the New Tab space that holds every widget not pinned to Home.
+newtab-widget-menu-move-to-widgets = Widgets
 newtab-widget-size-small = Small
 newtab-widget-size-medium = Medium
 newtab-widget-size-large = Large
@@ -831,9 +860,9 @@ newtab-widget-section-menu-button =
 newtab-widget-add-widgets-button =
     .aria-label = Add widget
     .title = Add widget
-newtab-widget-section-menu-manage = Manage widgets
-newtab-widget-section-menu-hide-all = Hide widgets
-newtab-widget-section-menu-learn-more = Learn more
+newtab-widget-section-menu-manage = Manage Widgets
+newtab-widget-section-menu-hide-all = Hide Widgets
+newtab-widget-section-menu-learn-more = Learn More
 newtab-widget-section-feedback = Tell us what you think
 # Button shown when additional widgets are hidden beyond the
 # first row, allowing users to show them.
@@ -843,6 +872,10 @@ newtab-widget-section-show-more =
 # allowing users to collapse it back to one row.
 newtab-widget-section-show-less =
     .label = Show fewer widgets
+# Shown in place of a widget's content when the widget could not be loaded.
+# The widget's name is shown and read out separately, just before this message,
+# so this message names no widget.
+newtab-widget-error-not-available = Widget unavailable. Check back later.
 newtab-widget-lists-name-default = Checklist
 newtab-widget-lists-name-label-default =
     .label = Task list
@@ -872,25 +905,21 @@ newtab-widget-lists-completed-list = Completed ({ $number })
 newtab-widget-lists-celebration-headline = Good work
 newtab-widget-lists-celebration-subhead = All clear
 newtab-widget-task-list-menu-copy = Copy
-newtab-widget-lists-menu-edit = Edit list name
+newtab-widget-lists-menu-edit = Edit List Name
 newtab-widget-lists-menu-edit2 =
     .aria-label = Edit list name
-newtab-widget-lists-menu-create = Create a new list
-newtab-widget-lists-menu-delete = Delete this list
-newtab-widget-lists-menu-copy = Copy list to clipboard
-newtab-widget-lists-menu-learn-more = Learn more
-# "Change" is a verb here: the button switches which list is shown
-newtab-widget-lists-change-list =
-    .title = Change list
-    .aria-label = Change list
+newtab-widget-lists-menu-create = Create a New List
+newtab-widget-lists-menu-delete = Delete This List
+newtab-widget-lists-menu-copy = Copy List to Clipboard
+newtab-widget-lists-menu-learn-more = Learn More
 newtab-widget-lists-button-add-item = Add an item
 newtab-widget-lists-input-add-an-item2 =
     .placeholder = Add an item
     .aria-label = Add an item
 newtab-widget-lists-input-error = Please include text to add an item.
 newtab-widget-lists-input-menu-open-link = Open link
-newtab-widget-lists-input-menu-move-up = Move up
-newtab-widget-lists-input-menu-move-down = Move down
+newtab-widget-lists-input-menu-move-up = Move Up
+newtab-widget-lists-input-menu-move-down = Move Down
 newtab-widget-lists-input-menu-delete = Delete
 newtab-widget-lists-input-menu-edit = Edit
 newtab-widget-lists-input-menu-edit2 =
@@ -926,9 +955,9 @@ newtab-widget-timer-label-pause =
     .label = Pause
 newtab-widget-timer-reset =
     .title = Reset
-newtab-widget-timer-menu-notifications = Turn off notifications
-newtab-widget-timer-menu-notifications-on = Turn on notifications
-newtab-widget-timer-menu-learn-more = Learn more
+newtab-widget-timer-menu-notifications = Turn Off Notifications
+newtab-widget-timer-menu-notifications-on = Turn On Notifications
+newtab-widget-timer-menu-learn-more = Learn More
 # Tooltip and screen reader label for the icon-only button that opens the
 # widget's menu.
 newtab-widget-timer-open-menu-button =
@@ -942,15 +971,6 @@ newtab-widget-timer-open-menu-button =
 newtab-crossword-widget-open-menu-button =
     .title = Open crossword menu
     .aria-label = Open crossword menu
-
-## World Cup wallpaper OMC messages
-## Shown as on-screen messages promoting the World Cup wallpapers.
-
-newtab-sports-widget-message-wallpapers-title = Kick off the World Cup with new wallpapers
-newtab-sports-widget-message-wallpapers-body = Bring some match-day energy to your browser for the tournament.
-newtab-sports-widget-message-wallpapers-cta = Choose wallpaper
-newtab-sports-widget-message-wallpapers-semifinals-title = Get a new wallpaper for the semi-finals
-newtab-sports-widget-message-wallpapers-semifinals-body = Set the stage for the World Cup’s biggest matches.
 
 ## Strings introduced by the Nova redesign of the Timer widget
 
@@ -1049,22 +1069,33 @@ newtab-nova-customization-callout-primary-button =
 
 ## Strings for the Clock widget
 
-newtab-clock-widget-menu-learn-more = Learn more
-newtab-clock-widget-menu-edit = Edit clocks
-newtab-clock-widget-menu-switch-to-12h = Switch to 12-hour format
-newtab-clock-widget-menu-switch-to-24h = Switch to 24-hour format
+newtab-clock-widget-menu-learn-more = Learn More
+newtab-clock-widget-menu-edit = Edit Clocks
+newtab-clock-widget-menu-switch-to-12h = Switch to 12-Hour Format
+newtab-clock-widget-menu-switch-to-24h = Switch to 24-Hour Format
 newtab-clock-widget-label-your-clocks = Your clocks
-newtab-clock-widget-search-location-input =
-    .label = Location
+# "Back" is an icon-only button next to the city search field form that returns to the list of clocks.
+newtab-clock-widget-search-back-button =
+    .title = Back
+    .aria-label = Back
+newtab-clock-widget-search-location-input2 =
     .placeholder = Search for a city
     .aria-label = Search for a city
 # "Nickname (optional)" refers to a custom, user-defined label for a saved location
 # (e.g., "Home", "Office", or "School") to make it easier to recognize.
 # Not to be translated as a legal name, username, or alias used for identity verification.
-newtab-clock-widget-input-nickname =
+# The description counts down as the user types.
+# Variables:
+#   $count (number) - How many more characters the nickname can have.
+newtab-clock-widget-input-nickname2 =
     .label = Nickname (optional)
     .placeholder = Add a nickname
     .aria-label = Nickname (optional)
+    .description =
+        { $count ->
+            [one] { $count } character left
+           *[other] { $count } characters left
+        }
 # "Add new clock" is an icon-only button in the widget toolbar — the
 # attributes are consumed as tooltip/screen-reader label only. The button
 # never renders visible text.
@@ -1257,48 +1288,14 @@ home-prefs-stories-header2 =
 home-prefs-widgets-header =
     .label = Widgets
 
-# Lists is a widget on New Tab, similar to a to-do widget
-home-prefs-lists-header =
-    .label = Lists
-
-# Timer is a widget on New Tab, similar to the Pomodoro timer.
-home-prefs-timer-header =
-    .label = Timer
-
-# Clock is a widget on New Tab that displays time zones around the world.
-home-prefs-clocks-header =
-    .label = Clock
-
-# Privacy is a widget on New Tab that shows tracking protection activity.
-home-prefs-privacy-header =
-    .label = Privacy
-
-# Crossword is a widget on New Tab that shows a daily crossword puzzle.
-home-prefs-crossword-widget-header =
-    .label = Crossword
-
-# Finance is a widget on New Tab that shows stock ticker prices.
-home-prefs-stocks-header2 =
-    .label = Finance
-
-# Picture of the day is a widget on New Tab that shows a daily Wikimedia Commons image.
-home-prefs-picture-header =
-    .label = Picture of the day
-
-# Search is a widget on New Tab that shows the user's recent and trending
-# searches.
-home-prefs-search-widget-header =
-    .label = Search
-
-# Horoscopes is a widget on New Tab that shows daily horoscopes.
-home-prefs-horoscopes-header =
-    .label = Horoscopes
-
 home-prefs-mission-message2 =
     .message = Our sponsors support our mission to build a better web.
 
 home-prefs-manage-topics-link2 =
     .label = Manage topics
+
+home-prefs-manage-widgets-link =
+    .label = Manage widgets
 
 home-prefs-choose-wallpaper-link2 =
     .label = Choose a wallpaper
@@ -1364,7 +1361,7 @@ newtab-privacy-widget-label =
     .aria-label = Privacy
 
 # Context menu item linking to more information about the Privacy widget.
-newtab-privacy-menu-learn-more = Learn more
+newtab-privacy-menu-learn-more = Learn More
 
 # Tooltip and screen reader label for the icon-only button that opens the
 # widget's menu.
@@ -1407,6 +1404,9 @@ newtab-privacy-empty-state = { -brand-short-name } automatically blocks trackers
 # Here we are referring to the number of trackers blocked, which increases as the user browses.
 # An alternative can be "See a running total here"
 newtab-privacy-empty-state-tally = See a running tally here.
+# Shorter empty-state copy for the small card, shown as two separate lines.
+newtab-privacy-empty-state-small-title = Fewer trackers, faster browsing.
+newtab-privacy-empty-state-small-message = Browse to start blocking.
 
 ## Privacy widget — Enhanced Tracking Protection off state
 
@@ -1531,148 +1531,6 @@ newtab-privacy-message-streak-cta = View protections
 newtab-privacy-message-first-protection = Keep browsing, { -brand-short-name } will keep blocking.
 newtab-privacy-message-first-protection-cta = View protections
 
-## Strings for the Finance widget
-
-# Accessible name for the Finance widget. It is usually not shown, since the
-# list dropdown or the chosen ticker symbol takes the title's place.
-newtab-stocks-widget-title2 = Finance
-
-# "Markets" is the default list of market ETFs. The value is shown in the menu,
-# and .label is shown on the button that opens it.
-newtab-stocks-list-markets = Markets
-    .label = Markets
-# "Watchlist" is the user's list of stocks to follow. The value is shown in the
-# menu, and .label is shown on the button that opens it.
-newtab-stocks-list-watchlist = Watchlist
-    .label = Watchlist
-
-# Context menu item that opens the stock search (by company name or ticker symbol).
-newtab-stocks-menu-search-stocks = Search by name or symbol
-
-# Context menu item linking to more information about the Finance widget.
-newtab-stocks-menu-learn-more = Learn more
-
-# Shown in the Finance widget when its data could not be loaded.
-newtab-stocks-error-not-available = Stock data is not available.
-
-# Tooltip and screen reader label for the icon-only button that opens the
-# widget's menu.
-newtab-stocks-widget-open-menu-button2 =
-    .title = Open finance menu
-    .aria-label = Open finance menu
-
-# Toolbar button that opens the stock search. It shows only the icon until it is
-# hovered or focused, then the .label as well; "Search" is a verb. .title and
-# .aria-label name it for tooltips and screen readers.
-newtab-stocks-search-button =
-    .label = Search
-    .title = Search by name or symbol
-    .aria-label = Search by name or symbol
-
-# Shown on the Watchlist while the user has no stocks in it, above a button that
-# opens the stock search.
-newtab-stocks-watchlist-empty = Start watching stocks that matter to you
-
-# Button under the empty-watchlist message that opens the stock search. Shown
-# with a magnifying-glass icon and the .label, where "Search" is a verb; .title
-# and .aria-label name it the same way as the toolbar search button.
-newtab-stocks-watchlist-empty-search =
-    .label = Search
-    .title = Search by name or symbol
-    .aria-label = Search by name or symbol
-
-## Screen-reader summary of a stock ticker.
-## Variables:
-##   $name (String) - the full fund/ETF name, e.g. "SPDR S&P 500 ETF Trust".
-##   $change (String) - the day's percentage change, e.g. "+2.1%".
-##   $price (String) - the last price, e.g. "$559.44".
-
-# Stock increased (went up) during the day
-newtab-stocks-ticker-status-up = { $name }, up { $change }, { $price }
-
-# Stock decreased (went down) during the day
-newtab-stocks-ticker-status-down = { $name }, down { $change }, { $price }
-
-# Stock didn't change during the day
-newtab-stocks-ticker-status-flat = { $name }, no change, { $change }, { $price }
-
-## Finance widget watchlist add and remove controls
-
-# Tooltip and screen-reader label for the button that adds a stock to the watchlist.
-# The button shows only an icon and never renders visible text.
-# Variables:
-#   $name (String) - the fund/ETF name, e.g. "SPDR S&P 500 ETF Trust".
-newtab-stocks-add-to-watchlist =
-    .title = Add { $name } to watchlist
-    .aria-label = Add { $name } to watchlist
-
-# Tooltip and screen-reader label for the button that removes a stock from the watchlist.
-# The button shows only an icon and never renders visible text.
-# Variables:
-#   $name (String) - the fund/ETF name.
-newtab-stocks-remove-from-watchlist =
-    .title = Remove { $name } from watchlist
-    .aria-label = Remove { $name } from watchlist
-
-# Visually hidden text on a Markets row whose stock is already in the watchlist, so
-# screen readers announce that it is saved. Removal happens on the Watchlist tab.
-# Variables:
-#   $name (String) - the fund/ETF name.
-newtab-stocks-in-watchlist = { $name } is in your watchlist
-
-# Announced to screen readers after a stock is added to the watchlist.
-# Variables:
-#   $name (String) - the fund/ETF name.
-newtab-stocks-added-to-watchlist = Added { $name } to watchlist
-
-# Announced to screen readers after a stock is removed from the watchlist.
-# Variables:
-#   $name (String) - the fund/ETF name.
-newtab-stocks-removed-from-watchlist = Removed { $name } from watchlist
-
-## Finance widget ticker search
-
-# Placeholder and screen-reader label for the ticker search input.
-newtab-stocks-search-input =
-    .placeholder = Search by name or symbol
-    .aria-label = Search by name or symbol
-
-# "Search results" is the accessible label for the list of tickers matching the
-# search. It means "results of the search", not "search within the results".
-newtab-stocks-search-results =
-    .aria-label = Search results
-
-# Shown in the search panel, where the results will appear, until the user
-# has searched.
-newtab-stocks-search-hint = Search for symbols or companies to add to your watchlist
-
-# "Back" is an icon-only button in the search panel header that returns to the
-# widget — the attributes are consumed as tooltip/screen-reader label only. The
-# button never renders visible text.
-newtab-stocks-search-back-button =
-    .title = Back
-    .aria-label = Back
-
-# Shown when a ticker search returns no matching symbols.
-# Variables:
-#   $query (String) - the text the user searched for.
-newtab-stocks-search-no-results = No results for “{ $query }”
-
-# Shown while a ticker search is running; also announced to screen readers.
-newtab-stocks-search-loading = Loading…
-
-# Shown when a ticker search fails to reach the service.
-newtab-stocks-search-error = Couldn’t search right now. Try again later.
-
-# Shown below successful search results when the watchlist is already full.
-# Variables:
-#   $limit (Number) - the maximum number of stocks the watchlist can hold.
-newtab-stocks-watchlist-full =
-    { $limit ->
-        [one] You can add up to { $limit } stock. Remove one to add another.
-        *[other] You can add up to { $limit } stocks. Remove one to add another.
-    }
-
 ## Strings for the Picture of the Day widget
 
 # Title shown at the top of the widget, with the source name appended.
@@ -1681,6 +1539,11 @@ newtab-picture-header = Picture of the day · Wikimedia Commons
 
 # Shorter title shown at the top of the widget, without the source name.
 newtab-picture-header-main = Picture of the day
+
+# Title shown at the top of the widget, with the date of the picture shown.
+# $date (Date) - the day Wikimedia Commons featured the picture as its picture
+# of the day, shown in numbers (for example 10/8/2026).
+newtab-picture-header-date = Picture of the day: { DATETIME($date, year: "numeric", month: "numeric", day: "numeric") }
 
 # Attribution line shown under the title once a picture loads: an author
 # credit, a link to the picture's source page, and a link to its license.
@@ -1704,30 +1567,30 @@ newtab-picture-widget-open-menu-button =
     .title = Open picture of the day menu
     .aria-label = Open picture of the day menu
 
-# Button that sets the current picture as the New Tab background wallpaper. The
-# button collapses to an icon when not hovered/focused, so .title is its tooltip.
-newtab-picture-set-wallpaper =
+# Button that sets the picture shown in the widget, which may be today’s or the
+# previous day’s, as the New Tab background wallpaper. The button collapses to an
+# icon when not hovered/focused, so .title is its tooltip.
+newtab-picture-set-wallpaper2 =
     .label = Set wallpaper
     .title = Set wallpaper
-    .aria-label = Set today’s picture as your wallpaper
+    .aria-label = Set this picture as your wallpaper
 
 # Context menu item that opens the New Tab customization panel.
-newtab-picture-menu-manage-wallpaper = Manage wallpaper
+newtab-picture-menu-manage-wallpaper = Manage Wallpaper
 
-# Context menu item that hides today’s picture, replacing it with an existing
-# wallpaper.
-newtab-picture-menu-hide-photo = Hide today’s picture
+# Context menu item that hides the picture shown in the widget.
+newtab-picture-menu-hide-photo2 = Hide This Picture
 
-# Context menu item that restores today’s picture after it has been hidden.
-newtab-picture-menu-show-photo = Show today’s picture
+# Context menu item that restores the picture after it has been hidden.
+newtab-picture-menu-show-photo2 = Show Picture
 
 # Context menu item linking to more information about the widget.
-newtab-picture-menu-learn-more = Learn more
+newtab-picture-menu-learn-more = Learn More
 
 # Icon button shown on the widget once the picture is hidden; restores it.
-newtab-picture-show-button =
-    .title = Show today’s picture
-    .aria-label = Show today’s picture
+newtab-picture-show-button2 =
+    .title = Show picture
+    .aria-label = Show picture
 
 # Shown when there is no new picture to display yet.
 newtab-picture-check-back = Check back tomorrow for a new picture
@@ -1748,7 +1611,7 @@ newtab-search-widget-open-menu-button =
     .aria-label = Open search menu
 
 # Context menu item linking to more information about the widget.
-newtab-recent-searches-menu-learn-more = Learn more
+newtab-recent-searches-menu-learn-more = Learn More
 
 # Tab listing the searches the user has made recently.
 newtab-recent-searches-tab-recent = Recent searches
@@ -1790,7 +1653,75 @@ newtab-horoscopes-widget-open-menu-button =
     .aria-label = Open horoscopes menu
 
 # Context menu item linking to more information about the widget.
-newtab-horoscopes-menu-learn-more = Learn more
+newtab-horoscopes-menu-learn-more = Learn More
+
+# Context menu item linking to the Yahoo website, the provider of the
+# horoscopes. “Yahoo” is a brand name and should not be translated.
+newtab-horoscopes-menu-powered-by-yahoo = Powered by Yahoo
+
+## Strings for the Travel widget
+
+# Widget heading; also the widget's accessible name. Travel (noun) is a
+# widget on New Tab for searching hotels, flights and car rentals.
+newtab-travel-widget-title = Travel
+
+# Tooltip and screen reader label for the icon-only button that opens the
+# widget's menu.
+newtab-travel-widget-open-menu-button =
+    .title = Open travel menu
+    .aria-label = Open travel menu
+
+# Context menu item linking to more information about the widget.
+newtab-travel-menu-learn-more = Learn More
+
+# Context menu item linking to the Kayak website, the provider of the
+# travel search. “Kayak” is a brand name and should not be translated.
+newtab-travel-menu-powered-by-kayak = Powered by Kayak
+
+## Strings for the Solitaire widget. Solitaire is a widget on New Tab where you
+## can play solitaire, a card game for one player, also known as patience.
+## Game displays within an iframe with name “Yahoo Solitaire”
+
+# Widget heading; also the widget's accessible name.
+newtab-solitaire-widget-title = Solitaire
+
+# Tooltip and screen reader label for the icon-only button that opens the
+# widget's menu.
+newtab-solitaire-widget-open-menu-button =
+    .title = Open solitaire menu
+    .aria-label = Open solitaire menu
+
+# Context menu item linking to more information about the widget.
+newtab-solitaire-menu-learn-more = Learn More
+
+## Strings for the Wrexham AFC widget. Wrexham AFC is a football club from
+## Wrexham, Wales. For now, the widget is only expected to be shown in Welsh
+## and British English. “Wrexham AFC” is the club’s name. Use the name the
+## club is known by in your language, if it has one: in Welsh, “CPD Wrecsam”.
+
+# The widget's name. .title is its heading and accessible name, .label its
+# Customize panel toggle, and .menu-label the screen reader label of the
+# button that opens its menu.
+newtab-custom-widget-wrexhamafc =
+    .title = Wrexham AFC
+    .label = Wrexham AFC
+    .menu-label = Open Wrexham AFC menu
+
+# Menu item opening a submenu that switches what the widget shows. “View” is a
+# noun here, as in “the view the widget shows”.
+newtab-widget-wrexhamafc-menu-view = View
+
+## Options in the View submenu, each switching the widget to a different view.
+## These are football terms: “Matches” shows the club’s latest or next match,
+## with its score once it has started; “Table” shows the league table, the
+## standings of the teams in the club’s league; and “Fixtures” lists the club’s
+## upcoming scheduled matches.
+
+newtab-widget-wrexhamafc-view-matches = Matches
+newtab-widget-wrexhamafc-view-table = Table
+newtab-widget-wrexhamafc-view-fixtures = Fixtures
+# Menu item opening the New Tab customize panel, where wallpapers are chosen.
+newtab-widget-wrexhamafc-menu-wallpapers = Wallpapers
 
 ## Strings for the navigable panels that new tab content area can be
 ## split into.

@@ -1,13 +1,8 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
 buildscript {
-    repositories {
-        gradle.configureMavenRepositories(delegate)
-    }
-
     dependencies {
-        classpath libs.android.gradle.plugin
-        classpath libs.kotlin.gradle.plugin
+        classpath libs.mozilla.glean.gradle.plugin
     }
 }
 

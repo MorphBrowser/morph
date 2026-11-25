@@ -5,6 +5,7 @@
 package mozilla.components.feature.contextmenu
 
 import android.content.ActivityNotFoundException
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.view.View
@@ -93,6 +94,37 @@ class ContextMenuCandidateTest {
                 "mozac.feature.contextmenu.copy_email_address",
             ),
             candidates.map { it.id },
+        )
+    }
+
+    @Test
+    fun `WHEN additional tab candidates are provided THEN they are added after the open in tab candidates`() {
+        val additionalCandidate =
+            ContextMenuCandidate(
+                id = "test.candidate",
+                label = "Test candidate",
+                showFor = { _, _ -> true },
+                action = { _, _ -> },
+            )
+
+        val candidates =
+            ContextMenuCandidate.defaultCandidates(
+                context = testContext,
+                tabsUseCases = mock(),
+                contextMenuUseCases = mock(),
+                snackBarParentView = mock(),
+                downloadsLocation = { "downloads" },
+                additionalTabCandidates = listOf(additionalCandidate),
+            )
+
+        assertEquals(
+            listOf(
+                "mozac.feature.contextmenu.open_in_new_tab",
+                "mozac.feature.contextmenu.open_in_private_tab",
+                "test.candidate",
+                "mozac.feature.contextmenu.copy_link",
+            ),
+            candidates.take(4).map { it.id },
         )
     }
 
@@ -1688,6 +1720,60 @@ class ContextMenuCandidateTest {
     }
 
     @Test
+    fun `Candidate 'Copy Link' marks the clip as sensitive only in a private tab`() {
+        val candidate =
+            ContextMenuCandidate.createCopyLinkCandidate(testContext, CoordinatorLayout(testContext), snackbarDelegate)
+        val clipboardManager = testContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = true),
+            HitResult.UNKNOWN("https://www.mozilla.org/link"),
+        )
+
+        assertEquals("https://www.mozilla.org/link", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertTrue(clipboardManager.isPrimaryClipSensitive())
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = false),
+            HitResult.UNKNOWN("https://www.mozilla.org/link"),
+        )
+
+        assertEquals("https://www.mozilla.org/link", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertFalse(clipboardManager.isPrimaryClipSensitive())
+    }
+
+    @Test
+    fun `Candidate 'Copy link text' marks the clip as sensitive only in a private tab`() {
+        val candidate =
+            ContextMenuCandidate.createCopyLinkTextCandidate(
+                testContext,
+                CoordinatorLayout(testContext),
+                snackbarDelegate,
+            )
+        val clipboardManager = testContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = true),
+            HitResult.UNKNOWN(src = "https://www.mozilla.org", linkText = "Mozilla"),
+        )
+
+        assertEquals("Mozilla", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertTrue(clipboardManager.isPrimaryClipSensitive())
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = false),
+            HitResult.UNKNOWN(src = "https://www.mozilla.org", linkText = "Mozilla"),
+        )
+
+        assertEquals("Mozilla", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertFalse(clipboardManager.isPrimaryClipSensitive())
+    }
+
+    @Test
     fun `Candidate 'Copy Image Location'`() {
         val parentView = CoordinatorLayout(testContext)
 
@@ -1786,6 +1872,35 @@ class ContextMenuCandidateTest {
                 HitResult.IMAGE("https://www.mozilla.org"),
             )
         )
+    }
+
+    @Test
+    fun `Candidate 'Copy Image Location' marks the clip as sensitive only in a private tab`() {
+        val candidate =
+            ContextMenuCandidate.createCopyImageLocationCandidate(
+                testContext,
+                CoordinatorLayout(testContext),
+                snackbarDelegate,
+            )
+        val clipboardManager = testContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = true),
+            HitResult.IMAGE_SRC("https://firefox.com", "https://getpocket.com"),
+        )
+
+        assertEquals("https://firefox.com", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertTrue(clipboardManager.isPrimaryClipSensitive())
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = false),
+            HitResult.IMAGE_SRC("https://firefox.com", "https://getpocket.com"),
+        )
+
+        assertEquals("https://firefox.com", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertFalse(clipboardManager.isPrimaryClipSensitive())
     }
 
     @Test
@@ -2037,6 +2152,35 @@ class ContextMenuCandidateTest {
     }
 
     @Test
+    fun `Candidate 'Copy email address' marks the clip as sensitive only in a private tab`() {
+        val candidate =
+            ContextMenuCandidate.createCopyEmailAddressCandidate(
+                testContext,
+                CoordinatorLayout(testContext),
+                snackbarDelegate,
+            )
+        val clipboardManager = testContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = true),
+            HitResult.UNKNOWN("mailto:example@example.com"),
+        )
+
+        assertEquals("example@example.com", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertTrue(clipboardManager.isPrimaryClipSensitive())
+
+        clipboardManager.clearPrimaryClip()
+        candidate.action.invoke(
+            createTab("https://www.mozilla.org", private = false),
+            HitResult.UNKNOWN("mailto:example@example.com"),
+        )
+
+        assertEquals("example@example.com", clipboardManager.primaryClip?.getItemAt(0)?.text)
+        assertFalse(clipboardManager.isPrimaryClipSensitive())
+    }
+
+    @Test
     fun `Candidate 'Share email address'`() {
         val context = spy(testContext)
 
@@ -2254,7 +2398,29 @@ class ContextMenuCandidateTest {
 
         assertTrue(sessionState.isUrlSchemeAllowed("https://mozilla.org"))
     }
+
+    @Test
+    fun `GIVEN IMAGE_SRC with title combinations WHEN getTitleOrLink is called THEN it returns the title or link`() {
+        HitResult.IMAGE_SRC("https://mozilla.org/image.png", "https://mozilla.org", "Image title").also { result ->
+            assertEquals("https://mozilla.org\n\nImage title", result.getDisplayTitle())
+        }
+
+        HitResult.IMAGE_SRC("https://mozilla.org/image.png", "https://mozilla.org", " ").also { result ->
+            assertEquals("https://mozilla.org", result.getDisplayTitle())
+        }
+
+        HitResult.IMAGE_SRC("https://mozilla.org/image.png", "https://mozilla.org").also { result ->
+            assertEquals("https://mozilla.org", result.getDisplayTitle())
+        }
+
+        HitResult.IMAGE_SRC("https://mozilla.org/image.png", "https://mozilla.org", "Image title").also { result ->
+            assertEquals("https://mozilla.org", result.getLink())
+        }
+    }
 }
+
+private fun ClipboardManager.isPrimaryClipSensitive(): Boolean =
+    primaryClip?.description?.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) == true
 
 private class TestSnackbarDelegate : SnackbarDelegate {
     var hasShownSnackbar = false

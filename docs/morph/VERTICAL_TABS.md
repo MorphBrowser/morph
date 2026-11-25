@@ -19,6 +19,8 @@ The sidebar should:
 
 Morph should support at least:
 
+Implementation status (M1): Morph's compact state is Firefox's collapsed launcher, and its standard state is Firefox's expanded launcher (`sidebar.visibility`, `sidebar.expandOnHover`). A distinct expanded state is not implemented; see `ROADMAP.md`.
+
 ### Compact
 
 Primarily icons/favicons, with strong selection and accessible labels/tooltips.
@@ -36,6 +38,8 @@ Transitions between these states should preserve the physical identity of tabs a
 ## Selection
 
 The selected tab uses a material selection surface or indicator that transitions between tabs.
+
+Implemented in M1: a flat, fully rounded secondary-container surface with a short colour and shape transition. The moving indicator is not implemented yet (M2).
 
 When selection changes, the indicator should move/reshape towards the destination rather than independently disappearing and reappearing.
 

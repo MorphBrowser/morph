@@ -15,6 +15,8 @@ support-files = [
   "html_zstd-test-page.html",
   "html_image-tooltip-test-page.html",
   "html_cache-test-page.html",
+  "html_connection-allowlist-test-page.html",
+  "html_connection-allowlist-test-page.html^headers^",
   "html_cors-test-page.html",
   "html_csp-frame-test-page.html",
   "html_csp-resend-test-page.html",
@@ -130,6 +132,8 @@ support-files = [
 
 ["browser_net_block-before-network.js"]
 
+["browser_net_block-connection-allowlist.js"]
+
 ["browser_net_block-context.js"]
 
 ["browser_net_block-csp.js"]
@@ -201,6 +205,8 @@ https_first_disabled = true # Bug 1898241
 ["browser_net_complex-params.js"]
 
 ["browser_net_content-type.js"]
+
+["browser_net_cookies_filter.js"]
 
 ["browser_net_cookies_sorted.js"]
 

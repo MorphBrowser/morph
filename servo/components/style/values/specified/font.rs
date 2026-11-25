@@ -1000,8 +1000,8 @@ impl FontSize {
     /// of different styles and font instances when "random" floating-point sizes are used.
     #[inline]
     pub fn quantize_font_size(size: CSSPixelLength) -> CSSPixelLength {
-        // If the size is < 1024px, just snap to an integer number of appUnits.
-        if size.px() < 1024.0 {
+        // If the size is < 1024px and >= 0.1px, just snap to an integer number of appUnits.
+        if size.px() < 1024.0 && size.px() >= 0.1 {
             return CSSPixelLength::from(app_units::Au::from_f32_px(size.px()));
         }
 
@@ -1021,8 +1021,14 @@ impl FontSize {
         }
         let d = size.px() * SCALE_PLUS_ONE;
         let t = d - size.px();
-        // Snap the result to integer appUnits.
-        CSSPixelLength::from(app_units::Au::from_f32_px(d - t))
+        let quantized = d - t;
+        if quantized < 0.1 {
+            // Don't snap tiny values.
+            CSSPixelLength::new(quantized)
+        } else {
+            // Snap the quantized result to integer appUnits.
+            CSSPixelLength::from(app_units::Au::from_f32_px(quantized))
+        }
     }
 }
 
@@ -1610,10 +1616,13 @@ pub enum FontSynthesis {
     Clone,
     Copy,
     Debug,
+    Deserialize,
     Eq,
+    Hash,
     MallocSizeOf,
     Parse,
     PartialEq,
+    Serialize,
     SpecifiedValueInfo,
     ToComputedValue,
     ToCss,
@@ -2343,6 +2352,13 @@ pub enum FontVariantPosition {
     Super,
 }
 
+fn font_variant_caps_all_values_enabled(_: &ParserContext) -> bool {
+    crate::pref!(
+        "layout.css.font-variant-caps.all-values.enabled",
+        gecko = true
+    )
+}
+
 /// https://drafts.csswg.org/css-fonts/#propdef-font-variant-caps
 #[allow(missing_docs)]
 #[derive(
@@ -2368,14 +2384,14 @@ pub enum FontVariantPosition {
 pub enum FontVariantCaps {
     Normal,
     SmallCaps,
-    #[cfg(feature = "gecko")]
+    #[parse(condition = "font_variant_caps_all_values_enabled")]
     AllSmallCaps,
-    #[cfg(feature = "gecko")]
+    #[parse(condition = "font_variant_caps_all_values_enabled")]
     PetiteCaps,
-    #[cfg(feature = "gecko")]
+    #[parse(condition = "font_variant_caps_all_values_enabled")]
     AllPetiteCaps,
-    #[cfg(feature = "gecko")]
+    #[parse(condition = "font_variant_caps_all_values_enabled")]
     Unicase,
-    #[cfg(feature = "gecko")]
+    #[parse(condition = "font_variant_caps_all_values_enabled")]
     TitlingCaps,
 }

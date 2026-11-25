@@ -66,7 +66,6 @@ add_setup(
 
     Services.prefs.setBoolPref("network.http.happy_eyeballs_enabled", true);
     Services.prefs.setIntPref("network.http.speculative-parallel-limit", 0);
-    Services.prefs.setBoolPref("network.ssl_tokens_cache_enabled", true);
     Services.prefs.setBoolPref("network.http.http3.enable", false);
     // Make the H2 idle timeout very short so the warm-up H2 session is
     // reclaimed quickly, leaving the CM entry alive (mUsingSpdy=true) but
@@ -76,7 +75,6 @@ add_setup(
     registerCleanupFunction(async () => {
       Services.prefs.clearUserPref("network.http.happy_eyeballs_enabled");
       Services.prefs.clearUserPref("network.http.speculative-parallel-limit");
-      Services.prefs.clearUserPref("network.ssl_tokens_cache_enabled");
       Services.prefs.clearUserPref("network.http.http3.enable");
       Services.prefs.clearUserPref("network.http.http2.timeout");
       Services.prefs.clearUserPref("network.dns.disableIPv6");
@@ -178,10 +176,7 @@ function fetchNoThrow(url) {
 add_task(
   {
     skip_if: () =>
-      AppConstants.MOZ_SYSTEM_NSS ||
-      !gServerStarted ||
-      mozinfo.os == "android" ||
-      mozinfo.socketprocess_networking,
+      AppConstants.MOZ_SYSTEM_NSS || !gServerStarted || mozinfo.os == "android",
   },
   async function test_he_0rtt_alpn_switch_dead_winner_blocks_host() {
     // Warm-up (IPv4-only) sets mUsingSpdy=true on the CM entry and issues an
@@ -284,10 +279,7 @@ add_task(
 add_task(
   {
     skip_if: () =>
-      AppConstants.MOZ_SYSTEM_NSS ||
-      !gServerStarted ||
-      mozinfo.os == "android" ||
-      mozinfo.socketprocess_networking,
+      AppConstants.MOZ_SYSTEM_NSS || !gServerStarted || mozinfo.os == "android",
   },
   async function test_he_0rtt_h2_txn_gone_closes_connection() {
     const host = "0rtt-reject-h2.example.com";
@@ -368,10 +360,7 @@ add_task(
 add_task(
   {
     skip_if: () =>
-      AppConstants.MOZ_SYSTEM_NSS ||
-      !gServerStarted ||
-      mozinfo.os == "android" ||
-      mozinfo.socketprocess_networking,
+      AppConstants.MOZ_SYSTEM_NSS || !gServerStarted || mozinfo.os == "android",
   },
   async function test_he_0rtt_h1_reject_txn_gone_no_assert() {
     // Regression test for bug 2047480: an H1 0-RTT request whose real

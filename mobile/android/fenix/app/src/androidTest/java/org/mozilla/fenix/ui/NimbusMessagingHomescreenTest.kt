@@ -5,7 +5,6 @@
 package org.mozilla.fenix.ui
 
 import android.content.Intent
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.junit4.v2.AndroidComposeTestRule as AndroidComposeTestRuleV2
 import mozilla.components.service.nimbus.messaging.FxNimbusMessaging
 import mozilla.components.service.nimbus.messaging.MessageData
@@ -62,11 +61,10 @@ class NimbusMessagingHomescreenTest {
 
     @get:Rule(order = 3) val memoryLeaksRule = DetectMemoryLeaksRule(composeTestRule = { composeTestRule })
 
-    @OptIn(ExperimentalTestApi::class)
     @Before
     fun setUp() {
         // Set up nimbus message
-        FxNimbusMessaging.features.messaging.withInitializer { _, _ ->
+        FxNimbusMessaging.features.messaging.withInitializer { _ ->
             // FML generated objects.
             Messaging(
                 messages =
@@ -88,7 +86,7 @@ class NimbusMessagingHomescreenTest {
         }
 
         // Remove some homescreen features not needed for testing
-        FxNimbus.features.homescreen.withInitializer { _, _ ->
+        FxNimbus.features.homescreen.withInitializer { _ ->
             // These are FML generated objects and enums
             Homescreen(
                 sectionsEnabled =

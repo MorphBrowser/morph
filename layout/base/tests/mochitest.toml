@@ -271,6 +271,8 @@ support-files = ["file_dynamic_toolbar_max_height.html"]
 
 ["test_emulate_forced_colors.html"]
 
+["test_emulate_prefers_contrast.html"]
+
 ["test_emulate_prefers_reduced_motion.html"]
 
 ["test_event_target_radius.html"]
@@ -607,6 +609,18 @@ support-files = [
   "chrome/blue-32x32.png",
   "caret-empty-contenteditable-overflow-click.html",
   "caret-empty-contenteditable-overflow-click-ref.html",
+  "caret-atomic-inline-with-non-initial-baseline.html",
+  "caret-atomic-inline-with-non-initial-baseline-ref.html",
+  "caret-atomic-inline-with-non-initial-baseline-vertical-rl.html",
+  "caret-atomic-inline-with-non-initial-baseline-vertical-rl-ref.html",
+  "caret-in-empty-last-line-1.html",
+  "caret-in-empty-last-line-2.html",
+  "caret-in-empty-last-line-3.html",
+  "caret-in-empty-last-line-4.html",
+  "caret-in-empty-last-line-ref.html",
+  "caret-in-invisible-last-line-1.html",
+  "caret-in-invisible-last-line-2.html",
+  "caret-in-invisible-last-line-ref.html",
 ]
 
 ["test_resize_flush.html"]

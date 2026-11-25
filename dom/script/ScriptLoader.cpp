@@ -20,12 +20,13 @@
 #include "js/PropertyAndElement.h"  // JS_DefineProperty
 #include "js/Transcoding.h"  // JS::TranscodeRange, JS::TranscodeResult, JS::IsTranscodeFailureResult
 #include "js/Utility.h"
-#include "js/experimental/CompileScript.h"  // JS::FrontendContext, JS::NewFrontendContext, JS::DestroyFrontendContext, JS::SetNativeStackQuota, JS::ThreadStackQuotaForSize, JS::CompilationStorage, JS::CompileGlobalScriptToStencil, JS::CompileModuleScriptToStencil, JS::DecodeStencil, JS::PrepareForInstantiate, JS::AllowCancellingCompilation, JS::RequestFrontendCompilationCancellation
+#include "js/experimental/CompileScript.h"  // JS::FrontendContext, JS::NewFrontendContext, JS::DestroyFrontendContext, JS::SetNativeStackQuota, JS::ThreadStackQuotaForSize, JS::CompilationStorage, JS::CompileGlobalScriptToStencil, JS::CompileModuleScriptToStencil, JS::DecodeStencil, JS::PrepareForInstantiate, JS::FrontendContextCreationOptions, JS::RequestFrontendCompilationCancellation
 #include "js/experimental/JSStencil.h"  // JS::Stencil, JS::InstantiationStorage, JS::StartCollectingDelazifications, JS::IsStencilCacheable
 #include "js/loader/LoadedScript.h"
 #include "js/loader/ModuleLoadRequest.h"
 #include "js/loader/ModuleLoaderBase.h"
 #include "js/loader/ScriptLoadRequest.h"
+#include "mozilla/AntiTrackingUtils.h"
 #include "mozilla/AppShutdown.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/AsyncEventDispatcher.h"
@@ -1044,8 +1045,8 @@ nsresult ScriptLoader::PrepareIncrementalStreamLoader(
     ScriptLoadRequest* aRequest) {
   UniquePtr<mozilla::dom::SRICheckDataVerifier> sriDataVerifier;
   if (!aRequest->mIntegrity.IsEmpty()) {
-    sriDataVerifier = MakeUnique<SRICheckDataVerifier>(aRequest->mIntegrity,
-                                                       aChannel, mReporter);
+    sriDataVerifier = std::make_unique<SRICheckDataVerifier>(
+        aRequest->mIntegrity, aChannel, mReporter);
   }
 
   RefPtr<ScriptLoadHandler> handler =
@@ -1379,7 +1380,7 @@ void ScriptLoader::TryUseCache(ReferrerPolicy aReferrerPolicy,
     //           different encoding, and thus this cache entry shouldn't be
     //           used.
     if (aRequestType == ScriptLoadRequestType::Preload &&
-        !aRequest->mClassicScriptHintEncoding && mDocument &&
+        !aRequest->mClassicScriptHintEncoding &&
         mDocument->GetDocumentCharacterSetSource() == 0) {
       // This is the (b-1) case above.
       LOG(
@@ -1474,7 +1475,7 @@ void ScriptLoader::EmulateNetworkEvents(ScriptLoadRequest* aRequest) {
 
   NotifyObserversForCachedScript(aRequest);
 
-  {
+  if (const auto* perfData = aRequest->mNetworkMetadata->GetPerfData()) {
     nsAutoCString name;
     nsString entryName;
     aRequest->URI()->GetSpec(name);
@@ -1483,8 +1484,7 @@ void ScriptLoader::EmulateNetworkEvents(ScriptLoadRequest* aRequest) {
     auto now = TimeStamp::Now();
 
     SharedSubResourceCacheUtils::AddPerformanceEntryForCache(
-        entryName, GetInitiatorType(aRequest), aRequest->mNetworkMetadata, now,
-        now, mDocument);
+        entryName, GetInitiatorType(aRequest), *perfData, now, now, mDocument);
   }
 }
 
@@ -1574,6 +1574,11 @@ bool ScriptLoader::ProcessExternalScript(nsIScriptElement* aElement,
     return false;
   }
 
+  // https://html.spec.whatwg.org/#prepare-the-script-element
+  // Step 33.7. If el is potentially render-blocking, then block rendering on
+  // el.
+  mDocument->MaybeBlockRendering(*aScriptContent->AsElement());
+
   nsString nonce = nsContentSecurityUtils::GetIsElementNonceableNonce(
       *aScriptContent->AsElement());
   SRIMetadata sriMetadata;
@@ -1608,6 +1613,8 @@ bool ScriptLoader::ProcessExternalScript(nsIScriptElement* aElement,
       // Probably plans have changed; even though the preload was allowed seems
       // like the actual load is not; let's cancel the preload request.
       request->Cancel();
+      // The script never loads, so nothing else unblocks rendering for it.
+      mDocument->UnblockRendering(*aScriptContent->AsElement());
       return false;
     }
 
@@ -1672,6 +1679,8 @@ bool ScriptLoader::ProcessExternalScript(nsIScriptElement* aElement,
     nsresult rv = StartLoad(request);
     if (NS_FAILED(rv)) {
       ReportErrorToConsole(request, rv);
+      // The script never loads, so nothing else unblocks rendering for it.
+      mDocument->UnblockRendering(*aScriptContent->AsElement());
 
       // If this is a script element that with an https URL scheme would block
       // the parser, we need to block the parser.
@@ -1875,6 +1884,13 @@ bool ScriptLoader::ProcessInlineScript(nsIScriptElement* aElement,
     }
   }
 
+  // https://html.spec.whatwg.org/#prepare-the-script-element
+  // Step 34.2, the "module" case, step 2: if el is potentially
+  // render-blocking, block rendering on el.
+  if (aScriptKind == ScriptKind::eModule) {
+    mDocument->MaybeBlockRendering(*element);
+  }
+
   // Inline classic scripts ignore their CORS mode and are always CORS_NONE.
   CORSMode corsMode = CORS_NONE;
   if (aScriptKind == ScriptKind::eModule) {
@@ -1965,17 +1981,21 @@ bool ScriptLoader::ProcessInlineScript(nsIScriptElement* aElement,
 
     // Remove any module preloads. Module specifier resolution is invalidated by
     // adding an import map, and incorrect dependencies may have been loaded.
+    // With multiple import maps, the preloaded module scripts are kept in the
+    // module map, and only their module graphs are reset.
     mPreloads.RemoveElementsBy(
         [this, multiImportMapsEnabled](const PreloadInfo& info) {
           if (!info.mRequest->IsModuleRequest()) {
             return false;
           }
 
-          info.mRequest->Cancel();
+          // Reset before cancelling, as cancelling an unfinished request
+          // clears its module script.
           if (multiImportMapsEnabled) {
-            mModuleLoader->ClearPreloadedModuleGraph(
+            mModuleLoader->ResetPreloadedModuleGraph(
                 info.mRequest->AsModuleRequest());
           }
+          info.mRequest->Cancel();
 
           return true;
         });
@@ -2152,7 +2172,9 @@ ScriptLoadRequest* ScriptLoader::LookupPreloadRequest(
     // script. Now the preload request is reused, so adding the resolved
     // specifiers into the global's resolved module set.
     if (request->IsModuleRequest()) {
-      mModuleLoader->MovePreloadedSetToResolvedSet(request->AsModuleRequest());
+      if (ModuleScript* ms = request->AsModuleRequest()->mModuleScript) {
+        mModuleLoader->MovePreloadedSetToResolvedSet(ms);
+      }
     }
   }
 
@@ -2360,12 +2382,14 @@ nsresult ScriptLoader::AttemptOffThreadScriptCompile(
     return NS_OK;
   }
 
-  // Don't off-thread compile JSON or CSS modules.
+  // Don't off-thread compile JSON, CSS, or text modules.
   // https://bugzilla.mozilla.org/show_bug.cgi?id=1912112 (JSON)
   // https://bugzilla.mozilla.org/show_bug.cgi?id=1987143 (CSS)
+  // https://bugzilla.mozilla.org/show_bug.cgi?id=2090781 (Text)
   if (aRequest->IsModuleRequest() &&
       (aRequest->AsModuleRequest()->mModuleType == JS::ModuleType::JSON ||
-       aRequest->AsModuleRequest()->mModuleType == JS::ModuleType::CSS)) {
+       aRequest->AsModuleRequest()->mModuleType == JS::ModuleType::CSS ||
+       aRequest->AsModuleRequest()->mModuleType == JS::ModuleType::Text)) {
     return NS_OK;
   }
 
@@ -2400,13 +2424,6 @@ nsresult ScriptLoader::AttemptOffThreadScriptCompile(
   } else if (aRequest->IsWasmBytes()) {
     if (!StaticPrefs::javascript_options_parallel_parsing() ||
         aRequest->WasmBytes().length() < OffThreadMinimumWasmLength) {
-      TRACE_FOR_TEST(aRequest, "compile:main thread");
-      return NS_OK;
-    }
-
-    // Only source phase modules are compiled off-thread. Compilation of
-    // evaluation phase modules is not yet implemented (Bug 2030454).
-    if (!aRequest->AsModuleRequest()->IsSourcePhaseRequest(cx)) {
       TRACE_FOR_TEST(aRequest, "compile:main thread");
       return NS_OK;
     }
@@ -2568,8 +2585,9 @@ void StencilCompileOrDecodeTask::CancelTask() {
 }
 
 nsresult StencilCompileOrDecodeTask::InitFrontendContext() {
-  mFrontendContext =
-      JS::NewFrontendContext(JS::AllowCancellingCompilation::Yes);
+  JS::FrontendContextCreationOptions options;
+  options.allowCancellingCompilation = true;
+  mFrontendContext = JS::NewFrontendContext(&options);
   if (!mFrontendContext) {
     mIsCancelled = true;
     return NS_ERROR_OUT_OF_MEMORY;
@@ -2792,7 +2810,7 @@ bool WasmCompileTask::StealResult(JSContext* aCx,
     return false;
   }
 
-  aModuleOut.set(JS::CreateWasmSourcePhaseModule(aCx, wasmModuleObject));
+  aModuleOut.set(JS::CreateWasmModule(aCx, wasmModuleObject));
   return !!aModuleOut;
 }
 
@@ -3052,6 +3070,14 @@ void ScriptLoader::FireScriptAvailable(nsresult aResult,
                          aRequest->GetScriptLoadContext()->mLineNo);
   }
 
+  // https://html.spec.whatwg.org/#execute-the-script-element
+  // Step 3. Unblock rendering on el. A load that a navigation aborted never
+  // completes, so rendering stays blocked.
+  if (!aRequest->GetScriptLoadContext()->mWasAbortedByNavigation) {
+    nsCOMPtr<Element> element = do_QueryInterface(scriptElement);
+    element->OwnerDoc()->UnblockRendering(*element);
+  }
+
   const bool isInlineClassicScript =
       aRequest->GetScriptLoadContext()->mIsInline &&
       !aRequest->IsModuleRequest();
@@ -3280,8 +3306,16 @@ void ScriptLoader::CalculateCacheFlag(ScriptLoadRequest* aRequest) {
     return;
   }
 
-  if (!aRequest->URI()->SchemeIs("http") &&
-      !aRequest->URI()->SchemeIs("https")) {
+  if (aRequest->HadRedirected()) {
+    LOG(("ScriptLoadRequest (%p): Bytecode-cache: Skip all: redirected",
+         aRequest));
+    aRequest->MarkNotCacheable();
+    return;
+  }
+
+  bool isHTTPS = aRequest->URI()->SchemeIs("https");
+
+  if (!aRequest->URI()->SchemeIs("http") && !isHTTPS) {
     LOG(("ScriptLoadRequest (%p): Bytecode-cache: Skip all: Unsupported scheme",
          aRequest));
     // Internal resources can be exposed to the web content, but they don't
@@ -3366,6 +3400,13 @@ void ScriptLoader::CalculateCacheFlag(ScriptLoadRequest* aRequest) {
   }
 
   if (mCache) {
+    if (!isHTTPS) {
+      LOG(("ScriptLoadRequest (%p): Bytecode-cache: Skip all: non-https",
+           aRequest));
+      aRequest->MarkNotCacheable();
+      return;
+    }
+
     if (mCache->IsLowMemory()) {
       // During the low-memory situation, we avoid creating another cache,
       // with the following rationale.
@@ -3591,6 +3632,10 @@ nsresult ScriptLoader::EvaluateScriptElement(ScriptLoadRequest* aRequest) {
     }
 
     globalObject = scriptGlobal;
+
+    // Bug 2072122: Trusted Types readiness experiment only, to be removed.
+    mDocument->SetTrustedTypesReadinessSignal(
+        TrustedTypesReadinessSignal::RanScript);
   }
 
   // 5. If el's from an external file is true, or el's type is "module", then
@@ -3911,8 +3956,6 @@ void ScriptLoader::InstantiateClassicScriptFromCachedStencil(
   aRequest->GetScriptLoadContext()->GetProfilerLabel(profilerLabelString);
 
   CalculateCacheFlag(aRequest);
-
-  MOZ_ASSERT(aRequest->PassedConditionForMemoryCache());
 
   // For cached stencils, there can be already ongoing work for the in-memory
   // cache and the disk cache.
@@ -4277,6 +4320,16 @@ ScriptFetchInfo* ScriptLoader::GetActiveScriptFetchInfo(JSContext* aCx) {
   }
 
   return static_cast<ScriptFetchInfo*>(value.toPrivate());
+}
+
+// static
+void ScriptLoader::AssociateFetchInfoWithSystemClassicScript(
+    JS::Handle<JSScript*> aScript, nsIURI* aURI) {
+  RefPtr<ScriptFetchOptions> fetchOptions = ScriptFetchOptions::CreateDefault();
+  fetchOptions->SetTriggeringPrincipal(nsContentUtils::GetSystemPrincipal());
+  RefPtr<ScriptFetchInfo> fetchInfo = new ScriptFetchInfo(
+      ScriptKind::eClassic, ReferrerPolicy::_empty, fetchOptions, aURI);
+  fetchInfo->AssociateWithScript(aScript);
 }
 
 void ScriptLoader::RegisterForDiskCache(ScriptLoadRequest* aRequest) {
@@ -4940,6 +4993,16 @@ nsresult ScriptLoader::OnStreamComplete(
     return NS_BINDING_ABORTED;
   }
 
+  // A navigation aborts the document's fetches, see
+  // https://html.spec.whatwg.org/#abort-a-document
+  if (aChannelStatus == NS_BINDING_ABORTED && aChannel) {
+    nsAutoCString reason;
+    aChannel->GetCanceledReason(reason);
+    if (reason.EqualsLiteral("navigation")) {
+      aRequest->GetScriptLoadContext()->mWasAbortedByNavigation = true;
+    }
+  }
+
   nsresult rv = VerifySRI(aRequest, aChannel, aSRIStatus, aSRIDataVerifier);
 
   if (NS_SUCCEEDED(rv)) {
@@ -5515,15 +5578,9 @@ nsresult ScriptLoader::PrepareLoadedRequest(ScriptLoadRequest* aRequest,
       aRequest->SetSourceMapURL(NS_ConvertUTF8toUTF16(sourceMapURL));
     }
 
-    nsCOMPtr<nsIClassifiedChannel> classifiedChannel =
-        do_QueryInterface(aChannel);
-    MOZ_ASSERT(classifiedChannel);
-    if (classifiedChannel &&
-        classifiedChannel->IsThirdPartyTrackingResource()) {
-      net::ClassificationFlags flags{
-          classifiedChannel->GetFirstPartyClassificationFlags(),
-          classifiedChannel->GetThirdPartyClassificationFlags()};
-      aRequest->GetScriptLoadContext()->SetClassificationFlags(flags);
+    if (AntiTrackingUtils::IsThirdPartyTrackingChannel(aChannel)) {
+      aRequest->GetScriptLoadContext()->SetClassificationFlags(
+          AntiTrackingUtils::GetClassificationFlags(aChannel));
     }
   }
 

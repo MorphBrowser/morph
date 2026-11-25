@@ -15,6 +15,7 @@
 // do NOT add it here, but instead add it to the file
 // slow_peer_connection_integrationtest.cc
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -31,6 +32,7 @@
 #include "api/candidate.h"
 #include "api/crypto/crypto_options.h"
 #include "api/data_channel_interface.h"
+#include "api/dtls_transport_interface.h"
 #include "api/dtmf_sender_interface.h"
 #include "api/jsep.h"
 #include "api/make_ref_counted.h"
@@ -46,6 +48,7 @@
 #include "api/rtp_transceiver_direction.h"
 #include "api/rtp_transceiver_interface.h"
 #include "api/scoped_refptr.h"
+#include "api/sctp_transport_interface.h"
 #include "api/stats/rtc_stats_report.h"
 #include "api/stats/rtcstats_objects.h"
 #include "api/test/mock_async_dns_resolver.h"
@@ -1711,6 +1714,131 @@ TEST_P(PeerConnectionIntegrationTest,
   auto index = FindFirstMediaStatsIndexByKind("audio", inbound_rtps);
   ASSERT_GE(index, 0);
   EXPECT_TRUE(inbound_rtps[index]->audio_level.has_value());
+}
+
+// Used for the test below. Without BUNDLE, payload type demuxing stays enabled
+// and unsignaled receive streams are kept when renegotiating.
+void RemoveBundleGroupSsrcsAndMsids(
+    std::unique_ptr<SessionDescriptionInterface>& sdp) {
+  RemoveSsrcsAndMsids(sdp);
+  sdp->description()->RemoveGroupByName("BUNDLE");
+}
+
+// Test that getStats() for the receiver of an unsignaled stream, i.e.
+// RTCRtpReceiver.getStats(), keeps returning the inbound-rtp stats of the
+// stream after renegotiating without signaled SSRCs.
+TEST_F(PeerConnectionIntegrationTestUnifiedPlan,
+       ReceiverGetStatsForUnsignaledStreamAfterRenegotiation) {
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  ConnectFakeSignaling();
+  caller()->AddAudioVideoTracks();
+  callee()->SetReceivedSdpMunger(RemoveBundleGroupSsrcsAndMsids);
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
+
+  std::vector<scoped_refptr<RtpReceiverInterface>> receivers =
+      callee()->pc()->GetReceivers();
+  ASSERT_THAT(receivers, SizeIs(2));
+  // Wait for all receivers before calling NewGetStats(), since
+  // RTCStatsCollector caches the full report for 50 ms.
+  for (const auto& receiver : receivers) {
+    SCOPED_TRACE(receiver->track()->kind());
+    // Frames are only reported by GetSources() once the receiver has been
+    // bound to the SSRC of the unsignaled stream.
+    ASSERT_TRUE(WaitUntil([&] { return !receiver->GetSources().empty(); }));
+  }
+  for (const auto& receiver : receivers) {
+    SCOPED_TRACE(receiver->track()->kind());
+    scoped_refptr<const RTCStatsReport> report =
+        callee()->NewGetStats(receiver, run_loop());
+    ASSERT_NE(report, nullptr);
+    ASSERT_THAT(report->GetStatsOfType<RTCInboundRtpStreamStats>(), SizeIs(1));
+  }
+
+  // Renegotiate, still without signaled SSRCs. The unsignaled streams are kept
+  // and no new first packet notifications will be issued for them.
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
+
+  for (const auto& receiver : receivers) {
+    SCOPED_TRACE(receiver->track()->kind());
+    scoped_refptr<const RTCStatsReport> report =
+        callee()->NewGetStats(receiver, run_loop());
+    ASSERT_NE(report, nullptr);
+    EXPECT_THAT(report->GetStatsOfType<RTCInboundRtpStreamStats>(), SizeIs(1));
+  }
+}
+
+// Test that the receiver of an unsignaled stream follows when the remote
+// endpoint changes the SSRC of the stream.
+TEST_F(PeerConnectionIntegrationTestUnifiedPlan,
+       ReceiverFollowsSsrcChangeOfUnsignaledStream) {
+  constexpr uint32_t kNewAudioSsrc = 1337;
+  constexpr uint32_t kNewVideoSsrc = 1338;
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  ConnectFakeSignaling();
+  caller()->AddAudioVideoTracks();
+  // Remove SSRCs and MSIDs from the received offer SDP.
+  callee()->SetReceivedSdpMunger(RemoveSsrcsAndMsids);
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
+
+  std::vector<scoped_refptr<RtpReceiverInterface>> receivers =
+      callee()->pc()->GetReceivers();
+  ASSERT_THAT(receivers, SizeIs(2));
+  for (const auto& receiver : receivers) {
+    ASSERT_TRUE(WaitUntil([&] { return !receiver->GetSources().empty(); }));
+  }
+
+  // Make the caller send with new SSRCs by applying a local offer with modified
+  // SSRCs. The offer isn't signaled, so the callee doesn't renegotiate and
+  // receives the new SSRCs as new unsignaled streams.
+  std::unique_ptr<SessionDescriptionInterface> offer =
+      caller()->CreateOfferAndWait();
+  ASSERT_NE(offer, nullptr);
+  for (ContentInfo& content : offer->description()->contents()) {
+    MediaContentDescription* media = content.media_description();
+    for (StreamParams& stream : media->mutable_streams()) {
+      ReplaceFirstSsrc(stream, media->type() == MediaType::AUDIO
+                                   ? kNewAudioSsrc
+                                   : kNewVideoSsrc);
+    }
+  }
+  auto observer = make_ref_counted<FakeSetLocalDescriptionObserver>();
+  caller()->pc()->SetLocalDescription(std::move(offer), observer);
+  ASSERT_TRUE(WaitUntil([&] { return observer->called(); }));
+  ASSERT_THAT(observer->error(), IsRtcOk());
+
+  // Wait for all receivers before calling NewGetStats(), since
+  // RTCStatsCollector caches the full report for 50 ms.
+  for (const auto& receiver : receivers) {
+    SCOPED_TRACE(receiver->track()->kind());
+    const uint32_t new_ssrc = receiver->media_type() == MediaType::AUDIO
+                                  ? kNewAudioSsrc
+                                  : kNewVideoSsrc;
+    // Frames of the new stream are only reported by GetSources() once the
+    // receiver has been bound to the new SSRC.
+    ASSERT_TRUE(WaitUntil([&] {
+      return absl::c_any_of(
+          receiver->GetSources(), [&](const RtpSource& source) {
+            return source.source_type() == RtpSourceType::SSRC &&
+                   source.source_id() == new_ssrc;
+          });
+    }));
+  }
+  for (const auto& receiver : receivers) {
+    SCOPED_TRACE(receiver->track()->kind());
+    const uint32_t new_ssrc = receiver->media_type() == MediaType::AUDIO
+                                  ? kNewAudioSsrc
+                                  : kNewVideoSsrc;
+    scoped_refptr<const RTCStatsReport> report =
+        callee()->NewGetStats(receiver, run_loop());
+    ASSERT_NE(report, nullptr);
+    std::vector<const RTCInboundRtpStreamStats*> inbound_rtps =
+        report->GetStatsOfType<RTCInboundRtpStreamStats>();
+    ASSERT_THAT(inbound_rtps, SizeIs(1));
+    EXPECT_EQ(inbound_rtps[0]->ssrc, new_ssrc);
+  }
 }
 
 // Test that DTLS 1.0 is used if both sides only support DTLS 1.0.
@@ -4037,6 +4165,9 @@ TEST_F(PeerConnectionIntegrationTestUnifiedPlan,
 
   caller()->CreateAndSetAndSignalOffer();
   ASSERT_TRUE(WaitUntil([&] { return SignalingStateStable(); }));
+  ASSERT_THAT(WaitUntil([&] { return caller()->ice_gathering_state(); },
+                        Eq(PeerConnectionInterface::kIceGatheringComplete)),
+              IsRtcOk());
 
   audio_transceiver->StopStandard();
   caller()->CreateAndSetAndSignalOffer();
@@ -5098,6 +5229,50 @@ TEST_P(PeerConnectionIntegrationTest, DtlsPqcFieldTrial) {
   EXPECT_EQ(caller()->dtls_transport_information().ssl_group_id(), expected);
 }
 
+TEST_P(PeerConnectionIntegrationTest,
+       SpedWireTriggerStartsDtlsWithoutRemoteDescription) {
+  if (!SSLStreamAdapter::IsBoringSsl()) {
+    GTEST_SKIP() << "DTLS-in-STUN requires BoringSSL.";
+  }
+  SetFieldTrials("WebRTC-IceHandshakeDtls/Enabled/");
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  ConnectFakeSignaling();
+  // Suppress SetRemoteDescription and ICE candidates from callee.
+  caller()->SetReceivedSdpMunger(
+      [](std::unique_ptr<SessionDescriptionInterface>& desc) { desc.reset(); });
+  callee()->set_signal_ice_candidates(false);
+
+  caller()->CreateDataChannel();
+  caller()->CreateAndSetAndSignalOffer();
+
+  ASSERT_THAT(
+      WaitUntil(
+          [&] {
+            const auto& history = caller()->peer_connection_state_history();
+            return std::find(history.begin(), history.end(),
+                             PeerConnectionInterface::PeerConnectionState::
+                                 kConnecting) != history.end();
+          },
+          IsTrue()),
+      IsRtcOk());
+}
+
+TEST_P(PeerConnectionIntegrationTest, NoEarlyDtlsStartWhenSpedNotInAnswer) {
+  if (!SSLStreamAdapter::IsBoringSsl()) {
+    GTEST_SKIP() << "DTLS-in-STUN requires BoringSSL.";
+  }
+  SetFieldTrials(kCallerName, "WebRTC-IceHandshakeDtls/Enabled/");
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  ConnectFakeSignalingForSdpOnly();
+  caller()->CreateDataChannel();
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_THAT(WaitUntil([&] { return SignalingStateStable(); }, IsTrue()),
+              IsRtcOk());
+  EXPECT_THAT(caller()->peer_connection_state_history(),
+              ::testing::Not(::testing::Contains(
+                  PeerConnectionInterface::PeerConnectionState::kConnecting)));
+}
+
 #endif  // WEBRTC_HAVE_SCTP
 
 TEST_P(PeerConnectionIntegrationTest, PerPeerConnectionHeaderExtensions) {
@@ -5150,6 +5325,50 @@ TEST_P(PeerConnectionIntegrationTest, PerPeerConnectionHeaderExtensions) {
   }
 }
 
+TEST_P(PeerConnectionIntegrationTest, CryptexStrippedFromReceivedAnswer) {
+  PeerConnectionInterface::RTCConfiguration caller_config;
+  caller_config.crypto_options.srtp.cryptex_policy =
+      CryptoOptions::Srtp::CryptexPolicy::kNegotiate;
+  PeerConnectionInterface::RTCConfiguration callee_config;
+  callee_config.crypto_options.srtp.cryptex_policy =
+      CryptoOptions::Srtp::CryptexPolicy::kRequire;
+
+  const bool create_media_engine = true;
+  SetCallerPcWrapperAndReturnCurrent(CreatePeerConnectionWrapper(
+      "caller", nullptr, &caller_config, PeerConnectionDependencies(nullptr),
+      /*event_log_factory=*/nullptr, /*reset_encoder_factory=*/false,
+      /*reset_decoder_factory=*/false, create_media_engine));
+  SetCalleePcWrapperAndReturnCurrent(CreatePeerConnectionWrapper(
+      "callee", nullptr, &callee_config, PeerConnectionDependencies(nullptr),
+      /*event_log_factory=*/nullptr, /*reset_encoder_factory=*/false,
+      /*reset_decoder_factory=*/false, create_media_engine));
+
+  ConnectFakeSignaling();
+
+  caller()->AddAudioVideoTracks();
+  callee()->AddAudioVideoTracks();
+  caller()->SetReceivedSdpMunger(
+      [](std::unique_ptr<SessionDescriptionInterface>& sdp) {
+        sdp->description()->set_cryptex(false);
+      });
+
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE(WaitUntil([&] {
+    return PeerConnectionStateIs(
+        PeerConnectionInterface::PeerConnectionState::kConnected);
+  }));
+
+  MediaExpectations media_expectations;
+  // We can receive cryptex media due to `kNegotiate` and callee saw cryptex in
+  // SDP.
+  media_expectations.CallerExpectsSomeAudioAndVideo();
+  // We drop the non-cryptex media (sent by the caller because of the SDP munge)
+  // due to `kRequire`.
+  media_expectations.CalleeExpectsNoAudio();
+  media_expectations.CalleeExpectsNoVideo();
+  ASSERT_TRUE(ExpectNewFrames(media_expectations));
+}
+
 TEST_P(PeerConnectionIntegrationTest, CryptexRenegotiation) {
   CryptoOptions crypto_options;
   crypto_options.srtp.cryptex_policy =
@@ -5190,20 +5409,6 @@ TEST_P(PeerConnectionIntegrationTest, CryptexRenegotiation) {
 }
 
 #ifdef WEBRTC_HAVE_SCTP
-
-class DowngradeLogSink : public LogSink {
- public:
-  void OnLogMessage(const std::string& message) override {
-    if (message.find("Received unexpected non-DTLS packet") !=
-        std::string::npos) {
-      found_ = true;
-    }
-  }
-  bool found() const { return found_; }
-
- private:
-  bool found_ = false;
-};
 
 // This test reproduces the vulnerability where a kPrAnswer with a BUNDLE group
 // but no fingerprint for a media section can cause that media section to use
@@ -5280,6 +5485,7 @@ TEST_P(PeerConnectionIntegrationTest,
   // Remove fingerprint from the second content.
   const ContentInfos& contents = desc->contents();
   ASSERT_GE(contents.size(), 2u);
+  const std::string bundled_mid = contents[0].mid();
   TransportInfo* transport_info =
       desc->GetTransportInfoByName(contents[1].mid());
   ASSERT_THAT(transport_info, NotNull());
@@ -5292,37 +5498,38 @@ TEST_P(PeerConnectionIntegrationTest,
 
   // With the fix, the Data Channel's transport will now be BUNDLED into mid 0.
   // Since mid 0 has DTLS active, mid 1's data will also be DTLS-wrapped.
-  // We can verify this by checking that the SCTP transport's internal DTLS
-  // transport is active.
-  EXPECT_TRUE(network_thread()->BlockingCall([&] {
-    return static_cast<SctpTransport*>(caller()->pc()->GetSctpTransport().get())
-        ->internal()
-        ->dtls_transport()
-        ->IsDtlsActive();
-  }));
+  network_thread()->BlockingCall([&] {
+    scoped_refptr<SctpTransportInterface> sctp_transport =
+        caller()->pc()->GetSctpTransport();
+    scoped_refptr<DtlsTransportInterface> bundled_dtls_transport =
+        caller()->pc()->LookupDtlsTransportByMid(bundled_mid);
+    ASSERT_THAT(sctp_transport, NotNull());
+    ASSERT_THAT(bundled_dtls_transport, NotNull());
+    EXPECT_EQ(sctp_transport->dtls_transport(), bundled_dtls_transport);
+    EXPECT_TRUE(static_cast<SctpTransport*>(sctp_transport.get())
+                    ->internal()
+                    ->dtls_transport()
+                    ->IsDtlsActive());
+  });
 
-  // If the bug were present, it would be sent as raw SCTP and trigger an error
-  // on the peer.
-
-  DowngradeLogSink downgrade_log_sink;
-  LogMessage::AddLogToStream(&downgrade_log_sink, LS_ERROR);
-
-  // Send data from caller.
+  // Apply the BUNDLE answer on callee as well so callee expects DTLS-wrapped
+  // SCTP on the bundled transport (dropping any unencrypted raw SCTP packets),
+  // and verify end-to-end delivery.
+  auto callee_observer = make_ref_counted<FakeSetLocalDescriptionObserver>();
+  callee()->pc()->SetLocalDescription(std::move(answer), callee_observer);
+  ASSERT_TRUE(WaitUntil([&] { return callee_observer->called(); }));
+  ASSERT_TRUE(callee_observer->error().ok());
   ASSERT_EQ(caller()->data_channels().size(), 1u);
   ASSERT_TRUE(WaitUntil([&] {
-    return caller()->data_channels()[0]->state() == DataChannelInterface::kOpen;
+    return caller()->data_channels()[0]->state() ==
+               DataChannelInterface::kOpen &&
+           callee()->data_observer() != nullptr;
   }));
   caller()->data_channels()[0]->Send(DataBuffer("SECRET-PLAINTEXT"));
-
-  // If the fix is correct, no non-DTLS packets should be received.
-  // We wait a bit to ensure packets have time to arrive.
-  Thread::Current()->ProcessMessages(500);
-
-  bool found = downgrade_log_sink.found();
-  LogMessage::RemoveLogToStream(&downgrade_log_sink);
-
-  EXPECT_FALSE(found) << "Security downgrade detected: raw SCTP packets sent "
-                         "instead of DTLS-wrapped packets.";
+  EXPECT_THAT(
+      WaitUntil([&] { return callee()->data_observer()->last_message(); },
+                Eq("SECRET-PLAINTEXT")),
+      IsRtcOk());
 }
 
 // This test verifies that establishing BUNDLE in a prAnswer does not cause

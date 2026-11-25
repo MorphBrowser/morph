@@ -5,7 +5,6 @@
 package org.mozilla.fenix.downloads.listscreen
 
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -32,7 +31,6 @@ import org.mozilla.fenix.theme.FirefoxTheme
  * @param title - The title to be displayed in the center of the TopAppBar.
  * @param actions - The actions displayed at the end of the TopAppBar.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun DownloadsTopAppBar(
     backgroundColor: Color,
@@ -94,7 +92,7 @@ private fun DownloadsTopAppBarPreview() {
                     contentDescription = stringResource(R.string.content_description_menu),
                 ) {
                     Icon(
-                        painter = painterResource(iconsR.drawable.mozac_ic_ellipsis_vertical_24),
+                        painter = painterResource(iconsR.drawable.mozac_ic_more_vertical_round_24),
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.inverseOnSurface,
                     )

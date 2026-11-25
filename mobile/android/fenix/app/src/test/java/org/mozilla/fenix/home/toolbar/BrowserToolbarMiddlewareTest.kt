@@ -16,6 +16,8 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -61,7 +63,6 @@ import mozilla.components.support.test.robolectric.testContext
 import mozilla.components.support.utils.ClipboardHandler
 import mozilla.components.ui.icons.R as iconsR
 import mozilla.components.ui.tabcounter.R as tabcounterR
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
@@ -94,9 +95,12 @@ import org.mozilla.fenix.ext.components
 import org.mozilla.fenix.ext.nav
 import org.mozilla.fenix.helpers.FenixGleanTestRule
 import org.mozilla.fenix.home.HomeFragmentDirections
+import org.mozilla.fenix.home.privatebrowsing.controller.PrivateBrowsingController
 import org.mozilla.fenix.home.toolbar.BrowserToolbarMiddleware.HomeToolbarAction
 import org.mozilla.fenix.home.toolbar.DisplayActions.FakeClicked
 import org.mozilla.fenix.home.toolbar.DisplayActions.MenuClicked
+import org.mozilla.fenix.home.toolbar.DisplayActions.PrivateModeClicked
+import org.mozilla.fenix.home.toolbar.DisplayActions.StoriesClicked
 import org.mozilla.fenix.home.toolbar.DisplayActions.VoiceSearchClicked
 import org.mozilla.fenix.home.toolbar.NavigationInteractions.NavigateBackClicked
 import org.mozilla.fenix.home.toolbar.NavigationInteractions.NavigateBackLongClicked
@@ -530,23 +534,6 @@ class BrowserToolbarMiddlewareTest {
 
         verify {
             navController.navigate(
-                HomeFragmentDirections.actionGlobalMenuDialogFragment(accesspoint = MenuAccessPoint.Home),
-                null,
-            )
-        }
-    }
-
-    @Test
-    fun `GIVEN menu customization is enabled WHEN clicking the menu button THEN open the customizable menu`() {
-        every { testContext.components.settings.isMenuCustomizationEnabled } returns true
-        val navController = navControllerShowingHome()
-        val (_, toolbarStore) = buildMiddlewareAndAddToStore(navController = navController)
-        val menuButton = toolbarStore.state.displayState.browserActionsEnd[1] as ActionButtonRes
-
-        toolbarStore.dispatch(menuButton.onClick as BrowserToolbarEvent)
-
-        verify {
-            navController.navigate(
                 HomeFragmentDirections.actionHomeFragmentToMenuFragment(accessPoint = MenuAccessPoint.Home),
                 null,
             )
@@ -908,11 +895,107 @@ class BrowserToolbarMiddlewareTest {
 
         val action = middleware.buildHomeAction(action = HomeToolbarAction.Menu) as ActionButtonRes
 
-        assertEquals(iconsR.drawable.mozac_ic_ellipsis_vertical_24, action.drawableResId)
+        assertEquals(iconsR.drawable.mozac_ic_more_vertical_round_24, action.drawableResId)
         assertEquals(R.string.content_description_menu, action.contentDescription)
         assertEquals(ActionButton.State.DEFAULT, action.state)
         assertEquals(MenuClicked(source = Source.Unknown), action.onClick)
         assertNull(action.onLongClick)
+    }
+
+    @Test
+    fun `WHEN building Stories action THEN returns Stories ActionButton`() {
+        val (middleware, _) = buildMiddlewareAndAddToStore()
+
+        val action = middleware.buildHomeAction(action = HomeToolbarAction.Stories) as ActionButtonRes
+
+        assertEquals(iconsR.drawable.mozac_ic_newsfeed_24, action.drawableResId)
+        assertEquals(R.string.homepage_all_stories, action.contentDescription)
+        assertEquals(StoriesClicked(source = Source.Unknown), action.onClick)
+        assertNull(action.onLongClick)
+    }
+
+    @Test
+    fun `WHEN building PrivateMode action THEN returns PrivateMode ActionButton`() {
+        val (middleware, _) = buildMiddlewareAndAddToStore()
+
+        val action = middleware.buildHomeAction(action = HomeToolbarAction.PrivateMode) as ActionButtonRes
+
+        assertEquals(iconsR.drawable.mozac_ic_private_mode_24, action.drawableResId)
+        assertEquals(R.string.content_description_private_browsing, action.contentDescription)
+        assertEquals(PrivateModeClicked(source = Source.Unknown), action.onClick)
+        assertNull(action.onLongClick)
+    }
+
+    @Test
+    fun `GIVEN homepage middle search is enabled WHEN initializing the toolbar THEN add the stories browser start action and private mode end action`() =
+        runTest {
+            every { testContext.components.settings.isHomepageMiddleSearchEnabled } returns true
+            every { testContext.components.settings.showPocketRecommendationsFeature } returns true
+
+            val (_, toolbarStore) = buildMiddlewareAndAddToStore()
+
+            val startActions = toolbarStore.state.displayState.browserActionsStart
+            assertEquals(1, startActions.size)
+            assertEquals(iconsR.drawable.mozac_ic_newsfeed_24, (startActions[0] as ActionButtonRes).drawableResId)
+
+            val endActions = toolbarStore.state.displayState.browserActionsEnd
+            assertEquals(3, endActions.size)
+            assertEquals(iconsR.drawable.mozac_ic_private_mode_24, (endActions[0] as ActionButtonRes).drawableResId)
+            assertIs<TabCounterAction>(endActions[1])
+        }
+
+    @Test
+    fun `GIVEN homepage middle search is enabled AND browsing in private mode WHEN initializing the toolbar THEN add only the private mode end action`() =
+        runTest {
+            every { testContext.components.settings.isHomepageMiddleSearchEnabled } returns true
+            every { testContext.components.settings.showPocketRecommendationsFeature } returns true
+
+            val (_, toolbarStore) =
+                buildMiddlewareAndAddToStore(browsingModeManager = SimpleBrowsingModeManager(Private))
+
+            assertEquals(0, toolbarStore.state.displayState.browserActionsStart.size)
+
+            val endActions = toolbarStore.state.displayState.browserActionsEnd
+            assertEquals(3, endActions.size)
+            val privateModeButton = endActions[0] as ActionButtonRes
+            assertEquals(iconsR.drawable.mozac_ic_private_mode_24, privateModeButton.drawableResId)
+            assertEquals(ActionButton.State.ACTIVE, privateModeButton.state)
+        }
+
+    @Test
+    fun `GIVEN homepage middle search is disabled WHEN initializing the toolbar THEN don't add the stories browser start action and private mode end action`() =
+        runTest {
+            every { testContext.components.settings.showPocketRecommendationsFeature } returns true
+
+            val (_, toolbarStore) = buildMiddlewareAndAddToStore()
+
+            assertEquals(0, toolbarStore.state.displayState.browserActionsStart.size)
+            assertEquals(2, toolbarStore.state.displayState.browserActionsEnd.size)
+        }
+
+    @Test
+    fun `GIVEN homepage middle search is enabled WHEN clicking the stories button THEN open the stories screen`() {
+        every { testContext.components.settings.isHomepageMiddleSearchEnabled } returns true
+        every { testContext.components.settings.showPocketRecommendationsFeature } returns true
+        val navController = navControllerShowingHome()
+        val (_, toolbarStore) = buildMiddlewareAndAddToStore(navController = navController)
+        val storiesButton = toolbarStore.state.displayState.browserActionsStart[0] as ActionButtonRes
+
+        toolbarStore.dispatch(storiesButton.onClick as BrowserToolbarEvent)
+
+        verify { navController.navigate(HomeFragmentDirections.actionHomeFragmentToStoriesFragment(), null) }
+    }
+
+    @Test
+    fun `GIVEN homepage middle search is enabled WHEN clicking the private mode button THEN switch to private browsing`() {
+        every { testContext.components.settings.isHomepageMiddleSearchEnabled } returns true
+        val privateBrowsingController: PrivateBrowsingController = mockk(relaxed = true)
+        val (_, toolbarStore) = buildMiddlewareAndAddToStore(privateBrowsingController = privateBrowsingController)
+        val privateModeButton = toolbarStore.state.displayState.browserActionsEnd[0] as ActionButtonRes
+
+        toolbarStore.dispatch(privateModeButton.onClick as BrowserToolbarEvent)
+
+        verify { privateBrowsingController.handlePrivateModeButtonClicked(Private) }
     }
 
     @Test
@@ -1498,6 +1581,56 @@ class BrowserToolbarMiddlewareTest {
             assertEquals(expectedBookmarkButton, primaryButton)
         }
 
+    @Test
+    fun `GIVEN a tab groups notification WHEN a downloads notification is added THEN the menu button is highlighted`() =
+        runTest {
+            val appStore =
+                AppStore(
+                    initialState = AppState(supportedMenuNotifications = setOf(SupportedMenuNotifications.TabGroups))
+                )
+            val (_, toolbarStore) = buildMiddlewareAndAddToStore(appStore = appStore)
+            testDispatcher.scheduler.advanceUntilIdle()
+            assertEquals(
+                expected = expectedMenuButton(false),
+                actual = toolbarStore.state.displayState.browserActionsEnd[1] as ActionButtonRes,
+            )
+
+            appStore.dispatch(AppAction.MenuNotification.AddMenuNotification(SupportedMenuNotifications.Downloads))
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            assertEquals(
+                expected = expectedMenuButton(true),
+                actual = toolbarStore.state.displayState.browserActionsEnd[1] as ActionButtonRes,
+            )
+        }
+
+    @Test
+    fun `GIVEN tab groups and downloads notifications WHEN the downloads notification is removed THEN the menu button is not highlighted`() =
+        runTest {
+            val appStore =
+                AppStore(
+                    initialState =
+                        AppState(
+                            supportedMenuNotifications =
+                                setOf(SupportedMenuNotifications.TabGroups, SupportedMenuNotifications.Downloads)
+                        )
+                )
+            val (_, toolbarStore) = buildMiddlewareAndAddToStore(appStore = appStore)
+            testDispatcher.scheduler.advanceUntilIdle()
+            assertEquals(
+                expected = expectedMenuButton(true),
+                actual = toolbarStore.state.displayState.browserActionsEnd[1] as ActionButtonRes,
+            )
+
+            appStore.dispatch(AppAction.MenuNotification.RemoveMenuNotification(SupportedMenuNotifications.Downloads))
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            assertEquals(
+                expected = expectedMenuButton(false),
+                actual = toolbarStore.state.displayState.browserActionsEnd[1] as ActionButtonRes,
+            )
+        }
+
     private fun navControllerShowingHome(): NavController =
         mockk(relaxed = true) { every { currentDestination } returns mockk { every { id } returns R.id.homeFragment } }
 
@@ -1509,6 +1642,7 @@ class BrowserToolbarMiddlewareTest {
         fenixBrowserUseCases: FenixBrowserUseCases = mockk(),
         navController: NavController = mockk(),
         browsingModeManager: BrowsingModeManager = this.browsingModeManager,
+        privateBrowsingController: PrivateBrowsingController = mockk(relaxed = true),
         settings: Settings = testContext.components.settings,
         translationsFeatureSettings: TranslationsEnabledSettings = this.translationsFeatureSettings,
         isWideScreen: () -> Boolean = { false },
@@ -1523,6 +1657,7 @@ class BrowserToolbarMiddlewareTest {
                 fenixBrowserUseCases = fenixBrowserUseCases,
                 navController = navController,
                 browsingModeManager = browsingModeManager,
+                privateBrowsingController = privateBrowsingController,
                 settings = settings,
                 translationsFeatureSettings = translationsFeatureSettings,
                 isWideScreen = isWideScreen,
@@ -1541,6 +1676,7 @@ class BrowserToolbarMiddlewareTest {
         fenixBrowserUseCases: FenixBrowserUseCases = mockk(),
         navController: NavController = mockk(),
         browsingModeManager: BrowsingModeManager = this.browsingModeManager,
+        privateBrowsingController: PrivateBrowsingController = mockk(relaxed = true),
         settings: Settings = testContext.components.settings,
         translationsFeatureSettings: TranslationsEnabledSettings = this.translationsFeatureSettings,
         isWideScreen: () -> Boolean = { false },
@@ -1554,6 +1690,7 @@ class BrowserToolbarMiddlewareTest {
             fenixBrowserUseCases = fenixBrowserUseCases,
             navController = navController,
             browsingModeManager = browsingModeManager,
+            privateBrowsingController = privateBrowsingController,
             settings = settings,
             translationsFeatureSettings = translationsFeatureSettings,
             isWideScreen = isWideScreen,
@@ -1671,7 +1808,7 @@ class BrowserToolbarMiddlewareTest {
         source: Source = Source.AddressBar.BrowserEnd,
     ) =
         ActionButtonRes(
-            drawableResId = iconsR.drawable.mozac_ic_ellipsis_vertical_24,
+            drawableResId = iconsR.drawable.mozac_ic_more_vertical_round_24,
             contentDescription = R.string.content_description_menu,
             highlighted = highlighted,
             onClick = MenuClicked(source),

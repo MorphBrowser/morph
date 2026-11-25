@@ -5,7 +5,6 @@
 task-defaults:
     worker-type: b-linux-docker-amd
     run:
-        clone-with: hg
         using: mozharness
     fetches:
         fetch:
@@ -327,7 +326,7 @@ win64-plain/debug:
         platform: windows2012-64/debug
         symbol: Bp
         tier: 1
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 7200
         env:
@@ -473,7 +472,7 @@ win64-plain/opt:
         platform: windows2012-64/opt
         symbol: Bp
         tier: 1
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 7200
         env:
@@ -543,6 +542,7 @@ win32-shippable/opt:
         env:
             MOZ_AUTOMATION_PACKAGE_TESTS: "1"
             MOZ_GENERATE_SBOM: "1"
+            SOURCE_DATE_EPOCH: "{build_date}"
     mozconfig:
         platform: win32
     run:
@@ -597,6 +597,7 @@ win64-shippable/opt:
         env:
             MOZ_AUTOMATION_PACKAGE_TESTS: "1"
             MOZ_GENERATE_SBOM: "1"
+            SOURCE_DATE_EPOCH: "{build_date}"
     mozconfig:
         platform: win64
     run:
@@ -877,7 +878,7 @@ win32-rusttests/opt:
         platform: windows2012-32/opt
         symbol: BR
         tier: 1
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 5400
         env:
@@ -921,7 +922,7 @@ win32-rusttests/debug:
         platform: windows2012-32/debug
         symbol: BR
         tier: 1
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 5400
         env:
@@ -965,7 +966,7 @@ win64-rusttests/opt:
         platform: windows2012-64/opt
         symbol: BR
         tier: 1
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 5400
         env:
@@ -1009,7 +1010,7 @@ win64-rusttests/debug:
         platform: windows2012-64/debug
         symbol: BR
         tier: 1
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         max-run-time: 5400
         env:
@@ -1055,7 +1056,7 @@ win64-ccov/opt:
         platform: windows2012-64/ccov
         symbol: B
         tier: 2
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         artifacts:
             - name: public/code-coverage-grcov.zip
@@ -1108,7 +1109,7 @@ win64-fuzzing-ccov/opt:
     treeherder:
         platform: windows2012-64/ccov
         symbol: Bocf
-    worker-type: b-win2022
+    worker-type: b-win2025
     worker:
         artifacts:
             - name: public/code-coverage-grcov.zip
@@ -1336,6 +1337,7 @@ win32-devedition/opt:
         env:
             MOZ_AUTOMATION_PACKAGE_TESTS: "1"
             MOZ_GENERATE_SBOM: "1"
+            SOURCE_DATE_EPOCH: "{build_date}"
     mozconfig:
         variant: devedition
         platform: win32
@@ -1391,6 +1393,7 @@ win64-devedition/opt:
         env:
             MOZ_AUTOMATION_PACKAGE_TESTS: "1"
             MOZ_GENERATE_SBOM: "1"
+            SOURCE_DATE_EPOCH: "{build_date}"
     mozconfig:
         variant: devedition
         platform: win64
@@ -1554,6 +1557,7 @@ win64-aarch64-shippable/opt:
         env:
             MOZ_AUTOMATION_PACKAGE_TESTS: "1"
             MOZ_GENERATE_SBOM: "1"
+            SOURCE_DATE_EPOCH: "{build_date}"
     mozconfig:
         platform: win64-aarch64
     run:
@@ -1609,6 +1613,7 @@ win64-aarch64-devedition/opt:
         env:
             MOZ_AUTOMATION_PACKAGE_TESTS: "1"
             MOZ_GENERATE_SBOM: "1"
+            SOURCE_DATE_EPOCH: "{build_date}"
     mozconfig:
         variant: devedition
         platform: win64-aarch64

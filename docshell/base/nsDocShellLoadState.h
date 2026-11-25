@@ -79,8 +79,7 @@ class nsDocShellLoadState final {
       const mozilla::dom::LoadURIOptions& aLoadURIOptions,
       nsDocShellLoadState** aResult);
   static nsresult CreateFromLoadURIOptions(
-      BrowsingContext* aBrowsingContext, nsIURI* aURI,
-      const mozilla::dom::LoadURIOptions& aLoadURIOptions,
+      nsIURI* aURI, const mozilla::dom::LoadURIOptions& aLoadURIOptions,
       nsDocShellLoadState** aResult);
 
   // Getters and Setters
@@ -156,6 +155,15 @@ class nsDocShellLoadState final {
   bool NotifiedBeforeUnloadListeners() const;
 
   void SetNotifiedBeforeUnloadListeners(bool aNotifiedBeforeUnloadListeners);
+
+  // If true, the old document already fired pageswap for this navigation
+  // before the navigation had to start again as a new load. Do not fire it
+  // again.
+  bool PageSwapFired() const { return mPageSwapFired; }
+
+  void SetPageSwapFired(bool aPageSwapFired) {
+    mPageSwapFired = aPageSwapFired;
+  }
 
   bool ForceAllowDataURI() const;
 
@@ -363,6 +371,9 @@ class nsDocShellLoadState final {
   void SetSpeculativeListener(mozilla::net::DocumentLoadListener* aListener);
   already_AddRefed<mozilla::net::DocumentLoadListener>
   TakeSpeculativeListener();
+  const mozilla::Maybe<uint64_t>& GetSpeculativeChannelId() const {
+    return mSpeculativeChannelId;
+  }
 
   void SetIsMetaRefresh(bool aMetaRefresh) { mIsMetaRefresh = aMetaRefresh; }
 
@@ -449,10 +460,9 @@ class nsDocShellLoadState final {
 
   // This is used as the parameter for https://html.spec.whatwg.org/#navigate
   void SetSourceElement(mozilla::dom::Element* aElement);
-  already_AddRefed<mozilla::dom::Element> GetSourceElement() const;
-  bool HasSourceElement() const {
-    return mSourceElement && mSourceElement->IsAlive();
-  }
+  // Take ownership of the source element.
+  already_AddRefed<mozilla::dom::Element> TakeSourceElement();
+  bool HasSourceElement() const { return !!mSourceElement; }
 
   // This is used as the parameter for https://html.spec.whatwg.org/#navigate
   nsIStructuredCloneContainer* GetNavigationAPIState() const;
@@ -518,8 +528,7 @@ class nsDocShellLoadState final {
   const char* ValidateWithOriginalState(nsDocShellLoadState* aOriginalState);
 
   static nsresult CreateFromLoadURIOptions(
-      BrowsingContext* aBrowsingContext, nsIURI* aURI,
-      const mozilla::dom::LoadURIOptions& aLoadURIOptions,
+      nsIURI* aURI, const mozilla::dom::LoadURIOptions& aLoadURIOptions,
       uint32_t aLoadFlagsOverride, nsIInputStream* aPostDataOverride,
       nsDocShellLoadState** aResult);
 
@@ -596,6 +605,8 @@ class nsDocShellLoadState final {
   // If this attribute is true, any potential unload listeners have been
   // notified if applicable.
   bool mNotifiedBeforeUnloadListeners;
+
+  bool mPageSwapFired = false;
 
   // Principal we're inheriting. If null, this means the principal should be
   // inherited from the current document. If set to NullPrincipal, the channel
@@ -749,8 +760,8 @@ class nsDocShellLoadState final {
   RefPtr<mozilla::net::DocumentLoadListener> mSpeculativeListener;
 
   // Optional value available in content to indicate the channel has been
-  // pre-initialized in the parent process.
-  bool mHasSpeculativeListener = false;
+  // pre-initialized in the parent process. Holds the id of that channel.
+  mozilla::Maybe<uint64_t> mSpeculativeChannelId;
 
   // True if the load was triggered by a meta refresh.
   bool mIsMetaRefresh;
@@ -780,7 +791,7 @@ class nsDocShellLoadState final {
   nsILoadInfo::HTTPSUpgradeTelemetryType mHttpsUpgradeTelemetry =
       nsILoadInfo::NOT_INITIALIZED;
 
-  nsWeakPtr mSourceElement;
+  RefPtr<mozilla::dom::Element> mSourceElement;
 
   RefPtr<nsStructuredCloneContainer> mNavigationAPIState;
 

@@ -3,22 +3,77 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { AITabStore } from "moz-src:///browser/components/aiwindow/ui/modules/AITabStore.sys.mjs";
+import { isAITabPageEditable } from "moz-src:///browser/components/aiwindow/ui/modules/AITabPageTypes.sys.mjs";
 import { getHeadingFont } from "moz-src:///browser/components/aiwindow/ui/modules/AITabHeadingFont.sys.mjs";
 import { ConversationStore } from "moz-src:///browser/components/aiwindow/ui/modules/ConversationStore.sys.mjs";
 import { getSmartPageName } from "chrome://browser/content/aiwindow/modules/TrustedInternalURLs.mjs";
-import { A2UI } from "../modules/A2UI.mjs";
+import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
-const lazy = {};
+/**
+ * A stored AI Tab record.
+ *
+ * @typedef {import("../modules/AITabStore.sys.mjs").AITabRow} AITabRow
+ */
 
-ChromeUtils.defineESModuleGetters(lazy, {
+/**
+ * A page prepared for rendering.
+ *
+ * @typedef {import("../modules/A2UI.sys.mjs").HydratedAITabData} HydratedAITabData
+ */
+
+/**
+ * A stored-page lookup and its URL identifiers.
+ *
+ * @typedef {object} AITabPageLookup
+ * @property {AITabRow|null} pageData - Latest stored version, if present.
+ * @property {string} pageName - Slug from the page URL.
+ * @property {string} url - Full page URL.
+ */
+
+/**
+ * Page data sent to the viewer, including hydrated content, a localized date,
+ * and whether its page type allows the page to be revised.
+ *
+ * @typedef {AITabRow & HydratedAITabData & {
+ *   createdAtLabel: string,
+ *   editable: boolean
+ * }} AITabData
+ */
+
+/**
+ * Page lookup response sent to the child actor.
+ *
+ * @typedef {{success: true, page: AITabData|null} |
+ *   {success: false, error: string}} AITabPageLookupResponse
+ */
+
+const SMART_PAGE_ICON_URL =
+  "chrome://browser/content/aiwindow/assets/smart-page-16.svg";
+
+const lazy = XPCOMUtils.declareLazy({
+  A2UI: "moz-src:///browser/components/aiwindow/ui/modules/A2UI.sys.mjs",
   AIWINDOW_URL:
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
+  AITab: "moz-src:///browser/components/aiwindow/models/aitab/AITab.sys.mjs",
+  PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
   URILoadingHelper: "resource:///modules/URILoadingHelper.sys.mjs",
+  fluentStrings: () => {
+    return new Localization(["preview/aiWindow.ftl"], true);
+  },
 });
 
-ChromeUtils.defineLazyGetter(lazy, "fluentStrings", () => {
-  return new Localization(["preview/aiWindow.ftl"], true);
-});
+let smartPageIconDataURI = null;
+
+async function getSmartPageIconDataURI() {
+  if (!smartPageIconDataURI) {
+    const response = await fetch(SMART_PAGE_ICON_URL);
+    const svg = await response.text();
+    smartPageIconDataURI = Services.io.newURI(
+      `data:image/svg+xml,${encodeURIComponent(svg)}`
+    );
+  }
+  return smartPageIconDataURI;
+}
 
 /**
  * Renders the eyebrow shown above a generated page's title.
@@ -60,19 +115,57 @@ export function formatCreatedAt(createdAt, now = Date.now()) {
  */
 export class AITabParent extends JSWindowActorParent {
   #headingFontPromise = null;
+  #tab;
+  #pageUuid;
 
   actorCreated() {
     this.#headingFontPromise = this.#loadHeadingFont();
+
+    const browser = this.browsingContext.top.embedderElement;
+    this.#setTab(browser?.documentGlobal.gBrowser?.getTabForBrowser(browser));
+  }
+
+  didDestroy() {
+    this.#setTab(null);
+  }
+
+  #setTab(tab) {
+    this.#tab?.removeEventListener("TabSelect", this.#onTabSelect);
+    this.#tab?.linkedBrowser.removeEventListener(
+      "SwapDocShells",
+      this.#onSwapDocShells
+    );
+    this.#tab?.documentGlobal.removeEventListener(
+      "activate",
+      this.#onWindowActivate
+    );
+
+    this.#tab = tab;
+
+    this.#tab?.addEventListener("TabSelect", this.#onTabSelect);
+    this.#tab?.linkedBrowser.addEventListener(
+      "SwapDocShells",
+      this.#onSwapDocShells
+    );
+    this.#tab?.documentGlobal.addEventListener(
+      "activate",
+      this.#onWindowActivate
+    );
   }
 
   async receiveMessage({ data, name }) {
     switch (name) {
       case "AITab:GetPage":
         return this.#handleGetPage();
+      case "AITab:GetHeadingFont":
+        return { font: await this.#headingFontPromise };
       case "AITab:DeletePage":
         return this.#handleDeletePage();
       case "AITab:OpenLink":
         this.#handleOpenLink(data);
+        return null;
+      case "AITab:RecordView":
+        this.#recordView(data);
         return null;
       default:
         console.warn(`AITabParent received unknown message: ${name}`);
@@ -81,49 +174,153 @@ export class AITabParent extends JSWindowActorParent {
   }
 
   /**
-   * The page this tab is showing, read from the tab's own URL rather than
-   * taken from the child. Content is a lower-trust process, so a page name it
-   * supplied could name a page other than the one on screen; anything
-   * destructive would then act on the wrong one.
+   * The slug and URL of the page this tab is showing, read from the tab's URL.
+   * The URL is kept so deleting the page also removes that exact URL from
+   * history.
    *
-   * @returns {?string} Null when the URL carries no usable page name.
+   * Read this as soon as a message from the page arrives. The tab can close
+   * while a store call is pending, and reading browsingContext after that
+   * throws.
+   *
+   * @returns {?{pageName: string, url: string}} Null when the URL carries no
+   *   usable page name.
    */
-  get #pageName() {
-    const spec = this.browsingContext?.currentURI?.spec;
-    if (!spec) {
+  get #currentPage() {
+    const url = this.browsingContext?.currentURI?.spec;
+    const pageName = url && getSmartPageName(URL.parse(url));
+    return pageName ? { pageName, url } : null;
+  }
+
+  /**
+   * Handles the activate event to trigger the tab refresh if the
+   * tab is already focused when the window is focused again.
+   */
+  #onWindowActivate = () => {
+    if (this.#tab?.selected) {
+      this.#onTabSelect();
+    }
+  };
+
+  /**
+   * Handles SwapDocShells event so the window can handle events from
+   * it's new tab host after switching windows.
+   *
+   * @param {Event} event
+   */
+  #onSwapDocShells = event => {
+    const oldBrowser = this.browsingContext.top.embedderElement;
+    if (event.currentTarget !== oldBrowser) {
+      return;
+    }
+
+    const browser = event.detail;
+    this.#setTab(browser.documentGlobal.gBrowser.getTabForBrowser(browser));
+  };
+
+  /**
+   * Handles TabSelect events to check whether the data for the
+   * Smart Page has changed. If it has a message is sent to the
+   * child actor to refresh the page.
+   *
+   * @returns {Promise<void>} Resolves after checking for an updated version.
+   */
+  #onTabSelect = async () => {
+    const pageDataResults = await this.#getPageData();
+    if (!this.#tab) {
+      return;
+    }
+
+    if (!pageDataResults || !pageDataResults.pageData) {
+      return;
+    }
+
+    const { pageData } = pageDataResults;
+    if (this.#pageUuid === pageData.uuid) {
+      return;
+    }
+
+    const page = this.#getPageForUI(pageData);
+    if (!page) {
+      return;
+    }
+
+    this.sendAsyncMessage("AITab:RefreshPageData", page);
+    this.#pageUuid = pageData.uuid;
+  };
+
+  /**
+   * Gets the page data for a Smart Page from the AITabStore
+   *
+   * @returns {Promise<AITabPageLookup|null>} Lookup result, or null for an invalid page URL.
+   */
+  async #getPageData() {
+    const currentPage = this.#currentPage;
+    if (!currentPage) {
       return null;
     }
 
-    return getSmartPageName(URL.parse(spec));
+    const { pageName, url } = currentPage;
+    const pageData = await AITabStore.getBySlug(pageName);
+
+    return { pageData, pageName, url };
   }
 
-  async #handleGetPage() {
-    const pageName = this.#pageName;
-    if (!pageName) {
-      return { success: false, error: "Invalid page name" };
+  /**
+   * Gets the hydrated surface data for rendering the Smart Page
+   *
+   * @param {AITabRow} pageData - Stored version to hydrate.
+   *
+   * @returns {AITabData|null} Renderable page, or null when no surface exists.
+   */
+  #getPageForUI(pageData) {
+    const surface = pageData?.components?.surface;
+    if (!surface) {
+      return null;
     }
 
+    const a2ui = new lazy.A2UI(surface);
+    const page = a2ui.toUI();
+
+    return {
+      ...pageData,
+      ...page,
+      createdAtLabel: formatCreatedAt(pageData.createdAt),
+      editable: isAITabPageEditable(pageData.pageType),
+    };
+  }
+
+  /**
+   * @returns {Promise<AITabPageLookupResponse>} Page data or a lookup error.
+   */
+  async #handleGetPage() {
     try {
-      const pageData = await AITabStore.getBySlug(pageName);
-      const surface = pageData?.components?.surface;
-      if (!surface) {
+      const pageDataResults = await this.#getPageData();
+      if (!pageDataResults) {
+        return { success: false, error: "Invalid page name" };
+      }
+
+      const { pageData, url, pageName } = pageDataResults;
+      if (!pageData) {
+        // Leftover slugs from deleted pages should not keep coming back as a
+        // history or address bar result.
+        this.#removeFromHistory(pageName, url).catch(error => {
+          console.error(
+            "Could not remove a missing AI Tab page from history",
+            error
+          );
+        });
+
         return { success: true, page: null };
       }
 
-      const a2ui = new A2UI(surface);
-      const page = a2ui.toUI();
+      const page = this.#getPageForUI(pageData);
+      if (!page) {
+        return { success: true, page: null };
+      }
 
-      return {
-        success: true,
-        font: await this.#headingFontPromise,
-        page: pageData &&
-          page && {
-            ...pageData,
-            ...page,
-            // Content renders the label as-is; it never sees the raw timestamp.
-            createdAtLabel: formatCreatedAt(pageData.createdAt),
-          },
-      };
+      this.#storeFavicon(url).catch(console.error);
+      this.#pageUuid = pageData.uuid;
+      return { success: true, page };
     } catch (error) {
       console.error("Failed to retrieve AI Tab page:", error);
       return { success: false, error: "Failed to retrieve page" };
@@ -131,8 +328,10 @@ export class AITabParent extends JSWindowActorParent {
   }
 
   /**
-   * Started when the actor is created and sent with the page, so content can
-   * install the font before it renders.
+   * Started when the actor is created so the download overlaps the page
+   * lookup. createAITab() usually started it during generation, in which case
+   * this reuses that download. Content asks for it separately and does not
+   * wait for it to render.
    *
    * @returns {Promise<?ArrayBuffer>} Null when the font is unavailable.
    */
@@ -156,10 +355,11 @@ export class AITabParent extends JSWindowActorParent {
    * @returns {Promise<object>}
    */
   async #handleDeletePage() {
-    const pageName = this.#pageName;
-    if (!pageName) {
+    const currentPage = this.#currentPage;
+    if (!currentPage) {
       return { success: false, error: "Invalid page name" };
     }
+    const { pageName, url } = currentPage;
 
     try {
       const page = await AITabStore.getBySlug(pageName);
@@ -169,6 +369,7 @@ export class AITabParent extends JSWindowActorParent {
       // stranded on the unavailable state with nowhere to go.
       if (page) {
         await AITabStore.deleteBySlug(page.slug);
+        Glean.smartWindow.aitabDelete.record();
 
         // The page is gone from here on. If clearing the conversation fails,
         // the delete the reader asked for still happened, so say so and log
@@ -188,6 +389,15 @@ export class AITabParent extends JSWindowActorParent {
             );
           }
         }
+
+        try {
+          await this.#removeFromHistory(page.slug, url);
+        } catch (error) {
+          console.error(
+            "Deleted an AI Tab page but could not remove it from history",
+            error
+          );
+        }
       }
 
       // Deferred so the reply reaches content before the tab navigates away.
@@ -201,15 +411,49 @@ export class AITabParent extends JSWindowActorParent {
   }
 
   /**
+   * Removes the history entry for a generated page, plus the tab's own URL
+   * when it names the same page under a different spelling.
+   *
+   * @param {string} slug
+   * @param {string} tabURL - The tab URL the slug was read from.
+   */
+  async #removeFromHistory(slug, tabURL) {
+    const urls = new Set([lazy.AITab.buildViewerURL(slug), tabURL]);
+    await lazy.PlacesUtils.history.remove([...urls]);
+  }
+
+  /**
+   * Stores the smart page icon in Places for the page URL, so page-icon:
+   * lookups (mention chips, chat links, urlbar) resolve it. The tab icon is a
+   * chrome: URL, which FaviconLoader never stores. Skipped wherever the visit
+   * itself would not be kept.
+   *
+   * @param {string} url - The tab URL, already validated by #currentPage.
+   */
+  async #storeFavicon(url) {
+    if (!Services.prefs.getBoolPref("places.history.enabled", true)) {
+      return;
+    }
+    await lazy.PlacesUtils.favicons.setFaviconForPage(
+      Services.io.newURI(url),
+      Services.io.newURI(SMART_PAGE_ICON_URL),
+      await getSmartPageIconDataURI()
+    );
+  }
+
+  /**
    * Opens a link from anywhere on a generated page. Kept separate from
    * AIChatContentParent's handler so AI Tab clicks stay out of chat's
-   * recordUriLoad() metric.
+   * recordUriLoad() metric. The click is recorded after the attempt, with
+   * a result of "switch", "new", or "error".
    *
    * @param {object} data
    * @param {string} data.url
    * @param {boolean} [data.preferSwitchToTab]
+   * @param {string} [data.component_type] - Catalog component the link was
+   *   in, the same name creation telemetry records, or "unknown".
    */
-  #handleOpenLink({ url, preferSwitchToTab } = {}) {
+  #handleOpenLink({ url, preferSwitchToTab, component_type } = {}) {
     // Links come from model output, so only http and https are opened.
     // file:, data: and javascript: URLs are dropped, as is a missing or
     // unparseable url: URL.parse returns null for those.
@@ -223,22 +467,49 @@ export class AITabParent extends JSWindowActorParent {
       return;
     }
 
-    if (
-      preferSwitchToTab &&
-      lazy.URILoadingHelper.switchToTabHavingURI(window, url, false, {})
-    ) {
-      return;
+    // The click is the user's choice to open the link, so it is recorded
+    // whether the tab switch or the new load succeeds.
+    let result = "new";
+    try {
+      if (
+        preferSwitchToTab &&
+        lazy.URILoadingHelper.switchToTabHavingURI(window, url, false, {})
+      ) {
+        result = "switch";
+      } else {
+        const { userContextId } =
+          window.gBrowser.selectedBrowser.browsingContext.originAttributes;
+        lazy.URILoadingHelper.openWebLinkIn(window, url, "tab", {
+          triggeringPrincipal:
+            Services.scriptSecurityManager.createNullPrincipal({
+              userContextId,
+            }),
+          userContextId,
+          forceForeground: false,
+        });
+      }
+    } catch (error) {
+      console.error("Could not open an AI Tab link", error);
+      result = "error";
     }
 
-    const { userContextId } =
-      window.gBrowser.selectedBrowser.browsingContext.originAttributes;
-    lazy.URILoadingHelper.openWebLinkIn(window, url, "tab", {
-      triggeringPrincipal: Services.scriptSecurityManager.createNullPrincipal({
-        userContextId,
-      }),
-      userContextId,
-      forceForeground: false,
-    });
+    Glean.smartWindow.aitabLinkClick.record({ component_type, result });
+  }
+
+  /**
+   * Records the status the page settled on, and whether the heading font
+   * installed. Content is untrusted, so anything other than the three
+   * statuses the page sets is recorded as an error.
+   *
+   * @param {object} data
+   * @param {string} [data.outcome]
+   * @param {string} [data.font]
+   */
+  #recordView(data) {
+    const known = ["ready", "unavailable", "error"];
+    const outcome = known.includes(data?.outcome) ? data.outcome : "error";
+    const font = known.includes(data?.font) ? data.font : "error";
+    Glean.smartWindow.aitabView.record({ outcome, font });
   }
 
   /**

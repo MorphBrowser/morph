@@ -4,7 +4,7 @@
 
 /* import-globals-from http2_test_common.js */
 
-const { Http3ProxyFilter, NodeHTTP2ProxyServer } = ChromeUtils.importESModule(
+const { Http3ProxyFilter } = ChromeUtils.importESModule(
   "resource://testing-common/NodeServer.sys.mjs"
 );
 
@@ -17,17 +17,12 @@ let proxyPort;
 let proxyFilter;
 
 add_setup(async function setup() {
-  serverPort = Services.env.get("MOZHTTP2_PORT");
-  Assert.notEqual(serverPort, null);
-  dump("using port " + serverPort + "\n");
-
-  // Set to allow the cert presented by our H2 server
   do_get_profile();
+  serverPort = await start_http2_test_server();
 
   let certdb = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
-  addCertFromFile(certdb, "http2-ca.pem", "CTu,u,u");
   addCertFromFile(certdb, "proxy-ca.pem", "CTu,u,u");
 
   Services.prefs.setBoolPref("network.proxy.allow_hijacking_localhost", true);
@@ -65,18 +60,13 @@ add_setup(async function setup() {
   );
   pps.registerFilter(proxyFilter, 10);
 
-  let h2Proxy = new NodeHTTP2ProxyServer();
-  await h2Proxy.startWithoutProxyFilter(proxyPort);
-  Assert.equal(proxyPort, h2Proxy.port());
-
-  registerCleanupFunction(async () => {
+  registerCleanupFunction(() => {
     Services.prefs.clearUserPref("network.http.http3.enable");
     Services.prefs.clearUserPref("network.dns.localDomains");
     Services.prefs.clearUserPref("network.proxy.allow_hijacking_localhost");
     Services.prefs.clearUserPref(
       "network.http.http3.alt-svc-mapping-for-testing"
     );
-    await h2Proxy.stop();
     pps.unregisterFilter(proxyFilter);
   });
 });

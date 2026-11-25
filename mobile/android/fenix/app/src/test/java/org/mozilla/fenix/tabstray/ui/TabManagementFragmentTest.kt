@@ -5,8 +5,6 @@
 package org.mozilla.fenix.tabstray.ui
 
 import android.content.Context
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleRegistry
 import androidx.navigation.NavController
 import io.mockk.Runs
 import io.mockk.every
@@ -14,6 +12,7 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
+import mozilla.components.support.test.assertNoUncaughtException
 import mozilla.components.support.test.robolectric.testContext
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -230,19 +229,16 @@ class TabManagementFragmentTest {
 
     @Test
     fun `GIVEN fragment is detached WHEN bookmark SnackBar is invoked THEN a crash does not result`() {
-        // Set up a spied fragment with a registry to drive the lifecycle
-        // This is a workaround since the FragmentScenario API can't be easily used alongside the components singleton
-        val detachedFragment = spyk(TabManagementFragment())
-        val registry = LifecycleRegistry.createUnsafe(detachedFragment)
-        every { detachedFragment.lifecycle } returns registry
+        assertNoUncaughtException {
+            TabManagementFragment().showBookmarkSnackbar(tabSize = 1, parentFolderTitle = null)
+        }
+    }
 
-        registry.currentState = Lifecycle.State.CREATED
-        registry.currentState = Lifecycle.State.DESTROYED
-
-        detachedFragment.showBookmarkSnackbar(
-            tabSize = 1,
-            parentFolderTitle = null,
-        )
+    @Test
+    fun `GIVEN fragment is detached WHEN synced tab undo SnackBar is invoked THEN a crash does not result`() {
+        assertNoUncaughtException {
+            TabManagementFragment().showUndoSnackbarForSyncedTab {}
+        }
     }
 
     private fun fakeTab(isPrivate: Boolean) =

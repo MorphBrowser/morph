@@ -46,6 +46,10 @@
      the container's border box. */
   --urlbar-container-padding-block: var(--urlbar-padding-block);
 
+  --search-add-engine-badge-fill: light-dark(var(--color-green-50), var(--color-green-20));
+  --search-add-engine-badge-stroke: light-dark(white, black);
+  --search-add-engine-badge-filter-deemphasized: grayscale(1);
+
   @media not -moz-pref("browser.nova.enabled") {
     --urlbar-basic-component-size: calc(var(--urlbar-height) - 2 * (var(--urlbar-input-container-border-width) + var(--urlbar-input-container-padding)));
     --urlbar-icon-padding: calc((var(--urlbar-height) - 2px /* border */ - 2px /* padding */ - 16px /* icon */) / 2);
@@ -89,6 +93,16 @@
       --urlbar-container-min-width: 140px;
     }
   }
+
+  @media (prefers-contrast) {
+    --search-add-engine-badge-fill: light-dark(var(--color-green-70), var(--color-green-20));
+  }
+
+  @media (forced-colors) {
+    --search-add-engine-badge-fill: CanvasText;
+    --search-add-engine-badge-stroke: Canvas;
+    --search-add-engine-badge-filter-deemphasized: none;
+  }
 }
 
 /* Variables for Nova design tokens that don't exist yet and that are owned by
@@ -98,7 +112,9 @@
   --chrome-box-shadow: rgba(0, 0, 0, 0.13);
   @media -moz-pref("browser.nova.enabled") {
     @media not ((-moz-native-theme) or (forced-colors)) {
-      --chrome-box-shadow: light-dark(rgba(89, 57, 168, 0.15), rgba(152, 113, 255, 0.15));
+      :root:is([theme-in-app], :not([lwtheme])) & {
+        --chrome-box-shadow: light-dark(rgba(89, 57, 168, 0.15), rgba(152, 113, 255, 0.15));
+      }
     }
   }
 }
@@ -446,6 +462,10 @@ toolbar[inactive="true"] .urlbar,
 }
 
 .urlbar-input {
+  /* global-shared.css sets this in chrome documents, but not in the page that
+     hosts an in-page bar. */
+  min-width: 0;
+
   /* Make the editable line box span the field's full inner height so clicking
      anywhere in the field places the caret. The value equals the input's
      available height so it fills the field without growing it. */
@@ -459,7 +479,21 @@ toolbar[inactive="true"] .urlbar,
   }
 }
 
+/* The following properties will be used by UrlbarValueFormatter to keep the
+   base domain clear of the overflow masks and the scheme box. */
+@property --urlbar-overflow-fade-size {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0;
+}
+@property --urlbar-scheme-size {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0;
+}
+
 #urlbar-input {
+  --urlbar-overflow-fade-size: 3ch;
   mask-repeat: no-repeat;
   unicode-bidi: plaintext;
   text-align: match-parent;
@@ -492,16 +526,22 @@ toolbar[inactive="true"] .urlbar,
   /* The following rules apply overflow masks to the unfocused urlbar
      This mask may be overriden when a Contextual Feature Recommendation is shown. */
   .urlbar:not([focused])[textoverflow="both"] > .urlbar-input-container > .urlbar-input-box > & {
-    mask-image: linear-gradient(to right, transparent, black 3ch, black calc(100% - 3ch), transparent);
+    mask-image: linear-gradient(
+      to right,
+      transparent,
+      black var(--urlbar-overflow-fade-size),
+      black calc(100% - var(--urlbar-overflow-fade-size)),
+      transparent
+    );
   }
   .urlbar:not([focused])[textoverflow="right"] > .urlbar-input-container > .urlbar-input-box > & {
-    mask-image: linear-gradient(to left, transparent, black 3ch);
+    mask-image: linear-gradient(to left, transparent, black var(--urlbar-overflow-fade-size));
   }
   .urlbar:not([focused])[textoverflow="left"] > .urlbar-input-container > .urlbar-input-box > & {
-    mask-image: linear-gradient(to right, transparent, black 3ch);
+    mask-image: linear-gradient(to right, transparent, black var(--urlbar-overflow-fade-size));
   }
   .urlbar:not([focused])[textoverflow="left"][domaindir="rtl"] > .urlbar-input-container > .urlbar-input-box > & {
-    mask-image: linear-gradient(to right, transparent var(--urlbar-scheme-size), black calc(var(--urlbar-scheme-size) + 3ch));
+    mask-image: linear-gradient(to right, transparent var(--urlbar-scheme-size), black calc(var(--urlbar-scheme-size) + var(--urlbar-overflow-fade-size)));
   }
 }
 
@@ -592,6 +632,11 @@ toolbar[inactive="true"] .urlbar,
     overflow-clip-margin: var(--urlbar-joint-background-shadow-margin);
 
     max-height: min(calc(100% - var(--urlbarview-joint-background-outset-block)), 100vh);
+
+    @media (-moz-platform: macos) and (not -moz-pref("layout.css.anchor-positioning.follows-transforms.enabled")) {
+      translate: 0 var(--fullscreen-menubar-shift, 0);
+      max-height: min(calc(100% - var(--urlbarview-joint-background-outset-block) - var(--fullscreen-menubar-shift, 0px)), 100vh);
+    }
   }
 }
 
@@ -639,7 +684,7 @@ toolbar[inactive="true"] .urlbar,
   flex: 1;
   min-width: 0;
   height: 100%;
-  margin-inline-start: var(--urlbar-input-gap);
+  margin-inline: var(--urlbar-input-gap);
   cursor: text;
 
   /* With the search engine button on its own row, a plain glass marks the
@@ -949,6 +994,14 @@ toolbar[inactive="true"] .urlbar,
     color: var(--urlbar-box-text-color-active);
     outline-color: var(--toolbarbutton-outline-color-active);
   }
+
+  /* Icons with an attention fill (e.g. a starred bookmark) must follow the
+     hover text color to stay legible against the hover background. */
+  @media (forced-colors) {
+    &:not([disabled]):is(:hover, [open]) > .urlbar-icon {
+      fill: currentColor;
+    }
+  }
 }
 
 .searchbar-textbox:placeholder-shown::-moz-search-clear-button,
@@ -1073,7 +1126,7 @@ toolbar[inactive="true"] .urlbar,
 
 /* Picture-in-Picture icon */
 #picture-in-picture-button > .urlbar-icon {
-  list-style-image: url("chrome://global/skin/media/picture-in-picture-open.svg");
+  list-style-image: url("resource://content-accessible/media/picture-in-picture-open.svg");
 }
 
 #picture-in-picture-button[pipactive] > .urlbar-icon {
@@ -1101,7 +1154,7 @@ toolbar[inactive="true"] .urlbar,
      Don't use margin-inline-end as this is adjusting the art of the icon. */
   margin-right: -1px;
 
-  #translations-button[translationsactive] > & {
+  [translationsactive] > & {
     fill: var(--toolbarbutton-icon-fill-attention);
     fill-opacity: 1;
     margin-inline: var(--space-small);
@@ -1141,17 +1194,9 @@ toolbar[inactive="true"] .urlbar,
     font-weight: var(--font-weight-bold);
   }
 
-  #translations-button[translationsactive]:is(:hover, [open]) > #translations-button-icon {
-    fill: currentColor;
-  }
-
   #translations-button:is(:hover, [open]) > #translations-button-locale {
     background-color: var(--toolbar-field-background-color);
     color: var(--toolbarbutton-icon-fill-attention);
-  }
-
-  #translations-button:is(:hover, [open]) > #translations-button-circle-arrows {
-    fill: currentColor;
   }
 }
 
@@ -1278,6 +1323,10 @@ toolbar[inactive="true"] .urlbar,
 
   .searchbar-search-button[addengines="true"] > & {
     list-style-image: url(chrome://browser/skin/search-indicator-badge-add.svg);
+    -moz-context-properties: fill, stroke;
+    fill: var(--search-add-engine-badge-fill);
+    stroke: var(--search-add-engine-badge-stroke);
+    filter: var(--search-add-engine-badge-filter-deemphasized);
     margin-inline: -15px 4px;
     margin-top: -10px;
     width: 11px;
@@ -1286,6 +1335,10 @@ toolbar[inactive="true"] .urlbar,
     &:dir(rtl) {
       margin-inline: -25px 14px;
     }
+  }
+
+  .searchbar-search-button[addengines="true"]:is(:hover, [aria-expanded="true"]) > & {
+    filter: none;
   }
 
   .searchbar-search-button:hover:not([addengines="true"]) > & {
@@ -1314,7 +1367,10 @@ toolbar[inactive="true"] .urlbar,
     content: "";
     position: absolute;
     display: block;
-    background: url(chrome://browser/skin/search-indicator-badge-add.svg) no-repeat center;
+    background: url(chrome://browser/skin/search-indicator-badge-add.svg) no-repeat center / contain;
+    -moz-context-properties: fill, stroke;
+    fill: var(--search-add-engine-badge-fill);
+    stroke: var(--search-add-engine-badge-stroke);
     height: 11px;
     width: 11px;
     margin-inline-start: 9px;
@@ -1454,10 +1510,17 @@ toolbar[inactive="true"] .urlbar,
     width: 11px;
     height: 11px;
     inset-block-start: var(--space-xxsmall);
-    inset-inline-start: var(--icon-size);
-    background: url(chrome://browser/skin/search-indicator-badge-add.svg) no-repeat center;
-    background-size: contain;
+    inset-inline-start: calc(var(--icon-size) - 1px);
+    background: url(chrome://browser/skin/search-indicator-badge-add.svg) no-repeat center / contain;
+    -moz-context-properties: fill, stroke;
+    fill: var(--search-add-engine-badge-fill);
+    stroke: var(--search-add-engine-badge-stroke);
+    filter: var(--search-add-engine-badge-filter-deemphasized);
     pointer-events: none;
+  }
+
+  &[addengines]:is(:hover, [open])::part(button)::after {
+    filter: none;
   }
 }
 
@@ -1590,7 +1653,6 @@ toolbar[inactive="true"] .urlbar,
   > panel-item::part(button) {
     /* The --icon-url variable allows setting an icon in JS. */
     background-image: var(--icon-url, url("chrome://global/skin/icons/search-glass.svg"));
-    /* stylelint-disable-next-line media-query-no-invalid */
     @media not -moz-pref("browser.nova.enabled") {
       /* With Nova, panel-list already has these styles by default; Proton needs
          adjustments to look like a proper menu. panel-item's Proton padding
@@ -1612,7 +1674,10 @@ toolbar[inactive="true"] .urlbar,
     content: "";
     position: absolute;
     display: flex;
-    background: url(chrome://browser/skin/search-indicator-badge-add.svg) no-repeat center;
+    background: url(chrome://browser/skin/search-indicator-badge-add.svg) no-repeat center / contain;
+    -moz-context-properties: fill, stroke;
+    fill: var(--search-add-engine-badge-fill);
+    stroke: var(--search-add-engine-badge-stroke);
     height: 11px;
     width: 11px;
     top: 4px;

@@ -217,6 +217,37 @@ struct opAppendComment {
   };
 };
 
+// mBuffer holds the target characters followed by the data characters.
+struct opAppendProcessingInstruction {
+  nsIContent** mParent;
+  char16_t* mBuffer;
+  int32_t mTargetLength;
+  int32_t mDataLength;
+
+  explicit opAppendProcessingInstruction(nsIContentHandle* aParent,
+                                         char16_t* aBuffer,
+                                         int32_t aTargetLength,
+                                         int32_t aDataLength)
+      : mBuffer(aBuffer),
+        mTargetLength(aTargetLength),
+        mDataLength(aDataLength) {
+    mParent = static_cast<nsIContent**>(aParent);
+  };
+};
+
+struct opAppendProcessingInstructionToDocument {
+  char16_t* mBuffer;
+  int32_t mTargetLength;
+  int32_t mDataLength;
+
+  explicit opAppendProcessingInstructionToDocument(char16_t* aBuffer,
+                                                   int32_t aTargetLength,
+                                                   int32_t aDataLength)
+      : mBuffer(aBuffer),
+        mTargetLength(aTargetLength),
+        mDataLength(aDataLength) {};
+};
+
 struct opAppendCommentToDocument {
   char16_t* mBuffer;
   int32_t mLength;
@@ -560,6 +591,7 @@ typedef mozilla::Variant<
     opCreateHTMLElement, opCreateSVGElement, opCreateMathMLElement,
     opSetFormElement, opAppendText, opFosterParentText, opAppendComment,
     opAppendCommentToDocument, opAppendDoctypeToDocument,
+    opAppendProcessingInstruction, opAppendProcessingInstructionToDocument,
     opGetDocumentFragmentForTemplate, opSetDocumentFragmentForTemplate,
     opGetShadowRootFromHost, opGetFosterParent,
     // Gecko-specific on-pop ops
@@ -643,7 +675,8 @@ class nsHtml5TreeOperation final {
                                 nsHtml5DocumentBuilder* aBuilder);
 
   static void SetHTMLElementAttributes(mozilla::dom::Element* aElement,
-                                       nsHtml5HtmlAttributes* aAttributes);
+                                       nsHtml5HtmlAttributes* aAttributes,
+                                       bool aNotify);
 
   MOZ_CAN_RUN_SCRIPT_BOUNDARY static void SetHTMLElementAttributesFast(
       mozilla::dom::Element* aElement, nsHtml5HtmlAttributes* aAttributes);
@@ -698,6 +731,19 @@ class nsHtml5TreeOperation final {
   // aTable, or nullptr when there is none, in which case the content is
   // appended to the stack parent instead.
   static nsIContent* GetFosterParentForInsertBefore(nsIContent* aTable);
+
+  static nsresult AppendProcessingInstruction(nsIContent* aParent,
+                                              const nsAString& aTarget,
+                                              const nsAString& aData,
+                                              nsHtml5DocumentBuilder* aBuilder);
+
+  static nsresult InsertProcessingInstructionBefore(
+      nsIContent* aParent, const nsAString& aTarget, const nsAString& aData,
+      nsIContent* aBefore, nsHtml5DocumentBuilder* aBuilder);
+
+  static nsresult AppendProcessingInstructionToDocument(
+      const nsAString& aTarget, const nsAString& aData,
+      nsHtml5DocumentBuilder* aBuilder);
 
   static nsIContent* GetFosterParent(nsIContent* aTable,
                                      nsIContent* aStackParent);

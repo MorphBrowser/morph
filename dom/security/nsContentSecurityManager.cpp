@@ -540,6 +540,10 @@ static nsresult DoContentSecurityChecks(nsIChannel* aChannel,
       if (shouldLoad == nsIContentPolicy::REJECT_POLICY) {
         return NS_ERROR_BLOCKED_BY_POLICY;
       }
+      if (aLoadInfo->GetRequestBlockingReason() ==
+          nsILoadInfo::BLOCKING_REASON_CONNECTION_ALLOWLIST) {
+        return NS_ERROR_CONNECTION_ALLOWLIST_VIOLATION;
+      }
     }
     return NS_ERROR_CONTENT_BLOCKED;
   }
@@ -1389,7 +1393,7 @@ static nsresult CheckAllowLoadByTriggeringRemoteType(nsIChannel* aChannel) {
     NS_ENSURE_SUCCESS(rv, rv);
 
     if (!(aboutModuleFlags & nsIAboutModule::MAKE_LINKABLE) &&
-        !(aboutModuleFlags & nsIAboutModule::URI_CAN_LOAD_IN_CHILD) &&
+        !(aboutModuleFlags & nsIAboutModule::URI_IS_ERROR_PAGE) &&
         !(aboutModuleFlags & nsIAboutModule::URI_MUST_LOAD_IN_CHILD)) {
       NS_WARNING(nsPrintfCString("Blocking load of about URI (%s) which cannot "
                                  "be linked to in web content process",

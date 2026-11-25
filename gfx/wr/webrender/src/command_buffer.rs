@@ -6,12 +6,13 @@ use api::euclid::{point2, Box2D};
 use api::{MixBlendMode, units::{DeviceRect, LayoutRect, PictureRect}};
 use crate::pattern::{PatternKind, PatternShaderInput};
 use crate::renderer::BlendMode;
-use crate::{spatial_tree::SpatialNodeIndex, render_task_graph::RenderTaskId, surface::SurfaceTileDescriptor, tile_cache::TileKey, renderer::GpuBufferAddress, FastHashMap};
+use crate::{spatial_tree::SpatialNodeIndex, render_task_graph::RenderTaskId, surface::{SurfaceExtraTarget, SurfaceTileDescriptor}, tile_cache::TileKey, renderer::GpuBufferAddress, FastHashMap};
 use crate::gpu_types::QuadSegment;
 use crate::prim_store::storage;
 use crate::segment::EdgeMask;
 use crate::transform::GpuTransformId;
-use crate::visibility::PrimitiveDrawHeader;
+use crate::prim_store::PrimitiveInstanceIndex;
+use crate::visibility::{BackdropCaptureIndex, PrimitiveDrawHeader};
 
 /// A tightly packed command stored in a command buffer
 #[cfg_attr(feature = "capture", derive(Serialize))]
@@ -32,6 +33,8 @@ impl Command {
     const CMD_SET_SEGMENTS: u32 = 0x50000000;
     /// Draw a 3d-split-composite primitive.
     const CMD_DRAW_SPLIT_COMPOSITE: u32 = 0x60000000;
+    /// Draw a path primitive, tiled during batching.
+    const CMD_DRAW_PATH: u32 = 0x70000000;
 
     /// Bitmask for command bits of the command.
     const CMD_MASK: u32 = 0xf0000000;
@@ -70,6 +73,11 @@ impl Command {
     fn draw_quad() -> Self {
         Command(Command::CMD_DRAW_QUAD)
     }
+
+    fn draw_path(path_index: u32) -> Self {
+        debug_assert!(path_index <= Command::PARAM_MASK);
+        Command(Command::CMD_DRAW_PATH | path_index)
+    }
 }
 
 bitflags! {
@@ -92,6 +100,10 @@ bitflags! {
         /// them with the red channel in the fragment shader. Used with multiply blending, on top
         /// of premultiplied alpha content, it has the effect of applying a mask to the content under ir.
         const IS_MASK = 1 << 4;
+
+        /// If true, a `QuadRoundedClip` follows the quad primitive's blocks in the
+        /// gpu buffer and the shader applies it directly.
+        const ROUNDED_RECT_CLIP = 1 << 5;
     }
 }
 
@@ -146,6 +158,11 @@ pub enum PrimitiveCommand {
         edge_flags: EdgeMask,
         blend_mode: BlendMode,
     },
+    Path {
+        /// Index of the `PathPrimitive` in the frame's path primitive storage.
+        path_index: u32,
+        device_rect: DeviceRect,
+    },
 }
 
 impl PrimitiveCommand {
@@ -199,6 +216,10 @@ impl PrimitiveCommand {
             edge_flags,
             blend_mode,
         }
+    }
+
+    pub fn path(path_index: u32, device_rect: DeviceRect) -> Self {
+        PrimitiveCommand::Path { path_index, device_rect }
     }
 
     pub fn instance(
@@ -356,6 +377,10 @@ impl CommandBuffer {
                     self.commands.push(Command::data(src_color_task_ids[i].sub_rect_index as u32));
                 }
             }
+            PrimitiveCommand::Path { path_index, device_rect } => {
+                self.commands.push(Command::draw_path(path_index));
+                push_rect(&mut self.commands, &device_rect);
+            }
         }
     }
 
@@ -452,6 +477,11 @@ impl CommandBuffer {
                     );
                     f(&cmd, current_spatial_node_index, &[]);
                 }
+                Command::CMD_DRAW_PATH => {
+                    let device_rect = read_rect(&mut cmd_iter);
+                    let cmd = PrimitiveCommand::path(param, device_rect);
+                    f(&cmd, current_spatial_node_index, &[]);
+                }
                 Command::CMD_SET_SEGMENTS => {
                     let count = param;
                     for _ in 0 .. count {
@@ -483,6 +513,10 @@ pub enum CommandBufferBuilderKind {
         //           slightly complicated by the sub_slice_index in the
         //           TileKey structure - could have a 2 level array?
         tiles: FastHashMap<TileKey, SurfaceTileDescriptor>,
+        /// Tasks besides the tiles that this surface's primitives are drawn
+        /// into. Primitives of every sub-slice in a target's rect are drawn
+        /// into it.
+        extra_targets: Vec<SurfaceExtraTarget>,
     },
     Simple {
         render_task_id: RenderTaskId,
@@ -492,53 +526,86 @@ pub enum CommandBufferBuilderKind {
     Invalid,
 }
 
+impl CommandBufferBuilderKind {
+    /// Call `f` with each task the surface's primitives are drawn into.
+    pub fn for_each_task(&self, mut f: impl FnMut(RenderTaskId)) {
+        match self {
+            CommandBufferBuilderKind::Tiled { tiles, extra_targets } => {
+                for descriptor in tiles.values() {
+                    f(descriptor.current_task_id);
+                }
+                for target in extra_targets {
+                    f(target.task_id);
+                }
+            }
+            CommandBufferBuilderKind::Simple { render_task_id, .. } => f(*render_task_id),
+            CommandBufferBuilderKind::Invalid => {}
+        }
+    }
+}
+
+/// A backdrop-filter capture open on a surface: each primitive prepared on the
+/// surface that is behind the element is drawn into the capture too.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct OpenBackdropCapture {
+    pub index: BackdropCaptureIndex,
+    /// The area of the surface the capture's filters sample.
+    pub region: PictureRect,
+    /// The `BackdropCapture` primitive. Primitives painted before the element
+    /// have lower instance indices.
+    pub capture_instance_index: PrimitiveInstanceIndex,
+    /// The command buffer the capture's task draws from.
+    pub cmd_buffer_index: CommandBufferIndex,
+    /// The render tasks the primitives drawn into the capture depend on, which
+    /// its task has to depend on too.
+    pub dependencies: Vec<RenderTaskId>,
+    /// Whether the primitive being prepared on the surface is drawn into the
+    /// capture, so that the render tasks it makes the surface depend on are
+    /// added to its dependencies too.
+    pub drawn_into: bool,
+}
+
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct CommandBufferBuilder {
     pub kind: CommandBufferBuilderKind,
 
-    /// If a command buffer establishes a sub-graph, then at the end of constructing
-    /// the surface, the parent surface is supplied as an input dependency, and the
-    /// parent surface gets a duplicated (existing) task with the same location, and
-    /// with the sub-graph output as an input dependency.
-    pub establishes_sub_graph: bool,
-
-    /// If this surface builds a sub-graph, it will mark a task in the filter sub-graph
-    /// as a resolve source for the input from the parent surface.
-    pub resolve_source: Option<RenderTaskId>,
-
     /// List of render tasks that depend on the task that will be created for this builder.
     pub extra_dependencies: Vec<RenderTaskId>,
+
+    /// The backdrop-filter captures open on this surface.
+    pub backdrop_captures: Vec<OpenBackdropCapture>,
 }
 
 impl CommandBufferBuilder {
     pub fn empty() -> Self {
         CommandBufferBuilder {
             kind: CommandBufferBuilderKind::Invalid,
-            establishes_sub_graph: false,
-            resolve_source: None,
             extra_dependencies: Vec::new(),
+            backdrop_captures: Vec::new(),
         }
     }
 
     /// Construct a tiled command buffer builder.
     pub fn new_tiled(
         tiles: FastHashMap<TileKey, SurfaceTileDescriptor>,
+        extra_targets: Vec<SurfaceExtraTarget>,
     ) -> Self {
         CommandBufferBuilder {
             kind: CommandBufferBuilderKind::Tiled {
                 tiles,
+                extra_targets,
             },
-            establishes_sub_graph: false,
-            resolve_source: None,
             extra_dependencies: Vec::new(),
+            backdrop_captures: Vec::new(),
         }
     }
 
     /// Construct a simple command buffer builder.
     pub fn new_simple(
         render_task_id: RenderTaskId,
-        establishes_sub_graph: bool,
         root_task_id: Option<RenderTaskId>,
         dirty_rect: PictureRect,
     ) -> Self {
@@ -548,9 +615,8 @@ impl CommandBufferBuilder {
                 root_task_id,
                 dirty_rect,
             },
-            establishes_sub_graph,
-            resolve_source: None,
             extra_dependencies: Vec::new(),
+            backdrop_captures: Vec::new(),
         }
     }
 }

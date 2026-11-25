@@ -11,6 +11,8 @@
 #include "mozilla/StaticPrefs_apz.h"
 #include "mozilla/StaticPrefs_layers.h"
 #include "mozilla/dom/BrowserChild.h"
+#include "mozilla/dom/Document.h"
+#include "mozilla/dom/ViewTransition.h"
 #include "mozilla/gfx/DrawEventRecorder.h"
 #include "mozilla/layers/APZTestData.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
@@ -127,7 +129,7 @@ bool WebRenderLayerManager::Initialize(
   WrBridge()->SetNamespace(idNamespace.ref());
   *aTextureFactoryIdentifier = textureFactoryIdentifier;
 
-  mDLBuilder = MakeUnique<wr::DisplayListBuilder>(
+  mDLBuilder = std::make_unique<wr::DisplayListBuilder>(
       WrBridge()->GetPipeline(), WrBridge()->GetWebRenderBackend());
 
   sHasInitialized = true;
@@ -137,7 +139,7 @@ bool WebRenderLayerManager::Initialize(
 void WebRenderLayerManager::Destroy() { DoDestroy(/* aIsSync */ false); }
 
 void WebRenderLayerManager::DoDestroy(bool aIsSync) {
-  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_RELEASE_ASSERT(NS_IsMainThread());
 
   if (IsDestroyed()) {
     return;
@@ -197,7 +199,7 @@ void WebRenderLayerManager::GetBackendName(nsAString& name) {
   }
 }
 
-uint32_t WebRenderLayerManager::StartFrameTimeRecording(int32_t aBufferSize) {
+uint32_t WebRenderLayerManager::StartFrameTimeRecording(uint32_t aBufferSize) {
   CompositorBridgeChild* renderer = GetCompositorBridgeChild();
   if (renderer) {
     uint32_t startIndex;
@@ -346,7 +348,7 @@ void WebRenderLayerManager::EndTransactionWithoutLayer(
   if (aRenderOffscreen) {
     wr::PipelineId mainId = WrBridge()->GetPipeline();
     wr::PipelineId tmpPipeline = gfx::GetTemporaryWebRenderPipelineId(mainId);
-    offscreenBuilder = MakeUnique<wr::DisplayListBuilder>(
+    offscreenBuilder = std::make_unique<wr::DisplayListBuilder>(
         tmpPipeline, WrBridge()->GetWebRenderBackend());
     diplayListBuilder = offscreenBuilder.get();
   }
@@ -475,11 +477,8 @@ void WebRenderLayerManager::EndTransactionWithoutLayer(
             ? wr::GeckoDisplayListType::Full(aGeckoDLBuildTime)
             : wr::GeckoDisplayListType::Partial(aGeckoDLBuildTime);
 
-    // convert from nanoseconds to microseconds
-    auto duration = TimeDuration::FromMicroseconds(
-        double(dlData.mDLDesc.builder_finish_time -
-               dlData.mDLDesc.builder_start_time) /
-        1000.);
+    auto duration = TimeDuration::FromNanoseconds(
+        dlData.mDLDesc.builder_finish_time - dlData.mDLDesc.builder_start_time);
     PerfStats::RecordMeasurement(PerfStats::Metric::WrDisplayListBuilding,
                                  duration);
     WrBridge()->EndTransaction(
@@ -653,12 +652,20 @@ void WebRenderLayerManager::ClearCachedResources() {
 }
 
 void WebRenderLayerManager::WrUpdated() {
+  // The parent released our pipeline's interned items in the old WebRender
+  // instance, so the next display list must start a fresh delta stream.
+  // Display lists built before this are dropped by the id namespace check.
+  mDLBuilder = std::make_unique<wr::DisplayListBuilder>(
+      WrBridge()->GetPipeline(), WrBridge()->GetWebRenderBackend());
   ClearAsyncAnimations();
   mStateManager.mAsyncResourceUpdates.reset();
   mWebRenderCommandBuilder.ClearCachedResources();
   DiscardLocalImages();
   if (mWidget) {
     if (dom::BrowserChild* browserChild = mWidget->GetOwningBrowserChild()) {
+      if (RefPtr<dom::Document> doc = browserChild->GetTopLevelDocument()) {
+        dom::ViewTransition::SkipAllAfterRenderingReset(*doc);
+      }
       browserChild->SchedulePaint();
     }
   }

@@ -50,6 +50,7 @@ import mozilla.components.ui.icons.R as iconsR
 import org.mozilla.fenix.R
 import org.mozilla.fenix.browser.browsingmode.BrowsingMode.Normal
 import org.mozilla.fenix.browser.browsingmode.BrowsingMode.Private
+import org.mozilla.fenix.components.menu.configuration.BrowserMenuConfiguration
 import org.mozilla.fenix.components.toolbar.ToolbarPosition
 import org.mozilla.fenix.databinding.TabPreviewBinding
 import org.mozilla.fenix.ext.components
@@ -164,9 +165,18 @@ constructor(
 
             ToolbarAction.Menu ->
                 ActionButtonRes(
-                    drawableResId = iconsR.drawable.mozac_ic_ellipsis_vertical_24,
+                    drawableResId = iconsR.drawable.mozac_ic_more_vertical_round_24,
                     contentDescription = R.string.content_description_menu,
-                    highlighted = context.components.appStore.state.supportedMenuNotifications.isNotEmpty(),
+                    highlighted =
+                        BrowserMenuConfiguration.hasNotificationToShow(
+                            context.components.appStore.state.supportedMenuNotifications,
+                            context.components.menuCustomizationRepository.customizedMenuInfo.value,
+                            if (context.components.settings.isToolsMenuCustomizationEnabled) {
+                                context.components.menuCustomizationRepository.customizedSectionsInfo.value.orEmpty()
+                            } else {
+                                emptyMap()
+                            },
+                        ),
                     onClick = object : BrowserToolbarEvent {},
                 )
 

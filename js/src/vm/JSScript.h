@@ -23,6 +23,7 @@
 #include "jstypes.h"
 
 #include "frontend/ScriptIndex.h"  // ScriptIndex
+#include "gc/Allocator.h"
 #include "gc/Barrier.h"
 #include "js/ColumnNumber.h"  // JS::LimitedColumnNumberOneOrigin, JS::LimitedColumnNumberOneOrigin
 #include "js/CompileOptions.h"
@@ -1582,8 +1583,9 @@ static_assert(sizeof(ScriptWarmUpData) == sizeof(uintptr_t),
 //
 // Accessing this array just requires calling the appropriate public
 // Span-computing function.
-class alignas(uintptr_t) PrivateScriptData final
-    : public TrailingArray<PrivateScriptData> {
+class MOZ_EMPTY_BASES alignas(uintptr_t) PrivateScriptData final
+    : public TrailingArray<PrivateScriptData>,
+      public gc::Buffer {
   uint32_t ngcthings = 0;
 
   // Note: This is only defined for scripts with an enclosing scope. This
@@ -2119,14 +2121,6 @@ class JSScript : public js::BaseScript {
   size_t numICEntries() const { return immutableScriptData()->numICEntries; }
 
   size_t funLength() const { return immutableScriptData()->funLength; }
-
-  void cacheForEval() {
-    MOZ_ASSERT(isForEval());
-    // IsEvalCacheCandidate will make sure that there's nothing in this
-    // script that would prevent reexecution even if isRunOnce is
-    // true.  So just pretend like we never ran this script.
-    clearFlag(MutableFlags::HasRunOnce);
-  }
 
   /*
    * Arguments access (via JSOp::*Arg* opcodes) must access the canonical

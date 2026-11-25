@@ -175,7 +175,6 @@
 #include "mozilla/dom/TrustedTypeUtils.h"
 #include "mozilla/dom/TrustedTypesConstants.h"
 #include "mozilla/dom/VRDisplay.h"
-#include "mozilla/dom/VRDisplayEvent.h"
 #include "mozilla/dom/VRDisplayEventBinding.h"
 #include "mozilla/dom/VREventObserver.h"
 #include "mozilla/dom/VisualViewport.h"
@@ -276,7 +275,6 @@
 #include "nsISerialEventTarget.h"
 #include "nsISimpleEnumerator.h"
 #include "nsISizeOfEventTarget.h"
-#include "nsISlowScriptDebug.h"
 #include "nsISupportsPrimitives.h"
 #include "nsISupportsUtils.h"
 #include "nsIThread.h"
@@ -310,6 +308,8 @@
 #include "nsTLiteralString.h"
 #include "nsTObserverArray.h"
 #include "nsTStringRepr.h"
+#include "nsThread.h"
+#include "nsThreadManager.h"
 #include "nsThreadUtils.h"
 #include "nsWeakReference.h"
 #include "nsWindowMemoryReporter.h"
@@ -944,7 +944,7 @@ nsGlobalWindowInner::nsGlobalWindowInner(nsGlobalWindowOuter* aOuterWindow,
   // add this inner window to the outer window list of inners.
   PR_INSERT_AFTER(this, aOuterWindow);
 
-  mTimeoutManager = MakeUnique<dom::TimeoutManager>(
+  mTimeoutManager = std::make_unique<dom::TimeoutManager>(
       *this, StaticPrefs::dom_timeout_max_idle_defer_ms(),
       static_cast<nsISerialEventTarget*>(nsPIDOMWindowInner::From(this)
                                              ->GetBrowsingContextGroup()
@@ -2166,6 +2166,11 @@ void nsGlobalWindowInner::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
           mIsHandlingResizeEvent = true;
         }
       }
+      aVisitor.mWantsPostHandleEvent = true;
+      break;
+    case eUnload:
+    case eLoad:
+      aVisitor.mWantsPostHandleEvent = true;
       break;
     case eMouseDown:
       if (aVisitor.mEvent->IsTrusted()) {
@@ -2493,16 +2498,6 @@ nsresult nsGlobalWindowInner::PostHandleEvent(EventChainPostVisitor& aVisitor) {
 
     if (mVREventObserver) {
       mVREventObserver->NotifyAfterLoad();
-    }
-
-    uint32_t autoActivateVRDisplayID = 0;
-    nsGlobalWindowOuter* outer = GetOuterWindowInternal();
-    if (outer) {
-      autoActivateVRDisplayID = outer->GetAutoActivateVRDisplayID();
-    }
-    if (autoActivateVRDisplayID) {
-      DispatchVRDisplayActivate(autoActivateVRDisplayID,
-                                VRDisplayEventReason::Navigation);
     }
   }
 
@@ -3525,6 +3520,21 @@ bool nsGlobalWindowInner::DoResolve(
     return ResolveComponentsShim(aCx, aObj, aDesc);
   }
 
+  // Bug 2072122: Trusted Types readiness experiment only, to be removed.
+  // React DOM looks up this global when it loads. A lookup that reaches us
+  // means the page does not define it; we never resolve it.
+  if (StaticPrefs::dom_security_trusted_types_readiness_telemetry_enabled() &&
+      aId == XPCJSRuntime::Get()->GetStringID(
+                 XPCJSContext::IDX_REACT_DEVTOOLS_GLOBAL_HOOK) &&
+      !xpc::IsXrayWrapper(aObj)) {
+    if (Document* doc = GetExtantDoc();
+        doc && !doc->IsDetectingTrustedTypesLibrary()) {
+      doc->SetTrustedTypesReadinessSignal(
+          TrustedTypesReadinessSignal::LookedUpReactDevToolsHook);
+    }
+    return true;
+  }
+
   // We also support a "window.controllers" thing; apparently some
   // sites use it for browser-sniffing.  See bug 1010577.
 #ifdef USE_CONTROLLERS_SHIM
@@ -3581,6 +3591,13 @@ bool nsGlobalWindowInner::MayResolve(jsid aId) {
                  XPCJSContext::IDX_CONTROLLERS_CLASS)) {
     // We only resolve .controllers/.Controllers in release builds and on
     // non-chrome windows, but let's not worry about any of that stuff.
+    return true;
+  }
+
+  // Bug 2072122: Trusted Types readiness experiment only, to be removed.
+  if (StaticPrefs::dom_security_trusted_types_readiness_telemetry_enabled() &&
+      aId == XPCJSRuntime::Get()->GetStringID(
+                 XPCJSContext::IDX_REACT_DEVTOOLS_GLOBAL_HOOK)) {
     return true;
   }
 
@@ -3918,8 +3935,13 @@ already_AddRefed<BrowsingContext> nsGlobalWindowInner::GetChildWindow(
 }
 
 void nsGlobalWindowInner::RefreshRealmPrincipal() {
-  JS::SetRealmPrincipals(js::GetNonCCWObjectRealm(GetWrapperPreserveColor()),
-                         nsJSPrincipals::get(mDoc->NodePrincipal()));
+  JS::Realm* realm = js::GetNonCCWObjectRealm(GetWrapperPreserveColor());
+  nsJSPrincipals* existing = nsJSPrincipals::get(JS::GetRealmPrincipals(realm));
+  nsJSPrincipals* jsPrincipals = nsJSPrincipals::get(mDoc->NodePrincipal());
+  if (existing != jsPrincipals) {
+    HoldOldPrincipal(existing);
+  }
+  JS::SetRealmPrincipals(realm, jsPrincipals);
 }
 
 void nsGlobalWindowInner::RefreshReduceTimerPrecisionCallerType() {
@@ -4033,10 +4055,10 @@ void nsGlobalWindowInner::Prompt(const nsAString& aMessage,
 }
 
 void nsGlobalWindowInner::Focus(CallerType aCallerType, ErrorResult& aError) {
-  FORWARD_TO_OUTER_OR_THROW(FocusOuter,
-                            (aCallerType, /* aFromOtherProcess */ false,
-                             nsFocusManager::GenerateFocusActionId()),
-                            aError, );
+  LazyFocusActionId actionId;
+  FORWARD_TO_OUTER_OR_THROW(
+      FocusOuter, (aCallerType, /* aFromOtherProcess */ false, actionId),
+      aError, );
 }
 
 nsresult nsGlobalWindowInner::Focus(CallerType aCallerType) {
@@ -5254,7 +5276,7 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
   // minified scripts which is more common in Web content that is loaded in the
   // content process.
   uint32_t* linenop = XRE_IsParentProcess() ? &lineno : nullptr;
-  bool hasFrame = JS::DescribeScriptedCaller(&filename, aCx, linenop);
+  JS::DescribeScriptedCaller(&filename, aCx, linenop);
 
   // Record the slow script event if we haven't done so already for this inner
   // window (which represents a particular page to the user).
@@ -5278,21 +5300,6 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
       return KillSlowScript;
     }
 
-    if (action == ProcessHangMonitor::StartDebugger) {
-      // Spin a nested event loop so that the debugger in the parent can fetch
-      // any information it needs. Once the debugger has started, return to the
-      // script.
-      RefPtr<nsGlobalWindowOuter> outer = GetOuterWindowInternal();
-      outer->EnterModalState();
-      SpinEventLoopUntil("nsGlobalWindowInner::ShowSlowScriptDialog"_ns, [&]() {
-        return monitor->IsDebuggerStartupComplete() ||
-               AppShutdown::IsShutdownImpending();
-      });
-      outer->LeaveModalState();
-      return (AppShutdown::IsShutdownImpending()) ? KillSlowScript
-                                                  : ContinueSlowScript;
-    }
-
     return ContinueSlowScriptAndKeepNotifying;
   }
 
@@ -5306,17 +5313,6 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
   nsCOMPtr<nsIPrompt> prompt = do_GetInterface(ds);
   NS_ENSURE_TRUE(prompt, KillSlowScript);
 
-  // Prioritize the SlowScriptDebug interface over JSD1.
-  nsCOMPtr<nsISlowScriptDebugCallback> debugCallback;
-
-  if (hasFrame) {
-    const char* debugCID = "@mozilla.org/dom/slow-script-debug;1";
-    nsCOMPtr<nsISlowScriptDebug> debugService = do_GetService(debugCID, &rv);
-    if (NS_SUCCEEDED(rv)) {
-      debugService->GetActivationHandler(getter_AddRefs(debugCallback));
-    }
-  }
-
   bool failed = false;
   auto getString = [&](const char* name, PropertiesFile propFile =
                                              PropertiesFile::DOM_PROPERTIES) {
@@ -5329,11 +5325,10 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
   };
 
   bool isAddonScript = !aAddonId.IsEmpty();
-  bool showDebugButton = debugCallback && !isAddonScript;
 
   // Get localizable strings
 
-  nsAutoString title, checkboxMsg, debugButton, msg;
+  nsAutoString title, checkboxMsg, msg;
   if (isAddonScript) {
     title = getString("KillAddonScriptTitle");
     checkboxMsg = getString("KillAddonScriptGlobalMessage");
@@ -5356,13 +5351,7 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
   } else {
     title = getString("KillScriptTitle");
     checkboxMsg = getString("DontAskAgain");
-
-    if (showDebugButton) {
-      debugButton = getString("DebugScriptButton");
-      msg = getString("KillScriptWithDebugMessage");
-    } else {
-      msg = getString("KillScriptMessage");
-    }
+    msg = getString("KillScriptMessage");
   }
 
   auto stopButton = getString("StopScriptButton");
@@ -5418,10 +5407,6 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
                          (nsIPrompt::BUTTON_TITLE_IS_STRING *
                           (nsIPrompt::BUTTON_POS_0 + nsIPrompt::BUTTON_POS_1));
 
-  // Add a third button if necessary.
-  if (showDebugButton)
-    buttonFlags += nsIPrompt::BUTTON_TITLE_IS_STRING * nsIPrompt::BUTTON_POS_2;
-
   bool checkboxValue = false;
   int32_t buttonPressed = 0;  // In case the user exits dialog by clicking X.
   {
@@ -5429,22 +5414,15 @@ nsGlobalWindowInner::ShowSlowScriptDialog(JSContext* aCx,
     AutoDisableJSInterruptCallback disabler(aCx);
 
     // Open the dialog.
-    rv = prompt->ConfirmEx(
-        title.get(), msg.get(), buttonFlags, waitButton.get(), stopButton.get(),
-        debugButton.get(), checkboxMsg.get(), &checkboxValue, &buttonPressed);
+    rv = prompt->ConfirmEx(title.get(), msg.get(), buttonFlags,
+                           waitButton.get(), stopButton.get(), nullptr,
+                           checkboxMsg.get(), &checkboxValue, &buttonPressed);
   }
 
   if (buttonPressed == 0) {
     if (checkboxValue && !isAddonScript && NS_SUCCEEDED(rv))
       return AlwaysContinueSlowScript;
     return ContinueSlowScript;
-  }
-
-  if (buttonPressed == 2) {
-    MOZ_RELEASE_ASSERT(debugCallback);
-
-    rv = debugCallback->HandleSlowScriptDebug(this);
-    return NS_SUCCEEDED(rv) ? ContinueSlowScript : KillSlowScript;
   }
 
   JS_ClearPendingException(aCx);
@@ -7054,7 +7032,7 @@ void nsGlobalWindowInner::GetGamepads(nsTArray<RefPtr<Gamepad>>& aGamepads) {
   // mGamepads.Count() may not be sufficient, but it's not harmful.
   aGamepads.SetCapacity(mGamepads.Count());
   for (const auto& entry : mGamepads) {
-    Gamepad* gamepad = entry.GetWeak();
+    Gamepad* gamepad = entry.GetRawPtr();
     aGamepads.EnsureLengthAtLeast(gamepad->Index() + 1);
     aGamepads[gamepad->Index()] = gamepad;
   }
@@ -7093,7 +7071,7 @@ void nsGlobalWindowInner::SyncGamepadState() {
   if (mHasSeenGamepadInput) {
     RefPtr<GamepadManager> gamepadManager(GamepadManager::GetService());
     for (const auto& entry : mGamepads) {
-      gamepadManager->SyncGamepadState(entry.GetKey(), this, entry.GetWeak());
+      gamepadManager->SyncGamepadState(entry.GetKey(), this, entry.GetRawPtr());
     }
   }
 }
@@ -7123,154 +7101,6 @@ void nsGlobalWindowInner::NotifyPresentationGenerationChanged(
   for (const auto& display : mVRDisplays) {
     if (display->DisplayId() == aDisplayID) {
       display->OnPresentationGenerationChanged();
-    }
-  }
-}
-
-void nsGlobalWindowInner::DispatchVRDisplayActivate(
-    uint32_t aDisplayID, mozilla::dom::VRDisplayEventReason aReason) {
-  // Ensure that our list of displays is up to date
-  VRDisplay::UpdateVRDisplays(mVRDisplays, this);
-
-  // Search for the display identified with aDisplayID and fire the
-  // event if found.
-  for (const auto& display : mVRDisplays) {
-    if (display->DisplayId() == aDisplayID) {
-      if (aReason != VRDisplayEventReason::Navigation &&
-          display->IsAnyPresenting(gfx::kVRGroupContent)) {
-        // We only want to trigger this event if nobody is presenting to the
-        // display already or when a page is loaded by navigating away
-        // from a page with an active VR Presentation.
-        continue;
-      }
-
-      VRDisplayEventInit init;
-      init.mBubbles = false;
-      init.mCancelable = false;
-      init.mDisplay = display;
-      init.mReason.Construct(aReason);
-
-      RefPtr<VRDisplayEvent> event =
-          VRDisplayEvent::Constructor(this, u"vrdisplayactivate"_ns, init);
-      // vrdisplayactivate is a trusted event, allowing VRDisplay.requestPresent
-      // to be used in response to link traversal, user request (chrome UX), and
-      // HMD mounting detection sensors.
-      event->SetTrusted(true);
-      // VRDisplay.requestPresent normally requires a user gesture; however, an
-      // exception is made to allow it to be called in response to
-      // vrdisplayactivate during VR link traversal.
-      display->StartHandlingVRNavigationEvent();
-      DispatchEvent(*event);
-      display->StopHandlingVRNavigationEvent();
-      // Once we dispatch the event, we must not access any members as an event
-      // listener can do anything, including closing windows.
-      return;
-    }
-  }
-}
-
-void nsGlobalWindowInner::DispatchVRDisplayDeactivate(
-    uint32_t aDisplayID, mozilla::dom::VRDisplayEventReason aReason) {
-  // Ensure that our list of displays is up to date
-  VRDisplay::UpdateVRDisplays(mVRDisplays, this);
-
-  // Search for the display identified with aDisplayID and fire the
-  // event if found.
-  for (const auto& display : mVRDisplays) {
-    if (display->DisplayId() == aDisplayID && display->IsPresenting()) {
-      // We only want to trigger this event to content that is presenting to
-      // the display already.
-
-      VRDisplayEventInit init;
-      init.mBubbles = false;
-      init.mCancelable = false;
-      init.mDisplay = display;
-      init.mReason.Construct(aReason);
-
-      RefPtr<VRDisplayEvent> event =
-          VRDisplayEvent::Constructor(this, u"vrdisplaydeactivate"_ns, init);
-      event->SetTrusted(true);
-      DispatchEvent(*event);
-      // Once we dispatch the event, we must not access any members as an event
-      // listener can do anything, including closing windows.
-      return;
-    }
-  }
-}
-
-void nsGlobalWindowInner::DispatchVRDisplayConnect(uint32_t aDisplayID) {
-  // Ensure that our list of displays is up to date
-  VRDisplay::UpdateVRDisplays(mVRDisplays, this);
-
-  // Search for the display identified with aDisplayID and fire the
-  // event if found.
-  for (const auto& display : mVRDisplays) {
-    if (display->DisplayId() == aDisplayID) {
-      // Fire event even if not presenting to the display.
-      VRDisplayEventInit init;
-      init.mBubbles = false;
-      init.mCancelable = false;
-      init.mDisplay = display;
-      // VRDisplayEvent.reason is not set for vrdisplayconnect
-
-      RefPtr<VRDisplayEvent> event =
-          VRDisplayEvent::Constructor(this, u"vrdisplayconnect"_ns, init);
-      event->SetTrusted(true);
-      DispatchEvent(*event);
-      // Once we dispatch the event, we must not access any members as an event
-      // listener can do anything, including closing windows.
-      return;
-    }
-  }
-}
-
-void nsGlobalWindowInner::DispatchVRDisplayDisconnect(uint32_t aDisplayID) {
-  // Ensure that our list of displays is up to date
-  VRDisplay::UpdateVRDisplays(mVRDisplays, this);
-
-  // Search for the display identified with aDisplayID and fire the
-  // event if found.
-  for (const auto& display : mVRDisplays) {
-    if (display->DisplayId() == aDisplayID) {
-      // Fire event even if not presenting to the display.
-      VRDisplayEventInit init;
-      init.mBubbles = false;
-      init.mCancelable = false;
-      init.mDisplay = display;
-      // VRDisplayEvent.reason is not set for vrdisplaydisconnect
-
-      RefPtr<VRDisplayEvent> event =
-          VRDisplayEvent::Constructor(this, u"vrdisplaydisconnect"_ns, init);
-      event->SetTrusted(true);
-      DispatchEvent(*event);
-      // Once we dispatch the event, we must not access any members as an event
-      // listener can do anything, including closing windows.
-      return;
-    }
-  }
-}
-
-void nsGlobalWindowInner::DispatchVRDisplayPresentChange(uint32_t aDisplayID) {
-  // Ensure that our list of displays is up to date
-  VRDisplay::UpdateVRDisplays(mVRDisplays, this);
-
-  // Search for the display identified with aDisplayID and fire the
-  // event if found.
-  for (const auto& display : mVRDisplays) {
-    if (display->DisplayId() == aDisplayID) {
-      // Fire event even if not presenting to the display.
-      VRDisplayEventInit init;
-      init.mBubbles = false;
-      init.mCancelable = false;
-      init.mDisplay = display;
-      // VRDisplayEvent.reason is not set for vrdisplaypresentchange
-      RefPtr<VRDisplayEvent> event =
-          VRDisplayEvent::Constructor(this, u"vrdisplaypresentchange"_ns, init);
-      event->SetTrusted(true);
-      DispatchEvent(*event);
-      // Once we dispatch the event, we must not access any members as an event
-      // listener can do anything, including closing windows.
-      return;
     }
   }
 }
@@ -7401,8 +7231,8 @@ already_AddRefed<Promise> nsGlobalWindowInner::PromiseDocumentFlushed(
     return nullptr;
   }
 
-  auto flushResolver =
-      MakeUnique<PromiseDocumentFlushedResolver>(resultPromise, aCallback);
+  auto flushResolver = std::make_unique<PromiseDocumentFlushedResolver>(
+      resultPromise, aCallback);
 
   if (!presShell->NeedStyleFlush() && !presShell->NeedLayoutFlush()) {
     flushResolver->Call();
@@ -7975,6 +7805,25 @@ void nsGlobalWindowInner::NoteMediaSourceURL(const nsACString& aURL) {
 void nsGlobalWindowInner::UnnoteMediaSourceURL(const nsACString& aURL) {
   DebugOnly<bool> found = mMediaSourceURLs.RemoveElementSorted(aURL);
   MOZ_ASSERT(found, "MediaSourceURL should have been noted");
+}
+
+void nsGlobalWindowInner::HoldOldPrincipal(nsIPrincipal* aPrincipal) {
+  mOldPrincipals.AppendElement(aPrincipal);
+  Dispatch(NewRunnableMethod(
+      "nsGlobalWindowInner::ClearOldPrincipalsIfNotNestedEventLoop", this,
+      &nsGlobalWindowInner::ClearOldPrincipalsIfNotNestedEventLoop));
+}
+
+void nsGlobalWindowInner::ClearOldPrincipalsIfNotNestedEventLoop() {
+  MOZ_ASSERT(NS_IsMainThread());
+  nsThread* mainThread = nsThreadManager::get().GetCurrentThread();
+  if (mainThread && mainThread->RecursionDepth() > 1) {
+    // Not OK to clear old principals from a nested event loop. In order
+    // to avoid spamming the nested event loop with runnables, just give
+    // up and leave the old principals around.
+    return;
+  }
+  mOldPrincipals.Clear();
 }
 
 void nsPIDOMWindowInner::MaybeSetHasPointerRawUpdateEventListeners() {

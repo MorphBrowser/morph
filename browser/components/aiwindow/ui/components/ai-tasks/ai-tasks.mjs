@@ -4,19 +4,19 @@
 
 import { html, nothing } from "chrome://global/content/vendor/lit.all.mjs";
 import { MozLitElement } from "chrome://global/content/lit-utils.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-button.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/agent-monitor-item.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/monitors-display.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/monitor-icon.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-select.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/moz-textarea.mjs";
-// eslint-disable-next-line import/no-unassigned-import
+// eslint-disable-next-line import-x/no-unassigned-import
 import "chrome://global/content/elements/panel-list.mjs";
 
 // Default constants - will be overridden by values from the actor
@@ -28,6 +28,7 @@ const DEFAULT_CONSTANTS = {
     WEEKLY: "weekly",
   },
   isMonitorRegionSupported: true,
+  isBlocked: false,
   smartWindowSupportUrl: "https://support.mozilla.org/kb/smart-window",
 };
 
@@ -97,6 +98,13 @@ export class AITasks extends MozLitElement {
     this.boundHandleMonitorOpen = this.handleMonitorOpen.bind(this);
     this.boundHandleMonitorSubmit = this.handleMonitorSubmit.bind(this);
     this.boundHandleMonitorCancel = this.handleMonitorCancel.bind(this);
+    this.boundHandleBlockedStateChanged =
+      this.handleBlockedStateChanged.bind(this);
+
+    window.addEventListener(
+      "SmartWindowTasks:BlockedStateChanged",
+      this.boundHandleBlockedStateChanged
+    );
 
     // Listen for events bubbling up from the create dialog and from
     // monitors-display > agent-monitor-item
@@ -194,6 +202,11 @@ export class AITasks extends MozLitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
 
+    window.removeEventListener(
+      "SmartWindowTasks:BlockedStateChanged",
+      this.boundHandleBlockedStateChanged
+    );
+
     // Remove event listeners
     this.removeEventListener(
       "agent-monitor-item:delete",
@@ -245,6 +258,18 @@ export class AITasks extends MozLitElement {
 
   get #dialog() {
     return this.shadowRoot.querySelector("dialog");
+  }
+
+  /**
+   * Refreshes the page when Smart Window is blocked or unblocked in AI
+   * Controls.
+   */
+  async handleBlockedStateChanged() {
+    await this.#initializeActor();
+    if (this._constants.isBlocked) {
+      this.closeDialog();
+    }
+    await this.loadMonitors();
   }
 
   // ===== Dialog Management =====
@@ -502,15 +527,20 @@ export class AITasks extends MozLitElement {
           ? html`<agent-monitor-item
               mode="create"
               .maxWatchUrls=${this._constants.TOTAL_NUM_URLS_IN_MONITOR}
+              .canSuggest=${false}
             ></agent-monitor-item>`
           : nothing}
       </dialog>
 
-      ${!this.isMonitorRegionSupported
+      ${this._constants.isBlocked || !this.isMonitorRegionSupported
         ? html`
             <div class="unavailable-wrapper">
               <div class="unavailable-container">
-                <h2 data-l10n-id="ai-tasks-no-monitors-title"></h2>
+                <h2
+                  data-l10n-id=${this._constants.isBlocked
+                    ? "ai-tasks-blocked-title"
+                    : "ai-tasks-no-monitors-title"}
+                ></h2>
                 <p data-l10n-id="ai-tasks-no-monitors-message">
                   <a
                     href=${this._constants.smartWindowSupportUrl}
@@ -545,6 +575,7 @@ export class AITasks extends MozLitElement {
                 .scheduleTypes=${this._constants.SCHEDULE_TYPES}
                 .weekdays=${WEEKDAYS}
                 .canResume=${!this.isMaxMonitorsReached}
+                .activeLimit=${this._constants.TOTAL_NUM_MONITORS}
               ></monitors-display>
             </div>
           </div>`}

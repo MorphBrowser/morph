@@ -21,7 +21,10 @@ from mozsystemmonitor.resourcemonitor import SystemResourceMonitor
 from mozharness.base.config import parse_config_file
 from mozharness.base.errors import PythonErrorList
 from mozharness.base.log import CRITICAL, DEBUG, ERROR, INFO, WARNING, OutputParser
-from mozharness.base.python import perfherder_schema_path
+from mozharness.base.python import (
+    perf_expected_changes_path,
+    perfherder_schema_path,
+)
 from mozharness.base.vcs.vcsbase import MercurialScript
 from mozharness.mozilla.automation import (
     TBPL_FAILURE,
@@ -101,7 +104,7 @@ class TalosOutputParser(OutputParser):
         # now let's check if we should retry
         harness_retry_re = TinderBoxPrintRe["harness_error"]["retry_regex"]
         if harness_retry_re.search(line):
-            self.critical(" %s" % line)
+            self.critical(f" {line}")
             self.update_worst_log_and_tbpl_levels(CRITICAL, TBPL_RETRY)
             return  # skip base parse_single_line
 
@@ -343,7 +346,7 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
             if value is not None:
                 setattr(self, setting, value)
                 if not self.gecko_profile:
-                    self.warning("enabling Gecko profiler for %s setting!" % setting)
+                    self.warning(f"enabling Gecko profiler for {setting} setting!")
                     self.gecko_profile = True
         self.pagesets_name = None
         self.benchmark_zip = None
@@ -442,13 +445,9 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
                     merged = self.merge_paths(directory_pieces, split)
                     host = merged[3]
                     site_origin_hash = self.make_talos_domain(host)
-                    new_url = 'http://%s/%s"' % (
-                        site_origin_hash,
-                        "/".join(merged),  # pylint --py3k: W1649
-                    )
+                    new_url = f'http://{site_origin_hash}/{"/".join(merged)}"'
                     self.info(
-                        "Replacing %s with %s in iframe inside %s"
-                        % (match.group(2), new_url, path)
+                        f"Replacing {match.group(2)} with {new_url} in iframe inside {path}"
                     )
                     return match.group(1) + new_url
 
@@ -535,8 +534,7 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         if self.query_talos_json_config() and self.suite is not None:
             if self.suite not in self.talos_json_config.get("suites"):
                 self.fatal(
-                    "Suite '%s' is not valid (not found in talos json config)"
-                    % self.suite
+                    f"Suite '{self.suite}' is not valid (not found in talos json config)"
                 )
 
     def talos_options(self, args=None, **kw):
@@ -573,7 +571,7 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
             tests = ":".join(tests)  # Talos expects this format
             kw_options["activeTests"] = tests
         for key, value in kw_options.items():
-            options.extend(["--%s" % key, value])
+            options.extend([f"--{key}", value])
         # configure profiling options
         options.extend(self.query_gecko_profile_options())
         # extra arguments
@@ -649,11 +647,13 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         webextension_dest = os.path.join(self.talos_path, "talos", "webextensions")
 
         if self.query_pagesets_name():
-            tooltool_artifacts.append({
-                "name": self.pagesets_name,
-                "manifest": self.pagesets_name_manifest,
-                "dest": src_talos_pageset_dest,
-            })
+            # DAMP only loads pages from the fis/ copy.
+            if self.talos_json_config["suites"][self.suite]["tests"] != ["damp"]:
+                tooltool_artifacts.append({
+                    "name": self.pagesets_name,
+                    "manifest": self.pagesets_name_manifest,
+                    "dest": src_talos_pageset_dest,
+                })
             tooltool_artifacts.append({
                 "name": self.pagesets_name,
                 "manifest": self.pagesets_name_manifest,
@@ -679,7 +679,7 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         # the --no-download option will override this
         for artifact in tooltool_artifacts:
             if "--no-download" not in self.config.get("talos_extra_options", []):
-                self.info("Downloading %s with tooltool..." % artifact)
+                self.info(f"Downloading {artifact} with tooltool...")
 
                 archive = os.path.join(artifact["dest"], artifact["name"])
                 output_dir_path = re.sub(r"\.zip$", "", archive)
@@ -697,12 +697,11 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
                             for file in files:
                                 artifact["postprocess"](subdir, file)
                 else:
-                    self.info("%s already available" % artifact)
+                    self.info(f"{artifact} already available")
 
             else:
                 self.info(
-                    "Not downloading %s because the no-download option was specified"
-                    % artifact
+                    f"Not downloading {artifact} because the no-download option was specified"
                 )
 
         # if running webkit tests locally, need to copy webkit source into talos/tests
@@ -722,11 +721,11 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         if os.path.exists(dest):
             shutil.rmtree(dest)
 
-        self.info("Copying webkit benchmarks from %s to %s" % (src, dest))
+        self.info(f"Copying webkit benchmarks from {src} to {dest}")
         try:
             shutil.copytree(src, dest)
         except Exception:
-            self.critical("Error copying webkit benchmarks from %s to %s" % (src, dest))
+            self.critical(f"Error copying webkit benchmarks from {src} to {dest}")
 
     # Action methods. {{{1
     # clobber defined in BaseScript
@@ -741,6 +740,15 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         return super().download_and_extract(
             extract_dirs=extract_dirs, suite_categories=["common", "talos"]
         )
+
+    def query_python_constraints(self):
+        return [
+            os.path.abspath(
+                os.path.join(
+                    self.talos_path, "..", "config", "requirements-mozbase.txt"
+                )
+            )
+        ]
 
     def create_virtualenv(self, **kwargs):
         """VirtualenvMixin.create_virtualenv() assuemes we're using
@@ -804,14 +812,13 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
 
         if len(parser.found_perf_data) != 1:
             self.critical(
-                "PERFHERDER_DATA was seen %d times, expected 1."
-                % len(parser.found_perf_data)
+                f"PERFHERDER_DATA was seen {len(parser.found_perf_data)} times, expected 1."
             )
             parser.update_worst_log_and_tbpl_levels(WARNING, TBPL_WARNING)
             return
 
         schema_path = perfherder_schema_path()
-        self.info("Validating PERFHERDER_DATA against %s" % schema_path)
+        self.info(f"Validating PERFHERDER_DATA against {schema_path}")
         try:
             with open(schema_path) as f:
                 schema = json.load(f)
@@ -826,7 +833,7 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         try:
             shutil.copyfile(src, dest)
         except Exception:
-            self.critical("Error copying results %s to upload dir %s" % (src, dest))
+            self.critical(f"Error copying results {src} to upload dir {dest}")
             parser.update_worst_log_and_tbpl_levels(CRITICAL, TBPL_FAILURE)
 
     def run_tests(self, args=None, **kw):
@@ -835,9 +842,7 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         # get talos options
         options = self.talos_options(args=args, **kw)
 
-        # XXX temporary python version check
         python = self.query_python_path()
-        self.run_command([python, "--version"])
         parser = TalosOutputParser(
             config=self.config, log_obj=self.log_obj, error_list=TalosErrorList
         )
@@ -858,6 +863,7 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
             env["PYTHONPATH"] = self.talos_path + os.pathsep + env["PYTHONPATH"]
         else:
             env["PYTHONPATH"] = self.talos_path
+        env["PERF_EXPECTED_CHANGES_PATH"] = perf_expected_changes_path()
 
         if self.repo_path is not None:
             env["MOZ_DEVELOPER_REPO_DIR"] = self.repo_path
@@ -874,10 +880,10 @@ class Talos(TestingMixin, MercurialScript, TooltoolMixin, CodeCoverageMixin):
         mozlog_opts = [f"--log-tbpl-level={self.config['log_level']}"]
 
         if not self.run_local and "suite" in self.config:
-            fname_pattern = "%s_%%s.log" % self.config["suite"]
+            fname_pattern = f"{self.config['suite']}_%s.log"
             mozlog_opts.append(
-                "--log-errorsummary=%s"
-                % os.path.join(env["MOZ_UPLOAD_DIR"], fname_pattern % "errorsummary")
+                "--log-errorsummary="
+                + os.path.join(env["MOZ_UPLOAD_DIR"], fname_pattern % "errorsummary")
             )
 
         def launch_in_debug_mode(cmdline):

@@ -38,12 +38,8 @@ EXPORTS.mozilla.net += [
     "DNSServiceBase.h",
     "HTTPSSVC.h",
     "IDNBlocklistUtils.h",
-    "NativeDNSResolverOverrideChild.h",
-    "NativeDNSResolverOverrideParent.h",
     "TRRService.h",
     "TRRServiceBase.h",
-    "TRRServiceChild.h",
-    "TRRServiceParent.h",
 ]
 
 SOURCES += [
@@ -60,6 +56,7 @@ elif CONFIG["OS_TARGET"] == "FreeBSD":
     SOURCES += ["PlatformDNSUnix.cpp"]
 elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "cocoa":
     SOURCES += ["PlatformDNSMac.cpp"]
+    SOURCE_HEADERS += ["PlatformDNSMac.h"]
 elif CONFIG["MOZ_WIDGET_TOOLKIT"] == "android":
     SOURCES += ["PlatformDNSAndroid.cpp"]
 else:
@@ -78,8 +75,6 @@ UNIFIED_SOURCES += [
     "HostRecordQueue.cpp",
     "HTTPSSVC.cpp",
     "IDNBlocklistUtils.cpp",
-    "NativeDNSResolverOverrideChild.cpp",
-    "NativeDNSResolverOverrideParent.cpp",
     "nsDNSService2.cpp",
     "nsHostRecord.cpp",
     "nsHostResolver.cpp",
@@ -88,15 +83,11 @@ UNIFIED_SOURCES += [
     "TRRQuery.cpp",
     "TRRService.cpp",
     "TRRServiceBase.cpp",
-    "TRRServiceChild.cpp",
-    "TRRServiceParent.cpp",
 ]
 
 IPDL_SOURCES = [
     "PDNSRequest.ipdl",
     "PDNSRequestParams.ipdlh",
-    "PNativeDNSResolverOverride.ipdl",
-    "PTRRService.ipdl",
 ]
 
 include("/ipc/chromium/chromium-config.mozbuild")

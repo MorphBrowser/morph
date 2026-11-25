@@ -18,7 +18,7 @@ For mobile projects, Raptor tests are on the following repositories:
 - Tests results: [Treeherder view](https://treeherder.mozilla.org/#/jobs?repo=reference-browser)
 - Schedule: On each push
 
-Tests are now defined in a similar fashion compared to what exists in mozilla-central. Task definitions are expressed in YAML:
+Tests are now defined in a similar fashion compared to what exists in the Firefox repository. Task definitions are expressed in YAML:
 
 - <https://github.com/mozilla-mobile/fenix/blob/1c9c5317eb33d92dde3293dfe6a857c279a7ab12/taskcluster/ci/raptor/kind.yml>
 - <https://github.com/mozilla-mobile/reference-browser/blob/4560a83cb559d3d4d06383205a8bb76a44336704/taskcluster/ci/raptor/kind.yml>
@@ -33,6 +33,6 @@ For more information, please reach out to :mhentges in #cia
 
 As Raptor is a Mozilla project we follow the general Python coding style:
 
-- <https://firefox-source-docs.mozilla.org/code-quality/coding-style/coding_style_python.html>
+- {doc}`/code-quality/coding-style/coding_style_python`
 
 [black](https://github.com/psf/black/) is the tool used to reformat the Python code.

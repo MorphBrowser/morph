@@ -9,7 +9,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   E10SUtils: "resource://gre/modules/E10SUtils.sys.mjs",
   InlineSpellCheckerContent:
     "resource://gre/modules/InlineSpellCheckerContent.sys.mjs",
-  LoginHelper: "resource://gre/modules/LoginHelper.sys.mjs",
+  LoginHelperDOM:
+    "moz-src:///toolkit/components/passwordmgr/shared/LoginHelperDOM.sys.mjs",
   LoginManagerChild: "resource://gre/modules/LoginManagerChild.sys.mjs",
   SelectionUtils: "resource://gre/modules/SelectionUtils.sys.mjs",
   SpellCheckHelper: "resource://gre/modules/InlineSpellChecker.sys.mjs",
@@ -262,11 +263,7 @@ export class ContextMenuChild extends JSWindowActorChild {
               ctx.drawImage(target, 0, 0);
             }
             let dataURL = canvas.toDataURL();
-            let url = target.ownerDocument.location;
-            let imageName = url.pathname.substr(
-              url.pathname.lastIndexOf("/") + 1
-            );
-            return Promise.resolve({ failed: false, dataURL, imageName });
+            return Promise.resolve({ failed: false, dataURL });
           } catch (e) {
             console.error(e);
           }
@@ -275,7 +272,6 @@ export class ContextMenuChild extends JSWindowActorChild {
         return Promise.resolve({
           failed: true,
           dataURL: null,
-          imageName: null,
         });
       }
 
@@ -1122,8 +1118,8 @@ export class ContextMenuChild extends JSWindowActorChild {
         HTMLInputElement.isInstance(context.target) &&
         !context.target.disabled &&
         !context.target.readOnly &&
-        (lazy.LoginHelper.isInferredEmailField(context.target) ||
-          lazy.LoginHelper.isInferredUsernameField(context.target));
+        (lazy.LoginHelperDOM.isInferredEmailField(context.target) ||
+          lazy.LoginHelperDOM.isInferredUsernameField(context.target));
       context.isDesignMode =
         (editFlags & lazy.SpellCheckHelper.CONTENTEDITABLE) !== 0;
       context.passwordRevealed =

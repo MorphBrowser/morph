@@ -10,6 +10,7 @@
 #include "SVGAnimatedLengthList.h"
 #include "SVGAttrTearoffTable.h"
 #include "SVGLength.h"
+#include "mozilla/SVGContentUtils.h"
 #include "mozilla/dom/SVGElement.h"
 #include "mozilla/dom/SVGLengthBinding.h"
 #include "nsError.h"
@@ -81,6 +82,8 @@ void DOMSVGLength::CleanupWeakRefs() {
   // cycle collected), so we that don't leave behind a pointer to
   // free / soon-to-be-free memory.
   if (nsCOMPtr<DOMSVGLengthList> lengthList = do_QueryInterface(mOwner)) {
+    // The slot we clear must really be ours; otherwise we'd leave our own
+    // slot holding a dangling pointer (use-after-free).
     MOZ_RELEASE_ASSERT(lengthList->mItems[mListIndex] == this,
                        "Clearing out the wrong list index...?");
     lengthList->mItems[mListIndex] = nullptr;
@@ -202,6 +205,7 @@ void DOMSVGLength::SetValue(float aUserUnitValue, ErrorResult& aRv) {
     aRv.ThrowNoModificationAllowedError("Animated values cannot be set");
     return;
   }
+  SVGContentUtils::NormalizeFloat(aUserUnitValue);
 
   // If the unit depends on style or layout then we need to flush before
   // converting from pixels.
@@ -252,11 +256,15 @@ float DOMSVGLength::ValueInSpecifiedUnits() {
   }
   if (nsCOMPtr<SVGElement> svg = do_QueryInterface(mOwner)) {
     SVGAnimatedLength* length = svg->GetAnimatedLength(mAttrEnum);
-    return mIsAnimValItem ? length->GetAnimValInSpecifiedUnits()
-                          : length->GetBaseValInSpecifiedUnits();
+    float value = mIsAnimValItem ? length->GetAnimValInSpecifiedUnits()
+                                 : length->GetBaseValInSpecifiedUnits();
+    return std::clamp(value, std::numeric_limits<float>::lowest(),
+                      std::numeric_limits<float>::max());
   }
 
-  return HasOwner() ? InternalItem().GetValueInCurrentUnits() : mValue;
+  float value = HasOwner() ? InternalItem().GetValueInCurrentUnits() : mValue;
+  return std::clamp(value, std::numeric_limits<float>::lowest(),
+                    std::numeric_limits<float>::max());
 }
 
 void DOMSVGLength::SetValueInSpecifiedUnits(float aValue, ErrorResult& aRv) {
@@ -265,6 +273,7 @@ void DOMSVGLength::SetValueInSpecifiedUnits(float aValue, ErrorResult& aRv) {
     return;
   }
 
+  SVGContentUtils::NormalizeFloat(aValue);
   if (nsCOMPtr<SVGElement> svg = do_QueryInterface(mOwner)) {
     svg->GetAnimatedLength(mAttrEnum)->SetBaseValueInSpecifiedUnits(aValue, svg,
                                                                     true);
@@ -346,6 +355,8 @@ void DOMSVGLength::NewValueSpecifiedUnits(uint16_t aUnit, float aValue,
     aRv.ThrowNotSupportedError("Unknown unit type");
     return;
   }
+
+  SVGContentUtils::NormalizeFloat(aValue);
 
   if (nsCOMPtr<SVGElement> svg = do_QueryInterface(mOwner)) {
     svg->GetAnimatedLength(mAttrEnum)->NewValueSpecifiedUnits(aUnit, aValue,

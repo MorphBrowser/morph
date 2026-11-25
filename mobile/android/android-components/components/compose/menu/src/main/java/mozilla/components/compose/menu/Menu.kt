@@ -17,12 +17,14 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.tooling.preview.PreviewParameter
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import mozilla.components.compose.base.text.Text
 import mozilla.components.compose.base.theme.AcornTheme
@@ -44,12 +46,15 @@ import mozilla.components.ui.icons.R as iconsR
  *
  * @param store The [MenuStore] backing this menu.
  * @param modifier [Modifier] to be applied to the menu container.
+ * @param onHeaderDarkBackgroundChanged Optional callback invoked when the sticky header's dark background state
+ *   changes.
  */
 @Suppress("CognitiveComplexMethod")
 @Composable
 fun Menu(
     store: MenuStore,
     modifier: Modifier = Modifier,
+    onHeaderDarkBackgroundChanged: ((Boolean) -> Unit)? = null,
 ) {
     Surface(
         modifier = modifier,
@@ -68,6 +73,12 @@ fun Menu(
         val listState = rememberLazyListState()
 
         val isScrollable = listState.canScrollForward || listState.canScrollBackward
+        val isHeaderDark = headerGroup != null && isScrollable
+
+        LaunchedEffect(isHeaderDark) {
+            onHeaderDarkBackgroundChanged?.invoke(isHeaderDark)
+        }
+
         val stickyBackgroundColor =
             if (isScrollable) {
                 MaterialTheme.colorScheme.surfaceContainerHigh
@@ -80,12 +91,21 @@ fun Menu(
                 MenuAttribution(attribution = attribution)
             }
 
+            if (headerGroup != null) {
+                MenuHeader(
+                    headerGroup = headerGroup,
+                    showDivider = listState.canScrollBackward,
+                    onInteraction = onInteraction,
+                    backgroundColor = stickyBackgroundColor,
+                )
+            }
+
             MenuContent(
                 listState = listState,
-                headerGroup = headerGroup,
                 scrollableGroups = scrollableGroups,
                 onInteraction = onInteraction,
-                stickyBackgroundColor = stickyBackgroundColor,
+                topPadding = if (headerGroup != null) 0.dp else AcornTheme.layout.space.static100,
+                bottomPadding = if (footerGroup != null) 0.dp else AcornTheme.layout.space.static100,
                 modifier = Modifier.weight(1f, fill = false),
             )
 
@@ -108,46 +128,22 @@ fun Menu(
 @Composable
 private fun MenuContent(
     listState: LazyListState,
-    headerGroup: MenuItemsGroup?,
     scrollableGroups: List<MenuItemsGroup>,
     onInteraction: (MenuEvent) -> Unit,
-    stickyBackgroundColor: Color,
+    topPadding: Dp,
+    bottomPadding: Dp,
     modifier: Modifier = Modifier,
 ) {
-    // A sticky header spans the whole width and provides its own top spacing, which keeps it from scrolling away
-    // together with the padding that would otherwise be above it.
-    val topPadding = if (headerGroup == null) AcornTheme.layout.space.static100 else 0.dp
-
     LazyColumn(
         state = listState,
         modifier = modifier.fillMaxWidth(),
         contentPadding =
             PaddingValues(
                 top = topPadding,
-                bottom = AcornTheme.layout.space.static100,
+                bottom = bottomPadding,
             ),
         verticalArrangement = Arrangement.spacedBy(AcornTheme.layout.space.static150),
     ) {
-        if (headerGroup != null) {
-            stickyHeader(key = headerGroup.id) {
-                Column(
-                    modifier =
-                        Modifier.background(stickyBackgroundColor).padding(top = AcornTheme.layout.space.static100)
-                ) {
-                    MenuGroupContent(
-                        headerGroup,
-                        onInteraction,
-                        isSticky = true,
-                        backgroundColor = stickyBackgroundColor,
-                    )
-
-                    if (listState.canScrollBackward) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    }
-                }
-            }
-        }
-
         scrollableGroups.forEach { group ->
             item(key = group.id) {
                 MenuGroupContent(
@@ -175,12 +171,41 @@ private fun MenuGroupContent(
                 onInteraction = onInteraction,
                 modifier = modifier,
                 isSticky = isSticky,
+                showTitles = group.showTitles,
                 backgroundColor = backgroundColor,
             )
         }
 
         is MenuItemsGroup.Row -> {
             ListMenuItemsGroup(group.items, onInteraction, modifier)
+        }
+    }
+}
+
+/**
+ * The group staying at the top of the menu while the others scroll.
+ *
+ * This is kept out of the scrolling list, as a sticky header of it would keep the menu busy forever if one of its items
+ * gets focused.
+ */
+@Composable
+private fun MenuHeader(
+    headerGroup: MenuItemsGroup,
+    showDivider: Boolean,
+    onInteraction: (MenuEvent) -> Unit,
+    backgroundColor: Color,
+) {
+    Column(modifier = Modifier.background(backgroundColor).padding(top = AcornTheme.layout.space.static150)) {
+        MenuGroupContent(
+            headerGroup,
+            onInteraction,
+            modifier = Modifier.padding(bottom = AcornTheme.layout.space.static100),
+            isSticky = true,
+            backgroundColor = backgroundColor,
+        )
+
+        if (showDivider) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
 }
@@ -192,12 +217,18 @@ private fun MenuFooter(
     onInteraction: (MenuEvent) -> Unit,
     backgroundColor: Color,
 ) {
-    Column(modifier = Modifier.background(backgroundColor)) {
+    Column(modifier = Modifier.background(backgroundColor).padding(bottom = AcornTheme.layout.space.static150)) {
         if (showDivider) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
 
-        MenuGroupContent(footerGroup, onInteraction, isSticky = true, backgroundColor = backgroundColor)
+        MenuGroupContent(
+            footerGroup,
+            onInteraction,
+            modifier = Modifier.padding(top = AcornTheme.layout.space.static100),
+            isSticky = true,
+            backgroundColor = backgroundColor,
+        )
     }
 }
 

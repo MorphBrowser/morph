@@ -17,11 +17,14 @@ import org.mozilla.fenix.browser.BackMenuItemProvider
 import org.mozilla.fenix.browser.ForwardMenuItemProvider
 import org.mozilla.fenix.browser.RefreshMenuItemProvider
 import org.mozilla.fenix.browser.ShareMenuItemProvider
-import org.mozilla.fenix.components.menu.FenixMenuItem.CustomizeReaderView
-import org.mozilla.fenix.components.menu.FenixMenuItem.FindInPage
-import org.mozilla.fenix.components.menu.FenixMenuItem.More
-import org.mozilla.fenix.components.menu.FenixMenuItem.Settings
-import org.mozilla.fenix.components.menu.MenuPresentationMode.Row
+import org.mozilla.fenix.components.menu.configuration.BrowserMenuConfiguration
+import org.mozilla.fenix.components.menu.configuration.FenixMenuItem
+import org.mozilla.fenix.components.menu.configuration.FenixMenuItem.CustomizeReaderView
+import org.mozilla.fenix.components.menu.configuration.FenixMenuItem.FindInPage
+import org.mozilla.fenix.components.menu.configuration.FenixMenuItem.More
+import org.mozilla.fenix.components.menu.configuration.FenixMenuItem.Settings
+import org.mozilla.fenix.components.menu.configuration.MenuPresentationMode.Row
+import org.mozilla.fenix.components.menu.configuration.MenuSectionConfiguration
 import org.mozilla.fenix.components.menu.store.MenuAction
 
 class MenuItemsRegistryTest {
@@ -50,8 +53,21 @@ class MenuItemsRegistryTest {
                 resolver = { FakeMenuItemProvider() },
             )
 
-        assertSame(registry.providers.getValue(FindInPage), registry[FindInPage])
+        assertSame(registry.providers.getValue(FindInPage.id), registry[FindInPage])
         assertSame(registry[FindInPage], registry.get(FindInPage))
+    }
+
+    @Test
+    fun `WHEN asking for the provider of an item expanding to other items than configured THEN offer the one configured for it`() {
+        val configured = More(subMenuItems = listOf(FindInPage, Settings))
+        val registry =
+            MenuItemsRegistry(
+                configuration = listOf(sectionOf(configured)),
+                resolver = { FakeMenuItemProvider() },
+            )
+
+        assertSame(registry[configured], registry[More(subMenuItems = listOf(Settings))])
+        assertSame(registry[configured], registry[More(subMenuItems = emptyList())])
     }
 
     @Test
@@ -60,10 +76,12 @@ class MenuItemsRegistryTest {
         val session = MenuTarget.BrowserTab
         val registry =
             MenuItemsRegistry(
-                configuration = MenuConfigurations.browser(isToolbarAtBottom = false, isExpandedToolbarEnabled = false),
+                configuration =
+                    BrowserMenuConfiguration.sections(isToolbarAtBottom = false, isExpandedToolbarEnabled = false),
                 resolver = { item ->
                     when (item) {
-                        FenixMenuItem.Back -> BackMenuItemProvider(browserStore, session, mockk(), backgroundScope)
+                        FenixMenuItem.Back ->
+                            BackMenuItemProvider(browserStore, session, mockk(), mockk(), backgroundScope)
                         FenixMenuItem.Forward ->
                             ForwardMenuItemProvider(browserStore, session, mockk(), backgroundScope)
                         FenixMenuItem.Share -> ShareMenuItemProvider(browserStore, session, mockk())
@@ -94,7 +112,7 @@ class MenuItemsRegistryTest {
         MenuSectionConfiguration(id = "section", presentationMode = Row, items = items.toList())
 
     private class FakeMenuItemProvider : MenuItemProvider {
-        override val itemFlow = MutableStateFlow<MenuItem?>(null)
+        override val itemsFlow = MutableStateFlow<List<MenuItem>>(emptyList())
 
         override fun handles(event: MenuEvent) = false
 

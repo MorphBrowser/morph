@@ -71,7 +71,6 @@ import org.mozilla.fenix.GleanMetrics.Events
 import org.mozilla.fenix.GleanMetrics.Toolbar
 import org.mozilla.fenix.NavGraphDirections
 import org.mozilla.fenix.R
-import org.mozilla.fenix.browser.BrowserFragmentDirections
 import org.mozilla.fenix.components.AppStore
 import org.mozilla.fenix.components.appstate.AppAction.URLCopiedToClipboard
 import org.mozilla.fenix.components.menu.MenuAccessPoint
@@ -174,7 +173,7 @@ class CustomTabBrowserToolbarMiddleware(
             }
 
             is StartPageActions.ProxyActivationAnimationFinished -> {
-                ipProtectionStore.dispatch(IPProtectionAction.ProxyActivationShown)
+                ipProtectionStore.dispatch(IPProtectionAction.ActivationAction.ProxyActivationShown)
                 next(action)
             }
 
@@ -275,8 +274,8 @@ class CustomTabBrowserToolbarMiddleware(
                 )
                 navController.nav(
                     R.id.externalAppBrowserFragment,
-                    BrowserFragmentDirections.actionGlobalMenuDialogFragment(
-                        accesspoint = MenuAccessPoint.External,
+                    ExternalAppBrowserFragmentDirections.actionExternalAppBrowserFragmentToMenuFragment(
+                        accessPoint = MenuAccessPoint.External,
                         customTabSessionId = customTabId,
                         isSandboxCustomTab = isSandboxCustomTab,
                     ),
@@ -528,7 +527,7 @@ class CustomTabBrowserToolbarMiddleware(
     private fun buildEndBrowserActions() = buildList {
         add(
             ActionButtonRes(
-                drawableResId = iconsR.drawable.mozac_ic_ellipsis_vertical_24,
+                drawableResId = iconsR.drawable.mozac_ic_more_vertical_round_24,
                 contentDescription = R.string.content_description_menu,
                 onClick = MenuClicked,
             )

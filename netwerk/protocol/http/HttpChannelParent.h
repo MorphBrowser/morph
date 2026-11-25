@@ -112,8 +112,6 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   // Callback while background channel is destroyed.
   void OnBackgroundParentDestroyed();
 
-  base::ProcessId OtherPid() const;
-
   // Inform the child actor that our referrer info was modified late during
   // BeginConnect.
   void OverrideReferrerInfoDuringBeginConnect(nsIReferrerInfo* aReferrerInfo);
@@ -170,7 +168,6 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
       const TimeStamp& aDispatchFetchEventEnd,
       const TimeStamp& aHandleFetchEventStart,
       const TimeStamp& aHandleFetchEventEnd,
-      const bool& aForceMainDocumentChannel,
       const TimeStamp& aNavigationStartTimeStamp,
       const uint64_t& aEarlyHintPreloaderId,
       const nsAString& aClassicScriptHintCharset,
@@ -196,7 +193,7 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   virtual mozilla::ipc::IPCResult RecvDocumentChannelCleanup(
       const bool& clearCacheEntry) override;
   virtual mozilla::ipc::IPCResult RecvRemoveCorsPreflightCacheEntry(
-      nsIURI* uri, const mozilla::ipc::PrincipalInfo& requestingPrincipal,
+      nsIURI* uri, NotNull<nsIPrincipal*> requestingPrincipal,
       const OriginAttributes& originAttributes) override;
   virtual mozilla::ipc::IPCResult RecvBytesRead(const int32_t& aCount) override;
   virtual mozilla::ipc::IPCResult RecvOpenOriginalCacheInputStream() override;
@@ -255,6 +252,10 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   nsCOMPtr<nsISerialEventTarget> GetEventTargetForBgParentWait();
 
   bool IsRedirectDueToAuthRetry(uint32_t redirectFlags);
+
+  // Sets mAltDataBindingOrigin from aChannel's principal, or clears it if the
+  // content process has not loaded that principal's origin.
+  void UpdateAltDataBindingOrigin(HttpBaseChannel* aChannel);
 
   int32_t mSendWindowSize;
 
@@ -327,10 +328,6 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   // increase 1 to mAsyncOpenBarrier and invoke TryInvokeAsyncOpen after
   // finished. This attribute is main thread only.
   uint8_t mAsyncOpenBarrier = 0;
-
-  // When true, ODAs are sent from the socket process to the child process
-  // directly.
-  uint8_t mDataSentToChildProcess : 1;
 };
 
 }  // namespace net

@@ -4,7 +4,7 @@
 
 Code reviews help ensure that the code solves a specific problem, doesn’t have bugs or regress other functionality, and has adequate test coverage. It also provides an opportunity to ensure correct documentation is added, whether through code comments or documentation of changes. The process of reviewing code also helps spread knowledge about how the code works amongst developers, both as a patch author and as a reviewer.
 
-A review is required before code or tests are added to Mozilla’s repository. Once approved, code is merged to autoland and once tests pass, sheriffs will merge it with other commits to mozilla-central. This guide outlines a set of standards for both patch author and reviewer.
+A review is required before code or tests are added to Mozilla’s repository. Once approved, code is merged to autoland and once tests pass, sheriffs will merge it with other commits to the `main` branch. This guide outlines a set of standards for both patch author and reviewer.
 
 ## Intended audience and outcomes
 
@@ -20,11 +20,11 @@ The sections below outline some of the high level expectations when reviewing co
 
 A code review and automation will check if this patch:
 
-* applies cleanly to mozilla-central and can be built.
+* applies cleanly to the `main` branch and can be built.
 * has a {ref}`good commit message <commit-message>` that describes the changes as well as the reason for them where that is not obvious.
   * Adding a longer description in a commit message will be used as the summary in Phabricator.
 * fixes the issue at hand.
-* has automated test coverage where appropriate. [Exceptions to this are covered by using the test-exception-\* tags in Phabricator](https://firefox-source-docs.mozilla.org/testing/testing-policy/index.html#exceptions). Here are some common exceptions in frontend where \[new\] test coverage isn’t needed:
+* has automated test coverage where appropriate. [Exceptions to this are covered by using the test-exception-\* tags in Phabricator](/testing/testing-policy/index.md#exceptions). Here are some common exceptions in frontend where \[new\] test coverage isn’t needed:
   * style/image/l10n-only changes
   * Code that interacts directly with the OS in ways we can’t mock in automated tests.
   * Code that requires very specific external circumstances (OS settings, wall clock time, actions by other programs, etc.) we can’t mock reliably.
@@ -152,7 +152,7 @@ This section covers some frontend-specific aspects of patches that reviewers are
 
 ### Performance
 
-* Avoid [style](https://firefox-source-docs.mozilla.org/performance/bestpractices.html#detecting-and-avoiding-synchronous-style-flushes) and [layout](https://firefox-source-docs.mozilla.org/performance/bestpractices.html#detecting-and-avoiding-synchronous-reflow) flushes.
+* Avoid [style](/performance/bestpractices.md#detecting-and-avoiding-synchronous-style-flushes) and [layout](/performance/bestpractices.md#detecting-and-avoiding-synchronous-reflow) flushes.
 * Use `requestIdleCallback` and/or workers for anything on the startup path and/or CPU or disk-intensive work that doesn’t actually need to happen immediately.
 * Use `IOUtils` to do async File IO, rather than nsIFile for synchronous access.
 * Keep complexity in mind and use reasonable data structures

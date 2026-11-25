@@ -6,13 +6,6 @@
 const HOMEPAGE_PREF = "browser.startup.homepage";
 const NEWTAB_ENABLED_PREF = "browser.newtabpage.enabled";
 const BLANK_HOMEPAGE_URL = "chrome://browser/content/blanktab.html";
-// @nova-cleanup(remove-conditional): Delete this constant; the firefoxLogo gate in assertSectionEnabled below and the _classic task become unconditional after cleanup.
-const NOVA_ENABLED_PREF = "browser.newtabpage.activity-stream.nova.enabled";
-const WEATHER_SYSTEM_PREF =
-  "browser.newtabpage.activity-stream.widgets.system.weather.enabled";
-// @nova-cleanup(remove-conditional): Delete this constant; only used by the test_firefox_home_enabled_when_tabs_is_home_classic task below.
-const CLASSIC_WEATHER_SYSTEM_PREF =
-  "browser.newtabpage.activity-stream.system.showWeather";
 
 add_setup(async function () {
   await SpecialPowers.pushPrefEnv({
@@ -22,7 +15,6 @@ add_setup(async function () {
       [HOMEPAGE_PREF, BLANK_HOMEPAGE_URL],
       [NEWTAB_ENABLED_PREF, true],
       // Enable conditionally-visible settings so we can test they stay enabled
-      [WEATHER_SYSTEM_PREF, true],
       ["browser.newtabpage.activity-stream.widgets.system.enabled", true],
       ["browser.newtabpage.activity-stream.feeds.system.topstories", true],
     ],
@@ -40,10 +32,7 @@ async function assertSectionEnabled(win) {
   ok(messageBar, "Message bar element exists");
   ok(messageBar.hidden, "Message bar is hidden when New tabs is Firefox Home");
 
-  // firefoxLogo is only registered when Nova is enabled. With Nova on and the
-  // widgets container on, Weather is nested in the Widgets group; without Nova
-  // it has its own row.
-  const novaEnabled = Services.prefs.getBoolPref(NOVA_ENABLED_PREF, false);
+  // With the widgets container on, Weather is managed with the other widgets.
   for (let settingId of [
     "webSearch",
     "widgets",
@@ -51,7 +40,7 @@ async function assertSectionEnabled(win) {
     "stories",
     "supportFirefox",
     "recentActivity",
-    ...(novaEnabled ? ["firefoxLogo"] : ["weatherStandalone"]),
+    "firefoxLogo",
   ]) {
     let control = await settingControlRenders(settingId, win);
     ok(
@@ -62,20 +51,6 @@ async function assertSectionEnabled(win) {
 }
 
 add_task(async function test_firefox_home_enabled_when_tabs_is_home() {
-  let { win, tab } = await openHomePreferences();
-  await assertSectionEnabled(win);
-  BrowserTestUtils.removeTab(tab);
-});
-
-// @nova-cleanup(remove-conditional): Delete this entire add_task; covers the Classic newtab UI which is being removed.
-add_task(async function test_firefox_home_enabled_when_tabs_is_home_classic() {
-  await SpecialPowers.pushPrefEnv({
-    set: [
-      [NOVA_ENABLED_PREF, false],
-      [CLASSIC_WEATHER_SYSTEM_PREF, true],
-    ],
-  });
-
   let { win, tab } = await openHomePreferences();
   await assertSectionEnabled(win);
   BrowserTestUtils.removeTab(tab);

@@ -144,6 +144,7 @@ bool jit::Bailout(BailoutStack* sp, BaselineBailoutInfo** bailoutInfo) {
       BailoutIonToBaseline(cx, bailoutData.activation(), frame, bailoutInfo,
                            /*exceptionInfo=*/nullptr, BailoutReason::Normal);
   MOZ_ASSERT_IF(success, *bailoutInfo != nullptr);
+  bailoutData.activation()->removeIonFrameRecovery(currentFramePtr);
 
   if (!success) {
     MOZ_ASSERT(cx->isExceptionPending());
@@ -161,7 +162,7 @@ bool jit::Bailout(BailoutStack* sp, BaselineBailoutInfo** bailoutInfo) {
   // increment the reference counter for each activation that appear on the
   // stack. As the bailed frame is one of them, we have to decrement it now.
   if (frame.ionScript()->invalidated()) {
-    frame.ionScript()->decrementInvalidationCount(cx->gcContext());
+    frame.ionScript()->decrementInvalidationCount();
   }
 
   // NB: Commentary on how |lastProfilingFrame| is set from bailouts.
@@ -221,6 +222,7 @@ bool jit::InvalidationBailout(InvalidationBailoutStack* sp,
                                       bailoutInfo, /*exceptionInfo=*/nullptr,
                                       BailoutReason::Invalidate);
   MOZ_ASSERT_IF(success, *bailoutInfo != nullptr);
+  bailoutData.activation()->removeIonFrameRecovery(currentFramePtr);
 
   if (!success) {
     MOZ_ASSERT(cx->isExceptionPending());
@@ -251,7 +253,7 @@ bool jit::InvalidationBailout(InvalidationBailoutStack* sp,
 #endif
   }
 
-  frame.ionScript()->decrementInvalidationCount(cx->gcContext());
+  frame.ionScript()->decrementInvalidationCount();
 
   // Make the frame being bailed out the top profiled frame.
   if (cx->runtime()->jitRuntime()->isProfilerInstrumentationEnabled(
@@ -296,6 +298,13 @@ bool jit::ExceptionHandlerBailout(JSContext* cx,
                                       BailoutReason::ExceptionHandler);
   if (success) {
     MOZ_ASSERT(bailoutInfo);
+
+    // Remove the frame's recover instruction results because the frame will be
+    // popped. We don't do this on failure because the exception handler can
+    // still run JS code in this frame (e.g. IteratorClose) that must see the
+    // same recovered values. The exception handler removes them when it pops
+    // the frame.
+    act->removeIonFrameRecovery(currentFramePtr);
 
     // Overwrite the kind so HandleException after the bailout returns
     // false, jumping directly to the exception tail.

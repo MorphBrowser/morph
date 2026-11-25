@@ -196,7 +196,11 @@ MediaDrmProxySupport::MediaDrmProxySupport(const nsAString& aKeySystem,
 
   mBridgeProxy = java::MediaDrmProxy::Create(mKeySystem, mJavaCallbacks);
 
-  MOZ_ASSERT(mBridgeProxy, "mBridgeProxy should not be null");
+  if (!mBridgeProxy) {
+    MDRMN_LOG("Failed to create the MediaDrm bridge");
+    return;
+  }
+
   mMediaDrmStubId = mBridgeProxy->GetStubId()->ToString();
 
   if (!aOriginID.IsEmpty()) {
@@ -218,7 +222,7 @@ nsresult MediaDrmProxySupport::Init(
 
   MediaDrmJavaCallbacksSupport::AttachNative(
       mJavaCallbacks,
-      mozilla::MakeUnique<MediaDrmJavaCallbacksSupport>(std::move(aCallback)));
+      std::make_unique<MediaDrmJavaCallbacksSupport>(std::move(aCallback)));
   return mBridgeProxy != nullptr ? NS_OK : NS_ERROR_FAILURE;
 }
 
@@ -261,12 +265,13 @@ void MediaDrmProxySupport::CloseSession(uint32_t aPromiseId,
 }
 
 void MediaDrmProxySupport::Shutdown() {
-  MOZ_ASSERT(mBridgeProxy);
-
   if (mDestroyed) {
     return;
   }
-  mBridgeProxy->Destroy();
+
+  if (mBridgeProxy) {
+    mBridgeProxy->Destroy();
+  }
   mDestroyed = true;
 }
 

@@ -14,6 +14,7 @@ TEST_DIRS += [
 ]
 
 MOCHITEST_MANIFESTS += [
+    "connection-allowlist/mochitest.toml",
     "cors/mochitest.toml",
     "csp/mochitest.toml",
     "general/mochitest.toml",
@@ -31,6 +32,7 @@ MOCHITEST_CHROME_MANIFESTS += [
 ]
 
 BROWSER_CHROME_MANIFESTS += [
+    "connection-allowlist/browser/browser.toml",
     "cors/browser.toml",
     "csp/browser.toml",
     "general/browser.toml",

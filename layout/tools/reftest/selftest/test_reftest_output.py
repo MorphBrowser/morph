@@ -85,6 +85,13 @@ def test_output_crash(runtests):
     assert crash[0]["action"] == "crash"
     assert crash[0]["signature"]
     assert crash[0]["minidump_path"]
+    assert crash[0]["group"].endswith("reftest-crash.list")
+
+    assert len(filter_action("suite_end", lines)) == 1
+    assert not any(
+        "suite_end message before suite_start" in l["message"]
+        for l in filter_action("log", lines)
+    )
 
     lines = filter_action("test_end", lines)
     assert len(lines) == 0
@@ -156,6 +163,7 @@ def test_output_leak(monkeypatch, runtests):
     assert len(leaks) == 1
     assert leaks[0]["process"] == "default"
     assert leaks[0]["bytes"] == 19915
+    assert leaks[0]["scope"]
 
 
 if __name__ == "__main__":

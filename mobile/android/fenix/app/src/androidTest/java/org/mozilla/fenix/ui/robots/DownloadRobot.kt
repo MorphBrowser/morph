@@ -10,7 +10,6 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import androidx.compose.ui.test.ComposeTimeoutException
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
@@ -79,7 +78,17 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "verifyDownloadPrompt: Verified that the download button is displayed")
     }
 
-    @OptIn(ExperimentalTestApi::class)
+    fun clickDownloadAgain() {
+        val downloadAgainButton =
+            itemContainingText(getStringResource(downloadsR.string.mozac_feature_downloads_dialog_download_again))
+        Log.i(TAG, "clickDownloadAgain: Waiting for $waitingTime ms for the \"Download again\" button to exist")
+        downloadAgainButton.waitForExists(waitingTime)
+        Log.i(TAG, "clickDownloadAgain: Waited for $waitingTime ms for the \"Download again\" button to exist")
+        Log.i(TAG, "clickDownloadAgain: Trying to click the \"Download again\" button")
+        downloadAgainButton.click()
+        Log.i(TAG, "clickDownloadAgain: Clicked the \"Download again\" button")
+    }
+
     fun verifyDownloadCompleteSnackbar(fileName: String? = null) {
         Log.i(TAG, "verifyDownloadCompleteSnackbar: Waiting for the download completed snackbar to exist")
         composeTestRule.waitUntilAtLeastOneExists(
@@ -93,7 +102,6 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
         fileName?.let { assertUIObjectExists(itemContainingText(it)) }
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyDownloadFailedSnackbar(fileName: String) {
         Log.i(TAG, "verifyDownloadFailedSnackbar: Waiting for the download failed snackbar to exist")
         this@DownloadRobot.composeTestRule.waitUntilAtLeastOneExists(
@@ -178,7 +186,6 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "openPageAndDownloadFile: Download initiated for $downloadFile")
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyDownloadedFileExistsInDownloadsList(fileName: String) {
         Log.i(TAG, "verifyDownloadedFileName: Trying to verify that the downloaded file: $fileName is displayed")
         this@DownloadRobot.composeTestRule.waitUntilAtLeastOneExists(
@@ -190,7 +197,6 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "verifyDownloadedFileName: Trying to verify that the downloaded file: $fileName is displayed")
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyDownloadFileIsNotDisplayed(fileName: String) {
         Log.i(
             TAG,
@@ -208,7 +214,6 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
         )
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyEmptyDownloadsList() {
         Log.i(
             TAG,
@@ -314,7 +319,6 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "longClickDownloadedItem: Long clicked downloaded file: $title")
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun clickDownloadsFilter(filter: String) {
         this@DownloadRobot.composeTestRule.waitUntilExactlyOneExists((hasText(filter)))
         Log.i(TAG, "clickImagesFilter: Trying to click the \"Images\" downloads filter")
@@ -330,7 +334,6 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "clickDownloadedItem: Clicked the \"Try again\" button")
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyDownloadFileFailedMessage(fileName: String) {
         Log.i(TAG, "verifyDownloadFileFailedMessage: Trying to verify the download failed for file: $fileName message")
         this@DownloadRobot.composeTestRule
@@ -425,7 +428,6 @@ class DownloadRobot(private val composeTestRule: ComposeTestRule) {
             return HomeScreenRobot.Transition(composeTestRule)
         }
 
-        @OptIn(ExperimentalTestApi::class)
         fun shareDownloadedItem(
             fileName: String,
             interact: ShareOverlayRobot.() -> Unit,

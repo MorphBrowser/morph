@@ -26,6 +26,7 @@
 #include "api/video/nv12_buffer.h"
 #include "api/video/video_frame_buffer.h"
 #include "api/video/video_rotation.h"
+#include "common_video/include/video_frame_buffer.h"
 #include "test/fake_texture_frame.h"
 #include "test/frame_utils.h"
 #include "test/gtest.h"
@@ -643,32 +644,78 @@ TEST(TestUpdateRectScale, CropAndScaleByHalf) {
   EXPECT_EQ(scaled, VideoFrame::UpdateRect({42, 22, 56, 106}));
 }
 
-TEST(TestVideoFrame, IsRepeatFrame) {
-  // Defaults to false.
+TEST(TestVideoFrame, RepeatMode) {
+  // Defaults to kNone.
   VideoFrame frame1 = VideoFrame::Builder()
                           .set_video_frame_buffer(I420Buffer::Create(10, 10))
                           .set_rotation(kVideoRotation_0)
                           .set_timestamp_ms(123)
                           .build();
+  EXPECT_EQ(frame1.repeat_mode(), VideoFrame::RepeatMode::kNone);
   EXPECT_FALSE(frame1.is_repeat_frame());
 
-  // Set to true.
-  VideoFrame frame2 = VideoFrame::Builder()
-                          .set_video_frame_buffer(I420Buffer::Create(10, 10))
-                          .set_rotation(kVideoRotation_0)
-                          .set_timestamp_ms(456)
-                          .set_is_repeat_frame(true)
-                          .build();
+  // Set to kQualityConvergence.
+  VideoFrame frame2 =
+      VideoFrame::Builder()
+          .set_video_frame_buffer(I420Buffer::Create(10, 10))
+          .set_rotation(kVideoRotation_0)
+          .set_timestamp_ms(456)
+          .set_repeat_mode(VideoFrame::RepeatMode::kQualityConvergence)
+          .build();
+  EXPECT_EQ(frame2.repeat_mode(), VideoFrame::RepeatMode::kQualityConvergence);
   EXPECT_TRUE(frame2.is_repeat_frame());
 
-  // Set to false.
+  // Set to kKeepAlive.
   VideoFrame frame3 = VideoFrame::Builder()
                           .set_video_frame_buffer(I420Buffer::Create(10, 10))
                           .set_rotation(kVideoRotation_0)
                           .set_timestamp_ms(789)
-                          .set_is_repeat_frame(false)
+                          .set_repeat_mode(VideoFrame::RepeatMode::kKeepAlive)
                           .build();
-  EXPECT_FALSE(frame3.is_repeat_frame());
+  EXPECT_EQ(frame3.repeat_mode(), VideoFrame::RepeatMode::kKeepAlive);
+  EXPECT_TRUE(frame3.is_repeat_frame());
+}
+
+TEST(TestVideoFrame, WrapI444BufferToI420FailsForOversizedDimensions) {
+  constexpr int kWidth = 32769;
+  constexpr int kHeight = 2;
+  std::vector<uint8_t> y(kWidth * kHeight, 10);
+  std::vector<uint8_t> u(kWidth * kHeight, 20);
+  std::vector<uint8_t> v(kWidth * kHeight, 30);
+
+  scoped_refptr<I444BufferInterface> wrapped_wide =
+      WrapI444Buffer(kWidth, kHeight, y.data(), kWidth, u.data(), kWidth,
+                     v.data(), kWidth, [] {});
+  EXPECT_EQ(wrapped_wide->ToI420(), nullptr);
+
+  scoped_refptr<I444BufferInterface> wrapped_tall =
+      WrapI444Buffer(kHeight, kWidth, y.data(), kHeight, u.data(), kHeight,
+                     v.data(), kHeight, [] {});
+  EXPECT_EQ(wrapped_tall->ToI420(), nullptr);
+}
+
+TEST(TestVideoFrame, WrapI422BufferToI420FailsForOversizedDimensions) {
+  constexpr int kWidth = 65537;
+  constexpr int kChromaWidth = (kWidth + 1) / 2;
+  constexpr int kHeight = 2;
+  std::vector<uint8_t> y(kWidth * kHeight, 10);
+  std::vector<uint8_t> u(kChromaWidth * kHeight, 20);
+  std::vector<uint8_t> v(kChromaWidth * kHeight, 30);
+
+  scoped_refptr<I422BufferInterface> wrapped_wide =
+      WrapI422Buffer(kWidth, kHeight, y.data(), kWidth, u.data(), kChromaWidth,
+                     v.data(), kChromaWidth, [] {});
+  EXPECT_EQ(wrapped_wide->ToI420(), nullptr);
+
+  constexpr int kTallHeight = 32769;
+  constexpr int kNarrowWidth = 2;
+  std::vector<uint8_t> tall_y(kNarrowWidth * kTallHeight, 10);
+  std::vector<uint8_t> tall_u(kTallHeight, 20);
+  std::vector<uint8_t> tall_v(kTallHeight, 30);
+  scoped_refptr<I422BufferInterface> wrapped_tall =
+      WrapI422Buffer(kNarrowWidth, kTallHeight, tall_y.data(), kNarrowWidth,
+                     tall_u.data(), 1, tall_v.data(), 1, [] {});
+  EXPECT_EQ(wrapped_tall->ToI420(), nullptr);
 }
 
 }  // namespace webrtc

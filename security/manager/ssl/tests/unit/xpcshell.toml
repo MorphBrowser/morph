@@ -4,6 +4,7 @@ tags = "psm condprof"
 firefox-appdir = "browser"
 prefs = [
   "security.pki.certificate_transparency.mode=1",
+  "security.utility_pkcs11_module_process.enabled=true",
 ]
 skip-if = [
   "msix", # Bug 1809477
@@ -37,6 +38,7 @@ support-files = [
   "test_keysize_ev/**",
   "test_missing_intermediate/**",
   "test_mldsa/**",
+  "test_mldsa_verification/**",
   "test_name_constraints/**",
   "test_ocsp_url/**",
   "test_onecrl/**",
@@ -65,7 +67,10 @@ run-if = [
 tags = "remote-settings blocklist psm"
 
 ["test_broken_fips.js"]
-prefs = ["security.storage.encryption.sqlite.enabled=false"]
+prefs = [
+  "security.storage.encryption.sqlite.enabled=false",
+  "security.utility_pkcs11_module_process.enabled=false",
+]
 # FIPS has never been a thing on Android, so the workaround doesn't
 # exist on that platform.
 # FIPS still works on Linux, so this test doesn't make any sense there.
@@ -253,6 +258,8 @@ run-sequentially = ["true"] # hardcoded ports
 ["test_mldsa.js"]
 run-sequentially = ["true"] # hardcoded ports
 
+["test_mldsa_verification.js"]
+
 ["test_name_constraints.js"]
 
 ["test_nonascii_path.js"]
@@ -299,6 +306,8 @@ run-sequentially = ["true"] # hardcoded ports
 
 ["test_ocsp_url.js"]
 run-sequentially = ["true"] # hardcoded ports
+
+["test_onecrl_loads_bundle.js"]
 
 ["test_oskeystore.js"]
 
@@ -411,5 +420,6 @@ skip-if = [
 ["test_sts_preloadlist_selfdestruct.js"]
 
 ["test_trust_anchors.js"]
+prefs = ["security.utility_pkcs11_module_process.enabled=false"]
 
 ["test_x509.js"]

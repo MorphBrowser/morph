@@ -5,8 +5,10 @@
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 import { getKeepSidebarOpenState } from "moz-src:///browser/components/aiwindow/ui/modules/ChatUtils.sys.mjs";
 
-const lazy = {};
-ChromeUtils.defineESModuleGetters(lazy, {
+const SIDEBAR_EMPTY_CLOSE_COUNT_PREF =
+  "browser.smartwindow.sidebar.emptyCloseCount";
+
+const lazy = XPCOMUtils.declareLazy({
   AIWINDOW_URL:
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   AIWindowUI:
@@ -17,23 +19,9 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///browser/components/aiwindow/ui/modules/SmartWindowTelemetry.sys.mjs",
   SessionStore:
     "moz-src:///browser/components/sessionstore/SessionStore.sys.mjs",
+  sidebarOpenByDefault: { pref: "browser.smartwindow.sidebar.openByDefault" },
+  sidebarEmptyCloseCount: { pref: SIDEBAR_EMPTY_CLOSE_COUNT_PREF },
 });
-
-const SIDEBAR_EMPTY_CLOSE_COUNT_PREF =
-  "browser.smartwindow.sidebar.emptyCloseCount";
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "sidebarOpenByDefault",
-  "browser.smartwindow.sidebar.openByDefault"
-);
-
-XPCOMUtils.defineLazyPreferenceGetter(
-  lazy,
-  "sidebarEmptyCloseCount",
-  SIDEBAR_EMPTY_CLOSE_COUNT_PREF,
-  0
-);
 
 /**
  * At which count the empty close prompt should be shown.
@@ -46,7 +34,7 @@ const SIDEBAR_EMPTY_CLOSE_PROMPT_TRIGGER_COUNT = 2;
 const SESSION_STORE_KEY = "ai-window-tab-state";
 
 /**
- * @typedef {import("chrome://browser/content/aiwindow/components/ai-window/ai-window.mjs").SmartbarInputState} SmartbarInputState
+ * @typedef {import("chrome://browser/content/aiwindow/components/ai-window.mjs").SmartbarInputState} SmartbarInputState
  * @typedef {import("chrome://browser/content/urlbar/SmartbarInput.mjs").ContextWebsite} ContextWebsite
  *
  * @typedef {{
@@ -558,7 +546,13 @@ export class AIWindowTabStatesManager {
 
     const tabState = this.#tabStates.get(tab) ?? {};
     if (saved?.conversationId) {
-      tabState.state = { ...(tabState.state ?? {}), ...saved };
+      const conversation = tabState.state?.conversation;
+      tabState.state = {
+        ...(tabState.state ?? {}),
+        ...saved,
+        conversation:
+          conversation?.id === saved.conversationId ? conversation : null,
+      };
       this.#tabStates.set(tab, tabState);
     }
     return tabState;
@@ -936,7 +930,7 @@ export class AIWindowTabStatesManager {
       return;
     }
 
-    lazy.AIWindowUI.updateStarterPrompts(this.#window, false, mode, tab);
+    lazy.AIWindowUI.updateNewChatContent(this.#window, false, mode, tab);
   };
 
   /**
@@ -1090,7 +1084,7 @@ export class AIWindowTabStatesManager {
         const tab = this.#window.gBrowser.selectedTab;
         let tabState = this.#tabStates.get(tab);
 
-        lazy.AIWindowUI.updateStarterPrompts(this.#window, true);
+        lazy.AIWindowUI.updateNewChatContent(this.#window, true);
 
         if (!tabState || !tabState.state?.conversationId) {
           return;
@@ -1119,13 +1113,11 @@ export class AIWindowTabStatesManager {
           !isSidebarOpen &&
           shouldKeepSidebarOpen
         ) {
-          lazy.AIWindowUI.openSidebar(
-            this.#window,
-            tabState.state.conversation
-          );
           tabState = this.#getTabState(tab, {
             input: EMPTY_SMARTBAR_INPUT_STATE,
           });
+          await this.#openSidebarForTab(tab, tabState);
+          return;
         }
 
         if (!isAiWindowUrl && lazy.AIWindowUI.isSidebarOpen(this.#window)) {

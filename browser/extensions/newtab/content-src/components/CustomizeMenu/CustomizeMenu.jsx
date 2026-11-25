@@ -256,7 +256,6 @@ export class _CustomizeMenu extends React.PureComponent {
                 mayHaveClocksWidget={this.props.mayHaveClocksWidget}
                 mayHavePrivacyWidget={this.props.mayHavePrivacyWidget}
                 mayHaveCrosswordWidget={this.props.mayHaveCrosswordWidget}
-                mayHaveStocksWidget={this.props.mayHaveStocksWidget}
                 mayHavePictureOfTheDayWidget={
                   this.props.mayHavePictureOfTheDayWidget
                 }
@@ -298,4 +297,6 @@ export class _CustomizeMenu extends React.PureComponent {
 export const CustomizeMenu = connect(state => ({
   DiscoveryStream: state.DiscoveryStream,
   Prefs: state.Prefs,
+  customizePanelSource: state.App.customizePanelSource,
+  customizePanelWallpaperCategory: state.App.customizePanelWallpaperCategory,
 }))(_CustomizeMenu);

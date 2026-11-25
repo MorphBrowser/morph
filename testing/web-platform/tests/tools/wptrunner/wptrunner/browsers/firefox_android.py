@@ -194,6 +194,7 @@ class ProfileCreator(FirefoxProfileCreator):
                 "places.history.enabled": False,
             }
         )
+        prefs.update(self._get_address_space_override_prefs())
 
         if self.package_name == "org.mozilla.geckoview.test_runner":
             # Bug 1879324: The TestRunner doesn't support "beforeunload" prompts yet
@@ -224,6 +225,10 @@ class ProfileCreator(FirefoxProfileCreator):
                 }
             )
         else:
+            # Remove once support for click and wait can be removed from WebDriver classic:
+            # https://bugzilla.mozilla.org/show_bug.cgi?id=1961138
+            prefs["marionette.navigate-after-click.enabled"] = False
+
             # Dispatch wheel scroll as widget event by default. It stays
             # disabled for wdspec until it can be enabled for all input sources.
             prefs["remote.events.async.wheel.enabled"] = True
@@ -394,6 +399,7 @@ class FirefoxAndroidBrowser(Browser):
 
     def cleanup(self, force=False):
         self.stop(force)
+        self.runner.device.device.pull_ccov()
 
     def executor_browser(self):
         return ExecutorBrowser, {"marionette_port": self.marionette_port,
@@ -428,7 +434,8 @@ class FirefoxAndroidWdSpecBrowser(FirefoxPytestBrowser):
         self.device_serial = device_serial[self.manager_number]
         # This is just to support the same adb lookup as for other test types
         context = get_app_context("fennec")(adb_path=adb_binary, device_serial=self.device_serial)
-        self.device = context.get_device(context.adb, self.device_serial)
+        self.adb_binary = context.adb
+        self.device = context.get_device(self.adb_binary, self.device_serial)
 
     def start(self, group_metadata, **kwargs):
         for ports in self.config.ports.values():
@@ -454,6 +461,7 @@ class FirefoxAndroidWdSpecBrowser(FirefoxPytestBrowser):
         cls, args = super().executor_browser()
         args["androidPackage"] = self.package_name
         args["androidDeviceSerial"] = self.device_serial
+        args["adb_binary"] = self.adb_binary
         args["env"] = self.env
         args["supports_devtools"] = False
         return cls, args

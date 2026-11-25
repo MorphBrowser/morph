@@ -6,10 +6,11 @@
 
 #![expect(clippy::missing_errors_doc, reason = "Passing up tokio errors.")]
 
-use std::{io, net::SocketAddr};
+use std::{io, iter, net::SocketAddr};
 
-use neqo_common::{datagram, qdebug};
+use neqo_common::datagram;
 use neqo_udp::{DatagramIter, RecvBuf};
+use tracing::{debug, warn};
 
 /// Ideally this would live in [`neqo_udp`]. [`neqo_udp`] is used in Firefox.
 ///
@@ -47,11 +48,11 @@ impl Socket {
         // if send_buf_before < ONE_MB {
         //     state.set_send_buffer_size((&socket).into(), ONE_MB)?;
         //     let send_buf_after = state.send_buffer_size((&socket).into())?;
-        //     qdebug!("Increasing socket send buffer size from {send_buf_before} to {ONE_MB}, now:
+        //     debug!("Increasing socket send buffer size from {send_buf_before} to {ONE_MB}, now:
         // {send_buf_after}"); } else {
-        //     qdebug!("Default socket send buffer size is {send_buf_before}, not changing");
+        //     debug!("Default socket send buffer size is {send_buf_before}, not changing");
         // }
-        qdebug!(
+        debug!(
             "Default socket send buffer size is {:?}",
             state.send_buffer_size((&socket).into())
         );
@@ -60,13 +61,21 @@ impl Socket {
         if recv_buf_before < ONE_MB {
             // Same as Firefox.
             // <https://searchfox.org/mozilla-central/rev/fa5b44a4ea5c98b6a15f39638ea4cd04dc271f3d/modules/libpref/init/StaticPrefList.yaml#13474-13477>
-            state.set_recv_buffer_size((&socket).into(), ONE_MB)?;
-            qdebug!(
-                "Increasing socket recv buffer size from {recv_buf_before} to {ONE_MB}, now: {:?}",
+            // Halve the request until the OS accepts it, e.g., NetBSD caps it at `kern.sbmax`.
+            for size in iter::successors(Some(ONE_MB), |size| Some(size / 2))
+                .take_while(|&s| s > recv_buf_before)
+            {
+                match state.set_recv_buffer_size((&socket).into(), size) {
+                    Ok(()) => break,
+                    Err(e) => warn!("Failed to set socket recv buffer size to {size}: {e}"),
+                }
+            }
+            debug!(
+                "Increasing socket recv buffer size from {recv_buf_before}, now: {:?}",
                 state.recv_buffer_size((&socket).into())
             );
         } else {
-            qdebug!("Default socket receive buffer size is {recv_buf_before}, not changing");
+            debug!("Default socket receive buffer size is {recv_buf_before}, not changing");
         }
 
         let inner = tokio::net::UdpSocket::from_std(socket)?;

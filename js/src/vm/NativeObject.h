@@ -97,10 +97,10 @@ class ArrayObject;
  *
  * ES2025 draft rev ac21460fedf4b926520b06c9820bdbebad596a8b
  *
- * |id| must be "length", |desc| is the new non-accessor descriptor, and
- * |result| receives an error code if the change is invalid.
+ * |desc| is the new non-accessor descriptor for "length", and |result|
+ * receives an error code if the change is invalid.
  */
-extern bool ArraySetLength(JSContext* cx, Handle<ArrayObject*> obj, HandleId id,
+extern bool ArraySetLength(JSContext* cx, Handle<ArrayObject*> obj,
                            Handle<PropertyDescriptor> desc,
                            ObjectOpResult& result);
 
@@ -264,7 +264,7 @@ class ObjectElements {
                                     IntegrityLevel level);
 
   friend bool ArraySetLength(JSContext* cx, Handle<ArrayObject*> obj,
-                             HandleId id, Handle<PropertyDescriptor> desc,
+                             Handle<PropertyDescriptor> desc,
                              ObjectOpResult& result);
 
   // The NumShiftedElementsBits high bits of this are used to store the
@@ -374,18 +374,18 @@ class ObjectElements {
 
   uint32_t getInitializedLength() const { return initializedLength; }
 
-  static int offsetOfFlags() {
+  static constexpr int offsetOfFlags() {
     return int(offsetof(ObjectElements, flags)) - int(sizeof(ObjectElements));
   }
-  static int offsetOfInitializedLength() {
+  static constexpr int offsetOfInitializedLength() {
     return int(offsetof(ObjectElements, initializedLength)) -
            int(sizeof(ObjectElements));
   }
-  static int offsetOfCapacity() {
+  static constexpr int offsetOfCapacity() {
     return int(offsetof(ObjectElements, capacity)) -
            int(sizeof(ObjectElements));
   }
-  static int offsetOfLength() {
+  static constexpr int offsetOfLength() {
     return int(offsetof(ObjectElements, length)) - int(sizeof(ObjectElements));
   }
 
@@ -1647,18 +1647,6 @@ class NativeObject : public JSObject {
     return v.isUndefined() ? nullptr : static_cast<T*>(v.toPrivate());
   }
 
-  // Returns the address of a reserved fixed slot that stores a T* as
-  // PrivateValue. Be very careful when using this because the object might be
-  // moved in memory!
-  template <typename T>
-  T** addressOfFixedSlotPrivatePtr(size_t slot) {
-    MOZ_ASSERT(slot < JSCLASS_RESERVED_SLOTS(getClass()));
-    MOZ_ASSERT(slotIsFixed(slot));
-    MOZ_ASSERT(getReservedSlot(slot).isDouble());
-    void* addr = &getFixedSlotRef(slot);
-    return reinterpret_cast<T**>(addr);
-  }
-
   /*
    * Calculate the number of dynamic slots to allocate to cover the properties
    * in an object with the given number of fixed slots and slot span.
@@ -1742,6 +1730,9 @@ class NativeObject : public JSObject {
   void shrinkElements(JSContext* cx, uint32_t cap);
 
  private:
+  // Like growElements, but doesn't call Watchtower::watchFirstDenseElementAdd.
+  bool growElementsNoWatchtowerCheck(JSContext* cx, uint32_t newcap);
+
   // Run a post write barrier that encompasses multiple contiguous elements in a
   // single step.
   inline void elementsRangePostWriteBarrier(uint32_t start, uint32_t count);
@@ -1903,9 +1894,10 @@ class NativeObject : public JSObject {
    * After adding a sparse index to obj, see if it should be converted to use
    * dense elements.
    */
-  static DenseElementResult maybeDensifySparseElements(
-      JSContext* cx, Handle<NativeObject*> obj);
-  static bool densifySparseElements(JSContext* cx, Handle<NativeObject*> obj);
+  static bool maybeDensifySparseElements(JSContext* cx,
+                                         Handle<NativeObject*> obj);
+  static bool densifySparseElements(JSContext* cx, Handle<NativeObject*> obj,
+                                    uint32_t newInitializedLength);
 
   inline HeapSlot* fixedElements() const {
     static_assert(2 * sizeof(Value) == sizeof(ObjectElements),

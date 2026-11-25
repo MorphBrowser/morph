@@ -69,8 +69,8 @@ const intermittently_loaded_scripts = {
 
     // Translations code which may be preffed on.
     "resource://gre/actors/TranslationsChild.sys.mjs",
-    "resource://gre/modules/translations/LanguageDetector.sys.mjs",
-    "resource://gre/modules/ConsoleAPIStorage.sys.mjs", // Logging related.
+    "moz-src:///toolkit/components/translations/LanguageDetector.sys.mjs",
+    "moz-src:///dom/console/ConsoleAPIStorage.sys.mjs", // Logging related.
 
     // Session store.
     "resource://gre/modules/sessionstore/SessionHistory.sys.mjs",

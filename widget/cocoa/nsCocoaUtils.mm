@@ -234,27 +234,49 @@ BOOL nsCocoaUtils::EventHasPhaseInformation(NSEvent* aEvent) {
          [aEvent momentumPhase] != NSEventPhaseNone;
 }
 
-void nsCocoaUtils::HideOSChromeOnScreen(bool aShouldHide) {
+void nsCocoaUtils::HideOSChromeOnScreen(bool aShouldHide,
+                                        bool aShouldPreventAppSwitching) {
   NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
 
-  // Keep track of how many hiding requests have been made, so that they can
-  // be nested.
+  // The presentation options are app-wide, but each window makes its own
+  // request, so both quantities are counts rather than flags: the OS chrome
+  // stays hidden, and app switching stays blocked, for as long as any current
+  // requester wants it. Windows can disagree about app switching, since a
+  // kiosk window asks for it and an ordinary window in emulated fullscreen
+  // does not, so each caller passes its own value on the hide and again on
+  // the matching unhide.
   static int sHiddenCount = 0;
+  static int sPreventAppSwitchingCount = 0;
 
   sHiddenCount += aShouldHide ? 1 : -1;
-  NS_ASSERTION(sHiddenCount >= 0, "Unbalanced HideMenuAndDockForWindow calls");
+  NS_ASSERTION(sHiddenCount >= 0, "Unbalanced HideOSChromeOnScreen calls");
+  if (aShouldPreventAppSwitching) {
+    sPreventAppSwitchingCount += aShouldHide ? 1 : -1;
+    NS_ASSERTION(sPreventAppSwitchingCount >= 0,
+                 "Unbalanced HideOSChromeOnScreen app switching requests");
+  }
 
-  NSApplicationPresentationOptions options =
-      sHiddenCount <= 0 ? NSApplicationPresentationDefault
-                        : NSApplicationPresentationHideDock |
-                              NSApplicationPresentationHideMenuBar;
+  NSApplicationPresentationOptions options = NSApplicationPresentationDefault;
+  if (sHiddenCount > 0) {
+    options = NSApplicationPresentationHideDock |
+              NSApplicationPresentationHideMenuBar;
+    if (sPreventAppSwitchingCount > 0) {
+      // Switching to another application restores the menu bar and the Dock,
+      // so block the two shortcuts that do it. Recovery does not depend on
+      // either: Cmd+Q still quits, and DisableForceQuit is deliberately not
+      // set, so Cmd+Option+Esc still opens the force quit panel.
+      options |= NSApplicationPresentationDisableProcessSwitching |
+                 NSApplicationPresentationDisableHideApplication;
+    }
+  }
   [NSApp setPresentationOptions:options];
 
   NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
 
 #define NS_APPSHELLSERVICE_CONTRACTID "@mozilla.org/appshell/appShellService;1"
-nsIWidget* nsCocoaUtils::GetHiddenWindowWidget() {
+
+already_AddRefed<nsIWidget> nsCocoaUtils::GetHiddenWindowWidget() {
   nsCOMPtr<nsIAppShellService> appShell(
       do_GetService(NS_APPSHELLSERVICE_CONTRACTID));
   if (!appShell) {
@@ -283,7 +305,7 @@ nsIWidget* nsCocoaUtils::GetHiddenWindowWidget() {
     return nullptr;
   }
 
-  return hiddenWindowWidget;
+  return hiddenWindowWidget.forget();
 }
 
 BOOL nsCocoaUtils::WasLaunchedAtLogin() {
@@ -503,7 +525,7 @@ nsresult nsCocoaUtils::CreateNSImageFromImageContainer(
 
     UniquePtr<SVGImageContext> svgContext;
     if (!aSVGContext) {
-      svgContext = MakeUnique<SVGImageContext>();
+      svgContext = std::make_unique<SVGImageContext>();
       aSVGContext = svgContext.get();
     }
 
@@ -1059,6 +1081,34 @@ uint32_t nsCocoaUtils::ConvertGeckoKeyCodeToMacCharCode(uint32_t aKeyCode) {
   }
 
   return 0;
+}
+
+bool nsCocoaUtils::GetGeckoKeyCodeNameForMacCharCode(uint32_t aCharCode,
+                                                     nsAString& aKeyCodeName) {
+  switch (aCharCode) {
+    case 0x1B:
+      aKeyCodeName.AssignLiteral("VK_ESCAPE");
+      return true;
+    case NSDeleteCharacter:
+      aCharCode = NSBackspaceCharacter;
+      break;
+    case NSCarriageReturnCharacter:
+    case NSNewlineCharacter:
+      aCharCode = NSEnterCharacter;
+      break;
+    default:
+      break;
+  }
+  if (!aCharCode) {
+    return false;
+  }
+  for (const KeyConversionData& entry : gKeyConversions) {
+    if (entry.charCode == aCharCode) {
+      aKeyCodeName.AssignASCII(entry.str, entry.strLength);
+      return true;
+    }
+  }
+  return false;
 }
 
 NSEventModifierFlags nsCocoaUtils::ConvertWidgetModifiersToMacModifierFlags(

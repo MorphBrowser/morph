@@ -119,9 +119,6 @@ pub struct TileCacheBuilder {
     root_spatial_node_index: SpatialNodeIndex,
     /// Debug flags to provide to our TileCacheInstances.
     debug_flags: DebugFlags,
-    /// While a backdrop-filter chain is added to a non-atomic slice: the
-    /// spatial node of the backdrop-filter element, which places the chain.
-    pub backdrop_placement_node: Option<SpatialNodeIndex>,
 }
 
 /// The output of a tile cache builder, containing all details needed to construct the
@@ -155,7 +152,6 @@ impl TileCacheBuilder {
             prev_scroll_root_cache: (SpatialNodeIndex::INVALID, SpatialNodeIndex::INVALID),
             root_spatial_node_index,
             debug_flags,
-            backdrop_placement_node: None,
         }
     }
 
@@ -271,12 +267,17 @@ impl TileCacheBuilder {
     }
 
     /// Add a primitive, either to the current tile cache, or a new one, depending on various conditions.
+    /// A non-atomic slice picks the tile cache by `placement_node_index`, which
+    /// is the primitive's spatial node except for a backdrop-filter chain: that
+    /// is in its backdrop root's space, only known once the slice is built, so
+    /// it is placed by the backdrop-filter element's spatial node.
     pub fn add_prim(
         &mut self,
         prim_instance: PrimitiveInstance,
         prim_rect: LayoutRect,
         prim_local_clip_rect: LayoutRect,
         spatial_node_index: SpatialNodeIndex,
+        placement_node_index: SpatialNodeIndex,
         prim_flags: PrimitiveFlags,
         spatial_tree: &SceneSpatialTree,
         quality_settings: &QualitySettings,
@@ -297,14 +298,7 @@ impl TileCacheBuilder {
                 );
             }
             SliceKind::Default { ref mut secondary_slices } => {
-                // A backdrop-filter chain is in its backdrop root's space, which
-                // is only known once the slice is built, so it is placed by the
-                // backdrop-filter element's spatial node instead.
-                let placement_node_index = if spatial_node_index == SpatialNodeIndex::UNKNOWN {
-                    self.backdrop_placement_node.expect("bug: unplaced prim in a non-atomic slice")
-                } else {
-                    spatial_node_index
-                };
+                assert_ne!(placement_node_index, SpatialNodeIndex::UNKNOWN);
 
                 // Check if we want to create a new slice based on the current / next scroll root
                 let scroll_root = find_scroll_root(
@@ -487,6 +481,23 @@ fn find_scroll_root(
     scroll_root
 }
 
+/// Returns true if every non-zero corner radius has the same value. Native
+/// compositors such as CoreAnimation can only apply a single corner radius,
+/// selecting which corners it applies to.
+fn has_single_corner_radius(radius: &BorderRadius) -> bool {
+    let mut single = None;
+    for corner in [radius.top_left, radius.top_right, radius.bottom_left, radius.bottom_right] {
+        if corner.width > 0.0 || corner.height > 0.0 {
+            match single {
+                None => single = Some(corner),
+                Some(r) if r != corner => return false,
+                Some(_) => {}
+            }
+        }
+    }
+    true
+}
+
 /// Given a PrimitiveList and scroll root, construct a tile cache primitive instance
 /// that wraps the primitive list.
 fn create_tile_cache(
@@ -542,6 +553,8 @@ fn create_tile_cache(
     //         (b) Box-shadow or image-mask clips
     //         (c) More than one rounded-rect clip (unless they can be intersected
     //             into a single rounded-rect clip).
+    //         (d) Clips in a preserve-3d context, which apply in the plane of
+    //             their element rather than when compositing.
     let mut shared_clip_node_id = shared_clip_node_id.unwrap_or(ClipNodeId::NONE);
     let mut current_node_id = shared_clip_node_id;
     let mut rounded_rect_count = 0;
@@ -562,12 +575,16 @@ fn create_tile_cache(
         let node = clip_tree_builder.get_node(current_node_id);
         let clip_node_data = &clips[node.handle];
 
-        // Check if this clip is in the root coord system (i.e. is axis-aligned with tile-cache)
-        let is_rcs = spatial_tree.is_root_coord_system(node.spatial_node_index);
+        // Check if this clip is in the root coord system (i.e. is axis-aligned with tile-cache),
+        // outside any preserve-3d context
+        let is_rcs = spatial_tree.is_root_coord_system(node.spatial_node_index) &&
+            !spatial_tree.is_in_preserve_3d_context(node.spatial_node_index);
 
         let node_valid = if is_rcs {
-            match clip_node_data.key.kind {
+            match clip_node_data.kind {
                 ClipItemKeyKind::ImageMask(..) |
+                ClipItemKeyKind::Path(..) |
+                ClipItemKeyKind::Border(_) |
                 ClipItemKeyKind::Rectangle(ClipMode::ClipOut) |
                 ClipItemKeyKind::RoundedRectangle(_, _, ClipMode::ClipOut) => {
                     // Has an image-mask or clip-out clip, we can't handle this as a shared clip
@@ -578,7 +595,8 @@ fn create_tile_cache(
                     // as uniform radii to be able to apply the clip during compositing.
                     let br = clamped_radius(&BorderRadius::from(radius), node.unsnapped_clip_rect.size());
                     if !debug_flags.contains(DebugFlags::DISABLE_COMPOSITOR_CLIPS) &&
-                       br.can_use_fast_path_in(&node.unsnapped_clip_rect) {
+                       br.can_use_fast_path_in(&node.unsnapped_clip_rect) &&
+                       has_single_corner_radius(&br) {
                         rounded_rect_count += 1;
 
                         if accumulated_rounded_rect.is_none() {
@@ -597,7 +615,8 @@ fn create_tile_cache(
                 }
             }
         } else {
-            // Has a complex transform, we can't handle this as a shared clip
+            // Has a complex transform or is in a preserve-3d context, we can't
+            // handle this as a shared clip
             false
         };
 
@@ -609,7 +628,7 @@ fn create_tile_cache(
                 // correct spatial transforms is performed in pre_update; here we just
                 // verify the clips are geometrically compatible in their local spaces
                 // to decide whether to keep both in the shared clip chain.
-                let can_combine = match (accumulated_rounded_rect, clip_node_data.key.kind) {
+                let can_combine = match (accumulated_rounded_rect, clip_node_data.kind) {
                     (
                         Some((acc_rect, acc_radius)),
                         ClipItemKeyKind::RoundedRectangle(radius, _, ClipMode::Clip),
@@ -619,6 +638,7 @@ fn create_tile_cache(
                             acc_rect, acc_radius,
                             node.unsnapped_clip_rect, radius,
                         )
+                        .filter(|(_, combined_radius)| has_single_corner_radius(combined_radius))
                     }
                     _ => None,
                 };
@@ -633,7 +653,7 @@ fn create_tile_cache(
                     // Can't combine, drop children and keep only this clip.
                     shared_clip_node_id = current_node_id;
                     rounded_rect_count = 1;
-                    if let ClipItemKeyKind::RoundedRectangle(radius, _, ClipMode::Clip) = clip_node_data.key.kind {
+                    if let ClipItemKeyKind::RoundedRectangle(radius, _, ClipMode::Clip) = clip_node_data.kind {
                         let radius = clamped_radius(&BorderRadius::from(radius), node.unsnapped_clip_rect.size());
                         accumulated_rounded_rect = Some((node.unsnapped_clip_rect, radius));
                     }
@@ -730,7 +750,7 @@ impl Default for PictureCacheDebugInfo {
 }
 
 /// Debug information about the compositor clip applied to a picture cache slice
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct CompositorClipDebugInfo {
@@ -743,22 +763,30 @@ pub struct CompositorClipDebugInfo {
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct SliceDebugInfo {
-    pub tiles: FastHashMap<TileOffset, TileDebugInfo>,
+    /// Tile state by offset, for each sub-slice.
+    pub sub_slices: Vec<FastHashMap<TileOffset, TileDebugInfo>>,
     pub compositor_clip: Option<CompositorClipDebugInfo>,
 }
 
 impl SliceDebugInfo {
     pub fn new() -> Self {
         SliceDebugInfo {
-            tiles: FastHashMap::default(),
+            sub_slices: Vec::new(),
             compositor_clip: None,
         }
     }
 
-    /// Convenience method to retrieve a given tile. Deliberately panics
-    /// if the tile isn't present.
+    pub fn add_tile(&mut self, sub_slice_index: usize, offset: TileOffset, info: TileDebugInfo) {
+        if self.sub_slices.len() <= sub_slice_index {
+            self.sub_slices.resize_with(sub_slice_index + 1, FastHashMap::default);
+        }
+        self.sub_slices[sub_slice_index].insert(offset, info);
+    }
+
+    /// Convenience method to retrieve a given tile of the primary sub-slice.
+    /// Deliberately panics if the tile isn't present.
     pub fn tile(&self, x: i32, y: i32) -> &TileDebugInfo {
-        &self.tiles[&TileOffset::new(x, y)]
+        &self.sub_slices[0][&TileOffset::new(x, y)]
     }
 }
 

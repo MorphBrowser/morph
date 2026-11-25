@@ -58,6 +58,13 @@ const TOP_SITES_USER_VALUE_TEMP_PREF =
   "activationWindow.temp.topSitesUserValue";
 const TOP_STORIES_USER_VALUE_TEMP_PREF =
   "activationWindow.temp.topStoriesUserValue";
+const WIDGETS_ENABLED_PREF = "widgets.enabled";
+const WIDGETS_USER_VALUE_TEMP_PREF = "activationWindow.temp.widgetsUserValue";
+const PREF_TYPES = { boolean: "Bool", number: "Int", string: "String" };
+const ofType = (value, type) =>
+  typeof value === type && (type !== "number" || Number.isInteger(value))
+    ? value
+    : undefined;
 // Browser-wide Nova gate. Lives off the activity-stream branch, so it is read
 // and observed directly here (not via the branch observer) and broadcast to
 // content to gate the theme picker in the customize panel.
@@ -80,21 +87,9 @@ function recordsHistory() {
   );
 }
 
-/**
- * @backward-compat { version 157 }
- * The recent searches widget requires the `newtab_search_widget` registered
- * in BrowserSearchTelemetry.sys.mjs and no partner code configuration which
- * was added to ConfigSearchEngine.sys.mjs in 157.
- * Remove this guard once 157 reaches Release.
- */
-function isWidgetSearchSapHostSupported() {
-  return Services.vc.compare(AppConstants.MOZ_APP_VERSION, "157.0a1") >= 0;
-}
-
 const PREF_DEFAULTS = [
   { type: "bool", key: "logowordmark.alwaysVisible", defaultValue: false },
   { type: "bool", key: "feeds.section.topstories", defaultValue: false },
-  { type: "bool", key: "discoverystream.enabled", defaultValue: false },
   {
     type: "bool",
     key: "discoverystream.hardcoded-basic-layout",
@@ -116,6 +111,10 @@ const PREF_DEFAULTS = [
 
 ChromeUtils.defineLazyGetter(lazy, "logConsole", function () {
   return console.createInstance({
+    logModule: "PrefsFeed",
+    // @backward-compat { version 162 }
+    // Older versions ignore logModule and name the module after the prefix.
+    // Remove prefix: once 162 reaches Release.
     prefix: "PrefsFeed",
     maxLogLevel: Services.prefs.getBoolPref(
       "browser.newtabpage.activity-stream.activationWindow.log",
@@ -129,6 +128,30 @@ ChromeUtils.defineLazyGetter(lazy, "logConsole", function () {
 export class PrefsFeed {
   /** @type {Store} */
   store = null;
+
+  /**
+   * The activation window variant, or "" outside the window. A lazy getter for
+   * ACTIVATION_WINDOW_VARIANT_PREF replaces this in the constructor.
+   *
+   * @type {string}
+   */
+  inActivationWindowState;
+
+  /**
+   * Prefs whose default this profile was given by the train-hop config, with
+   * the default each had before and the value written.
+   *
+   * @type {Map<string, {original: boolean|number|string, value: boolean|number|string}>}
+   */
+  _trainhopDefaults = new Map();
+
+  /**
+   * True while train-hop defaults are being written, so the branch observer
+   * they fire is not tracked as a user change in the activation window.
+   *
+   * @type {boolean}
+   */
+  _writingTrainhopDefaults = false;
 
   constructor(prefMap) {
     this._prefMap = prefMap;
@@ -199,7 +222,11 @@ export class PrefsFeed {
       }
     }
 
-    if (isUserChange && this.inActivationWindowState) {
+    if (
+      isUserChange &&
+      !this._writingTrainhopDefaults &&
+      this.inActivationWindowState
+    ) {
       this.trackActivationWindowPrefChange(name, value);
     }
   }
@@ -238,16 +265,25 @@ export class PrefsFeed {
    * @param {boolean | number | string} value - The new preference value
    */
   trackActivationWindowPrefChange(name, value) {
-    if (name === TOP_SITES_ENABLED_PREF) {
-      this._prefs.set(TOP_SITES_USER_VALUE_TEMP_PREF, value);
-      lazy.logConsole.debug(
-        `User set top sites to ${value} during activation window`
-      );
-    } else if (name === TOP_STORIES_ENABLED_PREF) {
-      this._prefs.set(TOP_STORIES_USER_VALUE_TEMP_PREF, value);
-      lazy.logConsole.debug(
-        `User set top stories to ${value} during activation window`
-      );
+    switch (name) {
+      case TOP_SITES_ENABLED_PREF:
+        this._prefs.set(TOP_SITES_USER_VALUE_TEMP_PREF, value);
+        lazy.logConsole.debug(
+          `User set top sites to ${value} during activation window`
+        );
+        break;
+      case TOP_STORIES_ENABLED_PREF:
+        this._prefs.set(TOP_STORIES_USER_VALUE_TEMP_PREF, value);
+        lazy.logConsole.debug(
+          `User set top stories to ${value} during activation window`
+        );
+        break;
+      case WIDGETS_ENABLED_PREF:
+        this._prefs.set(WIDGETS_USER_VALUE_TEMP_PREF, value);
+        lazy.logConsole.debug(
+          `User set widgets to ${value} during activation window`
+        );
+        break;
     }
   }
 
@@ -343,37 +379,6 @@ export class PrefsFeed {
     // user turning the space off.
     this._trainhopConfig = valueObj;
 
-    // Bug 2021055: Write weather.display to the default branch so Nimbus sets
-    // the initial value without overriding an explicit user choice (user branch
-    // always takes precedence over the default branch).
-    if (valueObj.widgets?.weatherForecastEnabled && valueObj.weather?.display) {
-      Services.prefs
-        .getDefaultBranch(this._prefs._branchStr)
-        .setStringPref("weather.display", valueObj.weather.display);
-    }
-
-    // Write widgets.weather.size to the default branch so trainhop overrides
-    // the migration default computed by getWeatherWidgetSize() while a user's
-    // explicit size pick (user branch) still wins.
-    if (
-      typeof valueObj.widgets?.weatherSize === "string" &&
-      valueObj.widgets.weatherSize
-    ) {
-      Services.prefs
-        .getDefaultBranch(this._prefs._branchStr)
-        .setStringPref("widgets.weather.size", valueObj.widgets.weatherSize);
-    }
-
-    // Write topSitesRows to the default branch to enable experiments with
-    // the default row count without overriding an explicit user choice.
-    if (valueObj.topSites?.topSitesRows) {
-      Services.prefs
-        .getDefaultBranch(this._prefs._branchStr)
-        .setIntPref("topSitesRows", valueObj.topSites.topSitesRows);
-    }
-
-    this._applySpacePrefDefaults(valueObj);
-
     // Write initialWallpaper to the user branch so it persists after the
     // experiment ends. The guard prevents overwriting an existing value or a
     // user's explicit wallpaper choice that has already cleared it.
@@ -387,6 +392,51 @@ export class PrefsFeed {
       );
     }
 
+    const trainhopDefaults = new Map([
+      // Bug 2021055: lets an experiment that turns on the weather forecast
+      // also pick its initial display mode (e.g. "simple" vs "detailed").
+      // Ignored unless the same config enables the forecast.
+      [
+        "weather.display",
+        valueObj.widgets?.weatherForecastEnabled
+          ? ofType(valueObj.weather?.display, "string") || undefined
+          : undefined,
+      ],
+      // Overrides the migration default computed by getWeatherWidgetSize().
+      [
+        "widgets.weather.size",
+        ofType(valueObj.widgets?.weatherSize, "string") || undefined,
+      ],
+      [
+        "topSitesRows",
+        ofType(valueObj.topSites?.topSitesRows, "number") || undefined,
+      ],
+      [
+        "section.highlights.rows",
+        ofType(valueObj.highlights?.rows, "number") || undefined,
+      ],
+    ]);
+
+    // Only Recent Activity is feed gated: its pref gates HighlightsFeed, so
+    // overriding the reads would show a space with nothing to render. Only the
+    // write is scoped to the experiment; the restore must still run once the
+    // variant is gone, which is exactly when unenrolling needs it. Enterprise
+    // profiles are excluded by the recipe's `!hasActiveEnterprisePolicies`
+    // targeting rather than checked here.
+    const spacesAssigned = isSpacesAssigned(this._spacesVariantPrefs(valueObj));
+    for (const { feedGated, trainhopKey, userPref } of Object.values(
+      SPACE_CONFIG
+    )) {
+      if (feedGated) {
+        trainhopDefaults.set(
+          userPref,
+          spacesAssigned
+            ? ofType(valueObj[trainhopKey]?.enabled, "boolean")
+            : undefined
+        );
+      }
+    }
+
     // Override each widget's default enabled value from the train-hop config,
     // most specific payload first: the widget's own trainhopConfig.<namespace>,
     // then widgetsSettings.*Enabled, then the legacy widgets.*Enabled key.
@@ -398,31 +448,78 @@ export class PrefsFeed {
     // separate concern handled by widgetsSettings.*Visible and the namespace
     // `visible` field in WidgetsRegistry; this only sets the on/off default.
     // Adding another widget takes nothing but its registry entry.
-    const defaultBranch = Services.prefs.getDefaultBranch(
-      this._prefs._branchStr
-    );
     for (const widget of WIDGET_REGISTRY) {
       const namespaced = widget.trainhopNamespace
         ? valueObj[widget.trainhopNamespace]
         : undefined;
-      const value =
-        namespaced?.enabled ??
-        valueObj.widgetsSettings?.[widget.widgetsSettingsEnabledKey] ??
-        valueObj.widgets?.[widget.trainhopEnabledKey];
-      if (typeof value === "boolean") {
-        defaultBranch.setBoolPref(widget.enabledPref, value);
-      }
+      trainhopDefaults.set(
+        widget.enabledPref,
+        ofType(
+          namespaced?.enabled ??
+            valueObj.widgetsSettings?.[widget.widgetsSettingsEnabledKey] ??
+            valueObj.widgets?.[widget.trainhopEnabledKey],
+          "boolean"
+        )
+      );
     }
 
     // Nothing falls back to trainhopConfig when reading widgets.enabled, so
     // this is the only remote override. widgetsSettings wins if both are sent.
-    const containerEnabled =
-      valueObj.widgetsSettings?.enabled ?? valueObj.widgets?.enabled;
-    if (typeof containerEnabled === "boolean") {
-      defaultBranch.setBoolPref("widgets.enabled", containerEnabled);
-    }
+    trainhopDefaults.set(
+      WIDGETS_ENABLED_PREF,
+      ofType(
+        valueObj.widgetsSettings?.enabled ?? valueObj.widgets?.enabled,
+        "boolean"
+      )
+    );
+    this._applyTrainhopPrefDefaults(trainhopDefaults);
 
     return valueObj;
+  }
+
+  /**
+   * Writes each value in `values` to the default branch, so a user value still
+   * wins. Once a pref no longer has a value, puts back the default it had
+   * before, unless something else has changed it since, so unenrolling takes
+   * effect without a restart.
+   *
+   * @param {Map<string, boolean|number|string|undefined>} values - pref name to
+   *   train-hop value, undefined when the config doesn't set it
+   */
+  _applyTrainhopPrefDefaults(values) {
+    const defaultBranch = Services.prefs.getDefaultBranch(
+      this._prefs._branchStr
+    );
+    const get = (pref, type) =>
+      defaultBranch[`get${PREF_TYPES[type]}Pref`](
+        pref,
+        PREFS_CONFIG.get(pref)?.value
+      );
+    const set = (pref, value) =>
+      defaultBranch[`set${PREF_TYPES[typeof value]}Pref`](pref, value);
+    for (const [pref, value] of values) {
+      try {
+        this._writingTrainhopDefaults = true;
+        const written = this._trainhopDefaults.get(pref);
+        if ((typeof value) in PREF_TYPES) {
+          const original = written ? written.original : get(pref, typeof value);
+          set(pref, value);
+          this._trainhopDefaults.set(pref, { original, value });
+        } else if (written) {
+          this._trainhopDefaults.delete(pref);
+          if (get(pref, typeof written.value) === written.value) {
+            set(pref, written.original);
+          }
+        }
+      } catch (e) {
+        lazy.logConsole.error(
+          `Failed to apply the train-hop default for ${pref}`,
+          e
+        );
+      } finally {
+        this._writingTrainhopDefaults = false;
+      }
+    }
   }
 
   /**
@@ -488,46 +585,6 @@ export class PrefsFeed {
     }
     if (this._prefs.get(space.optOutPref) !== !value) {
       this._prefs.set(space.optOutPref, !value);
-    }
-  }
-
-  /**
-   * Writes the pref default for the spaces that need one, which is Recent
-   * Activity alone: its pref gates HighlightsFeed, so overriding the reads
-   * would show a space with nothing to render. The default branch, so a user
-   * value still wins, and reverted on unenrollment rather than at the next
-   * restart -- but only for a profile this has written, so an unrelated
-   * train-hop config does not touch it.
-   *
-   * Enterprise profiles are excluded by the recipe's
-   * `!hasActiveEnterprisePolicies` targeting rather than checked here.
-   *
-   * @param {object} valueObj - the freshly computed train-hop config
-   */
-  _applySpacePrefDefaults(valueObj) {
-    // Only the write is scoped to the experiment. The revert must still run
-    // once the variant is gone, which is exactly when unenrolling needs it.
-    const assigned = isSpacesAssigned(this._spacesVariantPrefs(valueObj));
-    this._wroteSpaceDefaults ??= new Set();
-    for (const space of Object.values(SPACE_CONFIG)) {
-      if (!space.feedGated) {
-        continue;
-      }
-      const { trainhopKey, userPref } = space;
-      const enabled = valueObj[trainhopKey]?.enabled;
-      if (assigned && typeof enabled === "boolean") {
-        Services.prefs
-          .getDefaultBranch(this._prefs._branchStr)
-          .setBoolPref(userPref, enabled);
-        this._wroteSpaceDefaults.add(userPref);
-      } else if (this._wroteSpaceDefaults.has(userPref)) {
-        // The Set is the safety here, not the variant: only a pref this
-        // profile was actually given gets put back.
-        Services.prefs
-          .getDefaultBranch(this._prefs._branchStr)
-          .setBoolPref(userPref, PREFS_CONFIG.get(userPref).value);
-        this._wroteSpaceDefaults.delete(userPref);
-      }
     }
   }
 
@@ -691,6 +748,27 @@ export class PrefsFeed {
     // computed in main process
     values.isPrivateBrowsingEnabled = lazy.PrivateBrowsingUtils.enabled;
     values.platform = AppConstants.platform;
+    Object.assign(values, {
+      // app.update.channel is "default" on local builds, so it can't tell
+      // Nightly apart.
+      isNightlyBuild: AppConstants.NIGHTLY_BUILD,
+      /**
+       * @backward-compat { version 161 }
+       * MozAdsReportReason only has SCAM, MISLEADING and OFFENSIVE from 161, so
+       * ReportContent keeps showing the legacy ad report reasons before that.
+       */
+      adsNewReportReasonsSupported:
+        Services.vc.compare(AppConstants.MOZ_APP_VERSION, "161.0a1") >= 0,
+      /**
+       * @backward-compat { version 162 }
+       * play-fill.svg and pause-fill.svg moved from chrome://global/skin/media/
+       * to resource://content-accessible/media/ in Firefox 162 (bug 2093279).
+       */
+      mediaIconsPath:
+        Services.vc.compare(AppConstants.MOZ_APP_VERSION, "162.0a1") >= 0
+          ? "resource://content-accessible/media"
+          : "chrome://global/skin/media",
+    });
 
     // Save the geo pref if we have it
     if (lazy.Region.home) {
@@ -744,9 +822,6 @@ export class PrefsFeed {
     for (const pref of RECORDS_HISTORY_PREFS) {
       Services.prefs.addObserver(pref, this);
     }
-
-    // @backward-compat { version 157 } See isWidgetSearchSapHostSupported
-    values.supportsWidgetSearchSap = isWidgetSearchSapHostSupported();
 
     // Add experiment values and default values
     values.featureConfig = lazy.NimbusFeatures.newtab.getAllVariables() || {};
@@ -852,6 +927,7 @@ export class PrefsFeed {
       maxProfileAgeInHours = 48,
       disableTopSites = false,
       disableTopStories = false,
+      disableWidgets = false,
       variant = "",
       enterActivationWindowMessageID = "",
       exitActivationWindowMessageID = "",
@@ -896,6 +972,7 @@ export class PrefsFeed {
         variant,
         disableTopSites,
         disableTopStories,
+        disableWidgets,
         enterActivationWindowMessageID,
         isStartup
       );
@@ -911,6 +988,7 @@ export class PrefsFeed {
    * @param {string} variant - The activation window variant identifier
    * @param {boolean} disableTopSites - Whether to disable top sites by default
    * @param {boolean} disableTopStories - Whether to disable top stories by default
+   * @param {boolean} disableWidgets - Whether to disable widgets by default
    * @param {string} enterActivationWindowMessageID - Message ID to display when entering activation window
    * @param {boolean} [isStartup=false] - Whether this is being called during
    *   browser startup. When true, skips the idempotent check to ensure default
@@ -920,6 +998,7 @@ export class PrefsFeed {
     variant,
     disableTopSites,
     disableTopStories,
+    disableWidgets,
     enterActivationWindowMessageID,
     isStartup = false
   ) {
@@ -962,6 +1041,13 @@ export class PrefsFeed {
         false,
         /* isUserChange */ false
       );
+    }
+
+    if (disableWidgets) {
+      lazy.logConsole.log("Disabling widgets by default.");
+      defaultBranch.setBoolPref(WIDGETS_ENABLED_PREF, false);
+      // This is a programmatic change, not a user action, so don't track it
+      this.onPrefChanged(WIDGETS_ENABLED_PREF, false, /* isUserChange */ false);
     }
 
     // Set the variant pref last, after default branch changes and broadcasts.
@@ -1008,6 +1094,14 @@ export class PrefsFeed {
       TOP_STORIES_ENABLED_PREF,
       PREF_DEFAULT_VALUE_TOPSTORIES_ENABLED
     );
+    const widgetsOverride =
+      this._trainhopConfig?.widgetsSettings?.enabled ??
+      this._trainhopConfig?.widgets?.enabled;
+    const widgetsDefault =
+      typeof widgetsOverride === "boolean"
+        ? widgetsOverride
+        : /** @type {boolean} */ (PREFS_CONFIG.get(WIDGETS_ENABLED_PREF).value);
+    defaultBranch.setBoolPref(WIDGETS_ENABLED_PREF, widgetsDefault);
 
     // Check temp pref status
     const hasTopSitesTempPref = this._prefs.isSet(
@@ -1016,8 +1110,9 @@ export class PrefsFeed {
     const hasTopStoriesTempPref = this._prefs.isSet(
       TOP_STORIES_USER_VALUE_TEMP_PREF
     );
+    const hasWidgetsTempPref = this._prefs.isSet(WIDGETS_USER_VALUE_TEMP_PREF);
     lazy.logConsole.debug(
-      `Temp prefs: topSites was disabled=${hasTopSitesTempPref}, topStories was disabled=${hasTopStoriesTempPref}`
+      `Temp prefs: topSites was disabled=${hasTopSitesTempPref}, topStories was disabled=${hasTopStoriesTempPref}, widgets was disabled=${hasWidgetsTempPref}`
     );
 
     // Broadcast the default changes (if user hasn't set these prefs, they'll see true)
@@ -1048,6 +1143,21 @@ export class PrefsFeed {
         "Skipping top stories broadcast - will restore user value"
       );
     }
+    if (!hasWidgetsTempPref) {
+      lazy.logConsole.debug(
+        `Broadcasting widgets default change (${widgetsDefault})`
+      );
+      // This is a programmatic change, not a user action, so don't track it
+      this.onPrefChanged(
+        WIDGETS_ENABLED_PREF,
+        widgetsDefault,
+        /* isUserChange */ false
+      );
+    } else {
+      lazy.logConsole.debug(
+        "Skipping widgets broadcast - will restore user value"
+      );
+    }
 
     // Then check if user made changes during activation window and apply them
     // Note: _prefs.set() will automatically trigger onPrefChanged() via the observer
@@ -1072,6 +1182,18 @@ export class PrefsFeed {
       this._prefs.reset(TOP_STORIES_USER_VALUE_TEMP_PREF);
       lazy.logConsole.debug(
         "Top stories user value restored and temp pref cleared"
+      );
+    }
+
+    if (hasWidgetsTempPref) {
+      const userValue = this._prefs.get(WIDGETS_USER_VALUE_TEMP_PREF);
+      lazy.logConsole.log(
+        `Restoring user's widgets preference to ${userValue}`
+      );
+      this._prefs.set(WIDGETS_ENABLED_PREF, userValue);
+      this._prefs.reset(WIDGETS_USER_VALUE_TEMP_PREF);
+      lazy.logConsole.debug(
+        "Widgets user value restored and temp pref cleared"
       );
     }
 

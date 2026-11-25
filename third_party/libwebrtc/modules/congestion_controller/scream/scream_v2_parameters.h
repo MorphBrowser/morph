@@ -27,8 +27,10 @@ struct ScreamV2Parameters {
   FieldTrialParameter<DataSize> min_ref_window;
 
   // Exponentially Weighted Moving Average (EWMA) factor for l4s_alpha.
-  FieldTrialParameter<double> l4s_avg_g_up;
-  FieldTrialParameter<double> l4s_avg_g_down;
+  FieldTrialParameter<double> l4s_avg_g;
+  // If true, scales `l4s_avg_g` by `steps_per_rtt` so `l4s_alpha` is updated
+  // relative to `max(reaction_interval, rtt)`.
+  FieldTrialParameter<bool> scale_l4s_alpha_with_rtt;
 
   // The number of consecutive RTTs with loss required to trigger a backoff.
   // Used as the step-up value (1.0 / rtts_with_loss_before_backoff) in the
@@ -75,14 +77,21 @@ struct ScreamV2Parameters {
   FieldTrialParameter<double> backoff_scale_factor_close_to_ref_window_i;
 
   // If CE is detected and this number of RTTs has passed since last
-  // congestion, ref_window_i will be reset.
+  // congestion, ref_window will be clamped to max_data_in_flight_prev_rtt.
   FieldTrialParameter<int>
       number_of_rtts_between_reset_ref_window_i_on_congestion;
+
+  // Maximum number of RTTs before `ref_window_i` is allowed to be updated on
+  // congestion even if `ref_window` has not increased by 5% above the lowest
+  // `ref_window` (`REF_WND_I_UPDATE_MAX_HOLD_RTTS` in the RFC).
+  FieldTrialParameter<int> ref_window_i_update_max_hold_rtts;
 
   // Max/Min used for calculating how much larger the send window is allowed to
   // be than the ref window.
   FieldTrialParameter<double> ref_window_overhead_min;
   FieldTrialParameter<double> ref_window_overhead_max;
+  // Minimum send window (max_data_in_flight), expressed in number of MSS.
+  FieldTrialParameter<int> min_max_data_in_flight_mss;
 
   // Exponentially Weighted Moving Average (EWMA) factor for updating queue
   // delay.
@@ -97,6 +106,41 @@ struct ScreamV2Parameters {
   // Thresholds for average latency difference. Used for limiting ref_window
   // increase.
   FieldTrialParameter<TimeDelta> latency_diff_threshold;
+  // If true, uses the minimum of the avg min delay scale factor and latency
+  // difference scale factor when limiting ref_window increase, instead of
+  // multiplying them.
+  FieldTrialParameter<bool> use_min_delay_scale_on_increase;
+  // If true, uses the spec's `REDUCE_JITTER` latency difference trend
+  // calculation (`calculate_latency_diff_avg`) and reference window scaling
+  // (`latency_diff_ref_wnd_scale_t`).
+  FieldTrialParameter<bool> reduce_jitter;
+  // Exponentially Weighted Moving Average (EWMA) factor for the short-term
+  // queue delay average (`QDELAY_SHORT_AVG_G` in the RFC). Used when
+  // `reduce_jitter` is true to track recent queue delay changes.
+  FieldTrialParameter<double> queue_delay_short_avg_g;
+  // Exponentially Weighted Moving Average (EWMA) factor for the long-term
+  // queue delay average (`QDELAY_LONG_AVG_G` in the RFC). Used when
+  // `reduce_jitter` is true as the baseline to detect sustained queue delay
+  // increases vs. short-term jitter.
+  FieldTrialParameter<double> queue_delay_long_avg_g;
+  // Deadband margin (`LATENCY_DIFF_MARGIN_1` in the RFC) subtracted from
+  // `qdelay_short_avg - qdelay_long_avg` before accumulating into
+  // `latency_diff_avg`, and also the clamp magnitude (`[-latency_diff_margin_1,
+  // +latency_diff_margin_1]`) for the per-feedback difference (`diff_t`).
+  FieldTrialParameter<TimeDelta> latency_diff_margin_1;
+  // Queue delay threshold (`LATENCY_DIFF_MARGIN_2` in the RFC) used to scale
+  // down `latency_diff_avg` increases (`min(1.0, queue_delay_avg /
+  // latency_diff_margin_2)`) to avoid over-sensitivity when average queue delay
+  // is low.
+  FieldTrialParameter<TimeDelta> latency_diff_margin_2;
+  // Gain factor (`LATENCY_DIFF_UP_GAIN` in the RFC) applied when increasing
+  // `latency_diff_avg` as `qdelay_short_avg` exceeds `qdelay_long_avg +
+  // latency_diff_margin_1`.
+  FieldTrialParameter<double> latency_diff_up_gain;
+  // Gain factor (`LATENCY_DIFF_DOWN_GAIN` in the RFC) applied when decreasing
+  // `latency_diff_avg` as `qdelay_short_avg` falls below `qdelay_long_avg +
+  // latency_diff_margin_1`.
+  FieldTrialParameter<double> latency_diff_down_gain;
   // Minimum (base) window from the latest sent packet in feedback to compute
   // min and max one-way delay.
   FieldTrialParameter<TimeDelta> burst_window_min;
@@ -118,6 +162,9 @@ struct ScreamV2Parameters {
   // TODO: bugs.webrtc.org/447037083 -  Consider implementing 4.2.1.4.1.
   // Competing Flows Compensation.
   FieldTrialParameter<TimeDelta> queue_delay_target;
+  // Factor of `queue_delay_target` above which `IsQueueDelayDetected()` returns
+  // true.
+  FieldTrialParameter<double> queue_delay_detected_factor;
 
   // If the minimum queue delay is below this threshold, queues are deamed to be
   // drained.
@@ -153,6 +200,27 @@ struct ScreamV2Parameters {
   // time feedback is delayed by the receiver. I.e the time from a packet is
   // received until feedback is sent. If zero, this delay is ignored.
   FieldTrialParameter<double> feedback_hold_time_avg_g;
+
+  // Exponentially Weighted Moving Average (EWMA) factor for tracking average
+  // feedback interval.
+  FieldTrialParameter<double> feedback_interval_avg_g;
+
+  // If true, effective virtual_rtt is calculated as
+  // std::max(virtual_rtt, feedback_interval). Otherwise, virtual_rtt is used.
+  FieldTrialParameter<bool> use_feedback_interval_for_virtual_rtt;
+
+  // If true, reference window is clamped to received rate on the first
+  // congestion event after the first RTT.
+  FieldTrialParameter<bool> allow_initial_ref_window_clamping;
+
+  // If true, uses the draft specification's linear per-RTT backoff scaling,
+  // inhibits `is_virtual_ce` when `queue_delay_avg` is decreasing, and scales
+  // down backoff when `target_rate` is below `acked_bitrate_margin *
+  // received_rate`.
+  FieldTrialParameter<bool> use_spec_backoff;
+  FieldTrialParameter<double> acked_bitrate_margin;
+  FieldTrialParameter<double> backoff_scale_low_target_rate;
+  FieldTrialParameter<bool> inhibit_backoff_if_data_in_flight_decreases;
 
   // If the time since last reaction to congestion is larger than this, the
   // pacing window is increased. I.e. packets are allowed to be sent in larger

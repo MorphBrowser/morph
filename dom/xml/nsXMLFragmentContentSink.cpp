@@ -82,15 +82,15 @@ class nsXMLFragmentContentSink : public nsXMLContentSink,
   virtual nsresult ProcessStyleLinkFromHeader(
       const nsAString& aHref, bool aAlternate, const nsAString& aTitle,
       const nsAString& aIntegrity, const nsAString& aType,
-      const nsAString& aMedia, const nsAString& aReferrerPolicy,
+      const nsAString& aMedia, const nsAString& aCrossOrigin,
+      const nsAString& aReferrerPolicy,
       const nsAString& aFetchPriority) override;
 
   // nsXMLContentSink overrides
   virtual nsresult MaybeProcessXSLTLink(
       ProcessingInstruction* aProcessingInstruction, const nsAString& aHref,
       bool aAlternate, const nsAString& aTitle, const nsAString& aType,
-      const nsAString& aMedia, const nsAString& aReferrerPolicy,
-      bool* aWasXSLT = nullptr) override;
+      const nsAString& aMedia, const nsAString& aReferrerPolicy) override;
 
   nsCOMPtr<Document> mTargetDocument;
   // the fragment
@@ -266,10 +266,8 @@ nsXMLFragmentContentSink::ReportError(const char16_t* aErrorText,
 nsresult nsXMLFragmentContentSink::ProcessStyleLinkFromHeader(
     const nsAString& aHref, bool aAlternate, const nsAString& aTitle,
     const nsAString& aIntegrity, const nsAString& aType,
-    const nsAString& aMedia, const nsAString& aReferrerPolicy,
-    const nsAString& aFetchPriority)
-
-{
+    const nsAString& aMedia, const nsAString& aCrossOrigin,
+    const nsAString& aReferrerPolicy, const nsAString& aFetchPriority) {
   MOZ_ASSERT_UNREACHABLE("Shouldn't have headers for a fragment sink");
   return NS_OK;
 }
@@ -277,8 +275,7 @@ nsresult nsXMLFragmentContentSink::ProcessStyleLinkFromHeader(
 nsresult nsXMLFragmentContentSink::MaybeProcessXSLTLink(
     ProcessingInstruction* aProcessingInstruction, const nsAString& aHref,
     bool aAlternate, const nsAString& aTitle, const nsAString& aType,
-    const nsAString& aMedia, const nsAString& aReferrerPolicy, bool* aWasXSLT) {
-  MOZ_ASSERT(!aWasXSLT, "Our one caller doesn't care about whether we're XSLT");
+    const nsAString& aMedia, const nsAString& aReferrerPolicy) {
   return NS_OK;
 }
 

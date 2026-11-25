@@ -9,6 +9,7 @@
 #include "CubebDeviceEnumerator.h"
 #include "MediaTrackGraphImpl.h"
 #include "Tracing.h"
+#include "audio_thread_priority.h"
 #include "cubeb/cubeb.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/MathAlgorithms.h"
@@ -18,6 +19,7 @@
 #include "mozilla/dom/AudioContext.h"
 #include "mozilla/dom/AudioDeviceInfo.h"
 #include "mozilla/dom/BaseAudioContextBinding.h"
+#include "mozilla/dom/WorkletThread.h"
 
 #ifdef MOZ_WEBRTC
 #  include "webrtc/MediaEngineWebRTC.h"
@@ -145,17 +147,17 @@ class MediaTrackGraphInitThreadRunnable : public Runnable {
   RefPtr<ThreadedDriver> mDriver;
 };
 
-void ThreadedDriver::Start() {
+void ThreadedDriver::StartThread(uint32_t aStackSize) {
   MOZ_ASSERT(!ThreadRunning());
-  LOG(LogLevel::Debug, ("Starting thread for a SystemClockDriver  {}",
-                        fmt::ptr(mGraphInterface.get())));
   (void)NS_WARN_IF(mThread);
   MOZ_ASSERT(!mThread);  // Ensure we haven't already started it
 
   nsCOMPtr<nsIRunnable> event = new MediaTrackGraphInitThreadRunnable(this);
+  nsIThreadManager::ThreadCreationOptions options = {.stackSize = aStackSize};
   // Note: mThread may be null during event->Run() if we pass to NewNamedThread!
   // See AudioInitTask
-  nsresult rv = NS_NewNamedThread("MediaTrackGrph", getter_AddRefs(mThread));
+  nsresult rv = NS_NewNamedThread("MediaTrackGrph", getter_AddRefs(mThread),
+                                  nullptr, options);
   if (NS_SUCCEEDED(rv)) {
     mThread->Dispatch(event.forget(), NS_DISPATCH_NORMAL);
   }
@@ -182,6 +184,27 @@ SystemClockDriver::SystemClockDriver(GraphInterface* aGraphInterface,
       mInitialTimeStamp(TimeStamp::Now()) {}
 
 SystemClockDriver::~SystemClockDriver() = default;
+
+void SystemClockDriver::Start() {
+  LOG(LogLevel::Debug, ("Starting thread for SystemClockDriver {}",
+                        fmt::ptr(mGraphInterface.get())));
+  StartThread(nsIThreadManager::DEFAULT_STACK_SIZE);
+}
+void SystemClockDriver::RunThread() {
+#ifdef XP_MACOSX
+  // Timed waits of normal priority threads can be coalesced far beyond their
+  // deadline when the process is otherwise idle, real-time threads are exempt.
+  atp_handle* handle = atp_promote_current_thread_to_real_time(0, mSampleRate);
+#endif
+
+  ThreadedDriver::RunThread();
+
+#ifdef XP_MACOSX
+  if (handle) {
+    atp_demote_current_thread_from_real_time(handle);
+  }
+#endif
+}
 
 void ThreadedDriver::RunThread() {
   mThreadRunning = true;
@@ -267,6 +290,12 @@ OfflineClockDriver::OfflineClockDriver(GraphInterface* aGraphInterface,
     : ThreadedDriver(aGraphInterface, nullptr, aSampleRate) {}
 
 OfflineClockDriver::~OfflineClockDriver() = default;
+
+void OfflineClockDriver::Start() {
+  LOG(LogLevel::Debug, ("Starting thread for OfflineClockDriver {}",
+                        fmt::ptr(mGraphInterface.get())));
+  StartThread(mozilla::dom::WorkletThread::StackSize());
+}
 
 void OfflineClockDriver::RunThread() {
   nsCOMPtr<nsIThreadInternal> threadInternal = do_QueryInterface(mThread);
@@ -1264,7 +1293,7 @@ TimeDuration AudioCallbackDriver::AudioOutputLatency() {
   auto streamLocked = mAudioStream.Lock();
   int rv = cubeb_stream_get_latency(streamLocked.ref(), &latencyFrames);
   if (rv || mSampleRate == 0) {
-    return TimeDuration::FromSeconds(0.0);
+    return TimeDuration::Zero();
   }
 
   return TimeDuration::FromSeconds(static_cast<double>(latencyFrames) /
@@ -1305,8 +1334,7 @@ AudioCallbackDriver::TryStartingFallbackDriver() {
 RefPtr<AudioCallbackDriver::FallbackWrapper>
 AudioCallbackDriver::CreateFallbackSystemClockDriver() {
   MOZ_ASSERT(mFallbackDriverState == FallbackDriverState::Running);
-  DebugOnly<AudioStreamState> audioStreamState =
-      static_cast<AudioStreamState>(mAudioStreamState);
+  DebugOnly<AudioStreamState> audioStreamState = mAudioStreamState.load();
   MOZ_ASSERT(audioStreamState == AudioStreamState::None ||
              audioStreamState == AudioStreamState::Pending ||
              audioStreamState == AudioStreamState::ChangingDevice);

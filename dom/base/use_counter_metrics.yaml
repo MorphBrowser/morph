@@ -108,8 +108,8 @@ use.counter:
     send_in_pings:
       - use-counters
 
-# Total of 2668 use counter metrics (excludes denominators).
-# Total of 435 'page' use counters.
+# Total of 2704 use counter metrics (excludes denominators).
+# Total of 445 'page' use counters.
 use.counter.page:
   svgsvgelement_getelementbyid:
     type: counter
@@ -6350,6 +6350,57 @@ use.counter.page:
     send_in_pings:
       - use-counters
 
+  akamai_used:
+    type: counter
+    description: >
+      Whether a page loaded a document or subresource served by Akamai.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  akamai_waf_blocked:
+    type: counter
+    description: >
+      Whether a page had a load blocked by the Akamai WAF.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  akamai_forbidden:
+    type: counter
+    description: >
+      Whether a page had a load get a 403 from Akamai that is not the WAF block page.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   notificationoptions_navigate:
     type: counter
     description: >
@@ -7081,6 +7132,40 @@ use.counter.page:
     send_in_pings:
       - use-counters
 
+  navigationtransition_to_getter:
+    type: counter
+    description: >
+      Whether a page got NavigationTransition.to.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  navigationtransition_to_setter:
+    type: counter
+    description: >
+      Whether a page set NavigationTransition.to.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   navigationtransition_committed_getter:
     type: counter
     description: >
@@ -7272,6 +7357,23 @@ use.counter.page:
     type: counter
     description: >
       Whether a page has a <script type="speculationrules"> element.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  speculation_rules_header:
+    type: counter
+    description: >
+      Whether a page has a speculation rule set from a Speculation-Rules header.
       Compare against `use.counter.top_level_content_documents_destroyed`
       to calculate the rate.
     bugs:
@@ -7506,7 +7608,75 @@ use.counter.page:
     send_in_pings:
       - use-counters
 
-# Total of 435 'document' use counters.
+  inner_html_fast_path:
+    type: counter
+    description: >
+      Whether a page sets innerHTML to markup that the innerHTML fast path parses.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  inner_html_fast_path_rejected:
+    type: counter
+    description: >
+      Whether a page sets innerHTML to markup that the innerHTML fast path leaves to the full parser.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  domparser_fast_path:
+    type: counter
+    description: >
+      Whether a page parses HTML with DOMParser that the innerHTML fast path parses.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  domparser_fast_path_rejected:
+    type: counter
+    description: >
+      Whether a page parses HTML with DOMParser that the innerHTML fast path leaves to the full parser.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+# Total of 445 'document' use counters.
 use.counter.doc:
   svgsvgelement_getelementbyid:
     type: counter
@@ -13747,6 +13917,57 @@ use.counter.doc:
     send_in_pings:
       - use-counters
 
+  akamai_used:
+    type: counter
+    description: >
+      Whether a document loaded a document or subresource served by Akamai.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  akamai_waf_blocked:
+    type: counter
+    description: >
+      Whether a document had a load blocked by the Akamai WAF.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  akamai_forbidden:
+    type: counter
+    description: >
+      Whether a document had a load get a 403 from Akamai that is not the WAF block page.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   notificationoptions_navigate:
     type: counter
     description: >
@@ -14478,6 +14699,40 @@ use.counter.doc:
     send_in_pings:
       - use-counters
 
+  navigationtransition_to_getter:
+    type: counter
+    description: >
+      Whether a document got NavigationTransition.to.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  navigationtransition_to_setter:
+    type: counter
+    description: >
+      Whether a document set NavigationTransition.to.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   navigationtransition_committed_getter:
     type: counter
     description: >
@@ -14669,6 +14924,23 @@ use.counter.doc:
     type: counter
     description: >
       Whether a document has a <script type="speculationrules"> element.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  speculation_rules_header:
+    type: counter
+    description: >
+      Whether a document has a speculation rule set from a Speculation-Rules header.
       Compare against `use.counter.content_documents_destroyed`
       to calculate the rate.
     bugs:
@@ -14890,6 +15162,74 @@ use.counter.doc:
     type: counter
     description: >
       Whether a document calls FileSystemHandle.move() with a stringified object as name.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  inner_html_fast_path:
+    type: counter
+    description: >
+      Whether a document sets innerHTML to markup that the innerHTML fast path parses.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  inner_html_fast_path_rejected:
+    type: counter
+    description: >
+      Whether a document sets innerHTML to markup that the innerHTML fast path leaves to the full parser.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  domparser_fast_path:
+    type: counter
+    description: >
+      Whether a document parses HTML with DOMParser that the innerHTML fast path parses.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  domparser_fast_path_rejected:
+    type: counter
+    description: >
+      Whether a document parses HTML with DOMParser that the innerHTML fast path leaves to the full parser.
       Compare against `use.counter.content_documents_destroyed`
       to calculate the rate.
     bugs:
@@ -18581,7 +18921,7 @@ use.counter.worker.service:
     send_in_pings:
       - use-counters
 
-# Total of 56 'deprecated operations (page)' use counters.
+# Total of 60 'deprecated operations (page)' use counters.
 use.counter.deprecated_ops.page:
   components:
     type: counter
@@ -19314,6 +19654,23 @@ use.counter.deprecated_ops.page:
     send_in_pings:
       - use-counters
 
+  svguse_inline_event_handler:
+    type: counter
+    description: >
+      Whether a page used SVGUseInlineEventHandler.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   idbobject_store_create_index_locale:
     type: counter
     description: >
@@ -19535,7 +19892,58 @@ use.counter.deprecated_ops.page:
     send_in_pings:
       - use-counters
 
-# Total of 56 'deprecated operations (document)' use counters.
+  gamepad_hand:
+    type: counter
+    description: >
+      Whether a page used GamepadHand.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  gamepad_haptic_actuators:
+    type: counter
+    description: >
+      Whether a page used GamepadHapticActuators.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  gamepad_pose:
+    type: counter
+    description: >
+      Whether a page used GamepadPose.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+# Total of 60 'deprecated operations (document)' use counters.
 use.counter.deprecated_ops.doc:
   components:
     type: counter
@@ -20268,6 +20676,23 @@ use.counter.deprecated_ops.doc:
     send_in_pings:
       - use-counters
 
+  svguse_inline_event_handler:
+    type: counter
+    description: >
+      Whether a document used SVGUseInlineEventHandler.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   idbobject_store_create_index_locale:
     type: counter
     description: >
@@ -20489,7 +20914,58 @@ use.counter.deprecated_ops.doc:
     send_in_pings:
       - use-counters
 
-# Total of 735 'CSS (page)' use counters.
+  gamepad_hand:
+    type: counter
+    description: >
+      Whether a document used GamepadHand.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  gamepad_haptic_actuators:
+    type: counter
+    description: >
+      Whether a document used GamepadHapticActuators.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  gamepad_pose:
+    type: counter
+    description: >
+      Whether a document used GamepadPose.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+# Total of 739 'CSS (page)' use counters.
 use.counter.css.page:
   css_align_items:
     type: counter
@@ -23636,6 +24112,23 @@ use.counter.css.page:
     send_in_pings:
       - use-counters
 
+  css_border_shape:
+    type: counter
+    description: >
+      Whether a page used the CSS property border-shape.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   css_border_spacing:
     type: counter
     description: >
@@ -23895,6 +24388,23 @@ use.counter.css.page:
     type: counter
     description: >
       Whether a page used the CSS property filter.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  css_fit_tolerance:
+    type: counter
+    description: >
+      Whether a page used the CSS property fit-tolerance.
       Compare against `use.counter.top_level_content_documents_destroyed`
       to calculate the rate.
     bugs:
@@ -24813,6 +25323,23 @@ use.counter.css.page:
     type: counter
     description: >
       Whether a page used the CSS property tab-size.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  css_text_autospace_size:
+    type: counter
+    description: >
+      Whether a page used the CSS property text-autospace-size.
       Compare against `use.counter.top_level_content_documents_destroyed`
       to calculate the rate.
     bugs:
@@ -30011,6 +30538,23 @@ use.counter.css.page:
     send_in_pings:
       - use-counters
 
+  css_flow_tolerance:
+    type: counter
+    description: >
+      Whether a page used the CSS property flow-tolerance.
+      Compare against `use.counter.top_level_content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   css_webkit_justify_content:
     type: counter
     description: >
@@ -32986,7 +33530,7 @@ use.counter.css.page:
     send_in_pings:
       - use-counters
 
-# Total of 735 'CSS (document)' use counters.
+# Total of 739 'CSS (document)' use counters.
 use.counter.css.doc:
   css_align_items:
     type: counter
@@ -36133,6 +36677,23 @@ use.counter.css.doc:
     send_in_pings:
       - use-counters
 
+  css_border_shape:
+    type: counter
+    description: >
+      Whether a document used the CSS property border-shape.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
   css_border_spacing:
     type: counter
     description: >
@@ -36392,6 +36953,23 @@ use.counter.css.doc:
     type: counter
     description: >
       Whether a document used the CSS property filter.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  css_fit_tolerance:
+    type: counter
+    description: >
+      Whether a document used the CSS property fit-tolerance.
       Compare against `use.counter.content_documents_destroyed`
       to calculate the rate.
     bugs:
@@ -37310,6 +37888,23 @@ use.counter.css.doc:
     type: counter
     description: >
       Whether a document used the CSS property tab-size.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  css_text_autospace_size:
+    type: counter
+    description: >
+      Whether a document used the CSS property text-autospace-size.
       Compare against `use.counter.content_documents_destroyed`
       to calculate the rate.
     bugs:
@@ -42495,6 +43090,23 @@ use.counter.css.doc:
     type: counter
     description: >
       Whether a document used the CSS property font-stretch.
+      Compare against `use.counter.content_documents_destroyed`
+      to calculate the rate.
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=1852098
+    notification_emails:
+      - dom-core@mozilla.com
+      - emilio@mozilla.com
+    expires: never
+    send_in_pings:
+      - use-counters
+
+  css_flow_tolerance:
+    type: counter
+    description: >
+      Whether a document used the CSS property flow-tolerance.
       Compare against `use.counter.content_documents_destroyed`
       to calculate the rate.
     bugs:

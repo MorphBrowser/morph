@@ -15,9 +15,11 @@ import { MigratorBase } from "moz-src:///browser/components/migration/MigratorBa
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  ArcMigrationUtils:
+    "moz-src:///browser/components/migration/ArcMigrationUtils.sys.mjs",
   ChromeMigrationUtils:
     "moz-src:///browser/components/migration/ChromeMigrationUtils.sys.mjs",
-  FormHistory: "resource://gre/modules/FormHistory.sys.mjs",
+  FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
   NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
   Qihoo360seMigrationUtils:
@@ -73,6 +75,18 @@ function convertBookmarks(items, bookmarkURLAccumulator, errorAccumulator) {
   return itemsToInsert;
 }
 
+function countBookmarks(items) {
+  let count = 0;
+  for (let item of items) {
+    if (item.type == "url") {
+      count++;
+    } else if (item.type == "folder") {
+      count += 1 + countBookmarks(item.children ?? []);
+    }
+  }
+  return count;
+}
+
 /**
  * Chrome profile migrator. This can also be used as a parent class for
  * migrators for browsers that are variants of Chrome.
@@ -94,6 +108,22 @@ export class ChromeProfileMigrator extends MigratorBase {
    * @type {Map<string, string>}
    */
   #dataPathRemappings = new Map();
+
+  /**
+   * True once the user has selected a folder in the file picker opened by
+   * getPermissions. Reset if that folder did not give access and the user
+   * then cancels the file picker.
+   *
+   * @type {boolean}
+   */
+  #hasUserSelectedDataFolder = false;
+
+  #shouldAvoidReadingData() {
+    return (
+      !this.#hasUserSelectedDataFolder &&
+      MigratorBase.needsFolderSelectionToReadData()
+    );
+  }
 
   static get key() {
     return "chrome";
@@ -117,6 +147,10 @@ export class ChromeProfileMigrator extends MigratorBase {
       return true;
     }
 
+    if (this.#shouldAvoidReadingData()) {
+      return false;
+    }
+
     let localStatePath = PathUtils.join(dataPath, "Local State");
     try {
       // Read one byte since on snap we can check existence even without being able
@@ -129,7 +163,7 @@ export class ChromeProfileMigrator extends MigratorBase {
     return false;
   }
 
-  async getPermissions(win) {
+  async getPermissions(win, { onFilePickerShown } = {}) {
     // Get the original path to the user data and ignore any existing remapping.
     // This allows us to set a new remapping if the user navigates the platforms
     // filepicker to a different directory on a second permission request attempt.
@@ -142,22 +176,67 @@ export class ChromeProfileMigrator extends MigratorBase {
       let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
       fp.init(win?.browsingContext, "", Ci.nsIFilePicker.modeGetFolder);
       fp.filterIndex = 1;
+      // Folders such as ~/Library are hidden in the file picker, so open it
+      // in the folder that the user needs to select.
+      if (originalDataPath) {
+        fp.displayDirectory = new lazy.FileUtils.File(
+          this._getPermissionFolder(originalDataPath)
+        );
+      }
       // Now wait for the filepicker to open and close. If the user picks
       // the local state folder, the OS should grant us read access to everything
       // inside, so we don't need to check or do anything else with what's
       // returned by the filepicker.
+      onFilePickerShown?.();
       let result = await new Promise(resolve => fp.open(resolve));
       // Bail if the user cancels the dialog:
       if (result == Ci.nsIFilePicker.returnCancel) {
+        this.#hasUserSelectedDataFolder = false;
         return false;
       }
 
-      let file = fp.file;
-      if (file && file.path != originalDataPath) {
-        this.#dataPathRemappings.set(originalDataPath, file.path);
+      this.#hasUserSelectedDataFolder = true;
+      // Resources looked up before the folder was selected may be empty.
+      this._resourcesByProfile = null;
+      let selectedDataPath =
+        fp.file && this._getDataPathFromPermissionFolder(fp.file.path);
+      if (selectedDataPath && selectedDataPath !== originalDataPath) {
+        this.#dataPathRemappings.set(originalDataPath, selectedDataPath);
+      } else {
+        this.#dataPathRemappings.delete(originalDataPath);
       }
     }
     return true;
+  }
+
+  /**
+   * Returns the folder that the user is asked to select in getPermissions.
+   * Override this if the browser keeps data outside of its user data path.
+   *
+   * @param {string} dataPath
+   *   The user data path containing Local State.
+   * @returns {string}
+   */
+  _getPermissionFolder(dataPath) {
+    return dataPath;
+  }
+
+  /**
+   * Returns the user data path containing Local State, given the folder the
+   * user selected in getPermissions. If this differs from the default user
+   * data path, the migrator reads from it instead. Override this whenever
+   * _getPermissionFolder is overridden, so that the selected folder leads back
+   * to the user data path. For example, if _getPermissionFolder returns the
+   * parent of the user data path, this should append the user data folder name
+   * to the selected folder.
+   *
+   * @param {string} folder
+   *   The folder selected by the user in getPermissions.
+   * @returns {string}
+   *   The user data path inside the selected folder.
+   */
+  _getDataPathFromPermissionFolder(folder) {
+    return folder;
   }
 
   async canGetPermissions() {
@@ -273,12 +352,20 @@ export class ChromeProfileMigrator extends MigratorBase {
   }
 
   async getLastUsedDate() {
-    let sourceProfiles = await this.getSourceProfiles();
-    if (!sourceProfiles) {
-      return new Date(0);
-    }
     let chromeUserDataPath = await this._getChromeUserDataPathIfExists();
     if (!chromeUserDataPath) {
+      return new Date(0);
+    }
+    if (this.#shouldAvoidReadingData()) {
+      // The profiles can't be read before the user selects the data folder,
+      // but the modification date of Local State can.
+      let info = await IOUtils.stat(
+        PathUtils.join(chromeUserDataPath, "Local State")
+      ).catch(() => null);
+      return new Date(info?.lastModified ?? 0);
+    }
+    let sourceProfiles = await this.getSourceProfiles();
+    if (!sourceProfiles) {
       return new Date(0);
     }
     let datePromises = sourceProfiles.map(async profile => {
@@ -307,7 +394,7 @@ export class ChromeProfileMigrator extends MigratorBase {
     }
 
     let chromeUserDataPath = await this._getChromeUserDataPathIfExists();
-    if (!chromeUserDataPath) {
+    if (!chromeUserDataPath || this.#shouldAvoidReadingData()) {
       return [];
     }
 
@@ -425,6 +512,7 @@ export class ChromeProfileMigrator extends MigratorBase {
         if (!rows) {
           return;
         }
+        this.available = rows.length;
 
         // If there are no relevant rows, return before initializing crypto and
         // thus prompting for Keychain access on macOS.
@@ -601,6 +689,7 @@ export class ChromeProfileMigrator extends MigratorBase {
 
     return {
       type: MigrationUtils.resourceTypes.PAYMENT_METHODS,
+      available: rows.length,
 
       async migrate(aCallback) {
         let loginCrypto;
@@ -727,7 +816,7 @@ async function GetBookmarksResource(aProfileFolder, aBrowserKey) {
     type: MigrationUtils.resourceTypes.BOOKMARKS,
 
     migrate(aCallback) {
-      return (async function () {
+      return (async () => {
         let gotErrors = false;
         let errorGatherer = function () {
           gotErrors = true;
@@ -785,6 +874,10 @@ async function GetBookmarksResource(aProfileFolder, aBrowserKey) {
             bookmarkJSONs.map(json => json.roots.synced?.children)
           ),
         };
+        this.available = Object.values(mergedRoots).reduce(
+          (sum, children) => sum + countBookmarks(children),
+          0
+        );
 
         // Import each Chrome bookmark root into its corresponding Gecko folder.
         for (let [rootName, parentGuid] of [
@@ -855,28 +948,52 @@ async function GetHistoryResource(aProfileFolder) {
     "Chrome history",
     countQuery
   );
-  if (!countRows[0].getResultByName("COUNT(*)")) {
+  let available = countRows[0].getResultByName("COUNT(*)");
+  if (!available) {
     return null;
   }
   return {
     type: MigrationUtils.resourceTypes.HISTORY,
+    available,
 
     migrate(aCallback) {
       (async function () {
-        const LIMIT = Services.prefs.getIntPref(
+        const TOTAL_LIMIT = Services.prefs.getIntPref(
           "browser.migrate.chrome.history.limit"
         );
+        const VISIT_LIMIT = MigrationUtils.getHistoryVisitLimit(
+          "browser.migrate.chrome.history.visit.limit"
+        );
 
-        let query =
-          "SELECT url, title, last_visit_time, typed_count FROM urls WHERE hidden = 0";
-        let maxAge = lazy.ChromeMigrationUtils.dateToChromeTime(
+        const maxAge = lazy.ChromeMigrationUtils.dateToChromeTime(
           Date.now() - MigrationUtils.HISTORY_MAX_AGE_IN_MILLISECONDS
         );
-        query += " AND last_visit_time > " + maxAge;
-
-        if (LIMIT) {
-          query += " ORDER BY last_visit_time DESC LIMIT " + LIMIT;
-        }
+        // Pages only need sorting to pick the most recent ones for the limit.
+        const limitClause = TOTAL_LIMIT
+          ? `ORDER BY last_visit_time DESC LIMIT ${TOTAL_LIMIT}`
+          : "";
+        // AUTO_SUBFRAME (3) visits are skipped: they map to EMBED, which Places
+        // doesn't write to the database. MANUAL_SUBFRAME (4) and RELOAD (8)
+        // visits are ranked last so they only fill slots not taken by visits
+        // that count towards frecency.
+        let query = `WITH pages AS (
+  SELECT id, url, title, last_visit_time, typed_count
+  FROM urls
+  WHERE hidden = 0 AND last_visit_time > ${maxAge}
+  ${limitClause}
+)
+SELECT p.id, p.url, p.title, p.last_visit_time, p.typed_count,
+       v.visit_time, v.transition
+FROM pages p
+LEFT JOIN visits v ON v.id IN (
+  SELECT id FROM visits
+  WHERE url = p.id
+  AND visit_time > ${maxAge}
+  AND (transition & 0xFF) != 3
+  ORDER BY (transition & 0xFF) IN (4, 8), visit_time DESC
+  LIMIT ${VISIT_LIMIT}
+)
+ORDER BY p.last_visit_time DESC`;
 
         let rows;
         try {
@@ -891,34 +1008,37 @@ async function GetHistoryResource(aProfileFolder) {
           }
         }
 
-        let pageInfos = [];
+        let pageInfosById = new Map();
         let fallbackVisitDate = new Date();
         for (let row of rows) {
           try {
-            // if having typed_count, we changes transition type to typed.
-            let transition = lazy.PlacesUtils.history.TRANSITIONS.LINK;
-            if (row.getResultByName("typed_count") > 0) {
-              transition = lazy.PlacesUtils.history.TRANSITIONS.TYPED;
+            let id = row.getResultByName("id");
+            let pageInfo = pageInfosById.get(id);
+            if (!pageInfo) {
+              pageInfo = {
+                title: row.getResultByName("title"),
+                url: new URL(row.getResultByName("url")),
+                visits: [],
+              };
+              pageInfosById.set(id, pageInfo);
             }
-
-            pageInfos.push({
-              title: row.getResultByName("title"),
-              url: new URL(row.getResultByName("url")),
-              visits: [
-                {
-                  transition,
-                  date: lazy.ChromeMigrationUtils.chromeTimeToDate(
-                    row.getResultByName("last_visit_time"),
-                    fallbackVisitDate
-                  ),
-                },
-              ],
+            let visitTime = row.getResultByName("visit_time");
+            pageInfo.visits.push({
+              transition: lazy.ChromeMigrationUtils.chromeTransitionToPlaces(
+                row.getResultByName("transition"),
+                row.getResultByName("typed_count")
+              ),
+              date: lazy.ChromeMigrationUtils.chromeTimeToDate(
+                visitTime ?? row.getResultByName("last_visit_time"),
+                fallbackVisitDate
+              ),
             });
           } catch (e) {
             console.error(e);
           }
         }
 
+        let pageInfos = [...pageInfosById.values()];
         if (pageInfos.length) {
           await MigrationUtils.insertVisitsWrapper(pageInfos);
         }
@@ -957,11 +1077,13 @@ async function GetFormdataResource(aProfileFolder) {
     "Chrome formdata",
     countQuery
   );
-  if (!countRows[0].getResultByName("COUNT(*)")) {
+  let available = countRows[0].getResultByName("COUNT(*)");
+  if (!available) {
     return null;
   }
   return {
     type: MigrationUtils.resourceTypes.FORMDATA,
+    available,
 
     async migrate(aCallback) {
       let query =
@@ -1001,7 +1123,7 @@ async function GetFormdataResource(aProfileFolder) {
       }
 
       try {
-        await lazy.FormHistory.update(addOps);
+        await MigrationUtils.insertFormHistoryWrapper(addOps);
       } catch (e) {
         console.error(e);
         aCallback(false);
@@ -1029,6 +1151,7 @@ async function GetExtensionsResource(aProfileId, aBrowserKey = "chrome") {
 
   return {
     type: MigrationUtils.resourceTypes.EXTENSIONS,
+    available: extensions.length,
     async migrate(callback) {
       let ids = extensions.map(extension => extension.id);
       let [progressValue, importedExtensions] =
@@ -1295,4 +1418,129 @@ export class VivaldiProfileMigrator extends ChromeProfileMigrator {
   _chromeUserDataPathSuffix = "Vivaldi";
   _keychainServiceName = "Vivaldi Safe Storage";
   _keychainAccountName = "Vivaldi";
+}
+
+/**
+ * Arc migrator. Arc is Chromium-based, but it keeps spaces, pinned tabs and
+ * folders in its own StorableSidebar.json file next to the Chromium user data
+ * directory. Arc has no regular bookmarks, so Favorites are imported as
+ * bookmarks and spaces as bookmark folders, instead of reading the Chromium
+ * Bookmarks file.
+ */
+export class ArcProfileMigrator extends ChromeProfileMigrator {
+  static get key() {
+    return "arc";
+  }
+
+  static get displayNameL10nID() {
+    return "migration-wizard-migrator-display-name-arc";
+  }
+
+  static get brandImage() {
+    return "chrome://browser/content/migration/brands/arc.png";
+  }
+
+  _chromeUserDataPathSuffix = "Arc";
+  _keychainServiceName = "Arc Safe Storage";
+  _keychainAccountName = "Arc";
+
+  _getPermissionFolder(dataPath) {
+    return PathUtils.parent(dataPath);
+  }
+
+  _getDataPathFromPermissionFolder(folder) {
+    return PathUtils.join(folder, "User Data");
+  }
+
+  async _getSidebarPath() {
+    const userDataPath = await this._getChromeUserDataPathIfExists();
+    if (!userDataPath) {
+      return null;
+    }
+    return PathUtils.join(
+      PathUtils.parent(userDataPath),
+      "StorableSidebar.json"
+    );
+  }
+
+  async getLastUsedDate() {
+    const dates = [await super.getLastUsedDate()];
+    const sidebarPath = await this._getSidebarPath();
+    if (sidebarPath) {
+      const info = await IOUtils.stat(sidebarPath).catch(() => null);
+      if (info) {
+        dates.push(new Date(info.lastModified));
+      }
+    }
+    return new Date(Math.max(...dates.map(date => date.getTime())));
+  }
+
+  async getResources(aProfile) {
+    let resources = (await super.getResources(aProfile)).filter(
+      r => r.type !== MigrationUtils.resourceTypes.BOOKMARKS
+    );
+    let userDataPath = await this._getChromeUserDataPathIfExists();
+    if (!userDataPath || !aProfile || !(await this.hasPermissions())) {
+      return resources;
+    }
+
+    let sidebarResource = await this._getSidebarResource(aProfile);
+    if (sidebarResource) {
+      resources.push(sidebarResource);
+    }
+    return resources;
+  }
+
+  /**
+   * Returns a bookmarks migration resource that imports a profile's Favorites
+   * and spaces from Arc's StorableSidebar.json onto the bookmarks toolbar.
+   *
+   * @param {object} aProfile The Chromium profile, whose `id` is its
+   *   directory name (e.g. "Default", "Profile 1").
+   * @returns {Promise<object|null>}
+   *   The resource, or null if the file is missing, unreadable or has nothing
+   *   to import for this profile.
+   */
+  async _getSidebarResource(aProfile) {
+    let sidebarPath = await this._getSidebarPath();
+    if (!sidebarPath) {
+      return null;
+    }
+    let bookmarks;
+    try {
+      let sidebarJSON = await IOUtils.readJSON(sidebarPath);
+      bookmarks = await lazy.ArcMigrationUtils.convertSidebarToBookmarks(
+        sidebarJSON,
+        aProfile.id
+      );
+    } catch (ex) {
+      if (!DOMException.isInstance(ex) || ex.name !== "NotFoundError") {
+        console.error("Could not read Arc spaces from", sidebarPath, ex);
+      }
+      return null;
+    }
+
+    if (!bookmarks.length) {
+      return null;
+    }
+
+    return {
+      type: MigrationUtils.resourceTypes.BOOKMARKS,
+
+      async migrate(aCallback) {
+        let success = false;
+        try {
+          await MigrationUtils.insertManyBookmarksWrapper(
+            bookmarks,
+            lazy.PlacesUtils.bookmarks.toolbarGuid,
+            { fixupOrSkipInvalidEntries: true }
+          );
+          success = true;
+        } catch (ex) {
+          console.error(ex);
+        }
+        aCallback(success);
+      },
+    };
+  }
 }

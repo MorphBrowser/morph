@@ -10,9 +10,9 @@
 #include "nsIPKCS11ModuleDB.h"
 #include "nsTLiteralString.h"
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#if !defined(MOZ_NO_SMART_CARDS)
 #  include "mozilla/ipc/UtilityProcessManager.h"
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
 namespace mozilla {
 namespace psm {
@@ -36,15 +36,16 @@ class PKCS11ModuleDB : public nsIPKCS11ModuleDB {
   NS_DECL_NSIPKCS11MODULEDB
 
   static already_AddRefed<PKCS11ModuleDB> GetSingleton();
+  static bool UtilityProcessEnabled();
 
   static nsresult DoDeleteModule(const nsCString& moduleName);
   static nsresult DoAddModule(const nsCString& moduleName,
                               const nsCString& libraryPath,
                               uint32_t mechanismFlags, uint32_t cipherFlags);
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#if !defined(MOZ_NO_SMART_CARDS)
   static nsresult DoListModules(nsTArray<mozilla::psm::ModuleInfo>& modules);
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 
  protected:
   virtual ~PKCS11ModuleDB() = default;
@@ -54,7 +55,7 @@ class PKCS11ModuleDB : public nsIPKCS11ModuleDB {
       MozPromise<nsTArray<RefPtr<nsIPKCS11Module>>, nsresult, true>;
   RefPtr<ListModulesPromise> ListMainProcessModules();
 
-#if defined(NIGHTLY_BUILD) && !defined(MOZ_NO_SMART_CARDS)
+#if !defined(MOZ_NO_SMART_CARDS)
   using PKCS11ModuleProcessPromise =
       MozPromise<RefPtr<PKCS11ModuleParent>, nsresult, false>;
   RefPtr<PKCS11ModuleProcessPromise> mPKCS11ModuleProcessPromise;
@@ -76,7 +77,7 @@ class PKCS11ModuleDB : public nsIPKCS11ModuleDB {
                                                const nsCString& oldPassword,
                                                const nsCString& newPassword);
 
-  typedef MozPromise<nsTArray<IPCClientCertObject>, nsresult, true>
+  typedef MozPromise<nsTArray<CryptokiObject>, nsresult, true>
       FindObjectsPromise;
   RefPtr<FindObjectsPromise> FindObjects(SearchingFor searchingFor);
 
@@ -106,10 +107,9 @@ class PKCS11ModuleDB : public nsIPKCS11ModuleDB {
   static RefPtr<SignPromise> SignGivenParent(
       Span<uint8_t> certificate, Span<uint8_t> data, Span<uint8_t> params,
       const RefPtr<PKCS11ModuleParent>& parent);
-#endif  // NIGHTLY_BUILD && !MOZ_NO_SMART_CARDS
+#endif  // !MOZ_NO_SMART_CARDS
 };
 
-const nsLiteralCString kIPCClientCertsModuleName("IPC Client Cert Module");
 const nsLiteralCString kNSSInternalModuleName("NSS Internal PKCS #11 Module");
 const nsLiteralCString kOSClientCertsModuleName("OS Client Cert Module");
 const nsLiteralCString kRemoteCertsModuleName("Remote Certs Module");

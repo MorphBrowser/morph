@@ -17,12 +17,16 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///toolkit/components/ipprotection/IPPSiteRuleManager.sys.mjs",
   IPPOnboardingMessage:
     "moz-src:///browser/components/ipprotection/IPPOnboardingMessageHelper.sys.mjs",
+  IPPMode:
+    "moz-src:///toolkit/components/ipprotection/IPPChannelFilter.sys.mjs",
   ERRORS: "moz-src:///toolkit/components/ipprotection/IPPProxyManager.sys.mjs",
   IPPProxyManager:
     "moz-src:///toolkit/components/ipprotection/IPPProxyManager.sys.mjs",
   IPPProxyStates:
     "moz-src:///toolkit/components/ipprotection/IPPProxyManager.sys.mjs",
   IPPUsageHelper:
+    "moz-src:///browser/components/ipprotection/IPPUsageHelper.sys.mjs",
+  UsageStates:
     "moz-src:///browser/components/ipprotection/IPPUsageHelper.sys.mjs",
   IPProtectionServerlist:
     "moz-src:///toolkit/components/ipprotection/IPProtectionServerlist.sys.mjs",
@@ -54,11 +58,14 @@ const BANDWIDTH_THRESHOLD_PREF = "browser.ipProtection.bandwidthThreshold";
 const BANDWIDTH_WARNING_DISMISSED_PREF =
   "browser.ipProtection.bandwidthWarningDismissedThreshold";
 const BANDWIDTH_RESET_DATE_PREF = "browser.ipProtection.bandwidthResetDate";
+const LOCATION_UNLOCK_MESSAGE_DISMISSED_PREF =
+  "browser.ipProtection.locationUnlockMessageDismissed";
 const EGRESS_LOCATION_PREF = "browser.ipProtection.egressLocation";
 const USER_OPENED_PREF = "browser.ipProtection.everOpenedPanel";
-const LOCATION_BADGE_DISMISSED_PREF =
-  "browser.ipProtection.locationButtonBadgeDismissed";
+const USER_OPENED_SINCE_160_PREF = "browser.ipProtection.openedPanelSince160";
 const UPGRADE_NOT_AVAILABLE_PREF = "browser.ipProtection.upgradeNotAvailable";
+const SITE_INCLUSION_PROMPT_SHOWN_PREF =
+  "browser.ipProtection.siteInclusionPromptShown";
 
 XPCOMUtils.defineLazyPreferenceGetter(
   lazy,
@@ -125,6 +132,9 @@ export class IPProtectionPanel {
    * @typedef {object} State
    * @property {boolean} isProtectionEnabled
    *  The timestamp in milliseconds since IP Protection was enabled
+   * @property {boolean} isDefaultMode
+   *  True if the proxy connection uses the default mode (the mode a
+   *  user-started connection gets), even if it has since failed.
    * @property {string} location
    *  The location country code
    * @property {Array<{code: string, available: boolean}>} locationsList
@@ -147,12 +157,29 @@ export class IPProtectionPanel {
    * Data about the currently loaded site, including "isExclusion".
    * @property {object} bandwidthUsage
    *  An object containing the current and max usage
+   * @property {boolean} bandwidthUnlimited
+   *  True if the user has unlimited bandwidth, else false.
    * @property {boolean} isActivating
    *  True if the VPN service is in the process of connecting, else false.
-   * @property {boolean} showLocationButtonBadge
-   *  True if the "new" badge on the location selection button should be visible.
+   * @property {boolean} isActive
+   *  True if the VPN proxy is active, else false.
+   * @property {boolean} isRetrying
+   *  True while a connection is being retried from the error state.
    * @property {boolean} isPremium
-   * True if the current device has Firefox set as the default browser or the user has a Mozilla VPN subscription and/or unlimited bandwidth
+   * True if the current device has Firefox set as the default browser or the user has a Mozilla VPN subscription
+   * Initially false; recomputed asynchronously before the panel is shown.
+   * @property {boolean} isDefaultBrowser
+   * True if Firefox is set as the default browser.
+   * Initially false; recomputed when the panel is shown.
+   * @property {boolean} canSetDefaultBrowser
+   * True if the user is allowed to set Firefox as the default browser.
+   * Initially false; recomputed when the panel is shown.
+   * @property {boolean} showSiteInclusionPrompt
+   * True if the prompt offering to always turn on VPN for the current site
+   * should be shown, else false.
+   * @property {boolean} showAdditionalLocationConfirmation
+   * True if the message confirming additional locations should be shown,
+   * else false.
    */
 
   /**
@@ -163,6 +190,7 @@ export class IPProtectionPanel {
   components = new WeakSet();
   initiatedUpgrade = false;
   #window = null;
+  #showToken = null;
   #panelView = null;
   #headerButtons = [];
   #locationsClosedByKeyboard = false;
@@ -378,17 +406,53 @@ export class IPProtectionPanel {
     );
   }
 
-  get isDefaultBrowser() {
-    let isDefaultBrowser = lazy.ShellService.isDefaultBrowser();
-    return isDefaultBrowser;
+  static async isDefaultBrowser() {
+    return lazy.ShellService.isDefaultBrowserAsync();
   }
 
-  get isPremium() {
+  async isDefaultBrowser() {
+    return IPProtectionPanel.isDefaultBrowser();
+  }
+
+  canSetDefaultBrowser() {
+    return (
+      Services.policies.isAllowed("setDefaultBrowser") &&
+      !Services.prefs.prefIsLocked(
+        "pref.general.disable_button.default_browser"
+      )
+    );
+  }
+
+  /**
+   * Whether the user may use locked egress locations. Doesn't depend on any
+   * window, so it is shared with IPPAutoActivation.
+   *
+   * @param {boolean|null} [isDefaultBrowser]
+   *   Whether Firefox is the default browser, if already known.
+   * @returns {Promise<boolean>}
+   */
+  static async isPremium(isDefaultBrowser = null) {
     let isPremium =
-      !this.#getBandwidthUsage() ||
       lazy.IPProtectionService.authProvider.hasUpgraded ||
-      this.isDefaultBrowser;
+      (isDefaultBrowser ?? (await IPProtectionPanel.isDefaultBrowser()));
     return isPremium;
+  }
+
+  /**
+   * @param {boolean|null} [isDefaultBrowser]
+   *   Whether Firefox is the default browser, if already known.
+   */
+  async isPremium(isDefaultBrowser = null) {
+    return IPProtectionPanel.isPremium(isDefaultBrowser);
+  }
+
+  async #setDefaultBrowser(win) {
+    await lazy.SpecialMessageActions.setDefaultBrowser(win);
+    const isDefaultBrowser = await this.isDefaultBrowser();
+    this.setState({
+      isDefaultBrowser,
+      isPremium: await this.isPremium(isDefaultBrowser),
+    });
   }
 
   /**
@@ -409,8 +473,8 @@ export class IPProtectionPanel {
       unauthenticated:
         lazy.IPProtectionService.state ===
         lazy.IPProtectionStates.UNAUTHENTICATED,
-      isProtectionEnabled:
-        lazy.IPPProxyManager.state === lazy.IPPProxyStates.ACTIVE,
+      isProtectionEnabled: lazy.IPPProxyManager.isDefaultModeActive,
+      isDefaultMode: lazy.IPPProxyManager.mode === lazy.IPPMode.getDefault(),
       location: lazy.EGRESS_LOCATION || null,
       locationsList: lazy.IPProtectionServerlist.countries,
       error: "",
@@ -423,14 +487,17 @@ export class IPProtectionPanel {
       isSiteInclusionsEnabled: this.isInclusionsFeatureEnabled,
       siteData: this.#getSiteData(),
       bandwidthUsage: this.#getBandwidthUsage(),
+      bandwidthUnlimited: this.#isBandwidthUnlimited(),
       isActivating:
         lazy.IPPProxyManager.state === lazy.IPPProxyStates.ACTIVATING,
+      isActive: lazy.IPPProxyManager.state === lazy.IPPProxyStates.ACTIVE,
+      isRetrying: false,
       isEnrolling: lazy.IPProtectionService.authProvider.isEnrolling,
-      showLocationButtonBadge: !Services.prefs.getBoolPref(
-        LOCATION_BADGE_DISMISSED_PREF,
-        false
-      ),
-      isPremium: this.isPremium,
+      isPremium: false,
+      isDefaultBrowser: false,
+      canSetDefaultBrowser: false,
+      showSiteInclusionPrompt: false,
+      showAdditionalLocationConfirmation: false,
     };
 
     // The progress listener to listen for page navigations.
@@ -454,6 +521,7 @@ export class IPProtectionPanel {
 
         if (this.active && aLocationURI) {
           this.#updateSiteData();
+          this.#updateProxyError();
         }
       },
     };
@@ -530,12 +598,15 @@ export class IPProtectionPanel {
     const inPrivateBrowsing =
       !!win && lazy.PrivateBrowsingUtils.isWindowPrivate(win);
 
-    let country = this.state.location;
-    if (!this.isPremium && country) {
-      const location = lazy.IPProtectionServerlist.getLocation(country);
-      if (location?.country.locked) {
-        country = undefined;
-      }
+    const country = await lazy.IPProtectionServerlist.resolveEgressCountry(() =>
+      this.isPremium()
+    );
+
+    // A connection kept up for the always-on sites is widened, not restarted.
+    if (lazy.IPPProxyManager.state === lazy.IPPProxyStates.ACTIVE) {
+      this.#followEgressLocation(country);
+      lazy.IPPProxyManager.setMode(lazy.IPPMode.getDefault());
+      return;
     }
 
     const { error } = await lazy.IPPProxyManager.start(
@@ -551,16 +622,53 @@ export class IPProtectionPanel {
       lazy.ERRORS.NOT_READY,
     ];
     if (error && !handledElsewhere.includes(error)) {
-      const errorMessage = this.#errorMessage(error);
+      const errorMessage = this.state.error
+        ? this.state.error
+        : this.#errorMessage(error);
       this.setState({
         error: errorMessage,
+        showSiteInclusionPrompt: false,
       });
       this.toolbarButton?.updateState(null, { error: errorMessage });
     }
   }
 
+  /**
+   * Switches an active connection that doesn't route through the location the
+   * panel shows.
+   *
+   * @param {string} [country]
+   *   The resolved egress country, or undefined for the recommended location.
+   */
+  #followEgressLocation(country) {
+    const current = lazy.IPPProxyManager.location;
+    const wanted = country
+      ? lazy.IPProtectionServerlist.getLocation(country)
+      : lazy.IPProtectionServerlist.getRecommendedLocation();
+    if (current && wanted?.country.code !== current.country.code) {
+      lazy.IPPProxyManager.switch(country);
+    }
+  }
+
+  /**
+   * Retries a failed connection from the error state. The error stays
+   * visible, in its trying again state, until the connection is active or
+   * paused, so a failed retry returns to the same error.
+   */
+  async #retryProxy() {
+    if (this.state.isRetrying) {
+      return;
+    }
+    this.setState({ isRetrying: true });
+    try {
+      await this.#startProxy();
+    } finally {
+      this.setState({ isRetrying: false });
+    }
+  }
+
   #errorMessage(error) {
-    if ([lazy.ERRORS.NETWORK, lazy.ERRORS.VPN_UNAVAILABLE].includes(error)) {
+    if (error == lazy.ERRORS.NETWORK) {
       return error;
     }
     return lazy.ERRORS.GENERIC;
@@ -607,23 +715,46 @@ export class IPProtectionPanel {
    * @param {XULElement} panelView
    *   The panelView element from the CustomizableUI widget callback.
    */
-  showing(panelView) {
+  async showing(panelView) {
+    const token = (this.#showToken = {});
+
+    const isDefaultBrowser = await this.isDefaultBrowser();
+    const isPremium = await this.isPremium(isDefaultBrowser);
+    const shouldShowAdditionalLocationConfirmation =
+      await this.#shouldShowAdditionalLocationConfirmation();
+
+    if (this.#showToken !== token) {
+      return;
+    }
+
+    if (lazy.IPPProxyManager.location) {
+      this.#followEgressLocation(
+        await lazy.IPProtectionServerlist.resolveEgressCountry(() => isPremium)
+      );
+    }
+
     if (this.initiatedUpgrade) {
       lazy.IPProtectionService.authProvider.checkForUpgrade();
       this.initiatedUpgrade = false;
     }
 
     this.#updateSiteData();
+    this.#updateProxyError();
+    lazy.IPProtectionServerlist.maybeFetchList();
 
     if (this.state.paused) {
       lazy.IPPProxyManager.refreshUsage();
     }
 
     this.setState({
-      isPremium: this.isPremium,
+      isPremium,
+      isDefaultBrowser,
+      canSetDefaultBrowser: this.canSetDefaultBrowser(),
       isSiteExceptionsEnabled: this.isExceptionsFeatureEnabled,
       isSiteInclusionsEnabled: this.isInclusionsFeatureEnabled,
       bandwidthWarning: this.#shouldShowBandwidthWarning(),
+      showAdditionalLocationConfirmation:
+        shouldShowAdditionalLocationConfirmation,
     });
 
     if (this.state.bandwidthWarning) {
@@ -652,6 +783,18 @@ export class IPProtectionPanel {
     if (!hasUserEverOpenedPanel) {
       Services.prefs.setBoolPref(USER_OPENED_PREF, true);
     }
+
+    let openedPanelSince160 = Services.prefs.getBoolPref(
+      USER_OPENED_SINCE_160_PREF
+    );
+    if (!openedPanelSince160) {
+      Services.prefs.setBoolPref(USER_OPENED_SINCE_160_PREF, true);
+    }
+
+    // The function has fully completed, until now hiding() treats the panel
+    // as never shown. Keep this last, there must be no early return or await
+    // between the premium check and here.
+    this.#showToken = null;
   }
 
   /**
@@ -660,9 +803,11 @@ export class IPProtectionPanel {
    * Disables updates to the panel.
    */
   hiding() {
-    if (this.state.showLocationButtonBadge) {
-      Services.prefs.setBoolPref(LOCATION_BADGE_DISMISSED_PREF, true);
-      this.state.showLocationButtonBadge = false;
+    if (this.#showToken) {
+      // Hidden or cancelled before showing() completed, the panel was never
+      // shown, so only clean up.
+      this.destroy();
+      return;
     }
 
     const mask = lazy.IPPOnboardingMessage.readPrefMask();
@@ -834,6 +979,7 @@ export class IPProtectionPanel {
       { once: true }
     );
 
+    await lazy.IPProtectionServerlist.maybeFetchList();
     this.panelMultiView?.showSubView(IPProtectionPanel.LOCATIONS_PANELVIEW);
     this.#createPanel(view, IPProtectionPanel.LOCATIONS_TAGNAME);
 
@@ -860,12 +1006,18 @@ export class IPProtectionPanel {
     view.addEventListener("keydown", this.#locationsKeyListener, {
       capture: true,
     });
+
+    if (this.state.showAdditionalLocationConfirmation) {
+      this.#hideLocationMessageBar();
+    }
   }
 
   /**
    * Remove added elements and listeners.
    */
   destroy() {
+    this.#showToken = null;
+
     if (!this.panel) {
       return;
     }
@@ -912,6 +1064,7 @@ export class IPProtectionPanel {
     doc.addEventListener("IPProtection:ClickUpgrade", this.handleEvent);
     doc.addEventListener("IPProtection:Close", this.handleEvent);
     doc.addEventListener("IPProtection:UserEnable", this.handleEvent);
+    doc.addEventListener("IPProtection:UserRetry", this.handleEvent);
     doc.addEventListener("IPProtection:UserDisable", this.handleEvent);
     doc.addEventListener("IPProtection:OptIn", this.handleEvent);
     doc.addEventListener("IPProtection:UserEnableVPNForSite", this.handleEvent);
@@ -925,6 +1078,15 @@ export class IPProtectionPanel {
     );
     doc.addEventListener("IPProtection:UserShowLocations", this.handleEvent);
     doc.addEventListener("IPProtection:UserSelectLocation", this.handleEvent);
+    doc.addEventListener("IPProtection:SetDefaultBrowser", this.handleEvent);
+    doc.addEventListener(
+      "IPProtection:DismissSiteInclusionPrompt",
+      this.handleEvent
+    );
+    doc.addEventListener(
+      "IPProtection:DismissLocationMessageBar",
+      this.handleEvent
+    );
   }
 
   #removePanelListeners(doc) {
@@ -932,6 +1094,7 @@ export class IPProtectionPanel {
     doc.removeEventListener("IPProtection:ClickUpgrade", this.handleEvent);
     doc.removeEventListener("IPProtection:Close", this.handleEvent);
     doc.removeEventListener("IPProtection:UserEnable", this.handleEvent);
+    doc.removeEventListener("IPProtection:UserRetry", this.handleEvent);
     doc.removeEventListener("IPProtection:UserDisable", this.handleEvent);
     doc.removeEventListener("IPProtection:OptIn", this.handleEvent);
     doc.removeEventListener(
@@ -951,6 +1114,15 @@ export class IPProtectionPanel {
       "IPProtection:UserSelectLocation",
       this.handleEvent
     );
+    doc.removeEventListener("IPProtection:SetDefaultBrowser", this.handleEvent);
+    doc.removeEventListener(
+      "IPProtection:DismissSiteInclusionPrompt",
+      this.handleEvent
+    );
+    doc.removeEventListener(
+      "IPProtection:DismissLocationMessageBar",
+      this.handleEvent
+    );
   }
 
   #addProxyListeners() {
@@ -960,6 +1132,10 @@ export class IPProtectionPanel {
     );
     lazy.IPPProxyManager.addEventListener(
       "IPPProxyManager:StateChanged",
+      this.handleEvent
+    );
+    lazy.IPPProxyManager.addEventListener(
+      "IPPProxyManager:ModeChanged",
       this.handleEvent
     );
     lazy.IPPProxyManager.addEventListener(
@@ -991,6 +1167,10 @@ export class IPProtectionPanel {
     );
     lazy.IPPProxyManager.removeEventListener(
       "IPPProxyManager:StateChanged",
+      this.handleEvent
+    );
+    lazy.IPPProxyManager.removeEventListener(
+      "IPPProxyManager:ModeChanged",
       this.handleEvent
     );
     lazy.IPPProxyManager.removeEventListener(
@@ -1028,15 +1208,64 @@ export class IPProtectionPanel {
     return lazy.IPPUsageHelper.getDismissedThresholds().panel < threshold;
   }
 
+  async #shouldShowAdditionalLocationConfirmation() {
+    if (lazy.IPProtectionService.state !== lazy.IPProtectionStates.READY) {
+      return false;
+    }
+
+    let hasDismissedLocationMessage = Services.prefs.getBoolPref(
+      LOCATION_UNLOCK_MESSAGE_DISMISSED_PREF,
+      true
+    );
+
+    if (hasDismissedLocationMessage) {
+      return false;
+    }
+
+    // If have paid VPN, never show it - these users already have access to all locations
+    if (this.state.hasUpgraded) {
+      return false;
+    }
+
+    let isDefaultBrowser = false;
+    try {
+      isDefaultBrowser = await lazy.ShellService.isDefaultBrowserAsync();
+    } catch (e) {
+      console.error(e);
+    }
+    return isDefaultBrowser;
+  }
+
+  async #updateAdditionalLocationConfirmation() {
+    const showLocationConfirmation =
+      await this.#shouldShowAdditionalLocationConfirmation();
+    this.setState({
+      showAdditionalLocationConfirmation: showLocationConfirmation,
+    });
+  }
+
+  #hideLocationMessageBar() {
+    Services.prefs.setBoolPref(LOCATION_UNLOCK_MESSAGE_DISMISSED_PREF, true);
+    this.setState({ showAdditionalLocationConfirmation: false });
+  }
+
   #addProgressListener() {
     if (this.gBrowser) {
       this.gBrowser.addTabsProgressListener(this.progressListener);
+      this.gBrowser.tabContainer.addEventListener(
+        "TabSelect",
+        this.handleEvent
+      );
     }
   }
 
   #removeProgressListener() {
     if (this.gBrowser) {
       this.gBrowser.removeTabsProgressListener(this.progressListener);
+      this.gBrowser.tabContainer.removeEventListener(
+        "TabSelect",
+        this.handleEvent
+      );
     }
   }
 
@@ -1091,8 +1320,8 @@ export class IPProtectionPanel {
    * Gets siteData by reading the current URL bar's URI.
    *
    * @returns {object|null}
-   *  An object with data relevant to a site (eg. isExclusion, hasSiteRule),
-   *  or null otherwise if invalid.
+   *  An object with data relevant to a site (eg. isExclusion, hasSiteRule,
+   *  host without a leading "www."), or null otherwise if invalid.
    *
    * @see State.siteData
    */
@@ -1102,11 +1331,15 @@ export class IPProtectionPanel {
     if (!principal || !lazy.IPPSiteRuleManager.canManage(principal)) {
       return null;
     }
-    const rule = lazy.IPPSiteRuleManager.getRule(principal);
+    const rule = lazy.IPPSiteRuleManager.getRule(
+      principal,
+      this.gBrowser.selectedBrowser.browserId
+    );
     const isExclusion = rule === lazy.IPPPrincipalRules.EXCLUDED;
     const isInclusion = rule === lazy.IPPPrincipalRules.INCLUDED;
     const hasSiteRule = rule !== lazy.IPPPrincipalRules.DEFAULT;
-    return { isExclusion, isInclusion, hasSiteRule };
+    const host = principal.host.replace(/^www\./, "");
+    return { isExclusion, isInclusion, hasSiteRule, host };
   }
 
   /**
@@ -1117,6 +1350,10 @@ export class IPProtectionPanel {
    *
    * @returns {object} An object with max and remaining as numbers
    */
+  #isBandwidthUnlimited() {
+    return lazy.IPPUsageHelper.state === lazy.UsageStates.UNLIMITED;
+  }
+
   #getBandwidthUsage() {
     if (
       lazy.BANDWIDTH_USAGE_ENABLED &&
@@ -1143,11 +1380,140 @@ export class IPProtectionPanel {
   }
 
   /**
+   * Whether the site inclusion prompt should be shown when the user turns on
+   * the VPN: only the first time, and only on a site that isn't already
+   * included.
+   *
+   * @returns {boolean}
+   */
+  #shouldShowSiteInclusionPrompt() {
+    if (
+      !this.isInclusionsFeatureEnabled ||
+      Services.prefs.getBoolPref(SITE_INCLUSION_PROMPT_SHOWN_PREF, false)
+    ) {
+      return false;
+    }
+    const siteData = this.#getSiteData();
+    return !!siteData && !siteData.isInclusion;
+  }
+
+  /**
    * Updates the siteData state property.
    */
   #updateSiteData() {
     const siteData = this.#getSiteData();
     this.setState({ siteData });
+  }
+
+  /**
+   * The error to show for the proxy state. A failed connection that only
+   * carries included sites is not shown on a tab it does not carry.
+   *
+   * @returns {string}
+   */
+  #getProxyErrorType() {
+    if (lazy.IPPProxyManager.state !== lazy.IPPProxyStates.ERROR) {
+      return "";
+    }
+    if (
+      lazy.IPPProxyManager.mode === lazy.IPPMode.MODE_INCLUSION &&
+      lazy.IPPSiteRuleManager.getRule(
+        getSitePrincipal(this.gBrowser),
+        this.gBrowser?.selectedBrowser.browserId
+      ) !== lazy.IPPPrincipalRules.INCLUDED
+    ) {
+      return "";
+    }
+    return this.#errorMessage(lazy.IPPProxyManager.errorType);
+  }
+
+  /**
+   * Re-evaluates a proxy state error for the selected tab. Errors from a
+   * failed start in this panel are left alone.
+   */
+  #updateProxyError() {
+    if (lazy.IPPProxyManager.state === lazy.IPPProxyStates.ERROR) {
+      this.setState({ error: this.#getProxyErrorType() });
+    }
+  }
+
+  #countUserEnableEvents() {
+    let userEnableCount = Services.prefs.getIntPref(
+      "browser.ipProtection.userEnableCount",
+      0
+    );
+    if (userEnableCount < 3) {
+      Services.prefs.setIntPref(
+        "browser.ipProtection.userEnableCount",
+        userEnableCount + 1
+      );
+    }
+  }
+
+  #handleDismissBandwidthWarnings() {
+    const state = lazy.IPPUsageHelper.state;
+    let threshold = 0;
+    if (state === "warning-75-percent") {
+      threshold = 75;
+    } else if (state === "warning-90-percent") {
+      threshold = 90;
+    }
+    if (threshold > 0) {
+      const current = lazy.IPPUsageHelper.getDismissedThresholds();
+      if (threshold > current.panel) {
+        lazy.IPPUsageHelper.setDismissedThresholds({
+          ...current,
+          panel: threshold,
+        });
+      }
+    }
+  }
+
+  #handleBandwidthThreshold(usage) {
+    const remainingPercent = Number(usage.remaining) / Number(usage.max);
+    const upsellThreshold = (1 - BANDWIDTH.FIRST_THRESHOLD) * 100;
+    const firstWarning = (1 - BANDWIDTH.SECOND_THRESHOLD) * 100;
+    const secondWarning = (1 - BANDWIDTH.THIRD_THRESHOLD) * 100;
+    let threshold = 0;
+    if (
+      remainingPercent <= BANDWIDTH.FIRST_THRESHOLD &&
+      remainingPercent > BANDWIDTH.SECOND_THRESHOLD
+    ) {
+      threshold = upsellThreshold;
+    } else if (
+      remainingPercent <= BANDWIDTH.SECOND_THRESHOLD &&
+      remainingPercent > BANDWIDTH.THIRD_THRESHOLD
+    ) {
+      threshold = firstWarning;
+    } else if (
+      remainingPercent > 0 &&
+      remainingPercent <= BANDWIDTH.THIRD_THRESHOLD
+    ) {
+      threshold = secondWarning;
+    } else if (remainingPercent === 0) {
+      threshold = 100;
+    }
+
+    const lastRecordedThreshold = Services.prefs.getIntPref(
+      BANDWIDTH_THRESHOLD_PREF,
+      threshold
+    );
+    Services.prefs.setIntPref(BANDWIDTH_THRESHOLD_PREF, threshold);
+
+    if (lastRecordedThreshold !== threshold) {
+      this.#measureBandwidthThreshold(threshold, lastRecordedThreshold);
+    }
+
+    const resetDate = usage.reset.toString();
+    const lastResetDate = Services.prefs.getStringPref(
+      BANDWIDTH_RESET_DATE_PREF,
+      ""
+    );
+    Services.prefs.setStringPref(BANDWIDTH_RESET_DATE_PREF, resetDate);
+
+    if (threshold === 0 && lastResetDate && resetDate !== lastResetDate) {
+      this.#sendBandwidthResetTrigger();
+    }
   }
 
   #handleEvent(event) {
@@ -1158,19 +1524,21 @@ export class IPProtectionPanel {
     } else if (event.type == "IPProtection:UserEnable") {
       this.#startProxy();
       Services.prefs.setBoolPref("browser.ipProtection.userEnabled", true);
-      let userEnableCount = Services.prefs.getIntPref(
-        "browser.ipProtection.userEnableCount",
-        0
-      );
-      if (userEnableCount < 3) {
-        Services.prefs.setIntPref(
-          "browser.ipProtection.userEnableCount",
-          userEnableCount + 1
-        );
+      this.#countUserEnableEvents();
+      if (this.#shouldShowSiteInclusionPrompt()) {
+        Services.prefs.setBoolPref(SITE_INCLUSION_PROMPT_SHOWN_PREF, true);
+        this.setState({ showSiteInclusionPrompt: true });
       }
+    } else if (event.type == "IPProtection:UserRetry") {
+      this.#retryProxy();
     } else if (event.type == "IPProtection:UserDisable") {
       this.#stopProxy();
       Services.prefs.setBoolPref("browser.ipProtection.userEnabled", false);
+      this.setState({ showSiteInclusionPrompt: false });
+    } else if (event.type == "IPProtection:DismissSiteInclusionPrompt") {
+      this.setState({ showSiteInclusionPrompt: false });
+    } else if (event.type == "IPProtection:DismissLocationMessageBar") {
+      this.#hideLocationMessageBar();
     } else if (event.type == "IPProtection:ClickUpgrade") {
       // Let the service know that we tried upgrading at least once
       this.initiatedUpgrade = true;
@@ -1179,34 +1547,52 @@ export class IPProtectionPanel {
       this.enroll({ entrypoint: "vpn_integration_panel" });
     } else if (
       event.type == "IPPProxyManager:StateChanged" ||
+      event.type == "IPPProxyManager:ModeChanged" ||
       event.type == "IPProtectionService:StateChanged" ||
       event.type === "IPPAuthProvider:StateChanged"
     ) {
-      let errorType = "";
-      if (lazy.IPPProxyManager.state === lazy.IPPProxyStates.ERROR) {
-        errorType = lazy.ERRORS.GENERIC;
-      }
+      const keepErrorState =
+        this.state.isRetrying &&
+        lazy.IPPProxyManager.state !== lazy.IPPProxyStates.ACTIVE &&
+        lazy.IPPProxyManager.state !== lazy.IPPProxyStates.PAUSED;
+      const errorType = keepErrorState
+        ? this.state.error
+        : this.#getProxyErrorType();
+      const paused = lazy.IPPProxyManager.state === lazy.IPPProxyStates.PAUSED;
 
       this.setState({
         unauthenticated:
           lazy.IPProtectionService.state ===
           lazy.IPProtectionStates.UNAUTHENTICATED,
-        isProtectionEnabled:
-          lazy.IPPProxyManager.state === lazy.IPPProxyStates.ACTIVE,
+        isProtectionEnabled: lazy.IPPProxyManager.isDefaultModeActive,
+        isDefaultMode: keepErrorState
+          ? this.state.isDefaultMode
+          : lazy.IPPProxyManager.mode === lazy.IPPMode.getDefault(),
         hasUpgraded: lazy.IPProtectionService.authProvider.hasUpgraded,
         error: errorType,
         isActivating:
           lazy.IPPProxyManager.state === lazy.IPPProxyStates.ACTIVATING,
+        isActive: lazy.IPPProxyManager.state === lazy.IPPProxyStates.ACTIVE,
         isEnrolling: lazy.IPProtectionService.authProvider.isEnrolling,
         bandwidthUsage: this.#getBandwidthUsage(),
+        bandwidthUnlimited: this.#isBandwidthUnlimited(),
         bandwidthWarning:
           lazy.IPProtectionService.state === lazy.IPProtectionStates.READY
             ? this.#shouldShowBandwidthWarning()
             : false,
-        paused: lazy.IPPProxyManager.state === lazy.IPPProxyStates.PAUSED,
+        paused,
+        showSiteInclusionPrompt:
+          this.state.showSiteInclusionPrompt && !errorType && !paused,
       });
-    } else if (event.type == "SiteRuleManager:RuleChanged") {
+
+      // Cannot put directly in setState b/c async
+      this.#updateAdditionalLocationConfirmation();
+    } else if (
+      event.type == "SiteRuleManager:RuleChanged" ||
+      event.type == "TabSelect"
+    ) {
       this.#updateSiteData();
+      this.#updateProxyError();
     } else if (event.type == "IPProtectionServerlist:ListChanged") {
       this.setState({
         locationsList: lazy.IPProtectionServerlist.countries,
@@ -1230,22 +1616,7 @@ export class IPProtectionPanel {
       );
       Glean.ipprotection.exclusionToggled.record({ excluded: true });
     } else if (event.type == "IPProtection:DismissBandwidthWarning") {
-      const state = lazy.IPPUsageHelper.state;
-      let threshold = 0;
-      if (state === "warning-75-percent") {
-        threshold = 75;
-      } else if (state === "warning-90-percent") {
-        threshold = 90;
-      }
-      if (threshold > 0) {
-        const current = lazy.IPPUsageHelper.getDismissedThresholds();
-        if (threshold > current.panel) {
-          lazy.IPPUsageHelper.setDismissedThresholds({
-            ...current,
-            panel: threshold,
-          });
-        }
-      }
+      this.#handleDismissBandwidthWarnings();
       this.setState({ bandwidthWarning: false });
     } else if (event.type == "IPPProxyManager:UsageChanged") {
       const usage = event.detail.usage;
@@ -1256,7 +1627,11 @@ export class IPProtectionPanel {
       if (usage.unlimited) {
         Services.prefs.clearUserPref(BANDWIDTH_THRESHOLD_PREF);
         Services.prefs.clearUserPref(BANDWIDTH_RESET_DATE_PREF);
-        this.setState({ bandwidthUsage: null, bandwidthWarning: false });
+        this.setState({
+          bandwidthUsage: null,
+          bandwidthUnlimited: true,
+          bandwidthWarning: false,
+        });
         return;
       }
 
@@ -1264,51 +1639,7 @@ export class IPProtectionPanel {
         return;
       }
 
-      const remainingPercent = Number(usage.remaining) / Number(usage.max);
-      const upsellThreshold = (1 - BANDWIDTH.FIRST_THRESHOLD) * 100;
-      const firstWarning = (1 - BANDWIDTH.SECOND_THRESHOLD) * 100;
-      const secondWarning = (1 - BANDWIDTH.THIRD_THRESHOLD) * 100;
-
-      let threshold = 0;
-      if (
-        remainingPercent <= BANDWIDTH.FIRST_THRESHOLD &&
-        remainingPercent > BANDWIDTH.SECOND_THRESHOLD
-      ) {
-        threshold = upsellThreshold;
-      } else if (
-        remainingPercent <= BANDWIDTH.SECOND_THRESHOLD &&
-        remainingPercent > BANDWIDTH.THIRD_THRESHOLD
-      ) {
-        threshold = firstWarning;
-      } else if (
-        remainingPercent > 0 &&
-        remainingPercent <= BANDWIDTH.THIRD_THRESHOLD
-      ) {
-        threshold = secondWarning;
-      } else if (remainingPercent === 0) {
-        threshold = 100;
-      }
-
-      const lastRecordedThreshold = Services.prefs.getIntPref(
-        BANDWIDTH_THRESHOLD_PREF,
-        threshold
-      );
-      Services.prefs.setIntPref(BANDWIDTH_THRESHOLD_PREF, threshold);
-
-      if (lastRecordedThreshold !== threshold) {
-        this.#measureBandwidthThreshold(threshold, lastRecordedThreshold);
-      }
-
-      const resetDate = usage.reset.toString();
-      const lastResetDate = Services.prefs.getStringPref(
-        BANDWIDTH_RESET_DATE_PREF,
-        ""
-      );
-      Services.prefs.setStringPref(BANDWIDTH_RESET_DATE_PREF, resetDate);
-
-      if (threshold === 0 && lastResetDate && resetDate !== lastResetDate) {
-        this.#sendBandwidthResetTrigger();
-      }
+      this.#handleBandwidthThreshold(usage);
 
       this.setState({
         bandwidthUsage: {
@@ -1318,12 +1649,11 @@ export class IPProtectionPanel {
         },
       });
     } else if (event.type == "IPPUsageHelper:StateChanged") {
-      this.setState({ bandwidthWarning: this.#shouldShowBandwidthWarning() });
+      this.setState({
+        bandwidthUnlimited: this.#isBandwidthUnlimited(),
+        bandwidthWarning: this.#shouldShowBandwidthWarning(),
+      });
     } else if (event.type == "IPProtection:UserShowLocations") {
-      if (this.state.showLocationButtonBadge) {
-        Services.prefs.setBoolPref(LOCATION_BADGE_DISMISSED_PREF, true);
-        this.setState({ showLocationButtonBadge: false });
-      }
       Glean.ipprotection.locationSelectorButtonClicked.record();
       this.showLocationSelector(
         event.detail?.keyboardActivated,
@@ -1337,6 +1667,8 @@ export class IPProtectionPanel {
         lazy.IPPProxyManager.switch(code === "REC" ? undefined : code);
       }
       this.panelMultiView?.goBack();
+    } else if (event.type == "IPProtection:SetDefaultBrowser") {
+      this.#setDefaultBrowser(event.target.documentGlobal);
     }
   }
 

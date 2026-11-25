@@ -1,0 +1,290 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+// eslint-disable-next-line no-unused-vars
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import { useSelector } from "react-redux";
+import { actionCreators as ac, actionTypes as at } from "common/Actions.mjs";
+import {
+  FRAMED_WIDGET_SANDBOX,
+  WIDGET_REGISTRY,
+  isRecordedFrameUserEvent,
+  resolveWidgetEventSource,
+  resolveWidgetFrame,
+  resolveWidgetSize,
+  WIDGET_USER_ACTIONS,
+  WIDGET_SOURCES,
+} from "common/WidgetsRegistry.mjs";
+import { SizeSubmenu } from "../SizeSubmenu";
+import { WidgetMenuButton } from "../WidgetMenuButton";
+import { WidgetMenuFooter } from "../WidgetMenuFooter";
+import { WidgetMenuPoweredBy } from "../WidgetMenuPoweredBy";
+import { useWidgetTelemetry } from "../useWidgetTelemetry";
+import {
+  useFramedWidgetMessages,
+  useFramedWidgetReady,
+  useFramedWidgetSize,
+} from "../useFramedWidgetMessages";
+import { useSrcAfterPageShown } from "../usePageVisible";
+
+const USER_ACTION_TYPES = {
+  ...WIDGET_USER_ACTIONS,
+  POWERED_BY_KAYAK: "powered_by_kayak",
+};
+
+const KAYAK_URL = "https://www.kayak.com/";
+
+const TRAVEL_ENTRY = WIDGET_REGISTRY.find(w => w.id === "travel");
+
+function withRegion(src, region) {
+  if (!src || !region) {
+    return src;
+  }
+  try {
+    const url = new URL(src);
+    const params = new URLSearchParams(url.hash.slice(1));
+    params.set("region", region);
+    url.hash = params;
+    return url.href;
+  } catch {
+    return src;
+  }
+}
+
+/**
+ * Travel widget.
+ *
+ * @param {object} props
+ * @param {Function} props.dispatch - Redux dispatch.
+ * @param {Function} props.handleUserInteraction - Marks the widget as
+ *   interacted with, which removes the "New" badge.
+ * @param {boolean} props.widgetsMayBeMaximized - Whether the current layout
+ *   allows resizing, which decides whether the Change size submenu shows.
+ * @param {object} props.widgetEnabledMap - Map of widget id to whether it is
+ *   currently active, used by the Move submenu.
+ */
+function Travel({
+  dispatch,
+  handleUserInteraction,
+  widgetsMayBeMaximized,
+  widgetEnabledMap,
+}) {
+  const prefs = useSelector(state => state.Prefs.values);
+  const framedWidgets = useSelector(state => state.FramedWidgets);
+  const { src: frameSrc, state: frameState } = resolveWidgetFrame(
+    TRAVEL_ENTRY,
+    prefs,
+    framedWidgets
+  );
+  // The frame reads its market and partner site from the region once, at load.
+  // A region that arrives later changes src, which reloads the frame on
+  // purpose. That only happens in a new profile's first session. The frame
+  // isn't held back until the region is known, so Travel still shows (using
+  // the browser language) if the region lookup never finishes.
+  const src = useSrcAfterPageShown(withRegion(frameSrc, prefs.region));
+  const widgetSize = resolveWidgetSize(TRAVEL_ENTRY, prefs);
+  const hasInteracted = prefs["widgets.travel.interaction"];
+
+  const handleInteraction = useCallback(
+    () => handleUserInteraction("travel"),
+    [handleUserInteraction]
+  );
+
+  const iframeRef = useRef(null);
+  // Explore travel asks for a larger size, which also counts as the user
+  // interacting and clears the New badge. Loading messages don't count.
+  const { requestedSize, clearRequestedSize } = useFramedWidgetSize({
+    widget: TRAVEL_ENTRY,
+    src,
+    iframeRef,
+    onAction(message) {
+      if (message === "change_size") {
+        handleInteraction();
+      }
+    },
+  });
+  // Like Crossword's growth, a layout that can't host a larger widget keeps
+  // the widget at its own size.
+  const displaySize =
+    widgetsMayBeMaximized && requestedSize ? requestedSize : widgetSize;
+
+  // Set below: the telemetry hook needs the variant this hook returns.
+  const recordErrorRef = useRef(null);
+  // The frame stays hidden until the widget's document sends widget_ready. A
+  // load timeout or terminal widget_error hides the whole widget.
+  const { ready, readyPayload, variant } = useFramedWidgetReady({
+    widget: TRAVEL_ENTRY,
+    src,
+    iframeRef,
+    onError(reason, terminal) {
+      recordErrorRef.current(reason);
+      if (terminal) {
+        dispatch({
+          type: at.FRAMED_WIDGET_UNAVAILABLE,
+          data: { id: TRAVEL_ENTRY.id },
+        });
+      }
+    },
+  });
+  // widget_variant is the background the frame shows, from widget_ready, so
+  // the impression waits for it.
+  const { impressionRef, recordUserAction, recordError } = useWidgetTelemetry({
+    dispatch,
+    widget: TRAVEL_ENTRY,
+    widgetSize: displaySize,
+    widgetVariant: variant,
+  });
+  recordErrorRef.current = recordError;
+
+  const frameOrigin = useMemo(() => {
+    try {
+      return new URL(src).origin;
+    } catch {
+      return null;
+    }
+  }, [src]);
+  useEffect(() => {
+    const frameWindow = iframeRef.current?.contentWindow;
+    if (!readyPayload || !frameWindow || !frameOrigin) {
+      return;
+    }
+    frameWindow.postMessage(
+      {
+        channel: `${TRAVEL_ENTRY.telemetryName}_widget`,
+        type: "action",
+        message: "interaction_state",
+        payload: { interacted: Boolean(hasInteracted) },
+        sentAt: new Date().toISOString(),
+      },
+      frameOrigin
+    );
+    // frameOrigin is left out: a new document sends its own widget_ready,
+    // which sends this again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readyPayload, hasInteracted]);
+
+  // The frame's user events count as the user interacting once the frame is
+  // showing, but only allowlisted ones reach Glean.
+  useFramedWidgetMessages({
+    widget: TRAVEL_ENTRY,
+    src,
+    iframeRef,
+    onMessage(type, message, payload) {
+      if (!ready || type !== "telemetry" || message !== "user_event") {
+        return;
+      }
+      if (isRecordedFrameUserEvent(TRAVEL_ENTRY, payload)) {
+        recordUserAction(payload.user_action, {
+          source: resolveWidgetEventSource(TRAVEL_ENTRY),
+          value: payload.action_value,
+        });
+      }
+      handleInteraction();
+    },
+  });
+
+  const handleChangeSize = useCallback(
+    size => {
+      dispatch(
+        ac.OnlyToMain({
+          type: at.SET_PREF,
+          data: { name: TRAVEL_ENTRY.sizePref, value: size },
+        })
+      );
+      // Without `size`, the event would report the size before the change.
+      recordUserAction(USER_ACTION_TYPES.CHANGE_SIZE, {
+        source: WIDGET_SOURCES.CONTEXT_MENU,
+        value: size,
+        size,
+      });
+      // The user's choice replaces any size the frame asked for.
+      clearRequestedSize();
+      handleInteraction();
+    },
+    [dispatch, recordUserAction, handleInteraction, clearRequestedSize]
+  );
+
+  function handleLearnMore() {
+    recordUserAction(USER_ACTION_TYPES.LEARN_MORE, {
+      source: WIDGET_SOURCES.CONTEXT_MENU,
+    });
+    handleInteraction();
+  }
+
+  if (frameState === "hidden") {
+    return null;
+  }
+
+  return (
+    <article
+      className={`travel widget col-4 ${displaySize}-widget`}
+      data-ready={ready || undefined}
+      ref={ready ? impressionRef : undefined}
+      aria-labelledby="travel-widget-label"
+    >
+      <h2
+        id="travel-widget-label"
+        className="newtab-widget-title sr-only"
+        data-l10n-id="newtab-travel-widget-title"
+      />
+      <div className="travel-overlay">
+        {!hasInteracted && (
+          <moz-badge
+            className="travel-new-badge"
+            data-l10n-id="newtab-widget-lists-label-new"
+          ></moz-badge>
+        )}
+        <div className="travel-context-menu-wrapper">
+          <WidgetMenuButton
+            className="travel-context-menu-button"
+            menuId="travel-context-menu"
+            l10nId="newtab-travel-widget-open-menu-button"
+          />
+          <panel-list className="panel-list-no-icons" id="travel-context-menu">
+            <WidgetMenuPoweredBy
+              dispatch={dispatch}
+              url={KAYAK_URL}
+              l10nId="newtab-travel-menu-powered-by-kayak"
+              recordUserAction={recordUserAction}
+              userAction={USER_ACTION_TYPES.POWERED_BY_KAYAK}
+              onClick={handleInteraction}
+            />
+            <WidgetMenuFooter
+              dispatch={dispatch}
+              widgetId={TRAVEL_ENTRY.id}
+              widgetEnabledMap={widgetEnabledMap}
+              widgetName={TRAVEL_ENTRY.telemetryName}
+              enabledPref={TRAVEL_ENTRY.enabledPref}
+              widgetSize={displaySize}
+              learnMoreL10nId="newtab-travel-menu-learn-more"
+              onLearnMore={handleLearnMore}
+              sizeSubmenu={
+                widgetsMayBeMaximized ? (
+                  <SizeSubmenu
+                    submenuId="travel-size-submenu"
+                    sizes={TRAVEL_ENTRY.validSizes}
+                    checkedSize={displaySize}
+                    onChangeSize={handleChangeSize}
+                  />
+                ) : null
+              }
+            />
+          </panel-list>
+        </div>
+      </div>
+      <iframe
+        // A new document gets a new window, so late messages from the old
+        // one fail the source check.
+        key={src}
+        ref={iframeRef}
+        className="travel-frame"
+        aria-labelledby="travel-widget-label"
+        src={src}
+        sandbox={FRAMED_WIDGET_SANDBOX}
+      />
+    </article>
+  );
+}
+
+export { Travel };

@@ -81,7 +81,6 @@ class HomeSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFragm
         }
 
         requirePreference<SwitchPreferenceCompat>(R.string.pref_key_privacy_report).apply {
-            if (fenixSettings.longfoxEnabled) title = resources.getString(R.string.help_catch_trackers)
             isChecked = fenixSettings.showPrivacyReportFeature
             onPreferenceChangeListener =
                 createMetricPreferenceChangeListener(
@@ -91,13 +90,11 @@ class HomeSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFragm
         }
 
         requirePreference<SwitchPreferenceCompat>(R.string.pref_key_recent_tabs).apply {
-            isVisible = fenixSettings.showHomepageRecentTabsSectionToggle
             isChecked = fenixSettings.showRecentTabsFeature
             onPreferenceChangeListener = createMetricPreferenceChangeListener("jump_back_in")
         }
 
         requirePreference<SwitchPreferenceCompat>(R.string.pref_key_customization_bookmarks).apply {
-            isVisible = fenixSettings.showHomepageBookmarksSectionToggle
             isChecked = fenixSettings.showBookmarksHomeFeature
             onPreferenceChangeListener = createMetricPreferenceChangeListener("bookmarks")
         }
@@ -135,7 +132,6 @@ class HomeSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFragm
         }
 
         requirePreference<SwitchPreferenceCompat>(R.string.pref_key_history_metadata_feature).apply {
-            isVisible = fenixSettings.showHomepageRecentlyVisitedSectionToggle
             isChecked = fenixSettings.historyMetadataUIFeature
             onPreferenceChangeListener = createMetricPreferenceChangeListener("recently_visited")
         }
@@ -157,6 +153,7 @@ class HomeSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFragm
 
         setupOpeningScreenPreferences()
         setupWeatherPreference()
+        setupWrexhamWidgetPreference()
     }
 
     private fun createMetricPreferenceChangeListener(
@@ -214,6 +211,23 @@ class HomeSettingsFragment : PreferenceFragmentCompat(), SystemInsetsPaddedFragm
             isVisible = fenixSettings.enableHomepageWeatherWidget
             isChecked = fenixSettings.showHomepageWeatherWidget
             onPreferenceChangeListener = createMetricPreferenceChangeListener("weather")
+        }
+    }
+
+    private fun setupWrexhamWidgetPreference() {
+        requirePreference<SwitchPreferenceCompat>(R.string.pref_key_show_homepage_wrexham_widget).apply {
+            isVisible = fenixSettings.enableHomepageWrexhamWidget
+            isChecked = fenixSettings.showHomepageWrexhamWidget
+            val metricListener = createMetricPreferenceChangeListener("wrexham_widget")
+            onPreferenceChangeListener = Preference.OnPreferenceChangeListener { preference, newValue ->
+                val handled = metricListener.onPreferenceChange(preference, newValue)
+                if (handled) {
+                    fenixComponents.appStore.dispatch(
+                        AppAction.SportsWidgetAction.VisibilityChanged(isVisible = newValue as Boolean)
+                    )
+                }
+                handled
+            }
         }
     }
 }

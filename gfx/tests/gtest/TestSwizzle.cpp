@@ -62,13 +62,11 @@ constexpr SwizzleArch kSwizzleArchs[] = {
 };
 
 static uint8_t RefPremultiply(uint8_t aColor, uint8_t aAlpha) {
-  uint32_t t = uint32_t(aColor) * aAlpha + 0xFF;
-  return uint8_t((t + (t >> 8)) >> 8);
+  return (uint32_t(aColor) * aAlpha + 127) / 255;
 }
 
 static uint8_t RefUnpremultiply(uint8_t aColor, uint8_t aAlpha) {
-  uint32_t q = aAlpha ? (0xFF00FFu / aAlpha) : 0u;
-  return uint8_t((uint32_t(aColor) * q) >> 16);
+  return aAlpha ? (uint32_t(aColor) * 255 + aAlpha / 2) / aAlpha : 0;
 }
 
 // Generate the expected pixel for testing with the given
@@ -680,6 +678,88 @@ TEST(Moz2D, UnpremultiplyRow)
   }
 }
 
+TEST(Moz2D, AlphaConversionRounding)
+{
+  constexpr int32_t width = 257;
+  constexpr int32_t stride = width * 4;
+  uint8_t src[stride], dst[stride], expected[stride], restored[stride];
+  uint8_t packed[stride];
+  const SurfaceFormat formats[] = {
+      SurfaceFormat::B8G8R8A8, SurfaceFormat::R8G8B8A8,
+      SurfaceFormat::A8R8G8B8, SurfaceFormat::B8G8R8X8,
+      SurfaceFormat::R8G8B8X8, SurfaceFormat::X8R8G8B8};
+
+  for (auto op : {SwizzleOp::Premultiply, SwizzleOp::Unpremultiply}) {
+    for (uint32_t alpha = 0; alpha <= 255; ++alpha) {
+      for (int32_t x = 0; x < width; ++x) {
+        uint32_t limit = op == SwizzleOp::Premultiply ? 256 : alpha + 1;
+        src[4 * x] = (x & 255) % limit;
+        src[4 * x + 1] = (255 - (x & 255)) % limit;
+        src[4 * x + 2] = ((x & 255) ^ 0x55) % limit;
+        src[4 * x + 3] = alpha;
+      }
+      for (auto sourceFormat :
+           {SurfaceFormat::B8G8R8A8, SurfaceFormat::R8G8B8A8,
+            SurfaceFormat::A8R8G8B8}) {
+        SCOPED_TRACE(testing::Message() << "source=" << int(sourceFormat));
+        for (int32_t x = 0; x < width; ++x) {
+          GeneratePixel(SwizzleOp::Copy, sourceFormat, src[4 * x],
+                        src[4 * x + 1], src[4 * x + 2], alpha, packed + 4 * x);
+        }
+        for (auto format : formats) {
+          if (op == SwizzleOp::Unpremultiply &&
+              (format == SurfaceFormat::B8G8R8X8 ||
+               format == SurfaceFormat::R8G8B8X8 ||
+               format == SurfaceFormat::X8R8G8B8)) {
+            continue;
+          }
+          for (int32_t x = 0; x < width; ++x) {
+            GeneratePixel(op, format, src[4 * x], src[4 * x + 1],
+                          src[4 * x + 2], alpha, expected + 4 * x);
+          }
+          for (auto arch : kSwizzleArchs) {
+            SCOPED_TRACE(testing::Message()
+                         << "op=" << int(op) << " alpha=" << alpha
+                         << " format=" << int(format) << " arch=" << int(arch));
+            auto row = RowFnFor(op, sourceFormat, format, arch);
+            if (!row) {
+              EXPECT_NE(arch, SwizzleArch::eAny);
+              EXPECT_NE(arch, SwizzleArch::eFallback);
+              continue;
+            }
+            row(packed, dst, width);
+            ASSERT_TRUE(ArrayEqual(dst, expected));
+            memcpy(dst, packed, stride);
+            row(dst, dst, width);
+            ASSERT_TRUE(ArrayEqual(dst, expected));
+            bool converted =
+                op == SwizzleOp::Premultiply
+                    ? PremultiplyData(packed, stride, sourceFormat, dst, stride,
+                                      format, IntSize(width, 1), arch)
+                    : UnpremultiplyData(packed, stride, sourceFormat, dst,
+                                        stride, format, IntSize(width, 1),
+                                        arch);
+            if (converted) {
+              ASSERT_TRUE(ArrayEqual(dst, expected));
+            } else {
+              EXPECT_NE(arch, SwizzleArch::eAny);
+              EXPECT_NE(arch, SwizzleArch::eFallback);
+            }
+            if (op == SwizzleOp::Unpremultiply) {
+              auto inverse =
+                  RowFnFor(SwizzleOp::Premultiply, format, sourceFormat, arch);
+              if (inverse) {
+                inverse(dst, restored, width);
+                ASSERT_TRUE(ArrayEqual(restored, packed));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST(Moz2D, SwizzleData)
 {
   const uint8_t in_bgra[5 * 4] = {
@@ -703,6 +783,11 @@ TEST(Moz2D, SwizzleData)
       0, 254, 253, 255, 255, 0,   0, 255, 0,   0,
       0, 255, 3,   2,   1,   255, 9, 0,   127, 255,
   };
+  // check opaquifying into alpha-first order
+  const uint8_t check_xrgb[5 * 4] = {
+      255, 0, 254, 253, 255, 255, 0,   0, 255, 0,
+      0,   0, 255, 3,   2,   1,   255, 9, 0,   127,
+  };
   // check packing
   uint8_t out24[5 * 3];
   const uint8_t check_bgr[5 * 3] = {253, 254, 0, 0, 0,   255, 0, 0,
@@ -720,32 +805,49 @@ TEST(Moz2D, SwizzleData)
       PACK_RGB565(1, 2, 3),     PACK_RGB565(127, 0, 9),
   };
 
-  SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8, out,
-              sizeof(out), SurfaceFormat::B8G8R8A8, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8,
+                          out, sizeof(out), SurfaceFormat::B8G8R8A8,
+                          IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out, check_bgra));
 
-  SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8, out,
-              sizeof(out), SurfaceFormat::R8G8B8A8, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8,
+                          out, sizeof(out), SurfaceFormat::R8G8B8A8,
+                          IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out, check_rgba));
 
-  SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8, out,
-              sizeof(out), SurfaceFormat::A8R8G8B8, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8,
+                          out, sizeof(out), SurfaceFormat::A8R8G8B8,
+                          IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out, check_argb));
 
-  SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8, out,
-              sizeof(out), SurfaceFormat::R8G8B8X8, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8,
+                          out, sizeof(out), SurfaceFormat::R8G8B8X8,
+                          IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out, check_rgbx));
 
-  SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8, out24,
-              sizeof(out24), SurfaceFormat::B8G8R8, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(check_rgba, sizeof(check_rgba),
+                          SurfaceFormat::R8G8B8X8, out, sizeof(out),
+                          SurfaceFormat::A8R8G8B8, IntSize(5, 1)));
+  EXPECT_TRUE(ArrayEqual(out, check_xrgb));
+
+  EXPECT_TRUE(SwizzleData(check_rgba, sizeof(check_rgba),
+                          SurfaceFormat::R8G8B8A8, out, sizeof(out),
+                          SurfaceFormat::X8R8G8B8, IntSize(5, 1)));
+  EXPECT_TRUE(ArrayEqual(out, check_xrgb));
+
+  EXPECT_TRUE(SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8,
+                          out24, sizeof(out24), SurfaceFormat::B8G8R8,
+                          IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out24, check_bgr));
 
-  SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8, out24,
-              sizeof(out24), SurfaceFormat::R8G8B8, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8,
+                          out24, sizeof(out24), SurfaceFormat::R8G8B8,
+                          IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out24, check_rgb));
 
-  SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8, out8,
-              sizeof(out8), SurfaceFormat::A8, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(in_bgra, sizeof(in_bgra), SurfaceFormat::B8G8R8A8,
+                          out8, sizeof(out8), SurfaceFormat::A8,
+                          IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out8, check_a));
 
   const uint8_t* uint32_argb;
@@ -758,9 +860,10 @@ TEST(Moz2D, SwizzleData)
     uint32_argb = check_bgra;
   }
 
-  SwizzleData(uint32_argb, sizeof(in_bgra), SurfaceFormat::A8R8G8B8_UINT32,
-              reinterpret_cast<uint8_t*>(out16), sizeof(out16),
-              SurfaceFormat::R5G6B5_UINT16, IntSize(5, 1));
+  EXPECT_TRUE(SwizzleData(uint32_argb, sizeof(in_bgra),
+                          SurfaceFormat::A8R8G8B8_UINT32,
+                          reinterpret_cast<uint8_t*>(out16), sizeof(out16),
+                          SurfaceFormat::R5G6B5_UINT16, IntSize(5, 1)));
   EXPECT_TRUE(ArrayEqual(out16, check_16));
 }
 
@@ -836,6 +939,11 @@ TEST(Moz2D, SwizzleRow)
       0, 254, 253, 255, 255, 0,   0, 255, 0,   0,
       0, 255, 3,   2,   1,   255, 9, 0,   127, 255,
   };
+  // check opaquifying into alpha-first order
+  const uint8_t check_xrgb[5 * 4] = {
+      255, 0, 254, 253, 255, 255, 0,   0, 255, 0,
+      0,   0, 255, 3,   2,   1,   255, 9, 0,   127,
+  };
   // check packing
   uint8_t out24[5 * 3];
   const uint8_t check_bgr[5 * 3] = {253, 254, 0, 0, 0,   255, 0, 0,
@@ -885,6 +993,26 @@ TEST(Moz2D, SwizzleRow)
     if (func) {
       func(in_bgra, out, 5);
       EXPECT_TRUE(ArrayEqual(out, check_rgbx));
+    } else {
+      EXPECT_NE(arch, SwizzleArch::eAny);
+      EXPECT_NE(arch, SwizzleArch::eFallback);
+    }
+
+    func = RowFnFor(SwizzleOp::Copy, SurfaceFormat::R8G8B8X8,
+                    SurfaceFormat::A8R8G8B8, arch);
+    if (func) {
+      func(check_rgba, out, 5);
+      EXPECT_TRUE(ArrayEqual(out, check_xrgb));
+    } else {
+      EXPECT_NE(arch, SwizzleArch::eAny);
+      EXPECT_NE(arch, SwizzleArch::eFallback);
+    }
+
+    func = RowFnFor(SwizzleOp::Copy, SurfaceFormat::R8G8B8A8,
+                    SurfaceFormat::X8R8G8B8, arch);
+    if (func) {
+      func(check_rgba, out, 5);
+      EXPECT_TRUE(ArrayEqual(out, check_xrgb));
     } else {
       EXPECT_NE(arch, SwizzleArch::eAny);
       EXPECT_NE(arch, SwizzleArch::eFallback);

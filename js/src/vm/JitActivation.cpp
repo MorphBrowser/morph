@@ -48,7 +48,8 @@ js::jit::JitActivation::~JitActivation() {
   }
   cx_->jitActivation = prevJitActivation_;
 
-  // All reocvered value are taken from activation during the bailout.
+  // Recover instruction results must have been removed by either the bailout
+  // code or the exception handler.
   MOZ_ASSERT(ionRecovery_.empty());
 
   // The BailoutFrameInfo should have unregistered itself from the
@@ -235,8 +236,8 @@ void js::jit::JitActivation::startWasmTrap(wasm::Trap trap,
   wasm::UnwindState unwindState;
   MOZ_RELEASE_ASSERT(wasm::StartUnwinding(state, &unwindState, &unwound));
   // With return calls, it is possible to not unwind when there is only an
-  // entry left on the stack, e.g. the return call trampoline that is created
-  // to restore realm before returning to the interpreter entry stub.
+  // entry left on the stack, e.g. after a return call collapsed the frame of a
+  // function called from an entry stub; see CanUnwindSignatureCheck.
   MOZ_ASSERT_IF(unwound, trap == wasm::Trap::IndirectCallBadSig);
 
   void* pc = unwindState.pc;

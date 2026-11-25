@@ -9,6 +9,7 @@ from taskgraph.transforms.base import RepoConfig
 from gecko_taskgraph.test.conftest import FakeParameters, FakeTransformConfig
 from gecko_taskgraph.transforms.job.common import (
     _rewrite_repo_configs_for_git_mirror,
+    add_gradle,
     clone_type,
 )
 
@@ -117,6 +118,89 @@ def test_rewrite_repo_configs_for_git_mirror():
 
     # Other repos (e.g. comm-central) are left untouched.
     assert rewritten["comm"] == repo_configs["comm"]
+
+
+@pytest.mark.parametrize(
+    "mode,use_cache,flags,cached",
+    (
+        pytest.param("offline", True, "--offline --daemon", True, id="offline"),
+        pytest.param(
+            "offline", False, "--offline --daemon", False, id="offline-uncached"
+        ),
+        pytest.param("online", False, "--daemon", False, id="online"),
+    ),
+)
+def test_add_gradle(mode, use_cache, flags, cached):
+    config = make_config(project="autoland", level="3")
+    job = {
+        "run": {"workdir": "/builds/worker"},
+        "worker": {"implementation": "docker-worker"},
+        "use-gradle-cache": use_cache,
+    }
+    taskdesc = {
+        "worker": {"env": {"OTHER": "1"}},
+        "fetches": {"toolchain": ["linux64-android-gradle-dependencies"]},
+    }
+
+    add_gradle(config, job, taskdesc, mode)
+
+    expected = {
+        "env": {
+            "OTHER": "1",
+            "GRADLE_FLAGS": flags,
+            "GRADLE_USER_HOME": "/builds/worker/gradle-user-home",
+        }
+    }
+    expected_toolchains = ["linux64-android-gradle-dependencies"]
+    if cached:
+        expected["env"]["MOZ_GRADLE_USER_HOME_SEED"] = (
+            "/builds/worker/fetches/gradle-user-home-seed.tar.zst"
+        )
+        expected_toolchains.append({
+            "name": "linux64-android-gradle-dependencies",
+            "artifact": "public/build/gradle-user-home-seed.tar.zst",
+            "extract": False,
+        })
+        expected["caches"] = [
+            {
+                "type": "persistent",
+                "name": "gradle-user-home",
+                "mount-point": "/builds/worker/gradle-user-home",
+                "skip-untrusted": False,
+            }
+        ]
+    assert taskdesc["worker"] == expected
+    assert taskdesc["fetches"] == {"toolchain": expected_toolchains}
+
+
+def test_add_gradle_cache_without_dependencies_fetch():
+    config = make_config(project="autoland", level="3")
+    job = {
+        "run": {"workdir": "/builds/worker"},
+        "worker": {"implementation": "docker-worker"},
+        "use-gradle-cache": True,
+    }
+    taskdesc = {"worker": {}}
+
+    add_gradle(config, job, taskdesc, "offline")
+
+    assert "MOZ_GRADLE_USER_HOME_SEED" not in taskdesc["worker"]["env"]
+    assert "fetches" not in taskdesc
+
+
+def test_add_gradle_online_cache():
+    config = make_config(project="autoland", level="3")
+    job = {
+        "run": {"workdir": "/builds/worker"},
+        "worker": {"implementation": "docker-worker"},
+        "use-gradle-cache": True,
+    }
+    taskdesc = {"worker": {}}
+
+    with pytest.raises(
+        Exception, match="use-gradle-cache requires use-gradle: offline"
+    ):
+        add_gradle(config, job, taskdesc, "online")
 
 
 if __name__ == "__main__":

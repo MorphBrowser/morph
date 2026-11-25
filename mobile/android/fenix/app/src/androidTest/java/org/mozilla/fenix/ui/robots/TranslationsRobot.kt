@@ -6,7 +6,6 @@ package org.mozilla.fenix.ui.robots
 
 import android.util.Log
 import androidx.compose.ui.test.ComposeTimeoutException
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.hasContentDescription
@@ -33,7 +32,6 @@ import org.mozilla.fenix.helpers.TestHelper.waitUntilSnackbarGone
 
 class TranslationsRobot(private val composeTestRule: ComposeTestRule) {
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyTranslationSheetIsDisplayed(isDisplayed: Boolean) {
         Log.i(
             TAG,
@@ -74,7 +72,7 @@ class TranslationsRobot(private val composeTestRule: ComposeTestRule) {
     fun clickTranslationsOptionsButton() {
         Log.i(TAG, "clickTranslationsOptionsButton: Trying to click the translations option button.")
         composeTestRule
-            .onNodeWithContentDescription(getStringResource(R.string.translation_option_bottom_sheet_title_heading))
+            .onNodeWithContentDescription(getStringResource(R.string.translation_option_bottom_sheet_title_heading2))
             .performClick()
         Log.i(TAG, "clickTranslationsOptionsButton: Clicked the translations options button.")
     }
@@ -188,7 +186,6 @@ class TranslationsRobot(private val composeTestRule: ComposeTestRule) {
         Log.i(TAG, "verifyAlwaysTranslateOptionIsChecked: Verified the \"Always translate\" description is checked.")
     }
 
-    @OptIn(ExperimentalTestApi::class)
     fun verifyTheNeverTranslateThisSiteOptionIsChecked(isChecked: Boolean) {
         Log.i(
             TAG,
@@ -258,7 +255,6 @@ class TranslationsRobot(private val composeTestRule: ComposeTestRule) {
     }
 
     class Transition(private val composeTestRule: ComposeTestRule) {
-        @OptIn(ExperimentalTestApi::class)
         fun clickTranslateButton(
             pageWasNotPreviouslyTranslated: Boolean = true,
             interact: BrowserRobot.() -> Unit,

@@ -792,7 +792,7 @@ class nsGenericHTMLElement : public nsGenericHTMLElementBase {
   MOZ_CAN_RUN_SCRIPT void AfterSetPopoverAttr();
 
   mozilla::EventListenerManager* GetEventListenerManagerForAttr(
-      nsAtom* aAttrName, bool* aDefer) override;
+      nsAtom* aAttrName) override;
 
   /**
    * Handles dispatching a simulated click on `this` on space or enter.
@@ -830,7 +830,8 @@ class nsGenericHTMLElement : public nsGenericHTMLElementBase {
   }
 
   void SetHTMLAttr(nsAtom* aName, const nsAString& aValue) {
-    SetAttr(kNameSpaceID_None, aName, aValue, true);
+    SetAttr(kNameSpaceID_None, aName, aValue, true,
+            mozilla::dom::IsKnownNewAttr::No);
   }
   void SetHTMLAttr(nsAtom* aName, const nsAString& aValue,
                    mozilla::ErrorResult& aError) {
@@ -1427,12 +1428,6 @@ using HTMLContentCreatorFunction =
 // Here, we expand 'NS_DECLARE_NS_NEW_HTML_ELEMENT()' by hand.
 // (Calling the macro directly (with no args) produces compiler warnings.)
 nsGenericHTMLElement* NS_NewHTMLElement(
-    already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
-    mozilla::dom::FromParser aFromParser = mozilla::dom::NOT_FROM_PARSER);
-
-// Distinct from the above in order to have function pointer that compared
-// unequal to a function pointer to the above.
-nsGenericHTMLElement* NS_NewCustomElement(
     already_AddRefed<mozilla::dom::NodeInfo> aNodeInfo,
     mozilla::dom::FromParser aFromParser = mozilla::dom::NOT_FROM_PARSER);
 

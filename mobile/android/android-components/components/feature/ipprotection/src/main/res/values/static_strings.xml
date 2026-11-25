@@ -7,6 +7,7 @@
     <string name="mozac_feature_ipprotection_eligibility">Eligibility</string>
     <string name="mozac_feature_ipprotection_eligibilitystatus">eligibilityStatus</string>
     <string name="mozac_feature_ipprotection_name">IP Protection</string>
+    <string name="mozac_feature_ipprotection_currentauthprovider">currentAuthProvider</string>
     <string name="mozac_feature_ipprotection_proxystatus">proxyStatus</string>
     <string name="mozac_feature_ipprotection_servicestatus">serviceStatus</string>
     <string name="mozac_feature_ipprotection_lasterror">lastError</string>
@@ -18,6 +19,7 @@
     <string name="mozac_feature_ipprotection_maxdatabytes">maxDataBytes</string>
     <string name="mozac_feature_ipprotection_useddatagb">usedDataGb</string>
     <string name="mozac_feature_ipprotection_resetdate">resetDate</string>
+    <string name="mozac_feature_ipprotection_unlimited">Unlimited</string>
     <string name="mozac_feature_ipprotection_account">Account</string>
     <string name="mozac_feature_ipprotection_account_status">status</string>
 </resources>

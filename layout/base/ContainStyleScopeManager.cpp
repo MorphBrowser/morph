@@ -78,7 +78,8 @@ ContainStyleScope& ContainStyleScopeManager::GetOrCreateScopeForContent(
     auto& parentScope =
         GetOrCreateScopeForContent(aContent->GetFlattenedTreeParent());
     return *mScopes.InsertOrUpdate(
-        aContent, MakeUnique<ContainStyleScope>(this, &parentScope, aContent));
+        aContent,
+        std::make_unique<ContainStyleScope>(this, &parentScope, aContent));
   }
 
   return GetRootScope();
@@ -173,7 +174,7 @@ void ContainStyleScopeManager::RecalcAllCounters() {
 void ContainStyleScopeManager::DumpCounters() {
   GetRootScope().GetCounterManager().Dump();
   for (auto& entry : mScopes) {
-    entry.GetWeak()->GetCounterManager().Dump();
+    entry.GetRawPtr()->GetCounterManager().Dump();
   }
 }
 #endif
@@ -236,7 +237,7 @@ void ContainStyleScopeManager::GetSpokenCounterText(nsIFrame* aFrame,
 void ContainStyleScopeManager::SetAllCountersDirty() {
   GetRootScope().GetCounterManager().SetAllDirty();
   for (auto& entry : mScopes) {
-    entry.GetWeak()->GetCounterManager().SetAllDirty();
+    entry.GetRawPtr()->GetCounterManager().SetAllDirty();
   }
 }
 

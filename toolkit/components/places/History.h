@@ -25,6 +25,7 @@ namespace mozilla::places {
 
 struct VisitData;
 class VisitedQuery;
+class HistoryClearedListener;
 
 // Initial size of mRecentlyVisitedURIs.
 #define RECENTLY_VISITED_URIS_SIZE 64
@@ -51,7 +52,8 @@ class History final : public BaseHistory,
 
   // IHistory
   NS_IMETHOD VisitURI(nsIWidget*, nsIURI*, nsIURI* aLastVisitedURI,
-                      uint32_t aFlags, uint64_t aBrowserId) final;
+                      uint32_t aFlags, uint64_t aBrowserId,
+                      uint32_t aUserContextId) final;
   NS_IMETHOD SetURITitle(nsIURI*, const nsAString&) final;
 
   // BaseHistory
@@ -119,6 +121,16 @@ class History final : public BaseHistory,
     return mDB->GetStatement(aQuery);
   }
 
+  uint32_t HistoryClearedCount() const {
+    MOZ_ASSERT(NS_IsMainThread());
+    return mHistoryClearedCount;
+  }
+  void OnHistoryCleared() {
+    MOZ_ASSERT(NS_IsMainThread());
+    ++mHistoryClearedCount;
+    NotifyHistoryCleared();
+  }
+
   bool IsShuttingDown() {
     MutexAutoLock lockedScope(mShuttingDownMutex);
     return mShuttingDown;
@@ -131,6 +143,8 @@ class History final : public BaseHistory,
    * @param {bool} aHidden The hidden status of the visit being appended.
    */
   void AppendToRecentlyVisitedURIs(nsIURI* aURI, bool aHidden);
+
+  void ClearRecentlyVisitedURIs() { mRecentlyVisitedURIs.Clear(); }
 
  private:
   virtual ~History();
@@ -156,6 +170,9 @@ class History final : public BaseHistory,
    * invoke GetDBConn() before.
    */
   RefPtr<mozilla::places::Database> mDB;
+
+  RefPtr<HistoryClearedListener> mHistoryClearedListener;
+  uint32_t mHistoryClearedCount = 0;
 
   /**
    * Remove any memory references to tasks and do not take on any more.

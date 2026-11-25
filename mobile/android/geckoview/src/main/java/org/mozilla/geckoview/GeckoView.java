@@ -71,6 +71,12 @@ import org.mozilla.gecko.util.ThreadUtils;
 
 /**
  * A view container that hosts Gecko rendering, manages its surface, and dispatches input/events.
+ *
+ * <p>On Android S and later, GeckoView owns the Android scroll-capture (long screenshot) properties
+ * for its content: while attached it installs its own {@link android.view.ScrollCaptureCallback}
+ * and sets {@code SCROLL_CAPTURE_HINT_INCLUDE}, and it clears them on detach. Embedders should not
+ * call {@code setScrollCaptureCallback} or {@code setScrollCaptureHint} on a GeckoView; those
+ * values are managed by GeckoView and will be overwritten.
  */
 @UiThread
 public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfaceProvider {
@@ -139,7 +145,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
                 .size(wrapper.getWidth(), wrapper.getHeight())
                 .build());
         mDisplay.setDynamicToolbarMaxHeight(mDynamicToolbarMaxHeight);
-        GeckoView.this.setActive(true);
+        GeckoView.this.maybeSetActive(true);
       }
     }
 
@@ -148,7 +154,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
         if (mDisplay != null) {
           mDisplay.surfaceDestroyed();
         }
-        GeckoView.this.setActive(false);
+        GeckoView.this.maybeSetActive(false);
       }
 
       final GeckoDisplay display = mDisplay;
@@ -171,7 +177,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
                 .build());
         mDisplay.setDynamicToolbarMaxHeight(mDynamicToolbarMaxHeight);
         if (!mValid) {
-          GeckoView.this.setActive(true);
+          GeckoView.this.maybeSetActive(true);
         }
       }
       mValid = true;
@@ -181,7 +187,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
     public void onSurfaceDestroyed() {
       if (mDisplay != null) {
         mDisplay.surfaceDestroyed();
-        GeckoView.this.setActive(false);
+        GeckoView.this.maybeSetActive(false);
       }
       mValid = false;
     }
@@ -292,6 +298,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
    *
    * @param context The Context in which this view is running.
    */
+  @SuppressWarnings("this-escape")
   public GeckoView(final Context context) {
     super(context);
     init();
@@ -303,6 +310,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
    * @param context the Context in which this view is running
    * @param attrs the set of view attributes to apply
    */
+  @SuppressWarnings("this-escape")
   public GeckoView(final Context context, final AttributeSet attrs) {
     super(context, attrs);
     init();
@@ -335,11 +343,6 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
         new int[] {android.R.attr.state_focused, -android.R.attr.state_focused},
         new ColorDrawable(Color.WHITE));
     setBackground(drawable);
-
-    // This will stop PropertyAnimator from creating a drawing cache (i.e. a
-    // bitmap) from a SurfaceView, which is just not possible (the bitmap will be
-    // transparent).
-    setWillNotCacheDrawing(false);
 
     mSurfaceWrapper = new SurfaceViewWrapper(getContext());
     mSurfaceWrapper.setBackgroundColor(Color.WHITE);
@@ -469,9 +472,9 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
     mDisplay.setDynamicToolbarMaxHeight(height);
   }
 
-  /* package */ void setActive(final boolean active) {
+  /* package */ void maybeSetActive(final boolean active) {
     if (mSession != null) {
-      mSession.setActive(active);
+      mSession.maybeSetActive(active);
     }
   }
 
@@ -593,7 +596,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
     // Make sure the clear color is set to the default
     mSession.getCompositorController().setClearColor(defaultColor());
 
-    if (ViewCompat.isAttachedToWindow(this)) {
+    if (isAttachedToWindow()) {
       mDisplay.acquire(session.acquireDisplay());
     }
 
@@ -759,6 +762,11 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
       mDisplay.acquire(mSession.acquireDisplay());
     }
 
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      setScrollCaptureCallback(new GeckoViewScrollCaptureCallback(() -> mSession));
+      setScrollCaptureHint(SCROLL_CAPTURE_HINT_INCLUDE);
+    }
+
     super.onAttachedToWindow();
 
     // This needs to be called after the `super.onAttachedToWindow()`.
@@ -774,6 +782,10 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
     removeWindowInsetsListener(KEYBOARD_WINDOW_INSETS_LISTENER);
     if (mWindowInsetsListeners.isEmpty()) {
       detachWindowInsetsListener(getActivityFromContext(getContext()));
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      setScrollCaptureCallback(null);
+      setScrollCaptureHint(SCROLL_CAPTURE_HINT_AUTO);
     }
 
     if (mSession == null) {
@@ -1101,9 +1113,7 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
     }
   }
 
-  /**
-   * @return Whether or not Android autofill is enabled for this view.
-   */
+  /** {@return whether or not Android autofill is enabled for this view} */
   public boolean getAutofillEnabled() {
     return mAutofillEnabled;
   }
@@ -1363,10 +1373,9 @@ public class GeckoView extends FrameLayout implements GeckoDisplay.NewSurfacePro
         return isDialogFinished;
       }
       final PrintManager printManager =
-          (PrintManager)
-              mActivityDelegate.getActivityContext().getSystemService(Context.PRINT_SERVICE);
+          (PrintManager) printContext.getSystemService(Context.PRINT_SERVICE);
       final PrintDocumentAdapter pda =
-          new GeckoViewPrintDocumentAdapter(pdfStream, getContext(), isDialogFinished);
+          new GeckoViewPrintDocumentAdapter(pdfStream, printContext, isDialogFinished);
       printManager.print("Firefox", pda, null);
       return isDialogFinished;
     }

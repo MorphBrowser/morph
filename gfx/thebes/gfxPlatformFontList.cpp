@@ -156,8 +156,12 @@ const gfxFontEntry::ScriptRange gfxPlatformFontList::sComplexScriptRanges[] = {
 };
 
 static const char* kObservedPrefs[] = {
-    "font.", "font.name-list.", "intl.accept_languages",  // hmmmm...
-    "browser.display.use_document_fonts.icon_font_allowlist", nullptr};
+    "font.",
+    "font.name-list.",
+    "intl.accept_languages",  // hmmmm...
+    "browser.display.use_document_fonts.icon_font_allowlist",
+    "gfx.font_rendering.fontations.enabled",
+};
 
 static const char kFontSystemWhitelistPref[] = "font.system.whitelist";
 
@@ -190,9 +194,14 @@ class gfxFontListPrefObserver final : public nsIObserver {
 static void FontListPrefChanged(const char* aPref, void* aData = nullptr) {
   // XXX this could be made to only clear out the cache for the prefs that were
   // changed but it probably isn't that big a deal.
-  gfxPlatformFontList::PlatformFontList()->ClearLangGroupPrefFonts();
-  gfxPlatformFontList::PlatformFontList()->LoadIconFontOverrideList();
-  gfxFontCache::GetCache()->Flush();
+  auto* pfl = gfxPlatformFontList::PlatformFontList();
+  if (aPref && !strcmp(aPref, "gfx.font_rendering.fontations.enabled")) {
+    pfl->UpdateFontList(true);
+  } else {
+    pfl->ClearLangGroupPrefFonts();
+    pfl->LoadIconFontOverrideList();
+    gfxFontCache::GetCache()->Flush();
+  }
 }
 
 static gfxFontListPrefObserver* gFontListPrefObserver = nullptr;
@@ -309,7 +318,7 @@ gfxPlatformFontList::gfxPlatformFontList(bool aNeedFullnamePostscriptNames)
       mOtherFamilyNames(16),
       mSharedCmaps(8) {
   if (aNeedFullnamePostscriptNames) {
-    mExtraNames = MakeUnique<ExtraNames>();
+    mExtraNames = std::make_unique<ExtraNames>();
   }
 
   mLangService = nsLanguageAtomService::GetService();
@@ -317,7 +326,7 @@ gfxPlatformFontList::gfxPlatformFontList(bool aNeedFullnamePostscriptNames)
   LoadBadUnderlineList();
   LoadIconFontOverrideList();
 
-  mFontPrefs = MakeUnique<FontPrefs>();
+  mFontPrefs = std::make_unique<FontPrefs>();
 
   gfxFontUtils::GetPrefsFontList(kFontSystemWhitelistPref, mEnabledFontsList);
   mFontFamilyWhitelistActive = !mEnabledFontsList.IsEmpty();
@@ -932,7 +941,7 @@ bool gfxPlatformFontList::InitOtherFamilyNames(
 
   if (SharedFontList() && !XRE_IsParentProcess()) {
     if (NS_IsMainThread()) {
-      bool initialized;
+      bool initialized = false;
       dom::ContentChild::GetSingleton()->SendInitOtherFamilyNames(
           GetGeneration(), aDeferOtherFamilyNamesLoading, &initialized);
       mOtherFamilyNamesInitialized.compareExchange(false, initialized);
@@ -1041,7 +1050,7 @@ gfxFontEntry* gfxPlatformFontList::LookupInFaceNameLists(
     // names not completely initialized, so keep track of lookup misses
     if (!mFaceNameListsInitialized) {
       if (!mFaceNamesMissed) {
-        mFaceNamesMissed = MakeUnique<nsTHashSet<nsCString>>(2);
+        mFaceNamesMissed = std::make_unique<nsTHashSet<nsCString>>(2);
       }
       mFaceNamesMissed->Insert(aFaceName);
     }
@@ -1890,7 +1899,7 @@ bool gfxPlatformFontList::FindAndAddFamiliesLocked(
 
 void gfxPlatformFontList::AddToMissedNames(const nsCString& aKey) {
   if (!mOtherNamesMissed) {
-    mOtherNamesMissed = MakeUnique<nsTHashSet<nsCString>>(2);
+    mOtherNamesMissed = std::make_unique<nsTHashSet<nsCString>>(2);
   }
   mOtherNamesMissed->Insert(aKey);
 }
@@ -2363,10 +2372,9 @@ void gfxPlatformFontList::AddGenericFonts(
   AutoLock lock(mLock);
 
   // TODO(eri): For now the math generic language uses the legacy
-  // "serif.x-math" configuration font list to avoid excesive
+  // "serif.x-math" configuration font list to avoid excessive
   // repetition until a better font preference system can be found.
-  if (StaticPrefs::mathml_font_family_math_enabled() &&
-      aGenericType == StyleGenericFontFamily::Math) {
+  if (aGenericType == StyleGenericFontFamily::Math) {
     aGenericType = StyleGenericFontFamily::Serif;
     aLanguage = nsGkAtoms::x_math;
   }
@@ -2949,7 +2957,7 @@ void gfxPlatformFontList::ClearLangGroupPrefFontsLocked() {
   mEmojiPrefFont = nullptr;
 
   // Create a new FontPrefs and replace the existing one.
-  mFontPrefs = MakeUnique<FontPrefs>();
+  mFontPrefs = std::make_unique<FontPrefs>();
 }
 
 // Support for memory reporting
@@ -3160,33 +3168,31 @@ void gfxPlatformFontList::CancelInitOtherFamilyNamesTask() {
 }
 
 void gfxPlatformFontList::ShareFontListShmBlockToProcess(
-    uint32_t aGeneration, uint32_t aIndex, base::ProcessId aPid,
+    uint32_t aGeneration, uint32_t aIndex,
     mozilla::ipc::ReadOnlySharedMemoryHandle* aOut) {
   auto list = SharedFontList();
   if (!list) {
     return;
   }
   if (!aGeneration || GetGeneration() == aGeneration) {
-    list->ShareShmBlockToProcess(aIndex, aPid, aOut);
+    list->ShareShmBlockToProcess(aIndex, aOut);
   } else {
     *aOut = nullptr;
   }
 }
 
 void gfxPlatformFontList::ShareFontListToProcess(
-    nsTArray<mozilla::ipc::ReadOnlySharedMemoryHandle>* aBlocks,
-    base::ProcessId aPid) {
+    nsTArray<mozilla::ipc::ReadOnlySharedMemoryHandle>* aBlocks) {
   auto list = SharedFontList();
   if (list) {
-    list->ShareBlocksToProcess(aBlocks, aPid);
+    list->ShareBlocksToProcess(aBlocks);
   }
 }
 
 mozilla::ipc::ReadOnlySharedMemoryHandle
-gfxPlatformFontList::ShareShmBlockToProcess(uint32_t aIndex,
-                                            base::ProcessId aPid) {
+gfxPlatformFontList::ShareShmBlockToProcess(uint32_t aIndex) {
   MOZ_RELEASE_ASSERT(SharedFontList());
-  return SharedFontList()->ShareBlockToProcess(aIndex, aPid);
+  return SharedFontList()->ShareBlockToProcess(aIndex);
 }
 
 void gfxPlatformFontList::ShmBlockAdded(

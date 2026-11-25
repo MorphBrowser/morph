@@ -175,8 +175,10 @@ inline size_t Arena::finalize(JS::GCContext* gcx, AllocKind thingKind,
   if constexpr (std::is_same_v<T, JSObject> || std::is_same_v<T, JSString> ||
                 std::is_same_v<T, JS::BigInt>) {
     if (isNewlyCreated_) {
-      zone()->pretenuring.updateCellCountsInNewlyCreatedArenas(
-          nmarked + nfinalized, nmarked);
+      auto& pretenuring = zone()->pretenuring;
+      JS::TraceKind kind = JS::MapTypeToTraceKind<T>::kind;
+      size_t nalloced = nmarked + nfinalized;
+      pretenuring.updateCellCountsInNewlyCreatedArenas(kind, nalloced, nmarked);
     }
   }
   isNewlyCreated_ = 0;
@@ -708,7 +710,8 @@ IncrementalProgress GCRuntime::markGrayRoots(SliceBudget& budget,
   gcstats::AutoPhase ap(stats(), phase);
 
   {
-    AutoSetMarkColor setColorGray(marker(), MarkColor::Gray);
+    AutoSetMarkColor setColorGray(marker(), MarkColor::Gray,
+                                  AllowGrayMarkingBeforeEndOfBlackMarking::Yes);
 
     AutoUpdateLiveCompartments updateLive(this);
     marker().setRootMarkingMode(true);
@@ -1106,13 +1109,9 @@ void GCRuntime::markIncomingGrayCrossCompartmentPointers() {
          src = NextIncomingCrossCompartmentPointer(src, true)) {
       JSObject* dst = CrossCompartmentPointerReferent(src);
       MOZ_ASSERT(dst->compartment() == c);
-      MOZ_ASSERT_IF(src->asTenured().isMarkedBlack(),
-                    dst->asTenured().isMarkedBlack());
 
-      if (src->asTenured().isMarkedGray()) {
-        TraceManuallyBarrieredEdge(marker().tracer(), &dst,
-                                   "cross-compartment gray pointer");
-      }
+      TraceManuallyBarrieredEdge(marker().tracer(), &dst,
+                                 "cross-compartment gray pointer");
     }
 
     c->gcIncomingGrayPointers = nullptr;
@@ -1236,7 +1235,7 @@ IncrementalProgress GCRuntime::beginMarkingSweepGroup(JS::GCContext* gcx,
                                                       SliceBudget& budget) {
 #ifdef DEBUG
   MOZ_ASSERT(!markOnBackgroundThreadDuringSweeping);
-  assertNoMarkingWork();
+  assertNoMarkingWorkInSweepingZones();
   for (auto& marker : markers) {
     MOZ_ASSERT(marker->markColor() == MarkColor::Black);
   }
@@ -1255,7 +1254,8 @@ IncrementalProgress GCRuntime::beginMarkingSweepGroup(JS::GCContext* gcx,
                         Zone::MarkBlackAndGray);
   }
 
-  AutoSetMarkColor setColorGray(marker(), MarkColor::Gray);
+  AutoSetMarkColor setColorGray(marker(), MarkColor::Gray,
+                                AllowGrayMarkingBeforeEndOfBlackMarking::Yes);
 
   // Mark incoming gray pointers from previously swept compartments.
   markIncomingGrayCrossCompartmentPointers();
@@ -1701,6 +1701,8 @@ IncrementalProgress GCRuntime::beginSweepingSweepGroup(JS::GCContext* gcx,
 
   using namespace gcstats;
 
+  assertNoMarkingWork();
+
   AutoSCC scc(stats(), sweepGroupIndex);
   finishMarkingDuringSweeping = false;
 
@@ -1875,7 +1877,7 @@ IncrementalProgress GCRuntime::endSweepingSweepGroup(JS::GCContext* gcx,
     return NotFinished;
   }
 
-  assertNoMarkingWork();
+  assertNoMarkingWorkInSweepingZones();
 
   // Disable background marking during sweeping until we start sweeping the next
   // zone group.
@@ -2815,8 +2817,13 @@ void GCRuntime::endSweepPhase(bool destroyingRuntime) {
     AutoLockSweepingLock lock(rt);
     callFinalizeCallbacks(rt->gcContext(), JSFINALIZE_COLLECTION_END);
 
-    if (allCCVisibleZonesWereCollected()) {
-      grayBitsValid = true;
+    if (grayBitsInvalid) {
+      if (grayBitsInvalid & GrayBitsInvalidatedInCurrentGC) {
+        grayBitsInvalid &= ~GrayBitsInvalidatedInCurrentGC;
+        MOZ_ASSERT(grayBitsInvalid == GrayBitsInvalid);
+      } else if (allCCVisibleZonesWereCollected()) {
+        grayBitsInvalid = 0;
+      }
     }
   }
 

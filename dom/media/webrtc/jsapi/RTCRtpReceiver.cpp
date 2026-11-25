@@ -110,7 +110,7 @@ static PrincipalHandle GetPrincipalHandle(nsPIDOMWindowInner* aWindow,
   } else if (aPrivacy == PrincipalPrivacy::Private) {
     principal = NullPrincipal::CreateWithInheritedAttributes(principal);
   }
-  return MakePrincipalHandle(principal);
+  return PrincipalHandle(principal);
 }
 
 #define INIT_CANONICAL(name, val)         \
@@ -144,16 +144,19 @@ RTCRtpReceiver::RTCRtpReceiver(
   PrincipalHandle principalHandle = GetPrincipalHandle(aWindow, aPrivacy);
   const bool isAudio = aConduit->type() == MediaSessionConduit::AUDIO;
 
+  // The remote track is not rendered until it is attached to a sink, so the
+  // graph does not need to start with an AudioCallbackDriver. CheckDriver()
+  // creates one when it is needed.
   MediaTrackGraph* graph = MediaTrackGraph::GetInstance(
-      isAudio ? MediaTrackGraph::AUDIO_THREAD_DRIVER
-              : MediaTrackGraph::SYSTEM_THREAD_DRIVER,
-      aWindow, MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE,
+      MediaTrackGraph::SYSTEM_THREAD_DRIVER, aWindow,
+      MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE,
       MediaTrackGraph::DEFAULT_OUTPUT_DEVICE);
 
   if (isAudio) {
     auto* source = graph->CreateSourceTrack(MediaSegment::AUDIO);
     mTrackSource = MakeAndAddRef<RemoteTrackSource>(
-        source, this, principalHandle, u"remote audio"_ns, aTrackingId);
+        source, this, GetPrincipalFromHandle(principalHandle),
+        u"remote audio"_ns, aTrackingId);
     mTrack = MakeAndAddRef<AudioStreamTrack>(aWindow, source, mTrackSource);
     mPipeline = MakeAndAddRef<MediaPipelineReceiveAudio>(
         mPc->GetHandle(), aTransportHandler, aCallThread, mStsThread.get(),
@@ -162,7 +165,8 @@ RTCRtpReceiver::RTCRtpReceiver(
   } else {
     auto* source = graph->CreateSourceTrack(MediaSegment::VIDEO);
     mTrackSource = MakeAndAddRef<RemoteTrackSource>(
-        source, this, principalHandle, u"remote video"_ns, aTrackingId);
+        source, this, GetPrincipalFromHandle(principalHandle),
+        u"remote video"_ns, aTrackingId);
     mTrack = MakeAndAddRef<VideoStreamTrack>(aWindow, source, mTrackSource);
     mPipeline = MakeAndAddRef<MediaPipelineReceiveVideo>(
         mPc->GetHandle(), aTransportHandler, aCallThread, mStsThread.get(),
@@ -265,7 +269,7 @@ nsTArray<RefPtr<RTCStatsPromise>> RTCRtpReceiver::GetStatsInternal(
     promises.AppendElement(InvokeAsync(
         mCallThread, __func__,
         [conduit = mPipeline->mConduit, recvTrackId]() mutable {
-          auto report = MakeUnique<dom::RTCStatsCollection>();
+          auto report = std::make_unique<dom::RTCStatsCollection>();
           const Maybe<webrtc::Call::Stats> stats = conduit->GetCallStats();
           stats.apply([&](const auto& aStats) {
             dom::RTCBandwidthEstimationInternal bw;
@@ -291,7 +295,7 @@ nsTArray<RefPtr<RTCStatsPromise>> RTCRtpReceiver::GetStatsInternal(
           mCallThread, __func__,
           [pipeline = mPipeline, recvTrackId = std::move(recvTrackId),
            mid = std::move(mid), transportId = std::move(transportId)] {
-            auto report = MakeUnique<dom::RTCStatsCollection>();
+            auto report = std::make_unique<dom::RTCStatsCollection>();
             auto asAudio = pipeline->mConduit->AsAudioSessionConduit();
             auto asVideo = pipeline->mConduit->AsVideoSessionConduit();
 
@@ -786,7 +790,7 @@ void RTCRtpReceiver::UpdateTransport() {
       extmaps.push_back(extmap);
     }
 
-    filter = MakeUnique<MediaPipelineFilter>(extmaps);
+    filter = std::make_unique<MediaPipelineFilter>(extmaps);
 
     // Add remote SSRCs so we can distinguish which RTP packets actually
     // belong to this pipeline (also RTCP sender reports).
@@ -832,6 +836,10 @@ bool RTCRtpReceiver::CanReceiveEarlyMedia() {
     // IsReceiving(), which reflects the real negotiated outcome via
     // mCurrentDirection. mTransceiver->Direction() is only the app's
     // preferred direction and can disagree with what was actually applied.
+    return false;
+  }
+  if (!GetJsepTransceiver().mRecvTrack.HasEarlyRecvCodecs()) {
+    // Nothing to decode with; starting a receive stream would assert.
     return false;
   }
   if (mPc->GetSignalingState() != RTCSignalingState::Have_local_offer) {

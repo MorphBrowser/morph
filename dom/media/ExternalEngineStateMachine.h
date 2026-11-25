@@ -339,6 +339,8 @@ class ExternalEngineStateMachine final
 
   void NotifyAudibleStateChangeIfNeeded();
 
+  void ApplyPendingCDMProxy();
+
   UniquePtr<ExternalPlaybackEngine> mEngine;
 
   bool mHasEnoughAudio = false;
@@ -356,7 +358,7 @@ class ExternalEngineStateMachine final
 #endif
 
   // Only used if setting CDM happens before the engine finishes initialization.
-  MozPromiseHolder<SetCDMPromise> mSetCDMProxyPromise;
+  RefPtr<CDMProxy> mPendingCDMProxy;
   MozPromiseRequestHolder<SetCDMPromise> mSetCDMProxyRequest;
 
   // If seek happens while the engine is still initializing, then we would
@@ -366,6 +368,9 @@ class ExternalEngineStateMachine final
 
   // It would be zero for audio-only playback.
   gfx::IntSize mVideoDisplay;
+
+  // The display size of the last video frame sent to the video container.
+  gfx::IntSize mLastFrameDisplay;
 
   // It would be set if playback is encrypted.
   nsCString mKeySystem;

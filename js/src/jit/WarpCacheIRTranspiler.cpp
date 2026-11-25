@@ -492,6 +492,9 @@ bool WarpCacheIRTranspiler::emitGuardFuse(RealmFuses::FuseIndex fuseIndex) {
     case RealmFuses::FuseIndex::OptimizeArraySpeciesFuse:
     case RealmFuses::FuseIndex::OptimizeTypedArraySpeciesFuse:
     case RealmFuses::FuseIndex::OptimizeRegExpPrototypeFuse:
+    case RealmFuses::FuseIndex::ObjectProtoHasNoIndexedPropsFuse:
+    case RealmFuses::FuseIndex::ArrayProtoHasNoIndexedPropsFuse:
+    case RealmFuses::FuseIndex::StringProtoHasNoIndexedPropsFuse:
       // This is a no-op because WarpOracle has added a compilation dependency.
       MOZ_ASSERT(RealmFuses::isInvalidatingFuse(fuseIndex));
       return true;
@@ -1266,11 +1269,17 @@ bool WarpCacheIRTranspiler::emitGuardNoDenseElements(ObjOperandId objId) {
   return true;
 }
 
-bool WarpCacheIRTranspiler::emitGuardFunctionHasJitEntry(ObjOperandId funId) {
+bool WarpCacheIRTranspiler::emitGuardFunctionHasValidJitEntry(
+    ObjOperandId funId) {
   MDefinition* fun = getOperand(funId);
   uint16_t expectedFlags = FunctionFlags::HasJitEntryFlags();
   uint16_t unexpectedFlags = 0;
 
+  // Note: the CacheIRCompiler checks if fun->nargs() > JIT_ARGS_LENGTH_MAX. In
+  // Ion, our generic call code is reachable via non-CacheIR paths that don't
+  // transpile this guard; for example, WarpBuilder::build_Call without a
+  // transpilable stub. It's therefore simpler to require that code to handle
+  // the args length check in all cases.
   auto* ins =
       MGuardFunctionFlags::New(alloc(), fun, expectedFlags, unexpectedFlags);
   add(ins);
@@ -2011,9 +2020,23 @@ bool WarpCacheIRTranspiler::emitLoadFixedSlotResult(ObjOperandId objId,
   return true;
 }
 
-bool WarpCacheIRTranspiler::emitLoadFixedSlotTypedResult(ObjOperandId objId,
-                                                         uint32_t offsetOffset,
-                                                         ValueType type) {
+bool WarpCacheIRTranspiler::emitLoadReservedFixedSlotResult(
+    ObjOperandId objId, uint32_t offsetOffset) {
+  int32_t offset = int32StubField(offsetOffset);
+
+  MDefinition* obj = getOperand(objId);
+  uint32_t slotIndex = NativeObject::getFixedSlotIndexFromOffset(offset);
+
+  auto* load = MLoadFixedSlot::New(alloc(), obj, slotIndex);
+  load->setNotMovable();
+  add(load);
+
+  pushResult(load);
+  return true;
+}
+
+bool WarpCacheIRTranspiler::emitLoadReservedFixedSlotTypedResult(
+    ObjOperandId objId, uint32_t offsetOffset, ValueType type) {
   int32_t offset = int32StubField(offsetOffset);
 
   MDefinition* obj = getOperand(objId);
@@ -2021,6 +2044,7 @@ bool WarpCacheIRTranspiler::emitLoadFixedSlotTypedResult(ObjOperandId objId,
 
   auto* load = MLoadFixedSlot::New(alloc(), obj, slotIndex);
   load->setResultType(MIRTypeFromValueType(JSValueType(type)));
+  load->setNotMovable();
   add(load);
 
   pushResult(load);
@@ -6688,14 +6712,14 @@ bool WarpCacheIRTranspiler::emitCallClassHook(ObjOperandId calleeId,
   MOZ_ASSERT(callInfo_->argFormat() == CallInfo::ArgFormat::Standard);
   MOZ_ASSERT(flags.getArgFormat() == CallFlags::ArgFormat::Standard);
 
-  // Callees can be from any realm. If this changes, we should update
-  // MCallClassHook::maybeCrossRealm.
-  MOZ_ASSERT(!flags.isSameRealm());
-
   auto* call = MCallClassHook::New(alloc(), target, callInfo_->argc(),
                                    callInfo_->constructing());
   if (!call) {
     return false;
+  }
+
+  if (flags.isSameRealm()) {
+    call->setNotCrossRealm();
   }
 
   if (callInfo_->ignoresReturnValue()) {
@@ -7177,13 +7201,12 @@ bool WarpCacheIRTranspiler::emitCallNativeSetter(ObjOperandId receiverId,
                         nargsAndFlagsOffset);
 }
 
-bool WarpCacheIRTranspiler::emitMetaCreateThis(uint32_t numFixedSlots,
-                                               uint32_t numDynamicSlots,
-                                               gc::AllocKind allocKind,
+bool WarpCacheIRTranspiler::emitMetaCreateThis(gc::AllocKind allocKind,
                                                uint32_t thisShapeOffset,
                                                uint32_t siteOffset) {
   SharedShape* shape = &shapeStubField(thisShapeOffset)->asShared();
   MOZ_ASSERT(shape->getObjectClass() == &PlainObject::class_);
+  MOZ_ASSERT(shape->slotSpan() == 0);
 
   MConstant* shapeConst = MConstant::NewShape(alloc(), shape);
   add(shapeConst);
@@ -7194,8 +7217,11 @@ bool WarpCacheIRTranspiler::emitMetaCreateThis(uint32_t numFixedSlots,
              gc::FinalizeKind::None);
   MOZ_ASSERT(!IsFinalizedKind(allocKind));
 
-  auto* createThis = MNewPlainObject::New(alloc(), shapeConst, numFixedSlots,
-                                          numDynamicSlots, allocKind, heap);
+  // The shape is empty, so there are no slots to initialize.
+  auto* createThis =
+      MNewPlainObject::New(alloc(), shapeConst,
+                           /* numFixedSlots = */ 0,
+                           /* numDynamicSlots = */ 0, allocKind, heap);
   add(createThis);
 
   callInfo_->thisArg()->setImplicitlyUsedUnchecked();
@@ -7273,9 +7299,9 @@ bool WarpCacheIRTranspiler::emitAssertRecoveredOnBailoutResult(
 }
 
 bool WarpCacheIRTranspiler::emitAssertNoAllocationMetadataBuilder(
-    uint32_t builderAddrOffset) {
-  // This is a no-op because we discard all JIT code when we set an allocation
-  // metadata callback.
+    uint32_t hasBuilderAddrOffset) {
+  // This is a no-op because we discard all JIT code when allocation metadata is
+  // enabled for a realm.
   return true;
 }
 

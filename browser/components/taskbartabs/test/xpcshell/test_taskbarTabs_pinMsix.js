@@ -28,13 +28,6 @@ sinon.stub(ShellService, "shellService").value({
 sinon.stub(ShellService, "requestCreateAndPinSecondaryTile").resolves();
 sinon.stub(ShellService, "requestDeleteSecondaryTile").resolves();
 
-sinon.stub(TaskbarTabsPin, "_getLocalization").returns({
-  formatValue(msg) {
-    // Slash must also be sanitized, so it should appear as '_' in paths.
-    return `[formatValue/${msg}]`;
-  },
-});
-
 registerCleanupFunction(() => {
   sinon.restore();
 });
@@ -79,7 +72,7 @@ add_task(async function test_pinCreatesDesktopEntry() {
   sinon.resetHistory();
 
   Assert.equal(
-    await TaskbarTabsPin.pinTaskbarTab(taskbarTab),
+    (await TaskbarTabsPin.pinTaskbarTab(taskbarTab)).shortcut,
     "taskbartab-" + taskbarTab.id,
     "Correct relative path is saved to the taskbar tab"
   );
@@ -99,7 +92,7 @@ add_task(async function test_pinUnusualName() {
   sinon.resetHistory();
 
   Assert.equal(
-    await TaskbarTabsPin.pinTaskbarTab(invalidTaskbarTab),
+    (await TaskbarTabsPin.pinTaskbarTab(invalidTaskbarTab)).shortcut,
     "taskbartab-" + invalidTaskbarTab.id,
     "Correct relative path is saved to the taskbar tab"
   );

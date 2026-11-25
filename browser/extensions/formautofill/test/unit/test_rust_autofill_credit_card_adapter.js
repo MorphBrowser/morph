@@ -16,10 +16,14 @@ const { RustAutofillCreditCardsAdapter } = ChromeUtils.importESModule(
 const { RustAutofillAdapterBase } = ChromeUtils.importESModule(
   "resource://autofill/RustAutofillAdapterBase.sys.mjs"
 );
-const { createAutofillKey, createAutofillStoreWithStaticKeyManager } =
-  ChromeUtils.importESModule(
-    "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustAutofill.sys.mjs"
-  );
+const {
+  CryptoError,
+  NoSuchRecord,
+  createAutofillKey,
+  createAutofillStoreWithStaticKeyManager,
+} = ChromeUtils.importESModule(
+  "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustAutofill.sys.mjs"
+);
 const { initialize: initRustComponents } = ChromeUtils.importESModule(
   "moz-src:///toolkit/components/uniffi-bindgen-gecko-js/components/generated/RustInitRustComponents.sys.mjs"
 );
@@ -41,6 +45,32 @@ function maskFor(number) {
   return "•".repeat(16 - 4) + number.slice(-4);
 }
 
+const CVV_SUPPORTED_PREF = "extensions.formautofill.creditCards.cvv.supported";
+const CVV_ENABLED_PREF = "extensions.formautofill.creditCards.cvv.enabled";
+const RUST_ACTIVE_PREF =
+  "extensions.formautofill.creditCards.storage.rust.active";
+
+function resetSecurityCode() {
+  Services.prefs.clearUserPref(CVV_SUPPORTED_PREF);
+  Services.prefs.clearUserPref(CVV_ENABLED_PREF);
+  Services.prefs.clearUserPref(RUST_ACTIVE_PREF);
+}
+
+registerCleanupFunction(resetSecurityCode);
+
+// Started up front: events recorded before it would replay on testResetFOG().
+add_setup(() => {
+  Services.fog.initializeFOG();
+});
+
+// The adapter is driven directly here, so nothing switches the profile to it:
+// claim it is the store serving, which CVV support requires.
+function enableSecurityCode() {
+  Services.prefs.setStringPref(CVV_SUPPORTED_PREF, "on");
+  Services.prefs.setBoolPref(CVV_ENABLED_PREF, true);
+  Services.prefs.setBoolPref(RUST_ACTIVE_PREF, true);
+}
+
 function waitForStorageChanged(expectedAction) {
   return new Promise(resolve => {
     Services.obs.addObserver(function obs(subject, _topic, action) {
@@ -51,6 +81,65 @@ function waitForStorageChanged(expectedAction) {
       resolve(subject.wrappedJSObject);
     }, "formautofill-storage-changed");
   });
+}
+
+/**
+ * Make the store's reads fail the way they do when the key cannot be used: a
+ * crypto error, whether the user declined the primary password or the data is
+ * unreadable, and the token's state is what says which it was.
+ *
+ * @param {Store} store The test store to break.
+ * @param {object} token The adapter's stand-in NSS token.
+ * @param {object} options
+ * @param {boolean} options.canceled Whether the token is left locked.
+ * @returns {object} `attempts`, and `restore()` to put the store back.
+ */
+function breakDecryption(store, token, { canceled }) {
+  const state = {
+    attempts: 0,
+    restore() {
+      delete store.getCreditCard;
+      delete store.getAllCreditCards;
+      // The token is unlocked again, as it would be once the user answers.
+      token.locked = false;
+    },
+  };
+  const read = async () => {
+    state.attempts++;
+    if (canceled) {
+      token.locked = true;
+    }
+    throw new CryptoError("decryption failed");
+  };
+  store.getCreditCard = read;
+  store.getAllCreditCards = read;
+  return state;
+}
+
+/**
+ * Make the store's writes fail the way they do when the key cannot be used: a
+ * crypto error, the same whether or not the user declined.
+ *
+ * @param {Store} store The test store to break.
+ * @param {object} token The adapter's stand-in NSS token.
+ * @param {object} options
+ * @param {boolean} options.canceled Whether the token is left locked.
+ * @returns {object} `restore()` to put the store back.
+ */
+function breakEncryption(store, token, { canceled }) {
+  store.addCreditCard = store.updateCreditCard = async () => {
+    if (canceled) {
+      token.locked = true;
+    }
+    throw new Error("crypto error");
+  };
+  return {
+    restore() {
+      delete store.addCreditCard;
+      delete store.updateCreditCard;
+      token.locked = false;
+    },
+  };
 }
 
 // The duplicate finders are generators, and what the assertions want is a list.
@@ -70,12 +159,21 @@ async function newAdapter(name) {
     FileTestUtils.getTempFile(name).path,
     createAutofillKey()
   );
-  return { store, adapter: new RustAutofillCreditCardsAdapter(store) };
+  const adapter = new RustAutofillCreditCardsAdapter(store);
+  // This store's key is its own rather than NSS's, so the real token says
+  // nothing about it and a test that has to answer for one supplies this.
+  const token = { locked: false };
+  adapter._primaryPasswordLocked = () => token.locked;
+  return { store, token, adapter };
 }
 
-// Records carry a mask, so what the store holds is asked of the store.
+// Records hold a mask, so the stored secrets are read from the store.
 async function storedNumber(store, guid) {
   return (await store.getCreditCard(guid)).ccNumber;
+}
+
+async function storedCode(store, guid) {
+  return (await store.getCreditCard(guid)).ccCvv;
 }
 
 add_task(async function test_duplicates_are_found_by_the_number() {
@@ -365,6 +463,245 @@ add_task(async function test_record_without_an_expiry() {
   Assert.equal(fetched["cc-name"], "Jane Doe", "the rest of the record stands");
 });
 
+add_task(async function test_security_code_round_trips() {
+  enableSecurityCode();
+  const { store, adapter } = await newAdapter("autofill-cc-adapter-csc.sqlite");
+  const guid = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const record = await adapter.get(guid);
+  Assert.ok(!("cc-csc" in record), "the security code is not read back");
+  Assert.strictEqual(
+    record.hasSecurityCode,
+    true,
+    "only whether the card has one"
+  );
+  Assert.equal(
+    await adapter.decryptField(record, "cc-csc"),
+    "123",
+    "and in the clear through decryptField"
+  );
+  Assert.equal(await storedCode(store, guid), "123", "as the store holds it");
+
+  const without = await adapter.add({
+    ...TEST_RECORD,
+    "cc-number": TEST_NUMBER_AMEX,
+    "cc-csc": "",
+  });
+  Assert.ok(
+    !(await adapter.get(without)).hasSecurityCode,
+    "an empty code is stored as none"
+  );
+
+  await adapter.update(without, { "cc-csc": " 4567 " }, true);
+  Assert.equal(await storedCode(store, without), "4567", "a code is trimmed");
+  await adapter.update(without, { "cc-csc": "12a" }, true);
+  await adapter.update(without, { "cc-csc": "12345" }, true);
+  Assert.equal(
+    await storedCode(store, without),
+    "4567",
+    "and one that is not 3 or 4 digits is not written"
+  );
+});
+
+add_task(async function test_both_secrets_come_from_one_read() {
+  enableSecurityCode();
+  const { store, adapter } = await newAdapter(
+    "autofill-cc-adapter-csc-decrypt.sqlite"
+  );
+  const guid = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const record = await adapter.get(guid);
+  let reads = 0;
+  const realGet = store.getCreditCard.bind(store);
+  store.getCreditCard = id => {
+    reads++;
+    return realGet(id);
+  };
+  try {
+    Assert.deepEqual(
+      await adapter.decryptFields(record, ["cc-number", "cc-csc"]),
+      { "cc-number": TEST_NUMBER, "cc-csc": "123" },
+      "decryptFields returns the number and the code"
+    );
+    Assert.equal(reads, 1, "from one read of the store");
+
+    // What the record holds for a secret is for display, so it is not what
+    // decides whether one is read.
+    reads = 0;
+    Assert.deepEqual(
+      await adapter.decryptFields(
+        { guid, "cc-number": "anything", "cc-csc": "" },
+        ["cc-number", "cc-csc"]
+      ),
+      { "cc-number": TEST_NUMBER, "cc-csc": "123" },
+      "the secrets are read by guid, whatever the record holds"
+    );
+    Assert.equal(reads, 1, "in one read");
+
+    reads = 0;
+    await Assert.rejects(
+      adapter.decryptFields(
+        { guid: "NoSuchGuid01", "cc-number": record["cc-number"] },
+        ["cc-number", "cc-csc"]
+      ),
+      e => e instanceof NoSuchRecord,
+      "a card the store does not hold fails the read"
+    );
+    Assert.equal(reads, 1, "after one read");
+
+    reads = 0;
+    Assert.deepEqual(
+      await adapter.decryptFields({ "cc-number": record["cc-number"] }, [
+        "cc-number",
+        "cc-csc",
+      ]),
+      { "cc-number": null, "cc-csc": null },
+      "and a record with no guid has no secrets"
+    );
+    Assert.equal(reads, 0, "without reading the store");
+  } finally {
+    delete store.getCreditCard;
+  }
+  await Assert.rejects(
+    adapter.decryptFields(record, ["cc-name"]),
+    /not stored encrypted/,
+    "a field no store encrypts is refused"
+  );
+});
+
+add_task(async function test_update_and_the_security_code() {
+  enableSecurityCode();
+  const { store, adapter } = await newAdapter(
+    "autofill-cc-adapter-csc-update.sqlite"
+  );
+  const guid = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const code = () => storedCode(store, guid);
+
+  await adapter.update(
+    guid,
+    { ...TEST_RECORD, "cc-name": "Jane Q. Doe" },
+    true
+  );
+  Assert.equal(await code(), "123", "an omitted code is kept when preserving");
+
+  await adapter.update(guid, { "cc-csc": "456" }, true);
+  Assert.equal(await code(), "456", "a new code replaces it");
+
+  await adapter.update(guid, { ...TEST_RECORD, "cc-csc": "" }, true);
+  Assert.equal(await code(), null, "the empty string clears it");
+
+  await adapter.update(guid, { ...TEST_RECORD, "cc-csc": "789" });
+  await adapter.update(guid, TEST_RECORD);
+  Assert.equal(
+    await code(),
+    "789",
+    "a replacing update keeps an omitted code, as the JSON store does"
+  );
+
+  await adapter.update(guid, { ...TEST_RECORD, "cc-csc": "" });
+  Assert.equal(await code(), null, "and only an empty one clears it");
+});
+
+add_task(async function test_a_duplicate_holds_its_security_code() {
+  enableSecurityCode();
+  const { adapter } = await newAdapter("autofill-cc-adapter-csc-dupe.sqlite");
+  const guid = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const [duplicate] = await collect(
+    adapter.getDuplicateRecords({ ...TEST_RECORD, "cc-name": "Someone Else" })
+  );
+  Assert.equal(duplicate.guid, guid, "the stored card is the duplicate");
+  Assert.equal(
+    duplicate["cc-csc"],
+    "123",
+    "with its security code in the clear, for the update doorhanger to compare"
+  );
+  Assert.equal(
+    duplicate["cc-number"],
+    maskFor(TEST_NUMBER),
+    "and its number still masked"
+  );
+});
+
+add_task(async function test_a_match_compares_the_security_code() {
+  enableSecurityCode();
+  const { adapter } = await newAdapter("autofill-cc-adapter-csc-match.sqlite");
+  const guid = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const matching = async record =>
+    (await collect(adapter.getMatchRecords(record))).map(r => r.guid);
+
+  // A match means nothing new was submitted and no doorhanger is shown, so a
+  // different code has to miss for the update doorhanger to offer saving it.
+  Assert.deepEqual(
+    await matching({ ...TEST_RECORD, "cc-csc": "999" }),
+    [],
+    "a different code is not a match"
+  );
+  Assert.deepEqual(
+    await matching({ ...TEST_RECORD, "cc-csc": "123" }),
+    [guid],
+    "the same code is"
+  );
+  Assert.deepEqual(
+    await matching(TEST_RECORD),
+    [guid],
+    "and so is a submission without a code"
+  );
+});
+
+add_task(async function test_security_code_while_disabled() {
+  const { store, adapter } = await newAdapter(
+    "autofill-cc-adapter-csc-disabled.sqlite"
+  );
+  enableSecurityCode();
+  const guid = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  Services.prefs.setStringPref(CVV_SUPPORTED_PREF, "off");
+  const code = () => storedCode(store, guid);
+
+  Assert.ok(
+    !("hasSecurityCode" in (await adapter.get(guid))),
+    "get() hides that the card has a code"
+  );
+  Assert.ok(
+    !("hasSecurityCode" in (await adapter.getAll())[0]),
+    "and so does getAll()"
+  );
+  Assert.ok(
+    (await adapter.getSavedFieldNames()).has("cc-csc"),
+    "getSavedFieldNames still reports it, as what the store holds"
+  );
+  const raw = await adapter.get(guid, { rawData: true });
+  Assert.strictEqual(
+    raw.hasSecurityCode,
+    true,
+    "a raw read still reports that it has one"
+  );
+  Assert.deepEqual(
+    await adapter.decryptFields(raw, ["cc-number", "cc-csc"]),
+    { "cc-number": TEST_NUMBER, "cc-csc": null },
+    "but decryptFields hands out only the number"
+  );
+
+  await adapter.update(guid, { ...TEST_RECORD, "cc-name": "Jane Q. Doe" });
+  Assert.equal(
+    await code(),
+    "123",
+    "a replacing update without a code keeps the stored one"
+  );
+  await adapter.update(guid, { ...TEST_RECORD, "cc-csc": "" });
+  await adapter.update(guid, { ...TEST_RECORD, "cc-csc": "456" }, true);
+  Assert.equal(await code(), "123", "nor can an update change it");
+
+  const added = await adapter.add({
+    ...TEST_RECORD,
+    "cc-number": TEST_NUMBER_AMEX,
+    "cc-csc": "789",
+  });
+  Assert.equal(
+    (await store.getCreditCard(added)).ccCvv,
+    null,
+    "add() does not store a code"
+  );
+  Services.prefs.clearUserPref(CVV_SUPPORTED_PREF);
+});
+
 add_task(async function test_add_rejects_a_record_without_a_valid_number() {
   const { adapter } = await newAdapter("autofill-cc-adapter-invalid.sqlite");
 
@@ -606,7 +943,7 @@ add_task(async function test_record_for_migration_export() {
   );
 });
 
-add_task(async function test_migration_export_refuses_an_unreadable_number() {
+add_task(async function test_a_number_another_key_wrote_fails_to_decrypt() {
   // Two stores over one file, each with a key of its own: the second holds a
   // card it cannot read, as a store does whose key changed under it.
   const path = FileTestUtils.getTempFile(
@@ -621,20 +958,57 @@ add_task(async function test_migration_export_refuses_an_unreadable_number() {
     await createAutofillStoreWithStaticKeyManager(path, createAutofillKey())
   );
 
-  // The store fails a read it cannot decrypt rather than handing the card over
-  // without its number.
-  await Assert.rejects(
-    reader.get(guid),
-    /CryptoError|reason:/,
-    "a card another key wrote cannot be read"
+  const record = await reader.get(guid);
+  Assert.equal(
+    record["cc-number"],
+    maskFor(TEST_NUMBER),
+    "the card is still listed, since listing does not decrypt"
   );
 
-  // So an export throws, and the migrator counts the record as failed and
-  // leaves the source alone, rather than copying the card without its number.
+  // The token is unlocked, so the failure is the data's own rather than a
+  // declined prompt, and it reaches the caller as it is.
   await Assert.rejects(
-    reader._recordForMigrationExport(await writer.get(guid)),
-    /reason:/,
-    "a number that will not decrypt throws rather than being copied without it"
+    reader.decryptField(record, "cc-number"),
+    e => e instanceof CryptoError,
+    "a card another key wrote fails to decrypt with the store's error"
+  );
+  Assert.equal(
+    await storedNumber(await writer._store(), guid),
+    TEST_NUMBER,
+    "and its number is left in place for the key that wrote it"
+  );
+});
+
+add_task(async function test_a_card_another_key_wrote_is_no_duplicate() {
+  const path = FileTestUtils.getTempFile(
+    "autofill-cc-adapter-dupebadkey.sqlite"
+  ).path;
+  await initRustComponents(PathUtils.profileDir);
+  const writer = new RustAutofillCreditCardsAdapter(
+    await createAutofillStoreWithStaticKeyManager(path, createAutofillKey())
+  );
+  await writer.add(TEST_RECORD);
+  const reader = new RustAutofillCreditCardsAdapter(
+    await createAutofillStoreWithStaticKeyManager(path, createAutofillKey())
+  );
+  reader._primaryPasswordLocked = () => false;
+  const readable = { ...TEST_RECORD, "cc-number": TEST_NUMBER_AMEX };
+  const guid = await reader.add(readable);
+
+  Assert.deepEqual(
+    await collect(reader.getDuplicateRecords(TEST_RECORD)),
+    [],
+    "the card the reader cannot decrypt is passed over"
+  );
+  Assert.deepEqual(
+    (await collect(reader.getDuplicateRecords(readable))).map(r => r.guid),
+    [guid],
+    "and the search still finds the card it can"
+  );
+  Assert.deepEqual(
+    (await collect(reader.getMatchRecords(readable))).map(r => r.guid),
+    [guid],
+    "as does the search for a match"
   );
 });
 
@@ -765,11 +1139,640 @@ add_task(async function test_get_distinguishes_missing_from_unreadable() {
   // creating a card, and saving writes a second record on top of the one that
   // could not be read.
   const unreadable = new RustAutofillCreditCardsAdapter({
-    getCreditCard: () => Promise.reject(new Error("database is locked")),
+    getCreditCardCandidate: () =>
+      Promise.reject(new Error("database is locked")),
   });
   await Assert.rejects(
     unreadable.get("AnyGuid00001"),
     /database is locked/,
     "a failure to read propagates rather than reading as not-found"
   );
+});
+
+add_task(async function test_a_declined_write_reports_abort() {
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-declined-write.sqlite"
+  );
+
+  // Writing unwraps the key as much as reading does, so a save is something
+  // the user can decline.
+  const broken = breakEncryption(store, token, { canceled: true });
+  let error;
+  try {
+    error = await adapter.add(TEST_RECORD).then(
+      () => null,
+      err => err
+    );
+  } finally {
+    broken.restore();
+  }
+
+  Assert.equal(
+    error.result,
+    Cr.NS_ERROR_ABORT,
+    "a save the user declined reports NS_ERROR_ABORT, not a crypto error"
+  );
+});
+
+add_task(async function test_one_decline_answers_for_every_read_waiting() {
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-concurrent.sqlite"
+  );
+  const guid = await adapter.add(TEST_RECORD);
+  const stored = await adapter.get(guid);
+
+  // Two reads can be waiting on one prompt. Declining it locks the token for
+  // both, and the store tells neither why its card came back without a
+  // number, so both owe NS_ERROR_ABORT -- a record of the decline that the
+  // first reader consumed would leave the second reporting its failure as
+  // unreadable data.
+  const broken = breakDecryption(store, token, { canceled: true });
+  try {
+    const errors = await Promise.all(
+      [1, 2].map(() =>
+        adapter.decryptField(stored, "cc-number").then(
+          () => null,
+          e => e
+        )
+      )
+    );
+    Assert.equal(broken.attempts, 2, "both reads reached the store");
+    Assert.deepEqual(
+      errors.map(e => e?.result),
+      [Cr.NS_ERROR_ABORT, Cr.NS_ERROR_ABORT],
+      "and both report the declined prompt rather than only the first"
+    );
+  } finally {
+    broken.restore();
+  }
+});
+
+add_task(async function test_an_unavailable_key_stops_the_duplicate_search() {
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-locked.sqlite"
+  );
+  await adapter.add(TEST_RECORD);
+  await adapter.add({ ...TEST_RECORD, "cc-number": TEST_NUMBER_AMEX });
+
+  // A key the user declined to unlock is not one record's problem: carrying on
+  // would compare none of the cards and report no duplicates.
+  const broken = breakDecryption(store, token, { canceled: true });
+  try {
+    await Assert.rejects(
+      collect(adapter.getDuplicateRecords(TEST_RECORD)),
+      /Primary password locked/,
+      "the search gives up rather than reporting no duplicates"
+    );
+  } finally {
+    broken.restore();
+  }
+  Assert.equal(broken.attempts, 1, "and read the store once");
+});
+
+add_task(async function test_a_new_last_four_is_not_compared() {
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-last4.sqlite"
+  );
+  await adapter.add(TEST_RECORD);
+
+  const broken = breakDecryption(store, token, { canceled: true });
+  try {
+    Assert.deepEqual(
+      await collect(
+        adapter.getDuplicateRecords({
+          ...TEST_RECORD,
+          "cc-number": TEST_NUMBER_AMEX,
+        })
+      ),
+      [],
+      "a number no stored card ends in has no duplicate"
+    );
+    Assert.equal(broken.attempts, 0, "and is answered without decrypting");
+
+    // Same last four digits, different number: only decrypting can tell.
+    await Assert.rejects(
+      collect(
+        adapter.getDuplicateRecords({
+          ...TEST_RECORD,
+          "cc-number": "4012888888881111",
+        })
+      ),
+      /Primary password locked/,
+      "a number sharing the last four digits is compared"
+    );
+    Assert.equal(broken.attempts, 1, "by decrypting");
+  } finally {
+    broken.restore();
+  }
+});
+
+add_task(
+  async function test_an_unreadable_card_ending_differently_is_skipped() {
+    // Two stores over one file, each with a key of its own: the reader holds a
+    // card another key wrote, which it cannot decrypt, next to one of its own.
+    const path = FileTestUtils.getTempFile(
+      "autofill-cc-adapter-dupe-unreadable.sqlite"
+    ).path;
+    await initRustComponents(PathUtils.profileDir);
+    const writer = new RustAutofillCreditCardsAdapter(
+      await createAutofillStoreWithStaticKeyManager(path, createAutofillKey())
+    );
+    await writer.add(TEST_RECORD);
+    const readerStore = await createAutofillStoreWithStaticKeyManager(
+      path,
+      createAutofillKey()
+    );
+    const reader = new RustAutofillCreditCardsAdapter(readerStore);
+    const amex = { ...TEST_RECORD, "cc-number": TEST_NUMBER_AMEX };
+    const guid = await reader.add(amex);
+
+    const decrypted = [];
+    const realGet = readerStore.getCreditCard.bind(readerStore);
+    readerStore.getCreditCard = id => {
+      decrypted.push(id);
+      return realGet(id);
+    };
+    try {
+      Assert.deepEqual(
+        (await collect(reader.getDuplicateRecords(amex))).map(r => r.guid),
+        [guid],
+        "the duplicate is found"
+      );
+    } finally {
+      delete readerStore.getCreditCard;
+    }
+    Assert.deepEqual(
+      decrypted,
+      [guid],
+      "and only the card ending the same is decrypted"
+    );
+  }
+);
+
+add_task(async function test_a_declined_primary_password_reports_abort() {
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-prp.sqlite"
+  );
+  const guid = await adapter.add(TEST_RECORD);
+
+  // Callers tell a declined prompt from unreadable data by NS_ERROR_ABORT,
+  // which is what crypto-SDR and the JSON store report, so a card the store
+  // hands over without its number has to be split back into the two.
+  let broken = breakDecryption(store, token, { canceled: true });
+  try {
+    const e = await adapter
+      .update(guid, { "cc-name": "Jane Q. Doe" }, true)
+      .then(
+        () => null,
+        err => err
+      );
+    Assert.equal(
+      e.result,
+      Cr.NS_ERROR_ABORT,
+      "an update that needed the stored number reports NS_ERROR_ABORT"
+    );
+  } finally {
+    broken.restore();
+  }
+  Assert.equal(
+    await storedNumber(store, guid),
+    TEST_NUMBER,
+    "so the number is still there once the token is unlocked"
+  );
+
+  // The same failure without a decline behind it is the record's own, and is
+  // not reported as one.
+  broken = breakDecryption(store, token, { canceled: false });
+  try {
+    await Assert.rejects(
+      adapter.update(guid, TEST_RECORD, true),
+      e => e instanceof CryptoError,
+      "unreadable data fails the update with the store's error"
+    );
+  } finally {
+    broken.restore();
+  }
+  Assert.equal(
+    await storedNumber(store, guid),
+    TEST_NUMBER,
+    "and leaves the stored number alone"
+  );
+});
+
+add_task(
+  async function test_a_card_whose_number_cannot_be_read_is_passed_over() {
+    const { store, adapter } = await newAdapter(
+      "autofill-cc-adapter-unread.sqlite"
+    );
+    const guid = await adapter.add(TEST_RECORD);
+    await store.scrubEncryptedData();
+
+    // A submission has to keep working when the store holds a card that cannot
+    // be decrypted: the scrubbed card is skipped rather than throwing.
+    Assert.deepEqual(
+      await collect(adapter.getDuplicateRecords(TEST_RECORD)),
+      [],
+      "the scrubbed card is not offered as a duplicate"
+    );
+    Assert.ok(await adapter.get(guid), "and it is still there");
+  }
+);
+
+// Every path that must never need the key, each run with every number read
+// failing as it does when the primary password is declined. A new path built on
+// candidates belongs here.
+add_task(async function test_paths_that_never_decrypt() {
+  enableSecurityCode();
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-listing.sqlite"
+  );
+  const guid = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const other = await adapter.add({
+    ...TEST_RECORD,
+    "cc-number": TEST_NUMBER_AMEX,
+  });
+  let prompts = 0;
+  const realAllowingPrompt = adapter._allowingPrompt.bind(adapter);
+  adapter._allowingPrompt = operation => {
+    prompts++;
+    return realAllowingPrompt(operation);
+  };
+
+  const broken = breakDecryption(store, token, { canceled: true });
+  try {
+    const record = await adapter.get(guid);
+    Assert.equal(record["cc-number"], maskFor(TEST_NUMBER), "get() is masked");
+    Assert.equal(record["cc-name"], TEST_RECORD["cc-name"], "and complete");
+    Assert.strictEqual(
+      record.hasSecurityCode,
+      true,
+      "reporting only that it has a code"
+    );
+    Assert.equal(await adapter.get("NoSuchGuid01"), null, "get() of no card");
+    Assert.deepEqual(
+      (await adapter.getAll()).map(r => r.guid).sort(),
+      [guid, other].sort(),
+      "getAll() lists the cards"
+    );
+    const names = await adapter.getSavedFieldNames();
+    for (const field of [
+      "cc-name",
+      "cc-number",
+      "cc-csc",
+      "cc-exp",
+      "cc-given-name",
+    ]) {
+      Assert.ok(names.has(field), `${field} is reported as saved`);
+    }
+    Assert.equal(await adapter.refreshCount(), 2, "refreshCount()");
+    Assert.deepEqual(
+      await adapter.getSavedCounts(),
+      { total: 2, withSecurityCode: 1 },
+      "getSavedCounts()"
+    );
+    await adapter.notifyUsed(guid);
+    Assert.equal((await adapter.get(guid)).timesUsed, 1, "notifyUsed()");
+    Assert.deepEqual(
+      await collect(
+        adapter.getDuplicateRecords({
+          ...TEST_RECORD,
+          "cc-number": "5105105105105100",
+        })
+      ),
+      [],
+      "getDuplicateRecords() for a number no card ends in"
+    );
+    Assert.deepEqual(
+      await collect(
+        adapter.getMatchRecords({
+          ...TEST_RECORD,
+          "cc-number": "5105105105105100",
+          "cc-csc": "123",
+        })
+      ),
+      [],
+      "getMatchRecords() for a number no card ends in"
+    );
+    Assert.ok(await adapter.remove(other), "remove()");
+    await adapter.removeAll();
+    Assert.equal(await adapter.refreshCount(), 0, "removeAll()");
+    Assert.equal(broken.attempts, 0, "none of them decrypts a number");
+    Assert.equal(prompts, 0, "or is allowed to prompt");
+  } finally {
+    broken.restore();
+    resetSecurityCode();
+  }
+
+  Assert.deepEqual(
+    [...(await adapter.getSavedFieldNames())],
+    [],
+    "with no cards, nothing is reported"
+  );
+});
+
+add_task(async function test_a_declined_os_prompt_reports_abort() {
+  const { adapter } = await newAdapter("autofill-cc-adapter-osauth.sqlite");
+  await adapter.add(TEST_RECORD);
+  const stored = (await adapter.getAll())[0];
+
+  // OS re-authentication is a step of its own here rather than something the
+  // decryption does on the way past, so declining it has to fail the same way
+  // OSKeyStore fails: NS_ERROR_ABORT, and no number handed back.
+  // head.js declares FormAutofillUtils but only assigns it once profile
+  // storage has been initialised, which this test does not do.
+  const { FormAutofillUtils: utils } = ChromeUtils.importESModule(
+    "resource://gre/modules/shared/FormAutofillUtils.sys.mjs"
+  );
+  const realVerify = utils.verifyUserOSAuth;
+  let generateKeyIfNotAvailable = true;
+  utils.verifyUserOSAuth = async (...args) => {
+    generateKeyIfNotAvailable = args[4];
+    return false;
+  };
+  try {
+    const e = await adapter
+      .decryptField(stored, "cc-number", { reauth: "unlock to continue" })
+      .then(
+        () => null,
+        err => err
+      );
+    Assert.equal(e.result, Cr.NS_ERROR_ABORT, "a declined prompt aborts");
+  } finally {
+    utils.verifyUserOSAuth = realVerify;
+  }
+  Assert.equal(
+    generateKeyIfNotAvailable,
+    false,
+    "and the prompt is not allowed to create an OS key store key this " +
+      "store would never read"
+  );
+
+  // A record holding nothing under that field is not worth a prompt.
+  Assert.equal(
+    await adapter.decryptField({}, "cc-number", { reauth: "unlock" }),
+    null,
+    "a record with no number reads as null without asking"
+  );
+  await Assert.rejects(
+    adapter.decryptField(stored, "cc-name"),
+    /not stored encrypted/,
+    "and a field this store does not keep encrypted is a programming error"
+  );
+});
+
+function storeErrors() {
+  return (Glean.formautofillCreditcards.storeError.testGetValue() ?? []).map(
+    e => e.extra
+  );
+}
+
+// Fails writes, and reads unless `reads` is false, with an unlocked token.
+function failStore(store, error, { reads = true } = {}) {
+  const fail = async () => {
+    throw error;
+  };
+  store.addCreditCard = store.updateCreditCard = fail;
+  if (reads) {
+    store.getCreditCard = store.getAllCreditCards = fail;
+  }
+  return {
+    restore() {
+      delete store.addCreditCard;
+      delete store.updateCreditCard;
+      delete store.getCreditCard;
+      delete store.getAllCreditCards;
+    },
+  };
+}
+
+add_task(async function test_store_error_on_write() {
+  enableSecurityCode();
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-store-error-write.sqlite"
+  );
+  const withCode = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const withoutCode = await adapter.add({
+    ...TEST_RECORD,
+    "cc-number": TEST_NUMBER_AMEX,
+  });
+  const attempt = promise => promise.catch(() => {});
+  const crypto = (operation, has_cvv) => ({
+    operation,
+    error_type: "CryptoError",
+    has_cvv: String(has_cvv),
+  });
+
+  Services.fog.testResetFOG();
+  let broken = failStore(store, new CryptoError("encryption failed"), {
+    reads: false,
+  });
+  try {
+    await attempt(adapter.add({ ...TEST_RECORD, "cc-csc": "456" }));
+    await attempt(adapter.add(TEST_RECORD));
+    await attempt(adapter.update(withoutCode, { "cc-csc": "789" }, true));
+    await attempt(adapter.update(withoutCode, { "cc-name": "Jo Doe" }, true));
+    await attempt(adapter.update(withCode, { "cc-name": "Jo Doe" }, true));
+    await attempt(adapter.update(withCode, { "cc-csc": "" }, true));
+  } finally {
+    broken.restore();
+  }
+  Assert.deepEqual(
+    storeErrors(),
+    [
+      crypto("add", true),
+      crypto("add", false),
+      crypto("update", true),
+      crypto("update", false),
+      crypto("update", true),
+      crypto("clear", true),
+    ],
+    "every failed write is recorded, with whether it involved a code"
+  );
+
+  Services.fog.testResetFOG();
+  broken = failStore(store, new Error("bad"), { reads: false });
+  try {
+    await attempt(adapter.add(TEST_RECORD));
+  } finally {
+    broken.restore();
+  }
+  Assert.deepEqual(
+    storeErrors(),
+    [{ operation: "add", error_type: "Unknown", has_cvv: "false" }],
+    "an error the store did not raise is Unknown"
+  );
+
+  Services.fog.testResetFOG();
+  broken = breakEncryption(store, token, { canceled: true });
+  try {
+    await attempt(adapter.add({ ...TEST_RECORD, "cc-csc": "456" }));
+  } finally {
+    broken.restore();
+  }
+  Assert.deepEqual(
+    storeErrors(),
+    [
+      {
+        operation: "add",
+        error_type: "PrimaryPasswordLocked",
+        has_cvv: "true",
+      },
+    ],
+    "a declined primary password is recorded as its own category"
+  );
+});
+
+add_task(async function test_store_error_on_read() {
+  enableSecurityCode();
+  const { store, token, adapter } = await newAdapter(
+    "autofill-cc-adapter-store-error-read.sqlite"
+  );
+  const withCode = await adapter.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const withoutCode = await adapter.add({
+    ...TEST_RECORD,
+    "cc-number": TEST_NUMBER_AMEX,
+  });
+  const attempt = promise => promise.catch(() => {});
+  const read = has_cvv => ({
+    operation: "read",
+    error_type: "CryptoError",
+    has_cvv: String(has_cvv),
+  });
+
+  // Listing reads no secret, so only the reads that decrypt can fail this way.
+  const recordWithCode = await adapter.get(withCode);
+  const recordWithoutCode = await adapter.get(withoutCode);
+
+  Services.fog.testResetFOG();
+  let broken = failStore(store, new CryptoError("decryption failed"));
+  try {
+    await adapter.get(withCode);
+    await adapter.getAll();
+    Assert.deepEqual(storeErrors(), [], "listing reads nothing that can fail");
+
+    await attempt(adapter.decryptField(recordWithCode, "cc-number"));
+    await attempt(adapter.decryptField(recordWithoutCode, "cc-number"));
+    await attempt(collect(adapter.getDuplicateRecords(TEST_RECORD)));
+  } finally {
+    broken.restore();
+  }
+  Assert.deepEqual(
+    storeErrors(),
+    [read(true), read(false), read(true)],
+    "every failed read is recorded, with whether a card it covered has a code"
+  );
+
+  Services.fog.testResetFOG();
+  broken = failStore(store, new CryptoError("decryption failed"));
+  store.getCreditCardCandidate = async () => {
+    throw new Error("cannot list");
+  };
+  try {
+    await attempt(adapter.decryptField(recordWithCode, "cc-number"));
+  } finally {
+    broken.restore();
+    delete store.getCreditCardCandidate;
+  }
+  Assert.deepEqual(
+    storeErrors(),
+    [{ operation: "read", error_type: "CryptoError" }],
+    "has_cvv is left out when the read cannot tell"
+  );
+
+  Services.fog.testResetFOG();
+  broken = breakDecryption(store, token, { canceled: true });
+  try {
+    await attempt(adapter.decryptField(recordWithCode, "cc-number"));
+  } finally {
+    broken.restore();
+  }
+  Assert.deepEqual(
+    storeErrors(),
+    [
+      {
+        operation: "read",
+        error_type: "PrimaryPasswordLocked",
+        has_cvv: "true",
+      },
+    ],
+    "a locked primary password is recorded as its own category"
+  );
+
+  Services.fog.testResetFOG();
+  Assert.equal(await adapter.get("NoSuchGuid01"), null);
+  Assert.deepEqual(storeErrors(), [], "nor a missing card");
+});
+
+add_task(async function test_store_error_for_a_card_another_key_wrote() {
+  enableSecurityCode();
+  const path = FileTestUtils.getTempFile(
+    "autofill-cc-adapter-store-error-key.sqlite"
+  ).path;
+  await initRustComponents(PathUtils.profileDir);
+  const writer = new RustAutofillCreditCardsAdapter(
+    await createAutofillStoreWithStaticKeyManager(path, createAutofillKey())
+  );
+  const guid = await writer.add({ ...TEST_RECORD, "cc-csc": "123" });
+  const reader = new RustAutofillCreditCardsAdapter(
+    await createAutofillStoreWithStaticKeyManager(path, createAutofillKey())
+  );
+  reader._primaryPasswordLocked = () => false;
+
+  Services.fog.testResetFOG();
+  // Listing reads no secret, so it is reading the number that fails.
+  const record = await reader.get(guid);
+  await Assert.rejects(
+    reader.decryptField(record, "cc-number"),
+    e => e instanceof CryptoError
+  );
+  Assert.deepEqual(
+    storeErrors(),
+    [{ operation: "read", error_type: "CryptoError", has_cvv: "true" }],
+    "a card the store cannot decrypt is recorded"
+  );
+});
+
+add_task(async function test_lone_surrogates_are_refused() {
+  const { adapter } = await newAdapter("autofill-cc-adapter-surrogates.sqlite");
+
+  await Assert.rejects(
+    adapter.add({ ...TEST_RECORD, "cc-name": "Jane Doe\uD83D" }),
+    /"cc-name" contains lone surrogates/,
+    "a record with a lone surrogate is not added"
+  );
+  Assert.equal((await adapter.getAll()).length, 0, "nothing is stored");
+
+  const guid = await adapter.add(TEST_RECORD);
+  await Assert.rejects(
+    adapter.update(guid, { "cc-name": "\uDE00Jane Doe" }, true),
+    /"cc-name" contains lone surrogates/,
+    "an update with a lone surrogate is refused"
+  );
+  Assert.equal(
+    (await adapter.get(guid))["cc-name"],
+    TEST_RECORD["cc-name"],
+    "the stored record is unchanged"
+  );
+});
+
+add_task(async function test_a_deleted_card_fails_the_read_while_locked() {
+  const { token, adapter } = await newAdapter(
+    "autofill-cc-adapter-deleted-locked.sqlite"
+  );
+  const guid = await adapter.add(TEST_RECORD);
+  const record = await adapter.get(guid);
+  await adapter.remove(guid);
+
+  // The store finds the card missing before it needs the key, so a locked
+  // token is no reason to report the read as declined.
+  token.locked = true;
+  try {
+    await Assert.rejects(
+      adapter.decryptFields(record, ["cc-number", "cc-csc"]),
+      e => e instanceof NoSuchRecord,
+      "a card deleted since it was listed fails the read as missing"
+    );
+  } finally {
+    token.locked = false;
+  }
 });

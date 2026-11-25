@@ -46,6 +46,8 @@ private val re =
 
 private const val MAILTO = "mailto:"
 
+private const val REPLACEMENT_CHAR = '\uFFFD'
+
 // Number of last digits to be shown when credit card number is obfuscated.
 private const val LAST_VISIBLE_DIGITS_COUNT = 4
 
@@ -77,7 +79,7 @@ fun String.toShortUrl(publicSuffixList: PublicSuffixList): String {
             inputString.startsWith(FILE_PREFIX) ||
             uri.port !in -1..MAX_VALID_PORT
     ) {
-        return inputString
+        return URLStringUtils.toLosslessDisplayUrl(inputString)
     }
 
     if (
@@ -142,7 +144,10 @@ fun String.isExtensionUrl() = this.startsWith("moz-extension://")
 /** Checks if this String is a URL of a resource. */
 fun String.isResourceUrl() = this.startsWith("resource://")
 
-/** Appends `http` scheme if no scheme is present in this String. */
+/**
+ * Appends `http` scheme if no scheme is present in this String, and encodes the spaces after the authority of an HTTP/S
+ * URL as `%20`.
+ */
 fun String.toNormalizedUrl(): String {
     val s = this.sanitizeURL()
     // Most commonly we'll encounter http or https schemes.
@@ -150,7 +155,7 @@ fun String.toNormalizedUrl(): String {
     return if (!s.startsWith("http://") && !s.startsWith("https://")) {
         URLStringUtils.toNormalizedURL(s)
     } else {
-        s
+        URLStringUtils.encodeSpacesAfterAuthority(s)
     }
 }
 
@@ -210,8 +215,8 @@ fun String.sha1(): String {
  *   be returned.
  */
 fun String.toDate(
-    vararg possibleFormats: String =
-        arrayOf(
+    possibleFormats: List<String> =
+        listOf(
             "yyyy-MM-dd'T'HH:mm",
             "yyyy-MM-dd",
             "yyyy-'W'ww",
@@ -500,4 +505,45 @@ fun String.truncateMiddle(maxLength: Int, ellipsis: String = "…"): String {
     val start = take(half)
     val end = takeLast(maxLength - ellipsis.length - half)
     return "$start$ellipsis$end"
+}
+
+/**
+ * Returns this camelCase or PascalCase string in snake_case: every uppercase character after the first is preceded by
+ * an underscore, and every character is lowercased.
+ */
+fun String.toSnakeCase(): String = buildString {
+    this@toSnakeCase.forEachIndexed { index, char ->
+        if (index > 0 && char.isUpperCase()) {
+            append('_')
+        }
+        append(char.lowercaseChar())
+    }
+}
+
+/**
+ * Returns this string with any unpaired UTF-16 surrogates replaced with U+FFFD, or this string itself if it has none.
+ * Web content can produce such strings (e.g. via `document.title`), but they can't be encoded as UTF-8, which is
+ * required when passing them to Rust components. Equivalent to JavaScript's `String.prototype.toWellFormed()`.
+ */
+fun String.toWellFormed(): String {
+    var result: StringBuilder? = null
+    var i = 0
+    while (i < length) {
+        val c = this[i]
+        if (i + 1 < length && Character.isSurrogatePair(c, this[i + 1])) {
+            result?.append(c)?.append(this[i + 1])
+            i += 2
+            continue
+        }
+        if (c.isSurrogate()) {
+            if (result == null) {
+                result = StringBuilder(length).append(this, 0, i)
+            }
+            result.append(REPLACEMENT_CHAR)
+        } else {
+            result?.append(c)
+        }
+        i++
+    }
+    return result?.toString() ?: this
 }

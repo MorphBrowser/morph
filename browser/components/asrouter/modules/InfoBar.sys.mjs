@@ -7,7 +7,6 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   ASRouter: "resource:///modules/asrouter/ASRouter.sys.mjs",
-  PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
   RemoteL10n: "resource:///modules/asrouter/RemoteL10n.sys.mjs",
   SpecialMessageActions:
     "resource://messaging-system/lib/SpecialMessageActions.sys.mjs",
@@ -25,6 +24,15 @@ const FTL_FILES = [
   "browser/profiles.ftl",
   "browser/termsofuse.ftl",
 ];
+
+/**
+ * Resolves which icon URL to use.
+ */
+function resolveImageSrc(doc, { imageURL, rtlImageURL }) {
+  return rtlImageURL && doc.documentElement.matches(":dir(rtl)")
+    ? rtlImageURL
+    : imageURL;
+}
 
 class InfoBarNotification {
   constructor(message, dispatch) {
@@ -75,6 +83,24 @@ class InfoBarNotification {
   }
 
   /**
+   * Resolve inline `<img data-l10n-name>` placeholders parsed out of a
+   * fluent string against message.content.inline_icons.
+   */
+  _resolveInlineImages(doc, root) {
+    const inlineIcons = this.message.content.inline_icons || {};
+    for (const img of root.querySelectorAll("img[data-l10n-name]")) {
+      const icon = inlineIcons[img.dataset.l10nName];
+      const src = icon && resolveImageSrc(doc, icon);
+      if (!src) {
+        img.remove();
+        continue;
+      }
+      img.src = src;
+      img.classList.add("inline-icon");
+    }
+  }
+
+  /**
    * Async helper to render a Fluent string. If the translation contains `<a
    * data-l10n-name>`, it will parse and inject the associated link contained
    * in the message.
@@ -102,6 +128,8 @@ class InfoBarNotification {
       a => a.dataset.l10nName
     );
     this._ensureLinkTemplatesFor(doc, names);
+
+    this._resolveInlineImages(doc, temp);
 
     // Import each node and wire up any anchors it contains
     for (const node of temp.childNodes) {
@@ -389,7 +417,7 @@ class InfoBarNotification {
    *
    * @param {Element} notificationBox - The `<notification-message>` element representing the infobar.
    * @param {object} btnDescription - An object describing the button, includes the label, the action with an optional dismiss property, primary button styling, and the optional `id` and generated `index` used to identify the button in telemetry.
-   * @param {Element} target - The <button> DOM element that was clicked.
+   * @param {Element} target - The <moz-button> DOM element that was clicked.
    * @returns {boolean} `true` to keep the infobar open, `false` to dismiss it.
    */
   buttonCallback(notificationBox, btnDescription, target) {
@@ -397,7 +425,7 @@ class InfoBarNotification {
       btnDescription.action,
       target.documentGlobal.gBrowser.selectedBrowser
     );
-    let isPrimary = target.classList.contains("primary");
+    let isPrimary = btnDescription.primary === true;
     let eventName = isPrimary
       ? "CLICK_PRIMARY_BUTTON"
       : "CLICK_SECONDARY_BUTTON";
@@ -581,15 +609,12 @@ export const InfoBar = {
 
   /**
    * Helper to check the window's state and whether it's a
-   * private browsing window, a popup, taskbar tab or mini window.
+   * popup, taskbar tab or mini window.
    *
    * @returns {boolean} `true` if the window is valid for showing an infobar.
    */
   isValidInfobarWindow(win) {
     if (!win || win.closed) {
-      return false;
-    }
-    if (lazy.PrivateBrowsingUtils.isWindowPrivate(win)) {
       return false;
     }
     if (!win.toolbar?.visible) {
@@ -636,7 +661,7 @@ export const InfoBar = {
    * Shows the active universal message in a window after it loads, provided
    * that its notification is still the active one.
    *
-   * @param {Window} win - A browser window, possibly still loading.
+   * @param {Window} win - A browser window that is still loading.
    * @param {object} active - The _activeInfobar entry to show.
    */
   _showWhenLoaded(win, { message, dispatch, notification }) {
@@ -657,11 +682,7 @@ export const InfoBar = {
       );
     };
 
-    if (win.document?.readyState === "complete") {
-      onWindowReady();
-    } else {
-      win.addEventListener("load", onWindowReady, { once: true });
-    }
+    win.addEventListener("load", onWindowReady, { once: true });
   },
 
   _maybeReplaceActiveInfoBar(nextMessage) {

@@ -11,21 +11,6 @@ $tags:
   - 'Core :: XPConnect'
 
 
-javascript.ion:
-  compile_time:
-    type: timing_distribution
-    time_unit: microsecond
-    description: >
-      Time in microseconds of an Ion compilation.
-    bugs:
-      - https://bugzilla.mozilla.org/show_bug.cgi?id=1918166
-    data_reviews:
-      - https://bugzilla.mozilla.org/show_bug.cgi?id=1918166
-    notification_emails:
-      - dpalmeiro@mozilla.com
-      - perf-telemetry-alerts@mozilla.com
-    expires: never
-
 javascript.gc:
   total_time:
     type: labeled_timing_distribution
@@ -608,6 +593,22 @@ javascript.gc:
       - "false"
       - "true"
 
+  gray_bits_valid:
+    type: labeled_counter
+    description: >
+      Whether the gray marking state was valid at the start of a major GC
+    bugs:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2096382
+    data_reviews:
+      - https://bugzilla.mozilla.org/show_bug.cgi?id=2096382
+    notification_emails:
+      - dev-telemetry-gc-alerts@mozilla.org
+      - jcoppeard@mozilla.com
+    expires: never
+    labels:
+      - "false"
+      - "true"
+
   budget_was_increased:
     type: labeled_counter
     description: >
@@ -1029,7 +1030,6 @@ script.preloader:
       - dothayer@mozilla.com
       - plawless@mozilla.com
     expires: never
-    telemetry_mirror: SCRIPT_PRELOADER_MAINTHREAD_RECOMPILE
 
   wait_time:
     type: timing_distribution
@@ -1057,4 +1057,3 @@ script.preloader:
       - dothayer@mozilla.com
       - plawless@mozilla.com
     expires: never
-    telemetry_mirror: SCRIPT_PRELOADER_WAIT_TIME
